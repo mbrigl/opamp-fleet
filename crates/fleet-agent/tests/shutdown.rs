@@ -29,11 +29,41 @@ fn sigterm_shuts_the_client_down_cleanly() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_supervisor"))
         .arg("--config")
         .arg(&config)
+        .stdout(std::process::Stdio::piped())
+        // The wait below reads an `info` line, whatever the environment asks to be logged.
+        .env("RUST_LOG", "info")
         .spawn()
         .expect("spawn the client");
 
-    // Give it time to install the signal handlers and enter the transport loop.
-    std::thread::sleep(Duration::from_millis(800));
+    // The signal handlers are in place before the Client logs anything; its transport loop says
+    // it polls once it runs. Its log is drained to the end, so the Client never blocks on it.
+    let (lines, logged) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().expect("the client's stdout");
+    std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            let _ = lines.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match logged.recv_timeout(left) {
+            Ok(line) if line.contains("polling") => break,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let status = child.wait().expect("the client's status");
+                panic!("the client exited with {status} before it entered its transport loop");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                panic!("the client never entered its transport loop");
+            }
+        }
+    }
     let kill = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()

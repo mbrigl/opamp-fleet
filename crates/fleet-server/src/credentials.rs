@@ -58,6 +58,9 @@ pub struct Credentials {
     hashing: Arc<tokio::sync::Semaphore>,
     /// The one password hash each peer address may have under way, an IPv6 one by its /64.
     in_flight: Mutex<HashMap<IpAddr, Arc<tokio::sync::Mutex<()>>>>,
+    /// How many passwords were verified against a hash: what the tests count instead of timing.
+    #[cfg(test)]
+    hashed: std::sync::atomic::AtomicUsize,
     /// The `WWW-Authenticate` value a `401` answers with (RFC 9110).
     challenge: String,
 }
@@ -97,6 +100,8 @@ impl Credentials {
             dummy,
             hashing: Arc::new(tokio::sync::Semaphore::new(CONCURRENT_HASHES)),
             in_flight: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            hashed: std::sync::atomic::AtomicUsize::new(0),
             challenge,
         })
     }
@@ -240,6 +245,9 @@ impl Credentials {
         // users exist.
         let phc = known.unwrap_or(&self.dummy);
         let verified = PasswordHash::new(phc).ok().is_some_and(|hash| {
+            #[cfg(test)]
+            self.hashed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Argon2::default()
                 .verify_password(password.as_bytes(), &hash)
                 .is_ok()
@@ -366,16 +374,13 @@ mod tests {
     fn an_unknown_user_costs_the_same_verification() {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
         let credentials = Credentials::new(&users, "Basic".into()).expect("credentials");
-        let started = Instant::now();
+        // Each answer costs one verification against a hash, the unknown user's against the
+        // comparison hash, which is as costly as the costliest user's (tested beside this one).
+        let hashed = || credentials.hashed.load(std::sync::atomic::Ordering::SeqCst);
         assert!(!credentials.verify(&basic("ops", "wrong")));
-        let known = started.elapsed();
-        let started = Instant::now();
+        assert_eq!(hashed(), 1);
         assert!(!credentials.verify(&basic("nobody", "wrong")));
-        let unknown = started.elapsed();
-        assert!(
-            unknown * 4 > known,
-            "an unknown user answered far faster: {unknown:?} against {known:?}"
-        );
+        assert_eq!(hashed(), 2, "an unknown user was answered without the hash");
         assert!(
             credentials.remembered.lock().expect("lock").is_empty(),
             "a failure is never remembered"
@@ -388,10 +393,12 @@ mod tests {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
         let credentials = Credentials::new(&users, "Basic".into()).expect("credentials");
         assert!(credentials.verify(&basic("ops", "s3cret")));
-        let started = Instant::now();
+        let hashed = || credentials.hashed.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(hashed(), 1);
         assert!(credentials.verify(&basic("ops", "s3cret")));
-        assert!(
-            started.elapsed() < Duration::from_millis(5),
+        assert_eq!(
+            hashed(),
+            1,
             "a remembered success is answered without the hash"
         );
         {

@@ -16,7 +16,9 @@
 #
 # Run by `postStartCommand` in devcontainer.json, so on every start of the container. Starting it
 # again is harmless: a port already forwarded is left as it is. Nothing here needs the stack to be
-# up — a connection made while it is down fails, and the next one after `docker compose up` works.
+# up, and the next connection after `docker compose up` works. While it is down, a forward still
+# accepts a connection and closes it at once, so a TCP connect alone reads it as up;
+# scripts/check-store.sh probes a store at its own protocol for that reason.
 #
 # The host is reached by the name both Podman and Docker Desktop give it inside a container. On
 # Docker Engine on Linux, which gives it no such name, set OTLP_FORWARD_HOST in the container's

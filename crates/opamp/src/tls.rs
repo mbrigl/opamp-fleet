@@ -112,6 +112,19 @@ pub fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> 
     Ok(certs)
 }
 
+/// The first certificate in `pem`, by the reader of [`certificates`]: what a CA file names as the
+/// authority, where a bundle's further certificates are its chain. A block of another label, a key
+/// beside the certificate, is passed over.
+///
+/// # Errors
+/// Returns an error when `pem` holds no certificate or a malformed one.
+pub fn first_certificate(pem: &[u8]) -> Result<CertificateDer<'static>, String> {
+    certificates(pem)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no certificates".to_string())
+}
+
 /// The first private key in `pem`, in any of the encodings rustls accepts (PKCS#8, PKCS#1, SEC1).
 ///
 /// A file with no key in it is an error, not an absence: the `NoItemsFound` case and a malformed
@@ -169,6 +182,24 @@ mod tests {
             certificates(key_pem.as_bytes()).is_err(),
             "a key is not a certificate"
         );
+    }
+
+    /// A CA file's authority is its first certificate, wherever a key stands beside it.
+    /// Verifies: ADR-0008
+    #[test]
+    fn the_first_certificate_of_a_file_is_its_first_certificate_block() {
+        let (first, key_pem) = pair();
+        let (second, _) = pair();
+        let want = certificates(first.as_bytes()).expect("first")[0].clone();
+        let bundle = format!("{first}{second}");
+        assert_eq!(first_certificate(bundle.as_bytes()).expect("first"), want);
+        let keyed = format!("{key_pem}{first}{second}");
+        assert_eq!(first_certificate(keyed.as_bytes()).expect("first"), want);
+        assert!(
+            first_certificate(key_pem.as_bytes()).is_err(),
+            "a key is not a certificate"
+        );
+        assert!(first_certificate(b"").is_err());
     }
 
     #[test]

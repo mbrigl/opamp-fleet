@@ -10,8 +10,10 @@
 # The store is named through the environment the tests read: FLEET_TEST_S3_ENDPOINT,
 # FLEET_TEST_S3_BUCKET, FLEET_TEST_S3_ACCESS_KEY_ID, and FLEET_TEST_S3_SECRET_ACCESS_KEY_FILE, or
 # FLEET_TEST_POSTGRES_HOST, _PORT, _DBNAME, _USER, _PASSWORD_FILE, and _CA_FILE; 'postgres' needs a
-# bucket named too, for a Server on both stores. Skipped is not passed: once a store is named, a test
-# that reports it skipped fails the run.
+# bucket named too, for a Server on both stores, and runs the whole library, whose tests outside
+# the store's module open the database too. FLEET_TEST_SERVER_IMAGE names the Server's image for
+# the test that runs it read-only on both stores; it skips without one, except in a CI run. Skipped
+# is not passed: once a store is named, a test that reports it skipped fails the run.
 #
 # Usage:
 #     scripts/check-store.sh s3|postgres
@@ -23,7 +25,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 case "${1:-}" in
   s3) filter="s3::" skipped="skipped: no S3 store" named="${FLEET_TEST_S3_ENDPOINT:-}" ;;
-  postgres) filter="postgres::" skipped="skipped: no PostgreSQL" named="${FLEET_TEST_POSTGRES_HOST:-}" ;;
+  postgres) filter="" skipped="skipped: no PostgreSQL" named="${FLEET_TEST_POSTGRES_HOST:-}" ;;
   *) echo "usage: scripts/check-store.sh s3|postgres" >&2; exit 2 ;;
 esac
 if [[ -z "$named" ]]; then
@@ -34,6 +36,53 @@ if [[ -z "$named" ]]; then
   echo "Skipped: no $1 store is named in the environment."
   exit 0
 fi
+
+# Before the tests, the check probes each named store at its own protocol. A TCP connect is not
+# enough: the Dev Container's forwards (.devcontainer/forward-otlp.sh) accept a connection while
+# the host's stack is down and close it at once, and the tests then fail as a code error would.
+# PostgreSQL answers an SSLRequest with one byte, 'S' or 'N'. An S3 endpoint answers an HTTP
+# request with a status line. Bash's /dev/tcp makes the probe, so it needs neither psql nor curl;
+# it cannot speak TLS, so it probes an S3 endpoint only of the form http://<host>:<port>, which CI
+# and the Dev Container name. 'postgres' probes its bucket's endpoint too.
+#
+# answers <host> <port> <request> <count> <answer pattern> — whether the store at <host>:<port>
+# answers the request with <count> bytes that match the pattern, within 10 seconds.
+answers() {
+  local answer
+  # shellcheck disable=SC2016 # the inner shell expands its own arguments
+  answer="$(timeout 10 bash -c '
+    exec 3<>"/dev/tcp/$1/$2" || exit 1
+    printf "$3" >&3
+    IFS= read -r -N "$4" -t 5 -u 3 answer
+    printf "%s" "$answer"' _ "$1" "$2" "$3" "$4" 2>/dev/null)"
+  # shellcheck disable=SC2053 # the pattern is the argument
+  [[ "$answer" == $5 ]]
+}
+# probe <host> <port> <request> <count> <answer pattern> — fail when the store does not answer.
+probe() {
+  answers "$@" && return 0
+  echo "ERROR: the store at $1:$2 does not answer: nothing listens there, or a listener closes the" >&2
+  echo "connection at once, as a forward to a store that is down does. Start the store first." >&2
+  exit 1
+}
+# probe_s3 <endpoint> — probe an endpoint of the form http://<host>:<port>; any other form is not
+# probed, and the check says so.
+probe_s3() {
+  if [[ ! "$1" =~ ^http://([^/:]+):([0-9]+)(/.*)?$ ]]; then
+    echo "Note: the S3 endpoint $1 is not of the form http://<host>:<port>, so it is not probed."
+    return 0
+  fi
+  probe "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" \
+    "HEAD / HTTP/1.0\r\nHost: ${BASH_REMATCH[1]}:${BASH_REMATCH[2]}\r\n\r\n" 5 'HTTP/'
+}
+if [[ "$1" == "postgres" ]]; then
+  probe "$FLEET_TEST_POSTGRES_HOST" "${FLEET_TEST_POSTGRES_PORT:-5432}" \
+    '\000\000\000\010\004\322\026\057' 1 '[SN]'
+fi
+if [[ -n "${FLEET_TEST_S3_ENDPOINT:-}" ]]; then
+  probe_s3 "$FLEET_TEST_S3_ENDPOINT"
+fi
+
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 
 # The tests of several instances on one token run against SoftHSM2, as scripts/check-rust.sh
@@ -55,6 +104,11 @@ if [[ "$1" == "postgres" ]]; then
   cargo test -p fleet-server --locked --test stateless_instance -- --nocapture 2>&1 | tee -a "$log"
   if grep -q "skipped: no S3 store" "$log"; then
     echo "the test of a Server on PostgreSQL and S3 was skipped: name a bucket too" >&2
+    exit 1
+  fi
+  # The image run read-only needs an image built and a container runtime, which a CI run has.
+  if [[ "${CI:-}" == "true" ]] && grep -q "skipped: no Server image" "$log"; then
+    echo "the test of the Server's image was skipped in a CI run: name FLEET_TEST_SERVER_IMAGE" >&2
     exit 1
   fi
 fi

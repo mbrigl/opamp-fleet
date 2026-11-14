@@ -161,7 +161,7 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 /// 4. **The self-update restart, before anything is applied after it.** The `Installing` the
 ///    package step just owed is the last thing this version says (ADR-0019). It ends the run, so
 ///    `AfterReply::End` means exactly this.
-/// 5. The self-Agent's Supervisor set (ADR-0018), whose retired Agents' goodbyes go out with it.
+/// 5. The self-Agent's Supervisor set (ADR-0046), whose retired Agents' goodbyes go out with it.
 ///
 /// While `enrolling` over plain HTTP the request rides the enrolment report instead (ADR-0016).
 pub async fn after_reply<S: ReportSink>(
@@ -258,9 +258,9 @@ pub async fn process_package_downloads<S: ReportSink>(
             otel.status_code = tracing::field::Empty,
             otel.status_description = tracing::field::Empty,
         );
-        // Each Agent stages into its own directory (ADR-0018), so the Supervisor's install is a
+        // Each Agent stages into its own directory (ADR-0046), so the Supervisor's install is a
         // rename beside the download rather than a copy across filesystems. Keyed by the block
-        // name behind the Agent, never by index — the Agent set can change at runtime (ADR-0018).
+        // name behind the Agent, never by index — the Agent set can change at runtime (ADR-0046).
         let staging_dir = config.staging_dir_for(engine.block_name(index));
         let download =
             crate::packages::download_and_verify(&package, config, &staging_dir, &progress)
@@ -301,7 +301,7 @@ pub async fn process_package_downloads<S: ReportSink>(
     true
 }
 
-/// Applies the self-Agent's received configuration — its Supervisor set (ADR-0018) — if one is
+/// Applies the self-Agent's received configuration — its Supervisor set (ADR-0046) — if one is
 /// pending, and sends the retired Agents' goodbyes through `sink`. Returns whether an apply ran,
 /// so the caller flushes the owed status reports.
 pub async fn process_self_configuration<S: ReportSink>(
@@ -314,7 +314,7 @@ pub async fn process_self_configuration<S: ReportSink>(
         return false;
     };
     // A second gate behind the capability the Agent does not declare: on a host that keeps its
-    // set no path reaches the apply (ADR-0018 clause 40).
+    // set no path reaches the apply (ADR-0046 clause 40).
     if !config.server_manages_set() {
         tracing::warn!(
             hash = %hex::encode(&offer.config_hash),
@@ -660,8 +660,8 @@ mod tests {
     }
 
     /// The Supervisor-set apply refuses to run on a host that keeps its set, whatever put a set in
-    /// front of it: nothing is written and nothing is sent (ADR-0018 clause 40).
-    /// Verifies: ADR-0018
+    /// front of it: nothing is written and nothing is sent (ADR-0046 clause 40).
+    /// Verifies: ADR-0046
     #[tokio::test]
     async fn the_supervisor_set_apply_refuses_to_run_on_a_host_that_keeps_its_set() {
         let dir = tempfile::tempdir().expect("tempdir");

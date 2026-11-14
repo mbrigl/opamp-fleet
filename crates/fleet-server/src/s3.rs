@@ -82,6 +82,10 @@ const LIMITS: Limits = Limits {
     retry_for: Duration::from_secs(60),
 };
 
+/// The largest object one copy in the bucket moves, as S3 bounds `CopyObject`: what a staged upload
+/// is placed under its name with, so no larger artifact can be stored.
+pub(crate) const LARGEST_COPY: u64 = 5 * 1024 * 1024 * 1024;
+
 /// The longest a call to the store may take under [`LIMITS`]: a retry started at the end of
 /// `retry_for`, its connection, and its silence.
 pub(crate) const LONGEST_CALL: Duration = Duration::from_secs(
@@ -172,8 +176,9 @@ impl S3BlobStore {
     }
 
     /// The store, its uploads staged under `uploader`'s lease.
+    #[cfg(test)]
     #[must_use]
-    pub fn staged_by(mut self, uploader: Uploader) -> Self {
+    pub(crate) fn staged_by(mut self, uploader: Uploader) -> Self {
         self.uploader = Arc::new(OnceLock::from(uploader));
         self
     }
@@ -1043,60 +1048,164 @@ pub(crate) mod tests {
     }
 
     /// A staging object whose lease was released at an orderly shutdown goes with the next sweep
-    /// on any instance, here the one after an entry is deleted, with the blob no entry names any
-    /// more. Two instances that clean up at once delete such an object once: the second waits for
-    /// the first's hold on the blob store's lock and then finds nothing
-    /// (ADR-0023 clauses 14 and 16).
-    /// Verifies: ADR-0023, ADR-0025
+    /// on any instance, and once: two instances on one database and one bucket each delete a
+    /// Package's entry at once, and each act's sweep runs. The second waits for the first's hold on
+    /// the blob store's lock, so the staging object is deleted by the sweep that held the lock
+    /// first, and each sweep deletes the blob its act let go (ADR-0023 clauses 13, 14 and 16). Which
+    /// sweep found staging objects to delete is counted where it asks which leases are live, which
+    /// a sweep does only once its listing found one.
+    /// Verifies: ADR-0023, ADR-0045
     #[test]
     fn the_next_sweep_on_any_instance_deletes_a_released_leases_staging_object_once() {
         use crate::packages::{PackageId, PackageStore, Platform};
+        use crate::postgres::testing::TestDatabase;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let Some(config) = named_store() else { return };
+        let released = "0b5e2f1c-9d4a-4e7b-8c3f-6a1d2e9b7c40";
+        let leases = [
+            "7c1d6a52-3f0e-4b8e-9a51-0d2c6e4f8a10",
+            "3e8a4b61-2c7d-4f9e-8b15-9d0c7e6f5a21",
+        ];
+        // The first open applies the schema, whose table the leases below are rows of.
+        drop(test.shared());
+        for lease in leases {
+            test.sql(&format!(
+                "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
+                 expires_at) VALUES ('{lease}', 'here', false, now(), now(), \
+                 now() + interval '1 hour')"
+            ));
+        }
+        let bucket = S3BlobStore::open(&again(&config)).expect("open");
+        // The sweep of A, once armed, stops where it asks which leases are live, holding the
+        // blob store's lock, until it is let go.
+        let armed = Arc::new(AtomicBool::new(false));
+        let (listed, lists) = std::sync::mpsc::channel::<()>();
+        let (go, goes) = std::sync::mpsc::channel::<()>();
+        let (listed, goes) = (std::sync::Mutex::new(listed), std::sync::Mutex::new(goes));
+        let pause: Arc<dyn Fn() + Send + Sync> = {
+            let armed = armed.clone();
+            Arc::new(move || {
+                if armed.swap(false, Ordering::SeqCst) {
+                    let _ = listed.lock().expect("listed").send(());
+                    goes.lock().expect("go").recv().expect("go");
+                }
+            })
+        };
+        let instance = |lease: &str, pause: Arc<dyn Fn() + Send + Sync>| {
+            let database = test.shared();
+            let found = Arc::new(AtomicUsize::new(0));
+            let live: LiveLeases = Arc::new({
+                let (database, found) = (database.clone(), found.clone());
+                move || {
+                    found.fetch_add(1, Ordering::SeqCst);
+                    pause();
+                    database.live_leases()
+                }
+            });
+            let store = S3BlobStore::open(&again(&config))
+                .expect("open")
+                .awaiting_a_lease()
+                .with_live(live.clone());
+            let cleanup = StagingCleanup::new(
+                store.clone(),
+                live,
+                Arc::new({
+                    let database = database.clone();
+                    move || database.hold_blobs()
+                }),
+            );
+            let (_named, held) = tokio::sync::watch::channel(Some(lease.to_string()));
+            cleanup.stage_under(held);
+            let records = crate::Records::Postgres(database);
+            let packages = PackageStore::with_backend(
+                records.packages().expect("the Packages"),
+                Box::new(store),
+                crate::clock::Elapsed::monotonic(),
+            )
+            .expect("open");
+            (packages, found)
+        };
+        let (a, a_found) = instance(leases[0], pause);
+        let (b, b_found) = instance(leases[1], Arc::new(|| {}));
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        let (a_id, b_id) = (
+            PackageId::new("otelcol", "1.0.0").expect("id"),
+            PackageId::new("otelcol", "2.0.0").expect("id"),
+        );
+        for (store, id, bytes) in [
+            (&a, &a_id, &b"an artifact A uploads"[..]),
+            (&b, &b_id, &b"an artifact B uploads"[..]),
+        ] {
+            store.create(id).expect("create");
+            store
+                .put_entry(id, &linux, bytes.to_vec())
+                .expect("an entry");
+        }
+        plant(&bucket, &format!("staging/{released}/0123456789abcdef"));
+        plant(&bucket, &format!("staging/{released}/fedcba9876543210"));
+        assert_eq!(keys(&bucket).len(), 4, "two blobs and two staging objects");
+        a_found.store(0, Ordering::SeqCst);
+        b_found.store(0, Ordering::SeqCst);
+        armed.store(true, Ordering::SeqCst);
+
+        let (a, b) = (Arc::new(a), Arc::new(b));
+        let first = std::thread::spawn({
+            let (a, a_id, linux) = (a.clone(), a_id.clone(), linux.clone());
+            move || a.delete_entry(&a_id, &linux)
+        });
+        lists
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("A's sweep has listed the staging objects, holding the lock");
+        let second = std::thread::spawn({
+            let (b, b_id, linux) = (b.clone(), b_id.clone(), linux.clone());
+            move || b.delete_entry(&b_id, &linux)
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !(test.waits_for_the_blob_lock() || second.is_finished()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "B's sweep neither waits nor ends"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        go.send(()).expect("go on");
+        assert_eq!(first.join().expect("A"), Ok(true));
+        assert_eq!(second.join().expect("B"), Ok(true));
+        assert_eq!(
+            (
+                a_found.load(Ordering::SeqCst),
+                b_found.load(Ordering::SeqCst)
+            ),
+            (1, 0),
+            "the staging objects were found, and deleted, by the sweep that had the lock first"
+        );
+        assert_eq!(
+            keys(&bucket),
+            Vec::<String>::new(),
+            "each sweep deleted its act's blob, and the staging objects are gone"
+        );
+        clear(&bucket);
+    }
+
+    /// Two instances whose staging cleanups, the ones each runs when it takes over a lapsed lease,
+    /// run at once delete a staging object of a released lease once: the second waits for the
+    /// first's hold on the blob store's lock and then finds nothing (ADR-0023 clauses 14 and 16).
+    /// Verifies: ADR-0023, ADR-0045
+    #[test]
+    fn two_staging_cleanups_at_once_delete_a_released_leases_staging_object_once() {
         use crate::postgres::testing::TestDatabase;
         let Some(test) = TestDatabase::named() else {
             return;
         };
         let Some(config) = named_store() else { return };
-        let live = "7c1d6a52-3f0e-4b8e-9a51-0d2c6e4f8a10";
         let released = "0b5e2f1c-9d4a-4e7b-8c3f-6a1d2e9b7c40";
         // One open of the test database: the holds below are sessions of their own on it, as
         // each instance's would be.
         let database = test.open();
-        let records = crate::Records::Postgres(database.clone());
-        test.sql(&format!(
-            "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
-             expires_at) VALUES ('{live}', 'here', false, now(), now(), \
-             now() + interval '1 hour')"
-        ));
-        let blobs = crate::config::BlobsConfig {
-            store: "s3".to_string(),
-            s3: Some(again(&config)),
-        };
-        let (store, cleanup) =
-            PackageStore::open_on(&records, None, &blobs, crate::clock::Elapsed::monotonic())
-                .expect("open");
-        let cleanup = cleanup.expect("a cleanup on the bucket");
-        let (_named, held) = tokio::sync::watch::channel(Some(live.to_string()));
-        cleanup.stage_under(held);
-        let id = PackageId::new("otelcol", "1.0.0").expect("id");
-        let linux = Platform::new("linux", "amd64").expect("platform");
-        store.create(&id).expect("create");
-        store
-            .put_entry(&id, &linux, b"an artifact".to_vec())
-            .expect("an entry");
         let bucket = S3BlobStore::open(&again(&config)).expect("open");
-        plant(&bucket, &format!("staging/{released}/0123456789abcdef"));
-        assert_eq!(
-            keys(&bucket).len(),
-            2,
-            "the blob and the released lease's upload"
-        );
-        assert_eq!(store.delete_entry(&id, &linux), Ok(true));
-        assert_eq!(
-            keys(&bucket),
-            Vec::<String>::new(),
-            "the sweep after the deletion takes the blob and the released lease's upload"
-        );
-
         plant(&bucket, &format!("staging/{released}/fedcba9876543210"));
         let (listed, lists) = std::sync::mpsc::channel();
         let (go, goes) = std::sync::mpsc::channel::<()>();

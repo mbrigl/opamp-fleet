@@ -440,7 +440,13 @@ fn install(
     let password = args
         .bootstrap_password_file
         .as_deref()
-        .map(|path| config_init::read_password_file(path, "--bootstrap-password-file"))
+        .map(|path| {
+            config_init::read_password_file(
+                path,
+                "--bootstrap-password-file",
+                &[&data_root, &layout_root],
+            )
+        })
         .transpose()?;
     // Not asked, the bootstrap identity found enrols a Client that holds no issued certificate,
     // over TLS (ADR-0027 clause 18) — decided, and a `bootstrap.p12` opened, before anything is
@@ -450,12 +456,16 @@ fn install(
     } else {
         // An absent file loads as the defaults; `--endpoint` then writes its endpoint, and an
         // existing file is kept.
-        let mut about_to_run = ClientConfig::load(&config_path)?;
+        let mut about_to_run = ClientConfig::load_held(&config_path)?;
         if let (false, Some(endpoint)) = (config_path.exists(), &args.endpoint) {
             about_to_run.endpoint.clone_from(endpoint);
         }
         about_to_run.state_dir = about_to_run.service_state_dir(&roots)?;
-        beside.unasked_enrolment(&about_to_run, password.as_deref().map(String::as_str))?
+        beside.unasked_enrolment(
+            &about_to_run,
+            password.as_deref().map(String::as_str),
+            &[&data_root, &layout_root],
+        )?
     };
     // Held from the first write to the last, so the account cannot swap the data root for a link
     // while this privileged run writes into it (ADR-0021).
@@ -474,8 +484,7 @@ fn install(
         // it — standing unless this install was told to withdraw it (ADR-0019) — and so do the CA
         // and the verification key beside the program (ADR-0027 clause 17).
         let self_update = !args.no_self_update;
-        written.copies =
-            config_init::run_with_endpoint(&config_path, endpoint, self_update, &beside)?;
+        written = config_init::run_with_endpoint(&config_path, endpoint, self_update, &beside)?;
     } else if !config_path.exists() {
         // Not an error — automation must not break — but never silent: without this file the
         // service refuses to start.
@@ -488,7 +497,12 @@ fn install(
 
     // Fail on a broken configuration now, not at the service's first start. After the write, so
     // that a file just answered into existence is held to the same rule as any other.
-    let mut config = ClientConfig::load(&config_path)?;
+    let mut config = ClientConfig::load_held(&config_path)?;
+    // An enrolment held to an endpoint the kept file does not name fails here, before anything is
+    // stopped, and again where it would connect.
+    if unasked.is_some() {
+        enrol::holds_to_named(&config, &written)?;
+    }
     // The state directory the service will run with — where an issued certificate counts. Asked
     // again of the file as it is now, which the service's account may have rewritten meanwhile.
     let state_dir = config.service_state_dir(&roots)?;
@@ -563,7 +577,7 @@ fn install(
                 &state_dir,
                 &supervisors_root,
                 &config_path,
-                &written.copies,
+                written.ca_copy().map(Path::to_path_buf).as_slice(),
             ),
         );
         halt_recorded(
@@ -619,9 +633,7 @@ fn install(
         }
         // Before anything is staged or registered (ADR-0020 clause 26): an enrolment that is stopped
         // leaves the answered file and nothing else.
-        if let Some(bootstrap) = &written.bootstrap {
-            enrol::run(&config, bootstrap)?;
-        }
+        enrol::run(&config, &written, &[&data_root, &layout_root])?;
         // And held to what the Client needs at startup. A packaged install registers the service
         // even so — it has an endpoint and no client identity to write — but never starts it, and
         // the service refuses to run until the file names one (ADR-0020, ADR-0021). Said loudly
@@ -667,7 +679,7 @@ fn install(
 
         // The handover (ADR-0021 clause 1), on every registration that runs under an account — a
         // kept one and root included: both roots belong to it — config and state because the
-        // service reads and rewrites them (ADR-0018), the executable layout because the
+        // service reads and rewrites them (ADR-0046), the executable layout because the
         // self-update that stages into it *is* the service (ADR-0019). The state directory is
         // created first: the daemon must not need rights on its parent to begin. Where a process
         // account is registered, what it keeps there stays its own (ADR-0021 clause 1): every
@@ -690,16 +702,7 @@ fn install(
                 )?,
             );
             // The copy beside a configuration named outside the data root is not under it.
-            skipped.extend(
-                run_as.hand_over(
-                    &written
-                        .copies
-                        .iter()
-                        .map(PathBuf::as_path)
-                        .collect::<Vec<_>>(),
-                    kept,
-                )?,
-            );
+            skipped.extend(run_as.hand_over(written.ca_copy().as_slice(), kept)?);
             for skipped in skipped {
                 println!("warning: {}", skipped.warning(run_as.account()));
             }
@@ -862,16 +865,14 @@ fn configure(
     // The installed copy runs from the layout, where no fleet files lie (ADR-0020, out of scope).
     let written = ask(&config_path, &roots, &config_init::Beside::default(), None)?;
 
-    let mut config = ClientConfig::load(&config_path)?;
+    let mut config = ClientConfig::load_held(&config_path)?;
     let state_dir = config.service_state_dir(&roots)?;
     config.state_dir.clone_from(&state_dir);
-    if let Some(bootstrap) = &written.bootstrap {
-        enrol::run(&config, bootstrap)?;
-    }
+    enrol::run(&config, &written, &[&data_root, &roots.layout])?;
     // What this run created belongs to whoever owns the configuration — the service's account when
     // it runs as one (ADR-0021 clause 1) — not to the administrator who ran it.
     let mut created = enrol::written(&state_dir);
-    created.extend(written.copies.iter().cloned());
+    created.extend(written.ca_copy().map(Path::to_path_buf));
     let skipped = run_as::match_owner(
         &config_path,
         &data_root,
@@ -905,7 +906,7 @@ fn ask(
     beside: &config_init::Beside,
     password: Option<&str>,
 ) -> Result<config_init::Written, String> {
-    let current = ClientConfig::load(config_path)?;
+    let current = ClientConfig::load_held(config_path)?;
     let mut in_service = current.clone();
     in_service.state_dir = current.service_state_dir(roots)?;
     config_init::run(
@@ -914,6 +915,7 @@ fn ask(
         in_service.is_enrolled(),
         beside,
         password,
+        (&[&roots.data, &roots.layout], &in_service.state_dir),
     )
 }
 

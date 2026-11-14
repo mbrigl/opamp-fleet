@@ -109,7 +109,7 @@ impl Handle {
 
     /// Stops accepting at once and tells each WebSocket session to close at an instant drawn
     /// uniformly over `over`
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 3), so the
     /// peers come back spread rather than all at once; what is still open [`SPREAD_GRACE`] after
     /// the window is cut. A window of zero tells them all at once.

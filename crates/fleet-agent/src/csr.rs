@@ -107,7 +107,7 @@ pub fn recover(state_dir: &Path) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("cannot open {}: {e}", state_dir.display())),
     };
-    let cert_pem = match dir.read(PENDING_CERT_FILE) {
+    let cert_pem = match dir.read(PENDING_CERT_FILE, crate::tls::MAX_PEM_BYTES) {
         Ok(cert_pem) => cert_pem,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
@@ -139,7 +139,7 @@ pub fn recover(state_dir: &Path) -> Result<(), String> {
 /// Whether the PEM certificate `cert_pem` is issued for the private key in the file `key_name`.
 fn certifies(dir: &HeldDir, cert_pem: &[u8], key_name: &str) -> bool {
     use rcgen::PublicKeyData as _;
-    let Ok(key_bytes) = dir.read(key_name).map(Zeroizing::new) else {
+    let Ok(key_bytes) = dir.read(key_name, crate::tls::MAX_PEM_BYTES) else {
         return false;
     };
     let Ok(key_pem) = std::str::from_utf8(&key_bytes) else {
@@ -162,7 +162,8 @@ fn certifies(dir: &HeldDir, cert_pem: &[u8], key_name: &str) -> bool {
 #[must_use]
 pub fn pending_fingerprint(state_dir: &Path) -> Option<String> {
     use sha2::{Digest, Sha256};
-    let pem = Zeroizing::new(crate::nofollow::read(&state_dir.join(PENDING_KEY_FILE)).ok()?);
+    let pem =
+        crate::nofollow::read(&state_dir.join(PENDING_KEY_FILE), crate::tls::MAX_PEM_BYTES).ok()?;
     let key = KeyPair::from_pem(std::str::from_utf8(&pem).ok()?).ok()?;
     Some(hex::encode(Sha256::digest(key.public_key_raw())))
 }
@@ -172,7 +173,12 @@ fn pending(config: &ClientConfig) -> Option<Vec<u8>> {
     if !config.state_dir.join(PENDING_KEY_FILE).exists() {
         return None;
     }
-    crate::nofollow::read(&config.state_dir.join(PENDING_CSR_FILE)).ok()
+    crate::nofollow::read(
+        &config.state_dir.join(PENDING_CSR_FILE),
+        crate::tls::MAX_PEM_BYTES,
+    )
+    .ok()
+    .map(|mut csr| std::mem::take(&mut *csr))
 }
 
 /// Whether this Client should ask for a certificate: it has none, or the one it has is into its
@@ -198,7 +204,7 @@ fn needs_certificate(config: &ClientConfig) -> bool {
 ///
 /// Read with `x509-parser` — the parser rcgen itself uses, whose own X.509 entry point is private.
 fn renewal_due(cert_file: &Path) -> Result<bool, String> {
-    let pem = crate::nofollow::read(cert_file)
+    let pem = crate::nofollow::read(cert_file, crate::tls::MAX_PEM_BYTES)
         .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
     let (_, block) = x509_parser::pem::parse_x509_pem(&pem)
         .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
@@ -296,8 +302,8 @@ fn renewal_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
     use rcgen::{PublicKeyData as _, SigningKey as _};
     use sha2::{Digest as _, Sha256};
     let dir = HeldDir::open(&config.state_dir).ok()?;
-    let cert_pem = dir.read(ISSUED_CERT_FILE).ok()?;
-    let key_pem = Zeroizing::new(dir.read(ISSUED_KEY_FILE).ok()?);
+    let cert_pem = dir.read(ISSUED_CERT_FILE, crate::tls::MAX_PEM_BYTES).ok()?;
+    let key_pem = dir.read(ISSUED_KEY_FILE, crate::tls::MAX_PEM_BYTES).ok()?;
     let (_, block) = x509_parser::pem::parse_x509_pem(&cert_pem).ok()?;
     let old_key = KeyPair::from_pem(std::str::from_utf8(&key_pem).ok()?).ok()?;
     let new_key_sha256 = Sha256::digest(new_key.subject_public_key_info());

@@ -8,7 +8,6 @@ mod common;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use fleet_server::config::ConnectionOfferConfig;
 use fleet_server::fleet::{AppState, ConnectionOffer};
@@ -19,17 +18,6 @@ impl Drop for ClientUnderTest {
     fn drop(&mut self) {
         common::stop_client(&mut self.0);
     }
-}
-
-async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if let Some(value) = probe() {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("timed out waiting for {what}");
 }
 
 /// A Server armed with a heartbeat-only offer: it changes a setting without moving the endpoint,
@@ -84,7 +72,7 @@ async fn an_offer_is_verified_persisted_and_reported_applied() {
 
     // The self-Agent connects, is offered the settings, verifies by actually connecting, and
     // reports APPLIED — at which point the Server stops offering (the reported hash matches).
-    wait_until("the agent to report the settings APPLIED", || {
+    common::wait_until("the agent to report the settings APPLIED", || {
         let snapshot = state.snapshot();
         let agent = snapshot.first()?;
         (agent.connected
@@ -105,7 +93,7 @@ async fn an_offer_is_verified_persisted_and_reported_applied() {
     // the Agent stays connected without churning through another rotation.
     drop(client);
     let _restarted = spawn_client(&config_path);
-    wait_until("the restarted agent to reconnect", || {
+    common::wait_until("the restarted agent to reconnect", || {
         state.snapshot().first().filter(|a| a.connected).map(|_| ())
     })
     .await;

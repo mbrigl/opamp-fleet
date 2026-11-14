@@ -40,7 +40,7 @@ pub struct ClientConfig {
     /// Where the Client persists its identity and the received remote configuration.
     #[serde(default = "default_state_dir")]
     pub state_dir: PathBuf,
-    /// Where the per-Supervisor directories live (ADR-0018); absent means
+    /// Where the per-Supervisor directories live (ADR-0046); absent means
     /// `<state_dir>/supervisors`, which is where they have always been. Set it to put the
     /// Managed Processes' programs somewhere `state_dir` cannot go — off a `noexec` mount, or
     /// onto a volume sized for a few hundred megabytes of agent rather than for state.
@@ -74,7 +74,7 @@ pub struct ClientConfig {
     /// defaults: a rotating file in the state directory, seven days kept.
     #[serde(default)]
     pub logging: LoggingConfig,
-    /// The fleet's timing policy for every Managed Process (ADR-0018): the graceful-stop budget
+    /// The fleet's timing policy for every Managed Process (ADR-0046): the graceful-stop budget
     /// and the apply grace. Absent takes the defaults.
     #[serde(default, rename = "supervisors")]
     pub supervisor_defaults: SupervisorsConfig,
@@ -94,7 +94,7 @@ pub struct ClientConfig {
     #[serde(skip)]
     pub source: Option<String>,
     /// The path this configuration was loaded from — where an accepted Supervisor set is written
-    /// back to (ADR-0018). Kept even when the file does not exist yet: the first applied offer
+    /// back to (ADR-0046). Kept even when the file does not exist yet: the first applied offer
     /// creates it. `None` only for a configuration never loaded from a path (tests, defaults).
     #[serde(skip)]
     pub path: Option<PathBuf>,
@@ -108,6 +108,11 @@ pub struct ClientConfig {
     /// certificate; set by the install, never by the file.
     #[serde(skip)]
     pub bootstrap_identity: Option<BootstrapIdentity>,
+    /// The certificates of `[tls] ca_file`, read once by a privileged enrolment and held in memory
+    /// (ADR-0021 clause 11): while set, they are the trust, and the file is not read again. Set by
+    /// the install, never by the file.
+    #[serde(skip)]
+    pub ca_pem: Option<Vec<u8>>,
     /// The process account's primary group, where a process account is registered (ADR-0021
     /// clause 21): what the Client shares with the Managed Processes belongs to it. Set by the run
     /// from the `--process-uid` its registration names, never by the file.
@@ -125,7 +130,7 @@ pub struct ClientConfig {
     /// ceiling; `0` is refused at load, the same as the message limit.
     #[serde(default = "default_max_artifact_size")]
     pub max_artifact_size_bytes: u64,
-    /// The `[[supervisor]]` blocks (ADR-0018): each runs one Supervisor managing one local
+    /// The `[[supervisor]]` blocks (ADR-0046): each runs one Supervisor managing one local
     /// process, appearing to the Server as its own Agent. Absent means the Client presents
     /// itself as a single Agent, as before.
     #[serde(default, rename = "supervisor")]
@@ -146,7 +151,7 @@ impl std::fmt::Debug for BootstrapIdentity {
     }
 }
 
-/// One `[[supervisor]]` block (ADR-0018). The common keys are extracted here; everything else
+/// One `[[supervisor]]` block (ADR-0046). The common keys are extracted here; everything else
 /// stays in [`settings`](Self::settings) for the plugin the `type` selects, which parses it
 /// strictly — serde cannot combine `flatten` with `deny_unknown_fields` (serde-rs/serde#1547),
 /// so this two-stage split is what keeps a typo anywhere in the block failing loudly at startup.
@@ -179,14 +184,14 @@ pub struct SupervisorBlock {
     /// graceful stop may take before the Managed Process is killed. `None` — the default — takes
     /// the global value.
     ///
-    /// Only a kind that knows nothing about its agent may state it (ADR-0018): how long an agent
+    /// Only a kind that knows nothing about its agent may state it (ADR-0046): how long an agent
     /// needs to shut down is a property of that agent, so a wrapped kind holds the value and the
     /// key is refused in its block.
     pub stop_timeout_secs: Option<u64>,
     /// Overrides the global `[supervisors] apply_grace_secs` for this Supervisor: how long a
     /// freshly (re)started Managed Process must survive before a received configuration is
     /// acknowledged `APPLIED`; exiting within the grace reports `FAILED` (the health-gated
-    /// acknowledgement ADR-0018 names). `0` acknowledges on start. `None` takes the global value,
+    /// acknowledgement ADR-0046 names). `0` acknowledges on start. `None` takes the global value,
     /// and a wrapped kind refuses the key for the reason above.
     pub apply_grace_secs: Option<u64>,
     /// Overrides the global `[updates] retain_previous_secs` for this Supervisor (ADR-0034): how
@@ -198,13 +203,13 @@ pub struct SupervisorBlock {
     /// member, one file. Setting it is what asks for the tree to be unpacked whole.
     ///
     /// It never decides *whether* packages are taken; the written shape of `binary`/`command`
-    /// still does that alone (ADR-0018).
+    /// still does that alone (ADR-0046).
     pub program_path: Option<PathBuf>,
     /// The plugin-specific keys, handed over verbatim for the second-stage strict parse.
     pub settings: toml::Table,
 }
 
-/// The subdirectory of a Supervisor's own directory holding its Managed Process (ADR-0018).
+/// The subdirectory of a Supervisor's own directory holding its Managed Process (ADR-0046).
 ///
 /// Called `program` and not `bin` on purpose: it holds one file for a single-file package, and a
 /// Foreign Agent's whole tree — an executable with the shared objects it loads — is unpacked under
@@ -242,12 +247,12 @@ pub(crate) const CLIENT_ENTRIES: [(&str, &str); 6] = [
 ];
 
 /// Where a Supervisor's Managed Process lives — and, as the same fact, whether this Client may
-/// replace it (ADR-0018).
+/// replace it (ADR-0046).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     /// What the process is spawned from, and what a package is installed over.
     ///
-    /// Always inside this Supervisor's own `program/` directory (ADR-0018): a Managed Process is
+    /// Always inside this Supervisor's own `program/` directory (ADR-0046): a Managed Process is
     /// always the fleet's. There is no `owned` flag beside this, because there is nothing for it to
     /// distinguish — every block that parses names a program this Client installs, so
     /// `AcceptsPackages` is a constant of this Client rather than a function of its configuration.
@@ -255,10 +260,10 @@ pub struct Program {
 }
 
 /// Resolves the program path of a `[[supervisor]]` block (ADR-0021 clause 24, as amended by
-/// ADR-0018).
+/// ADR-0046).
 ///
 /// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
-/// wrote. **One shape** (ADR-0018): a **bare file name**, resolving to
+/// wrote. **One shape** (ADR-0046): a **bare file name**, resolving to
 /// `<supervisor_dir>/program/<value>` — or `program/tree/<program_path>` for a multi-file package
 /// (ADR-0034) — a directory this Client creates and owns, so it may replace what is in it. A bare
 /// name cannot escape that directory, which is why nothing here has to sanitize a path.
@@ -276,7 +281,7 @@ pub fn resolve_program(
     supervisor_dir: &Path,
     name: &str,
 ) -> Result<Program, String> {
-    // The machine's program, which this Client does not manage (ADR-0018). `has_root` rather than
+    // The machine's program, which this Client does not manage (ADR-0046). `has_root` rather than
     // `is_absolute` so the Windows drive-relative form — `\Program Files\otelcol\otelcol.exe`, no
     // drive letter — folds into the same message: it is a near-miss of the absolute form, and both
     // have the same answer.
@@ -422,7 +427,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         let stop_timeout_secs = take_secs(&mut table, &name, "stop_timeout_secs")?;
         let apply_grace_secs = take_secs(&mut table, &name, "apply_grace_secs")?;
         let retain_previous_secs = take_secs(&mut table, &name, "retain_previous_secs")?;
-        // Not a supervisor key (ADR-0018 clause 13), and refused by name rather than left to the
+        // Not a supervisor key (ADR-0046 clause 13), and refused by name rather than left to the
         // plugin's strict parse: a block carrying it expects a Client that takes it, and what
         // answers it is not another key but a different place entirely.
         if table.contains_key("attributes") {
@@ -452,7 +457,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             ));
         }
         // And `accepts_packages = true` would say *whether*, while the program's path says *where*
-        // — two keys for one truth. ADR-0018 leaves one shape, so every Supervisor accepts packages
+        // — two keys for one truth. ADR-0046 leaves one shape, so every Supervisor accepts packages
         // and the key would only be a way to disagree with a constant.
         if table.contains_key("accepts_packages") {
             return Err(format!(
@@ -652,7 +657,7 @@ impl Default for LoggingConfig {
     }
 }
 
-/// The `[supervisors]` section (ADR-0018): the fleet's timing policy for every Managed Process.
+/// The `[supervisors]` section (ADR-0046): the fleet's timing policy for every Managed Process.
 ///
 /// Global here, because these are decisions about *this deployment* — how long an operator is
 /// willing to wait for a stop, how long a restart must hold before it counts as applied — and not
@@ -670,22 +675,22 @@ pub struct SupervisorsConfig {
     #[serde(default = "default_apply_grace_secs")]
     pub apply_grace_secs: u64,
     /// The environment variables a Server-delivered block may set, each name exact or ending in
-    /// `*` as a prefix (ADR-0018 clause 35). Empty — the default — lets a delivered block keep only
+    /// `*` as a prefix (ADR-0046 clause 35). Empty — the default — lets a delivered block keep only
     /// the environment its running block already has.
     #[serde(default)]
     pub delivered_env: Vec<String>,
     /// Whether a Server-delivered block may state `args` and `version_args` its running block does
-    /// not already have (ADR-0018 clause 35).
+    /// not already have (ADR-0046 clause 35).
     #[serde(default)]
     pub delivered_args: bool,
-    /// The Supervisors whose Agents neither declare nor act on remote configuration (ADR-0018),
+    /// The Supervisors whose Agents neither declare nor act on remote configuration (ADR-0046),
     /// by name: each runs only on what the operator placed in its `config/` directory, and a
     /// delivered block brings it no `args`, `version_args` or `env`. Read from this file only —
     /// the Supervisor-set apply never writes this section.
     #[serde(default)]
     pub remote_config_disabled: Vec<String>,
     /// Whether the Server manages the set of `[[supervisor]]` blocks through the Client's own
-    /// Agent (ADR-0018 clauses 26 and 38). `false` builds that Agent without remote configuration,
+    /// Agent (ADR-0046 clauses 26 and 38). `false` builds that Agent without remote configuration,
     /// and the blocks in this file are the operator's alone. Read from this file only, like the
     /// rest of the section.
     #[serde(default = "default_server_manages_set")]
@@ -1001,6 +1006,7 @@ impl Default for ClientConfig {
             path: None,
             state_dir_as_written: default_state_dir(),
             bootstrap_identity: None,
+            ca_pem: None,
             process_account_group: None,
             max_message_size_bytes: default_max_message_size(),
             max_artifact_size_bytes: default_max_artifact_size(),
@@ -1030,7 +1036,7 @@ impl ClientConfig {
     pub fn checked(self, path: &Path) -> Result<Self, String> {
         let mut config = self;
         config.check_supervisor_names()?;
-        // A name no block can ever carry would switch nothing off, silently (ADR-0018 clause 46).
+        // A name no block can ever carry would switch nothing off, silently (ADR-0046 clause 46).
         for name in &config.supervisor_defaults.remote_config_disabled {
             parse_instance_name(name).map_err(|e| {
                 format!(
@@ -1130,7 +1136,7 @@ impl ClientConfig {
         self.tls.as_ref()?.ca_file.as_deref()
     }
 
-    /// The root the per-Supervisor directories sit under (ADR-0018) — `supervisor_dir` when the
+    /// The root the per-Supervisor directories sit under (ADR-0046) — `supervisor_dir` when the
     /// operator set one, and `<state_dir>/supervisors` when they did not.
     #[must_use]
     pub fn supervisors_root(&self) -> PathBuf {
@@ -1169,7 +1175,7 @@ impl ClientConfig {
     }
 
     /// One Supervisor's own directory: its state, its `program/`, and its package staging, under
-    /// a single root the operator can place (ADR-0018).
+    /// a single root the operator can place (ADR-0046).
     #[must_use]
     pub fn supervisor_dir(&self, name: &str) -> PathBuf {
         self.supervisors_root().join(name)
@@ -1178,9 +1184,9 @@ impl ClientConfig {
     /// Where the artifact offered to an Agent is staged, by the name of the Supervisor behind it —
     /// `None` for the Client's own Agent. Inside that Supervisor's own directory, so that the
     /// install which follows is a rename within one filesystem instead of a copy across two
-    /// (ADR-0018); the Client's own Agent stages under `state_dir`, beside the versions a
+    /// (ADR-0046); the Client's own Agent stages under `state_dir`, beside the versions a
     /// self-update writes (ADR-0019). Keyed by name rather than by Engine index because the Agent
-    /// set can change at runtime (ADR-0018), which is exactly when an index stops naming a block.
+    /// set can change at runtime (ADR-0046), which is exactly when an index stops naming a block.
     #[must_use]
     pub fn staging_dir_for(&self, supervisor: Option<&str>) -> PathBuf {
         match supervisor {
@@ -1190,7 +1196,7 @@ impl ClientConfig {
     }
 
     /// Whether the operator switched remote configuration off for the Supervisor `name`
-    /// (ADR-0018).
+    /// (ADR-0046).
     #[must_use]
     pub fn remote_config_disabled(&self, name: &str) -> bool {
         self.supervisor_defaults
@@ -1199,7 +1205,7 @@ impl ClientConfig {
             .any(|listed| listed == name)
     }
 
-    /// Whether the Server manages this Client's Supervisor set (ADR-0018 clause 38).
+    /// Whether the Server manages this Client's Supervisor set (ADR-0046 clause 38).
     #[must_use]
     pub fn server_manages_set(&self) -> bool {
         self.supervisor_defaults.server_manages_set
@@ -1220,7 +1226,7 @@ impl ClientConfig {
     /// The operator-defined attributes one Agent reports (ADR-0032): the machine-level table,
     /// with a Supervisor's own entries merged over it per key.
     pub fn agent_attributes(&self, block: Option<&SupervisorBlock>) -> BTreeMap<String, String> {
-        // The block half is gone (ADR-0018): tagging one Agent among several is a Server label's
+        // The block half is gone (ADR-0046): tagging one Agent among several is a Server label's
         // job, which does it from the fleet and takes effect at once. The parameter stays because
         // the two call sites still differ in nothing else, and a future per-block statement would
         // land here.
@@ -1255,7 +1261,7 @@ mod tests {
 
     /// Every directory this Client derives is absolute, however the operator wrote it.
     ///
-    /// A Managed Process starts in its own directory (ADR-0018), so a relative path handed to it is
+    /// A Managed Process starts in its own directory (ADR-0046), so a relative path handed to it is
     /// resolved against a directory the Client has left — and `state_dir` defaults to the relative
     /// `client-state`, which would make the ordinary configuration the broken one: the program
     /// would be looked for beneath itself, and a Collector that did start could not open the
@@ -1680,7 +1686,7 @@ mod tests {
 
     /// Both keys that would configure package delivery on the host are refused rather than ignored:
     /// `package` would name the artifact (the Server's Selector does, ADR-0034), and
-    /// `accepts_packages` would say whether to take one (ADR-0018 derives that from the program's
+    /// `accepts_packages` would say whether to take one (ADR-0046 derives that from the program's
     /// path). An operator who has either in a file believes it does something.
     /// Verifies: ADR-0034
     #[test]
@@ -1717,9 +1723,9 @@ mod tests {
         );
     }
 
-    /// One shape (ADR-0018): a bare name, which is what puts the program in a directory this
+    /// One shape (ADR-0046): a bare name, which is what puts the program in a directory this
     /// Client owns and may therefore replace. Everything else is refused rather than guessed at.
-    // Verifies: ADR-0018
+    // Verifies: ADR-0046
     #[test]
     fn a_bare_name_resolves_and_everything_else_is_refused() {
         let dir = PathBuf::from("/srv/fleet/otelcol");
@@ -1749,7 +1755,7 @@ mod tests {
     }
 
     /// With a tree (ADR-0034) the program is one file *inside* the package, so the spawn path is
-    /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0018
+    /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0046
     /// made it mean, which is consent and nothing else.
     /// Verifies: ADR-0034
     #[test]
@@ -1805,7 +1811,7 @@ mod tests {
             .contains("relative"));
     }
 
-    /// ADR-0018: the machine's program is refused, and the message is the only notice an operator
+    /// ADR-0046: the machine's program is refused, and the message is the only notice an operator
     /// carrying such a block will get — so it must name the way across, not a rule number.
     ///
     /// Whose *spelling* is platform-specific even though the rule is not: on Unix a leading `/`
@@ -1831,7 +1837,7 @@ mod tests {
 
     /// The case Windows adds and Unix has no equivalent of: `\Program Files\...` carries a root but
     /// no drive, so it resolves against whichever drive the process is on — it *looks* absolute and
-    /// is not. It folds into the same refusal as the absolute form (ADR-0018), because it is a
+    /// is not. It folds into the same refusal as the absolute form (ADR-0046), because it is a
     /// near-miss of it and both have one answer.
     #[cfg(windows)]
     #[test]
@@ -1849,7 +1855,7 @@ mod tests {
     }
 
     /// The per-Supervisor root is `<state_dir>/supervisors` unless the operator moved it, and
-    /// everything that Supervisor owns hangs off the same place (ADR-0018).
+    /// everything that Supervisor owns hangs off the same place (ADR-0046).
     #[test]
     fn the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable() {
         let default = ClientConfig {
@@ -1968,7 +1974,7 @@ mod tests {
         assert_eq!(collector.name, "otelcol");
         assert_eq!(collector.endpoint_port, 4321);
         // Neither is stated in this block, and unstated now stays unstated: what a Supervisor runs
-        // with is resolved against the fleet's `[supervisors]` policy and its kind (ADR-0018),
+        // with is resolved against the fleet's `[supervisors]` policy and its kind (ADR-0046),
         // rather than being filled in with a compiled-in number here.
         assert_eq!(collector.stop_timeout_secs, None);
         assert_eq!(collector.apply_grace_secs, None);
@@ -2054,8 +2060,8 @@ mod tests {
     }
 
     /// The switch is a list of Supervisor names in `[supervisors]`, empty unless the operator
-    /// writes one (ADR-0018 clause 45).
-    /// Verifies: ADR-0018
+    /// writes one (ADR-0046 clause 45).
+    /// Verifies: ADR-0046
     #[test]
     fn remote_config_disabled_defaults_to_empty_and_lists_supervisor_names() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2080,9 +2086,9 @@ mod tests {
         assert!(!listed.remote_config_disabled("fluent-bit"));
     }
 
-    /// A value no block can ever carry fails startup, naming the key and the value (ADR-0018
+    /// A value no block can ever carry fails startup, naming the key and the value (ADR-0046
     /// clause 28).
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0046
     #[test]
     fn a_remote_config_disabled_name_outside_the_instance_name_grammar_fails_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2100,8 +2106,8 @@ mod tests {
     }
 
     /// The switch is a boolean in `[supervisors]`, `true` unless the operator writes `false`
-    /// (ADR-0018 clause 38).
-    /// Verifies: ADR-0018
+    /// (ADR-0046 clause 38).
+    /// Verifies: ADR-0046
     #[test]
     fn server_manages_set_defaults_to_true_and_reads_false() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2198,7 +2204,7 @@ mod tests {
 
     /// The Client-wide table stays — it describes the *host*, and it is what a fresh Agent carries
     /// into its first message, before there is anything for a Server to label. The block's own
-    /// table is gone, and refused by name (ADR-0018).
+    /// table is gone, and refused by name (ADR-0046).
     #[test]
     fn attributes_describe_the_host_and_a_block_no_longer_tags_one_agent() {
         let cfg: ClientConfig = toml::from_str(
@@ -2324,7 +2330,7 @@ mod tests {
 
     /// A tombstone name ([`crate::reconfigure::tombstone_name`]) names the Supervisor whose
     /// directory it holds, and is no name a Supervisor can carry (ADR-0035 clause 13).
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0046
     #[test]
     fn a_tombstone_names_its_supervisor_and_no_supervisor_carries_one() {
         for supervisor in ["agent", "a-b", "x1"] {

@@ -7,7 +7,7 @@ mod common;
 mod enrolling;
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use enrolling::Served;
 use fleet_server::fleet::AppState;
@@ -21,17 +21,6 @@ fn held(state_dir: &Path) -> Option<Vec<u8>> {
     Some(cert.raw_serial().to_vec())
 }
 
-async fn until<T>(what: &str, within: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + within;
-    loop {
-        if let Some(found) = probe() {
-            return found;
-        }
-        assert!(Instant::now() < deadline, "{what} did not happen in time");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 /// The newest message the Server has taken from the Agent, once it is an Agent of the fleet.
 fn last_message(state: &AppState) -> Option<u64> {
     state.snapshot().first().map(|agent| agent.sequence_num)
@@ -40,7 +29,7 @@ fn last_message(state: &AppState) -> Option<u64> {
 /// Waits until the Server has taken a message after `after`: one connection's messages are taken
 /// in order, so everything `after` caused — a certificate signed on it included — is done.
 async fn past(state: &AppState, after: u64) {
-    until("a later message", Duration::from_secs(10), || {
+    common::wait_until_within(Duration::from_secs(10), "a later message", || {
         last_message(state).filter(|seq| *seq > after)
     })
     .await;
@@ -69,7 +58,7 @@ async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_http() {
 async fn an_enrolment_needs_no_heartbeat() {
     let served = Served::start(60).await;
     let _client = served.client("wss", "heartbeat_interval_secs = 0\n");
-    let id = until("an enrolment request", Duration::from_secs(10), || {
+    let id = common::wait_until_within(Duration::from_secs(10), "an enrolment request", || {
         served
             .enrolment
             .pending()
@@ -78,7 +67,7 @@ async fn an_enrolment_needs_no_heartbeat() {
     })
     .await;
     served.state.approve_enrolment(&id).expect("approve");
-    until("the issued certificate", Duration::from_secs(10), || {
+    common::wait_until_within(Duration::from_secs(10), "the issued certificate", || {
         held(&served.state_dir)
     })
     .await;
@@ -118,7 +107,7 @@ async fn the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_n
         },
         shutdown,
     ));
-    let id = until("an enrolment request", Duration::from_secs(20), || {
+    let id = common::wait_until_within(Duration::from_secs(20), "an enrolment request", || {
         served
             .enrolment
             .pending()
@@ -192,7 +181,7 @@ async fn a_bootstrap_p12_enrols_and_its_key_is_never_written() {
     let config = fleet_agent::config::ClientConfig::load(&config_path).expect("load");
     let beside = fleet_agent::config_init::Beside::in_named_dir(&p12_dir).expect("dir");
     let bootstrap = beside
-        .unasked_enrolment(&config, Some(PASSWORD))
+        .unasked_enrolment(&config, Some(PASSWORD), &[])
         .expect("opens")
         .expect("taken");
 
@@ -200,7 +189,7 @@ async fn a_bootstrap_p12_enrols_and_its_key_is_never_written() {
     let enrolling = tokio::spawn(fleet_agent::service::enrol::enrol(
         config, bootstrap, shutdown,
     ));
-    let id = until("an enrolment request", Duration::from_secs(20), || {
+    let id = common::wait_until_within(Duration::from_secs(20), "an enrolment request", || {
         served
             .enrolment
             .pending()
@@ -250,7 +239,7 @@ async fn enrol_and_renew(scheme: &str) {
     );
     let (state, revocations, state_dir) = (&served.state, &served.revocations, &served.state_dir);
 
-    let id = until("an enrolment request", Duration::from_secs(20), || {
+    let id = common::wait_until_within(Duration::from_secs(20), "an enrolment request", || {
         served
             .enrolment
             .pending()
@@ -283,16 +272,18 @@ async fn enrol_and_renew(scheme: &str) {
         "queued under the bootstrap certificate it proves"
     );
     state.approve_enrolment(&id).expect("approve");
-    let first = until("the issued certificate", Duration::from_secs(10), || {
-        held(state_dir)
-    })
-    .await;
+    let first =
+        common::wait_until_within(Duration::from_secs(10), "the issued certificate", || {
+            held(state_dir)
+        })
+        .await;
     // An enrolling host is no Agent of the fleet, so the first message the Server keeps is the
     // first on a member connection: the one a request answered already would ride.
-    let first_member = until("a member connection", Duration::from_secs(10), || {
-        last_message(state)
-    })
-    .await;
+    let first_member =
+        common::wait_until_within(Duration::from_secs(10), "a member connection", || {
+            last_message(state)
+        })
+        .await;
     past(state, first_member).await;
     let issued = revocations.issued();
     assert_eq!(issued.len(), 1, "an approval issued {}", issued.len());
@@ -301,7 +292,7 @@ async fn enrol_and_renew(scheme: &str) {
         "the register knows the key by another fingerprint than the approved request"
     );
 
-    let second = until("a renewal", Duration::from_secs(LIFE as u64), || {
+    let second = common::wait_until_within(Duration::from_secs(LIFE as u64), "a renewal", || {
         held(state_dir).filter(|serial| *serial != first)
     })
     .await;

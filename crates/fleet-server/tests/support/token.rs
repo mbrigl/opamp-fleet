@@ -12,9 +12,10 @@ use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, ObjectClass};
 use cryptoki::session::UserType;
 use cryptoki::types::AuthPin;
+use fleet_core::pkcs11;
 use fleet_server::audit::{Audit, Entry, Permit, Unavailable};
 use fleet_server::config::Pkcs11Config;
-use fleet_server::pkcs11::{self, Token, TokenKey};
+use fleet_server::pkcs11::{Token, TokenKey};
 
 /// What a test that needs a token says when none is named; `scripts/check-rust.sh` fails a run
 /// that names one and still finds it.
@@ -76,7 +77,7 @@ impl TestToken {
         context
             .init_token(free, &so_pin, &label)
             .expect("init token");
-        let slot = pkcs11::slot_of(&context, &label).expect("the new token");
+        let slot = pkcs11::slot_of(&context, &label, "token_label").expect("the new token");
         let session = context.open_rw_session(slot).expect("session");
         session
             .login(UserType::So, Some(&so_pin))
@@ -123,7 +124,8 @@ impl TestToken {
     /// extractable.
     pub fn generate(&self, label: &str) {
         let context = pkcs11::context(&self.config.module).expect("module");
-        let slot = pkcs11::slot_of(&context, &self.config.token_label).expect("slot");
+        let slot =
+            pkcs11::slot_of(&context, &self.config.token_label, "token_label").expect("slot");
         let session = context.open_rw_session(slot).expect("session");
         let pin = std::fs::read_to_string(&self.config.pin_file).expect("PIN");
         pkcs11::log_in(&session, &AuthPin::from(pin.as_str())).expect("login");
@@ -183,7 +185,8 @@ impl TestToken {
     pub fn holds_unextractable(&self, label: &str) -> bool {
         use cryptoki::object::AttributeType;
         let context = pkcs11::context(&self.config.module).expect("module");
-        let slot = pkcs11::slot_of(&context, &self.config.token_label).expect("slot");
+        let slot =
+            pkcs11::slot_of(&context, &self.config.token_label, "token_label").expect("slot");
         let session = context.open_ro_session(slot).expect("session");
         let pin = std::fs::read_to_string(&self.config.pin_file).expect("PIN");
         pkcs11::log_in(&session, &AuthPin::from(pin.as_str())).expect("login");

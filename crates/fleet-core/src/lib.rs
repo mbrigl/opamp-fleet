@@ -16,6 +16,8 @@ pub mod ending;
 pub mod host;
 pub mod naming;
 pub mod package;
+#[cfg(feature = "pkcs11")]
+pub mod pkcs11;
 pub mod pkcs12;
 pub mod platform;
 pub mod rate;

@@ -619,7 +619,7 @@ async fn forgetting_an_agent_ends_its_session() {
 
 /// A message that arrives while the instance's lease is lapsed by its clock — after a suspend of
 /// its host, before it has closed its listeners — is not answered; the one before was.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn a_message_is_not_answered_while_the_lease_is_lapsed_by_its_clock() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -658,7 +658,7 @@ async fn a_message_is_not_answered_while_the_lease_is_lapsed_by_its_clock() {
 
 /// A push that falls due while the instance's lease is lapsed by its clock is not sent: a restart
 /// requested then stays queued for an instance that holds a lease.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test]
 async fn nothing_is_pushed_while_the_lease_is_lapsed_by_its_clock() {
     use std::sync::atomic::{AtomicU64, Ordering};

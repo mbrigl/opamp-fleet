@@ -7,7 +7,7 @@
 //!
 //! What "own" means here is what this Client can honestly observe: its own process, and the
 //! Managed Processes it spawned and holds the pids of. It does **not** reach into a Collector's
-//! internal telemetry the way upstream's supervisor does — ADR-0018 forbids this Client from
+//! internal telemetry the way upstream's supervisor does — ADR-0046 forbids this Client from
 //! touching a Managed Process's configuration, and the specification's non-goal forbids inventing
 //! an abstraction over it.
 //!
@@ -667,21 +667,11 @@ fn exporter_client(
         Some(cert) => crate::tls::client_tls_for(config, Some(cert)),
         None => crate::tls::trust(config),
     };
-    let builder = tls
-        .and_then(|tls| {
-            tls.apply(
-                // The timeout belongs here rather than on the exporter: `opentelemetry-otlp` keeps
-                // its own for the client it would have built, and never applies it to this one.
-                reqwest::Client::builder()
-                    .use_rustls_tls()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .timeout(EXPORT_TIMEOUT),
-            )
-        })
+    // The timeout belongs here rather than on the exporter: `opentelemetry-otlp` keeps its own for
+    // the client it would have built, and never applies it to this one.
+    let client = tls
+        .and_then(|tls| tls.https_client(opamp::client::Timeouts::Total(EXPORT_TIMEOUT)))
         .map_err(|e| format!("{field}: {e}"))?;
-    let client = builder
-        .build()
-        .map_err(|e| format!("{field}: cannot build the OTLP client: {e}"))?;
     // Captured here, on the runtime thread that applies the offer — the exporter thread this is
     // handed to has no runtime of its own to ask.
     let handle = tokio::runtime::Handle::try_current().map_err(|_| {
@@ -1260,8 +1250,10 @@ mod tests {
         let took = started.elapsed();
         assert!(refused.is_empty(), "{refused:?}");
         assert!(!telemetry.reporting());
+        // Only a defect waits out the replaced exporter's export timeout; a loaded host does not
+        // come near it.
         assert!(
-            took < Duration::from_secs(1),
+            took < EXPORT_TIMEOUT,
             "the offer waited {took:?} for the replaced exporter's flush"
         );
 
@@ -1410,18 +1402,28 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut connection, _) = listener.accept().await.expect("the exporter connects");
-            // Read until the exporter has nothing more to say, then answer: the body is protobuf
-            // and this stub has no reason to parse it — the span's name and status travel as plain
-            // strings inside it, which is exactly what is being asserted.
+            // Read the request whole, its head and the `Content-Length` bytes of its body, then
+            // answer: the body is protobuf and this stub has no reason to parse it — the span's
+            // name and status travel as plain strings inside it, which is exactly what is being
+            // asserted.
             let mut request = Vec::new();
             let mut chunk = [0u8; 4096];
-            while let Ok(Ok(read)) =
-                tokio::time::timeout(Duration::from_millis(200), connection.read(&mut chunk)).await
-            {
-                if read == 0 {
-                    break;
+            loop {
+                if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .expect("the request names its length");
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
                 }
-                request.extend_from_slice(&chunk[..read]);
+                match connection.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&chunk[..read]),
+                }
             }
             let _ = connection
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")

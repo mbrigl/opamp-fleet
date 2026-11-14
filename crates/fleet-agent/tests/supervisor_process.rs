@@ -1,4 +1,4 @@
-//! The supervision `Runner` (ADR-0018) across everything it does *to a host*: spawn and watchdog,
+//! The supervision `Runner` (ADR-0046) across everything it does *to a host*: spawn and watchdog,
 //! the health-gated apply, the binary swap and its rollback (ADR-0034), and the tree install
 //! (ADR-0034).
 //!
@@ -152,6 +152,15 @@ struct Harness {
     task: tokio::task::JoinHandle<()>,
     _service: Option<AgentsService>,
 }
+
+/// The apply grace of a test whose program is meant to fail within it: a crasher dies at once, so
+/// a long grace costs such a test nothing, and a loaded host cannot make a crash outlast it.
+const CRASH_GRACE: Duration = Duration::from_secs(30);
+
+/// The apply grace of a test where a program meant to stay up must also survive it, which the test
+/// then waits out: long enough for a crasher on a loaded host to die within it, short enough not
+/// to hold the test up.
+const GATE_GRACE: Duration = Duration::from_secs(2);
 
 /// A `Runner` with everything the test does not care about filled in. `install` and `apply_grace`
 /// are what the package tests vary; `version_probe` is set only where the probe is the subject.
@@ -373,7 +382,7 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs(via: Via) 
 both!(the_directories_an_agent_writes_into_are_made_before_it_runs);
 
 /// A program named by a **relative** path starts, though the process begins in its own directory
-/// (ADR-0018).
+/// (ADR-0046).
 ///
 /// `Command` does `chdir` *before* `exec` on Unix, so a relative program is resolved against the
 /// directory it was just moved into: `<dir>/<dir>/<program>`, which is nothing. The Client's own
@@ -876,7 +885,7 @@ fn the_second_service_does_not_listen_while_it_is_traced() {
     assert!(!socket.exists(), "it listened while it was traced");
 }
 
-// ── Reload and uninstall (ADR-0018) ──────────────────────────────────────────
+// ── Reload and uninstall (ADR-0046) ──────────────────────────────────────────
 
 /// The pid the spawn reported — how these tests tell a kept process from a fresh one.
 #[cfg(unix)]
@@ -981,7 +990,7 @@ async fn the_managed_process_is_handed_the_endpoint_token(via: Via) {
 }
 both!(the_managed_process_is_handed_the_endpoint_token);
 
-/// A kind that declared a reload applies a configuration in place (ADR-0018): the process is
+/// A kind that declared a reload applies a configuration in place (ADR-0046): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
 #[cfg(unix)]
@@ -1032,16 +1041,16 @@ both!(
     a_declared_reload_applies_without_a_restart
 );
 
-/// `reload-or-restart` (ADR-0018): a process that dies on its reload signal — the stub without
+/// `reload-or-restart` (ADR-0046): a process that dies on its reload signal — the stub without
 /// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
 /// files, and the apply is acknowledged from that restart rather than failed.
-// Verifies: ADR-0018
+// Verifies: ADR-0046
 #[cfg(unix)]
 async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead(via: Via) {
     let mut harness = runner_full(
         via,
         None,
-        Duration::from_millis(300),
+        GATE_GRACE,
         Duration::ZERO,
         None,
         None,
@@ -1066,9 +1075,9 @@ both!(
     a_process_that_dies_on_the_reload_signal_is_restarted_instead
 );
 
-/// The generic uninstall (ADR-0018): the graceful stop plus the answer, which is the adapter's
+/// The generic uninstall (ADR-0046): the graceful stop plus the answer, which is the adapter's
 /// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
-/// coming last is what lets the core purge the directory only after the kind is done (ADR-0018).
+/// coming last is what lets the core purge the directory only after the kind is done (ADR-0046).
 async fn an_uninstall_stops_the_process_answers_and_exits(via: Via) {
     let mut harness = start(via, || Some(spec(&stub_agent())));
     let health = next_health(&mut harness.events).await;
@@ -1194,9 +1203,7 @@ async fn a_process_surviving_the_apply_grace_is_acknowledged_applied(via: Via) {
 both!(a_process_surviving_the_apply_grace_is_acknowledged_applied);
 
 async fn a_process_exiting_within_the_grace_fails_the_apply_and_stays_supervised(via: Via) {
-    let mut harness = start_with_grace(via, Duration::from_millis(500), || {
-        Some(spec(&stub_crasher()))
-    });
+    let mut harness = start_with_grace(via, CRASH_GRACE, || Some(spec(&stub_crasher())));
     apply(&harness, b"h1").await;
     let (hash, result) = next_ack(&mut harness.events).await;
     assert_eq!(hash, b"h1".to_vec());
@@ -1283,7 +1290,7 @@ fn binary_harness(via: Via, binary: &Path, apply_grace: Duration) -> Harness {
     )
 }
 
-/// ADR-0018 clause 54: a package is *proved to run* before it replaces what runs. The check fails here, so
+/// ADR-0046 clause 54: a package is *proved to run* before it replaces what runs. The check fails here, so
 /// nothing is swapped and — the point of the whole exercise — the running process is never stopped
 /// for an artifact that could never have worked. Before this, the sequence was stop, swap, fail to
 /// start, roll back, restart: an outage bought for nothing.
@@ -1480,7 +1487,7 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails(via: Via) {
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(500));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
     let _ = next_health(&mut harness.events).await;
 
     // A binary that exits at once: it fails the grace and must be rolled back.
@@ -1505,7 +1512,7 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
     // Nothing on disk yet: a first install onto an empty program directory.
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(200));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
 
     let staged = dir.path().join("downloaded.staged");
     let crasher = bytes_of(&stub_crasher());
@@ -1535,7 +1542,7 @@ both!(a_first_install_that_will_not_start_is_kept_not_discarded);
 async fn a_program_that_keeps_crashing_is_held_not_looped(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(100));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
 
     // Install a crasher as a first install: kept (no predecessor), and it keeps crashing.
     let staged = dir.path().join("downloaded.staged");
@@ -1592,7 +1599,7 @@ async fn a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_to
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(300));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
     // The predecessor keeps crashing from the start, and is held.
     loop {
         let health = next_health(&mut harness.events).await;
@@ -1638,15 +1645,27 @@ async fn a_failed_package_starts_its_predecessor_exactly_once(via: Via) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
-    let mut harness = binary_harness(via, &binary, Duration::from_millis(300));
+    let mut harness = binary_harness(via, &binary, CRASH_GRACE);
     let running = next_health(&mut harness.events).await;
     assert_eq!(running.status, "running", "{running:?}");
 
     offer_package(&harness, dir.path(), &bytes_of(&stub_crasher()), "9.9.9").await;
     let (_, result) = next_package_ack(&mut harness.events).await;
     assert!(result.is_err(), "{result:?}");
-    // Longer than the backoff a second respawn would have waited.
-    let mut healths = Vec::new();
+    // The predecessor starts again, waited for within seconds; then nothing more for longer
+    // than the backoff a second respawn would have waited.
+    let restarted = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match harness.events.recv().await {
+                Some((_, ProcessEvent::Health(health))) => break health.status,
+                Some(_) => {}
+                None => panic!("the events ended"),
+            }
+        }
+    })
+    .await
+    .expect("the predecessor starts again");
+    let mut healths = vec![restarted];
     let until = tokio::time::Instant::now() + Duration::from_millis(2500);
     while let Ok(Some((_, event))) = tokio::time::timeout_at(until, harness.events.recv()).await {
         if let ProcessEvent::Health(health) = event {
@@ -1756,7 +1775,7 @@ fn tree_harness(via: Via, root: &Path) -> Harness {
             root: root.to_path_buf(),
             program_path: inside,
         }),
-        Duration::from_millis(200),
+        GATE_GRACE,
         None,
         move || Some(spec(&program)),
     )
@@ -2311,7 +2330,7 @@ mod an_apply_while_the_second_service_is_away {
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_package_waits_staged_while_the_service_is_away_and_is_swapped_in_once_it_is_back() {
-        let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
+        let (mut away, service) = running(&stub_agent(), CRASH_GRACE).await;
         let good = bytes_of(&stub_agent());
         the_service_goes(&mut away, service).await;
 
@@ -2616,10 +2635,10 @@ mod an_apply_while_the_second_service_is_away {
     }
 
     /// A restart command while a configuration and a package wait for the second service respawns
-    /// on the current files and does no more (ADR-0018 clause 8): its start, though it reaches the
+    /// on the current files and does no more (ADR-0046 clause 8): its start, though it reaches the
     /// service, acknowledges nothing and swaps nothing in. The retry it makes due at once does
     /// both, with a start of its own that is gated.
-    /// Verifies: ADR-0018, ADR-0021
+    /// Verifies: ADR-0046, ADR-0021
     #[tokio::test]
     async fn a_restart_while_something_waits_only_respawns_and_the_retry_decides() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2780,7 +2799,7 @@ mod an_apply_while_the_second_service_is_away {
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_failed_package_does_not_fail_the_configuration_its_predecessor_runs() {
-        let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
+        let (mut away, service) = running(&stub_agent(), GATE_GRACE).await;
         the_service_goes(&mut away, service).await;
         apply(&away.harness, b"cfg").await;
         the_apply_finds_it_away(&mut away).await;
@@ -2946,7 +2965,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A package that waited for the second service without its preflight is refused by the
     /// preflight that runs once the service is back, before anything is stopped: it is reported
-    /// failed, and what ran stays in place (ADR-0021 clause 18, ADR-0018 clause 54).
+    /// failed, and what ran stays in place (ADR-0021 clause 18, ADR-0046 clause 54).
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_package_whose_preflight_found_the_service_away_is_refused_once_it_is_back() {

@@ -162,11 +162,13 @@ impl Envelope {
                         .map(PackageId::parse)
                         .transpose()
                         .map_err(|e| format!("invalid package in the assignment: {e}"))?;
-                    Ok::<_, String>(crate::fleet::Assignment {
+                    let assignment = crate::fleet::Assignment {
                         deployment: assignment.deployment,
                         package,
                         configurations: assignment.configurations,
-                    })
+                    };
+                    assignment.check()?;
+                    Ok::<_, String>(assignment)
                 })
                 .transpose()?,
             labels: self.labels,
@@ -536,7 +538,7 @@ mod tests {
         other.assignment = Some(Assignment {
             deployment: "canary".to_string(),
             package: None,
-            configurations: BTreeMap::from([("base".to_string(), "4567cdef".to_string())]),
+            configurations: BTreeMap::from([("base".to_string(), "4567cdef".repeat(8))]),
         });
         store.put(&two, &other).expect("put");
         let otelcol = PackageId::new("otelcol", "1.2.3").expect("id");
@@ -546,7 +548,7 @@ mod tests {
         assert_eq!(store.pinning(Pin::Deployment("gone")), 0);
         assert_eq!(
             store.referenced_revisions("base"),
-            BTreeSet::from(["0123abcd".to_string(), "4567cdef".to_string()])
+            BTreeSet::from(["0123abcd".repeat(8), "4567cdef".repeat(8)])
         );
 
         let reopened = FsAgentStore::open(dir.path()).expect("reopen");
@@ -556,7 +558,7 @@ mod tests {
         assert_eq!(reopened.pinning(Pin::Deployment("canary")), 0);
         assert_eq!(
             reopened.referenced_revisions("base"),
-            BTreeSet::from(["0123abcd".to_string()])
+            BTreeSet::from(["0123abcd".repeat(8)])
         );
     }
 

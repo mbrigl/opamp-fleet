@@ -24,7 +24,7 @@
 # The ADR index merges its table rows by keeping the lines of both sides, and its prose as text: two
 # branches that each add an ADR append a row at the same end of a table, and a conflict there
 # carries no decision; a rule both sides reworded does. The driver, .githooks/merge-adr-index, says
-# how, and is enabled as "Git hooks" in CONTRIBUTING.md says; a clone without it merges the index as
-# text. Nothing relies on a merge on GitHub reading this line: a branch takes up main locally before
-# its pull request merges.
+# how, and is enabled as CONTRIBUTING.md → "Git hooks" says; a clone without it merges the index
+# as text. Nothing relies on a merge on GitHub reading this line: a branch takes up main locally
+# before its pull request merges.
 docs/adr/README.md merge=adr-index

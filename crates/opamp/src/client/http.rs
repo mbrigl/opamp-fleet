@@ -14,7 +14,7 @@ use crate::uid::InstanceUid;
 use prost::Message;
 use tracing::{info, warn};
 
-use super::{AfterReply, Ended, ReportSink, Session, StopSignal};
+use super::{AfterReply, Backoff, Ended, ReportSink, Session, StopSignal};
 
 /// One plain-HTTP connection's material, built by the application.
 pub struct Settings {
@@ -46,6 +46,10 @@ pub async fn run<S: Session, X: StopSignal>(
     // A Server that has never heard of these Agents needs full snapshots first.
     let mut reports = session.connected();
     let mut ended = Ended::Stopped;
+    // Refusals in a row, `Unavailable` and throttling alike, wait at least the next step, so a
+    // Server that names no wait, or zero, is not polled at once (ADR-0012 clause 4); an exchange
+    // that is answered starts the steps again.
+    let mut refused = Backoff::new();
     'poll: loop {
         // The routine cycle, then immediate follow-ups until no Agent owes a report — an outcome
         // is acknowledged now, not a poll later.
@@ -53,7 +57,8 @@ pub async fn run<S: Session, X: StopSignal>(
             for report in reports {
                 match exchange(client, endpoint, report, limit).await {
                     Ok(reply) => {
-                        if let Some(delay) = session.on_reply(&reply) {
+                        if let Some(named) = session.on_reply(&reply) {
+                            let delay = refused.at_least_a_step(named);
                             tokio::select! {
                                 () = tokio::time::sleep(delay) => {}
                                 () = stop.requested() => break 'poll,
@@ -61,10 +66,12 @@ pub async fn run<S: Session, X: StopSignal>(
                             reports = session.routine();
                             continue 'poll;
                         }
+                        refused.reset();
                     }
                     // The Server is overloaded, not out of step: wait as it asked and come back
                     // with the same reports. Nothing was processed, so nothing has to be rebuilt.
                     Err(Exchange::Throttled { after, status }) => {
+                        let after = refused.at_least_a_step(after);
                         warn!(%status, delay = ?after, "the server is throttling; waiting");
                         tokio::select! {
                             () = tokio::time::sleep(after) => {}
@@ -382,6 +389,102 @@ mod tests {
             request.to_lowercase().contains(&expected),
             "expected {expected:?} in:\n{request}"
         );
+    }
+
+    /// A Session that reports one empty message every cycle and asks nothing of the replies.
+    struct Polling;
+
+    impl Session for Polling {
+        fn connected(&mut self) -> Vec<AgentToServer> {
+            vec![AgentToServer::default()]
+        }
+        fn routine(&mut self) -> Vec<AgentToServer> {
+            vec![AgentToServer::default()]
+        }
+        fn owed(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+        fn on_reply(&mut self, reply: &ServerToAgent) -> Option<Duration> {
+            // As the Client's session does: an `Unavailable` names its wait, zero when unset.
+            reply.error_response.as_ref().map(|_| Duration::ZERO)
+        }
+        async fn after_reply<K: ReportSink>(&mut self, _: &mut K) -> AfterReply {
+            AfterReply::Continue
+        }
+        async fn changed(&mut self) {
+            std::future::pending::<()>().await;
+        }
+        fn exchange_failed(&mut self) {}
+        async fn stop(&mut self) {}
+        fn goodbyes(&mut self) -> Vec<AgentToServer> {
+            Vec::new()
+        }
+    }
+
+    /// Stops the driver once its time is up.
+    struct After(tokio::time::Instant);
+
+    impl StopSignal for After {
+        fn requested(&mut self) -> impl std::future::Future<Output = ()> + Send {
+            tokio::time::sleep_until(self.0)
+        }
+    }
+
+    /// How many polls the driver sends in 2.5 s to a Server that answers each one with `response`.
+    async fn polls_in_two_and_a_half_seconds(response: &'static str) -> usize {
+        install_ring_provider();
+        let (addr, seen) = stub(response).await;
+        let settings = Settings {
+            endpoint: format!("http://{addr}/v1/opamp"),
+            client: reqwest::Client::new(),
+            poll: Duration::from_secs(3600),
+            max_message_size: 8192,
+        };
+        let stop = tokio::time::Instant::now() + Duration::from_millis(2500);
+        run(&settings, &mut Polling, &mut After(stop))
+            .await
+            .expect("run");
+        let polls = seen.lock().expect("lock").len();
+        polls
+    }
+
+    /// A Server that refuses every poll and names no wait is not polled at once: the waits grow
+    /// along the backoff, 0.5 to 1 s, then 1 to 2 s, so 2.5 s hold three polls at most, where
+    /// polling at once would send hundreds. Likewise after `503` with `Retry-After: 0`.
+    /// Verifies: ADR-0012
+    #[tokio::test]
+    async fn refusals_that_name_no_wait_are_polled_at_growing_intervals() {
+        let unavailable = {
+            let reply = ServerToAgent {
+                error_response: Some(crate::proto::ServerErrorResponse {
+                    r#type: crate::proto::ServerErrorResponseType::Unavailable as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+            .encode_to_vec();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/x-protobuf\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                reply.len()
+            );
+            let mut bytes = head.into_bytes();
+            bytes.extend(reply);
+            Box::leak(
+                String::from_utf8_lossy(&bytes)
+                    .into_owned()
+                    .into_boxed_str(),
+            )
+        };
+        for (what, response) in [
+            ("Unavailable without a wait", &*unavailable),
+            (
+                "503 with Retry-After: 0",
+                "HTTP/1.1 503 Service Unavailable\r\nretry-after: 0\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            ),
+        ] {
+            let polls = polls_in_two_and_a_half_seconds(response).await;
+            assert!((1..=3).contains(&polls), "{what}: {polls} polls in 2.5 s");
+        }
     }
 
     /// Throttling on plain HTTP: a `503` with `Retry-After` is honoured as the Server asked, and

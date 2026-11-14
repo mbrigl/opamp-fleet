@@ -12,7 +12,6 @@ mod common;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use fleet_server::fleet::AgentView;
 use futures_util::SinkExt;
@@ -30,17 +29,6 @@ impl Drop for ClientUnderTest {
     fn drop(&mut self) {
         common::stop_client(&mut self.0);
     }
-}
-
-async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if let Some(value) = probe() {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("timed out waiting for {what}");
 }
 
 /// Places the stub where the Collector Supervisor's bare program name resolves.
@@ -139,14 +127,14 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
     // A Collector runs once it has a configuration, so the fleet gives it one — aimed at its type
     // alone, which the Client's own Agent does not share.
     let (collector_type, supervisor_uid) =
-        wait_until("the Collector's Supervisor to appear as an Agent", || {
+        common::wait_until("the Collector's Supervisor to appear as an Agent", || {
             view(&state.snapshot(), "otelcol")
                 .map(|a| (a.service_name.clone(), a.instance_uid.clone()))
         })
         .await;
     // The version probe has answered for the staged program, so the version the extension states
     // below is the one that arrives, not one the probe could still overwrite.
-    let host_name = wait_until("the version probe to report the program's version", || {
+    let host_name = common::wait_until("the version probe to report the program's version", || {
         let agents = state.snapshot();
         let agent = view(&agents, "otelcol")?;
         (agent.service_version == "9.9.9")
@@ -157,7 +145,7 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
     common::release_to_every_agent(&state, &["collector"]);
 
     // The Collector is running, and it was handed the token its extension presents.
-    let token = wait_until("the Collector to start with its endpoint token", || {
+    let token = common::wait_until("the Collector to start with its endpoint token", || {
         std::fs::read_to_string(&marker)
             .ok()?
             .lines()
@@ -227,7 +215,7 @@ async fn a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_
         .expect("the extension reports");
 
     // Its version, health and configuration reach the fleet, on the Supervisor's own Agent.
-    let reported_on = wait_until("the extension's report to reach the Server", || {
+    let reported_on = common::wait_until("the extension's report to reach the Server", || {
         let agents = state.snapshot();
         let agent = view(&agents, "otelcol")?;
         let reached = agent.service_version == "0.142.0"

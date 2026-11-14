@@ -192,7 +192,7 @@ async fn a_plain_http_exchange_is_answered_by_the_handler() {
 
 /// A reply past the limit is answered `500` and never put on the wire, and the handler is told it
 /// was not sent, so what it carried can wait for the next exchange.
-// Verifies: ADR-0025
+// Verifies: ADR-0045
 #[tokio::test]
 async fn a_plain_http_reply_past_the_limit_is_reported_unsent() {
     let (addr, handler) = serve(Settings::new(LIMIT)).await;
@@ -322,7 +322,14 @@ async fn a_websocket_carries_replies_and_pushes() {
     drop(pusher);
     handler.pushers.lock().unwrap().clear();
     assert!(matches!(next_reply(&mut socket).await, Message::Close(_)));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The close callback runs as the session ends, after the frame the client read.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while handler.closed.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the close callback ran");
     assert_eq!(*handler.closed.lock().unwrap(), [Transport::WebSocket]);
 }
 

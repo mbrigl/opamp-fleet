@@ -437,8 +437,8 @@ pub fn stage_current_exe(layout: &Layout) -> Result<PathBuf, String> {
     // Compared with the staged file itself, never trusted from the manifest beside it: the manifest
     // says what was staged, the file is what would run.
     let already_staged = dir
-        .read(BINARY_FILENAME)
-        .is_ok_and(|staged| staged == bytes);
+        .read(BINARY_FILENAME, bytes.len() as u64)
+        .is_ok_and(|staged| *staged == bytes);
     if !already_staged {
         dir.write(BINARY_FILENAME, &bytes, 0o755)
             .map_err(|e| format!("cannot write {}: {e}", binary.display()))?;

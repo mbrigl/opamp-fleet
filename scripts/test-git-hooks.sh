@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Self-test of the git hooks under .githooks/: every refusal and every passage the table under
-# "Git hooks" in CONTRIBUTING.md lists (AGENTS.md, sections 5 and 6).
+# CONTRIBUTING.md → "Git hooks" lists (AGENTS.md, sections 5 and 6).
 #
 # Each case builds a throwaway repository under a temporary directory with core.hooksPath pointing
 # at this repository's .githooks/, runs a real 'git commit' or 'git push' in it — the push goes to

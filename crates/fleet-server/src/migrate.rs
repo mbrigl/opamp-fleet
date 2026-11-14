@@ -37,7 +37,7 @@ use serde_json::Value;
 
 use crate::bootstrap::{BootstrapStore as _, Entry as BootstrapEntry};
 use crate::configs::Configuration;
-use crate::deployments::{Deployment, DeploymentBackend as _};
+use crate::deployments::Deployment;
 use crate::fs;
 use crate::packages::{Entry, Package, PackageId, Platform};
 use crate::revocation::{Host, Issued, LedgerStore as _};
@@ -762,19 +762,48 @@ fn assignment(
     }))
 }
 
-/// Opens the new `data_dir` as the Server would, so what would not start fails here.
+/// A clock at which nothing has ended: the check forgets no certificate, revocation or Host the
+/// migration has just reported as carried (ADR-0023 clause 26).
+struct Beginning;
+
+impl crate::fleet::Clock for Beginning {
+    fn now_ms(&self) -> u64 {
+        0
+    }
+}
+
+/// Opens the new `data_dir` as the Server's startup does, every store through the constructors
+/// it uses and the audit record's tail, so what would not start fails here. What has ended is left
+/// for the first start to forget.
 fn check_opens(data_dir: &Path, report: &mut Report) {
-    let opened = fs::open_data_dir(data_dir, true)
-        .and_then(|()| crate::fleet::AppState::new(data_dir.to_path_buf()).map(|_| ()))
-        .and_then(|()| crate::packages::PackageStore::open(data_dir.to_path_buf()).map(|_| ()))
-        .and_then(|()| fs::FsDeploymentBackend::open(data_dir)?.load().map(|_| ()))
-        .and_then(|()| fs::FsLedgerStore::open(data_dir)?.load().map(|_| ()))
-        .and_then(|()| fs::FsBootstrapStore::open(data_dir)?.load().map(|_| ()))
-        .and_then(|()| fs::FsAuditStore::open(data_dir).map(|_| ()));
-    match opened {
+    match open_every_store(data_dir) {
         Ok(()) => report.line(format!("opened: {} as the Server will", data_dir.display())),
         Err(e) => report.failed(format!("the new data directory does not open: {e}")),
     }
+}
+
+/// Every store the Server's startup in `main.rs` opens, in files, as a Server opens them with
+/// `[enrolment]` and without its `bootstrap_ca`, with the artifacts under `blobs/` and without the
+/// revocation list's authorities, which the list reads only after it opened.
+fn open_every_store(data_dir: &Path) -> Result<(), String> {
+    use crate::audit_log::AuditStore as _;
+    fs::open_data_dir(data_dir, true)?;
+    let records = crate::Records::Files(data_dir.to_path_buf());
+    let clock: std::sync::Arc<dyn crate::fleet::Clock> = std::sync::Arc::new(Beginning);
+    crate::enrolment::Enrolment::open_on(clock.clone(), records.enrolment())?;
+    crate::bootstrap::BootstrapCertificates::on(None, &records, clock.clone())?;
+    crate::revocation::Revocations::open(records.ledger()?, clock, Vec::new())?;
+    crate::floors::PackageFloors::open(records.floors())?;
+    let (packages, _) = crate::packages::PackageStore::open_on(
+        &records,
+        Some(data_dir),
+        &crate::config::BlobsConfig::default(),
+        crate::clock::Elapsed::monotonic(),
+    )?;
+    crate::fleet::PackageOffering::on(&records, packages)?;
+    fs::FsAuditStore::open(data_dir)?.tail()?;
+    crate::fleet::AppState::on(&records)?;
+    Ok(())
 }
 
 /// Copies `from` to `to` byte for byte, owner-only.
@@ -793,6 +822,7 @@ mod tests {
     use super::*;
     use crate::agent_store::AgentStore as _;
     use crate::configs::{revision_hash, Revision};
+    use crate::deployments::DeploymentBackend as _;
     use crate::revocation::{CertId, Facts};
     use sha2::{Digest, Sha256};
 
@@ -1315,5 +1345,67 @@ mod tests {
             "{:?}",
             report.lines
         );
+    }
+
+    /// The check opens every store the Server opens at startup, through the constructors it
+    /// uses: a migrated data directory whose floor or enrolment file the first start would refuse
+    /// fails it, naming the file.
+    /// Verifies: ADR-0023
+    #[test]
+    fn the_check_fails_on_a_floor_or_enrolment_file_the_server_would_refuse() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old = old_layout(root.path());
+        let data_dir = root.path().join("fleet-data");
+        let report = run(&old.config_dir, &old.packages_dir, &data_dir).expect("migrate");
+        assert!(!report.trust_failed, "{:?}", report.lines);
+
+        for name in [fs::PACKAGE_FLOORS, fs::ENROLMENT] {
+            write(&data_dir.join(name), b"not json");
+            let mut report = Report::default();
+            check_opens(&data_dir, &mut report);
+            assert!(report.trust_failed, "{name}: {:?}", report.lines);
+            assert!(
+                report.lines.iter().any(|line| line.contains(name)),
+                "{name}: {:?}",
+                report.lines
+            );
+            std::fs::remove_file(data_dir.join(name)).expect("remove");
+        }
+    }
+
+    /// The check forgets nothing the migration carried: an issued certificate and a bootstrap
+    /// certificate that have ended, and the Host the ended certificate bound, are on disk after it
+    /// as the report says, for the first start to forget.
+    /// Verifies: ADR-0023
+    #[test]
+    fn the_check_keeps_what_has_ended() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old = old_layout(root.path());
+        let mut issued = old.issued.clone();
+        issued.facts.not_after_ms = 1;
+        let stem = format!("{}-0a", &issued.facts.id.issuer[..16]);
+        write(
+            &old.config_dir
+                .join(format!("revocation/issued/{stem}.json")),
+            serde_json::to_vec(&issued).expect("json"),
+        );
+        let mut bootstrap = old.bootstrap.clone();
+        bootstrap.not_after_ms = 1;
+        write(
+            &old.config_dir.join("bootstrap-certificates/b5.json"),
+            serde_json::to_vec(&bootstrap).expect("json"),
+        );
+        let data_dir = root.path().join("fleet-data");
+        let report = run(&old.config_dir, &old.packages_dir, &data_dir).expect("migrate");
+        assert!(!report.trust_failed, "{:?}", report.lines);
+
+        let ledger = fs::FsLedgerStore::open(&data_dir)
+            .expect("open")
+            .load()
+            .expect("load");
+        assert_eq!(ledger.issued.len(), 1, "the ended certificate is kept");
+        assert!(ledger.hosts["h1"].instance_uids.contains(&old.released));
+        let bootstrap_store = fs::FsBootstrapStore::open(&data_dir).expect("open");
+        assert_eq!(bootstrap_store.load().expect("load").len(), 1);
     }
 }

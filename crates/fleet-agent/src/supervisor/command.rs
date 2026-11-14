@@ -1,4 +1,4 @@
-//! The `command` plugin: the example Custom Supervisor (ADR-0018). It brings a Foreign Agent —
+//! The `command` plugin: the example Custom Supervisor (ADR-0046). It brings a Foreign Agent —
 //! any process started by a command-line invocation — under management: spawned as configured,
 //! restarted when a remote configuration arrives (the files land in the Supervisor's
 //! `config/` directory for the process to re-read), health derived from the outside.
@@ -14,7 +14,7 @@ use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, Versio
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
-/// `command` is not among them: the core takes it out and resolves it (ADR-0018), and what
+/// `command` is not among them: the core takes it out and resolves it (ADR-0046), and what
 /// arrives here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,7 +30,7 @@ struct CommandSettings {
     /// 2.0.0 version in its output becomes the Agent's `service.version`. A Foreign Agent's
     /// version flag is its own convention — hence opt-in, unlike the Collector's.
     ///
-    /// They are also this kind's **preflight** (ADR-0018 clause 54): a package's staged program is run with
+    /// They are also this kind's **preflight** (ADR-0046 clause 54): a package's staged program is run with
     /// them before the running one is stopped, and a non-zero exit refuses the package with the
     /// program's own message. Same arguments, same contract — a check that is cheap and touches
     /// no state — asked where a refusal costs nothing rather than after the swap.
@@ -38,7 +38,7 @@ struct CommandSettings {
     version_args: Option<Vec<String>>,
 }
 
-/// The keys this kind does not take (ADR-0018), each with what answers it. Refused by name rather
+/// The keys this kind does not take (ADR-0046), each with what answers it. Refused by name rather
 /// than met with serde's "unknown field", because a block carrying one expects a Client that needs
 /// it, and the operator deleting the line deserves to be told where the value went.
 const RETIRED: &[(&str, &str)] = &[
@@ -69,7 +69,7 @@ impl Plugin for CommandPlugin {
     }
 
     /// Nothing at all. This is the kind for an agent nobody has written a wrapper for, so every
-    /// value is the operator's to state (ADR-0018).
+    /// value is the operator's to state (ADR-0046).
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
         crate::supervisor::ports::KindDefaults::none()
     }
@@ -84,7 +84,7 @@ impl Plugin for CommandPlugin {
             std::mem::take(&mut ctx.settings),
         )?;
         // Everything the operator wrote about *where* things are goes through the placeholders
-        // (ADR-0018) — the program itself deliberately does not.
+        // (ADR-0046) — the program itself deliberately does not.
         let args: Vec<String> = settings.args.iter().map(|a| ctx.expand(a)).collect();
         let env: Vec<(String, String)> = settings
             .env
@@ -100,11 +100,11 @@ impl Plugin for CommandPlugin {
             program: command.clone(),
             args,
             // A Foreign Agent's version flag is its own convention, and so is its banner: the
-            // strict SemVer read stays the default here (ADR-0018 clause 55).
+            // strict SemVer read stays the default here (ADR-0046 clause 55).
             parse: None,
         });
         // The same arguments, asked of the *staged* program before the running one is stopped
-        // (ADR-0018). This kind knows no argument of its own to be safe to run — but an operator
+        // (ADR-0046). This kind knows no argument of its own to be safe to run — but an operator
         // who set `version_args` has named one: the contract on that key is that the command may
         // be invoked with exactly these and will print its version, which is precisely a check
         // that is cheap and touches no state. Nothing new is asked of anyone; the arguments that
@@ -118,7 +118,7 @@ impl Plugin for CommandPlugin {
             env: Vec::new(),
         });
         // What this Foreign Agent will actually be invoked with, after the placeholders were
-        // expanded (ADR-0018). The spawn line names the program; the arguments are where a
+        // expanded (ADR-0046). The spawn line names the program; the arguments are where a
         // placeholder that did not resolve — or a working directory that is not the one the
         // operator meant — becomes visible, and the process itself usually reports neither.
         //
@@ -144,8 +144,8 @@ impl Plugin for CommandPlugin {
             archive_key: ctx.archive_key,
             version_probe,
             preflight,
-            // Not this kind's to know (ADR-0018): an agent nobody wrote a wrapper for applies a
-            // configuration by restarting, which is ADR-0018's generic behaviour.
+            // Not this kind's to know (ADR-0046): an agent nobody wrote a wrapper for applies a
+            // configuration by restarting, which is ADR-0046's generic behaviour.
             reload_signal: None,
             // The Client itself, or the second service where a process account is registered
             // (ADR-0021 clause 18): the registry says which.
@@ -160,7 +160,7 @@ impl Plugin for CommandPlugin {
                     program: command.clone(),
                     args: args.clone(),
                     env: env.clone(),
-                    // The program's own directory (ADR-0018), resolved at the spawn.
+                    // The program's own directory (ADR-0046), resolved at the spawn.
                     working_dir: None,
                     // Whatever the operator points this at is supervised as one process.
                     own_process_group: false,
@@ -184,7 +184,7 @@ impl Plugin for CommandPlugin {
 mod tests {
     use super::*;
 
-    /// `command` is gone from these settings — the core resolves it (ADR-0018) — so a block that
+    /// `command` is gone from these settings — the core resolves it (ADR-0046) — so a block that
     /// still carries it here would be an unknown key, which is exactly what must fail.
     #[test]
     fn settings_parse_strictly() {
@@ -205,8 +205,8 @@ mod tests {
         assert!(typo.try_into::<CommandSettings>().is_err());
     }
 
-    /// The two keys ADR-0018 retires are refused by name, on both sides of the seam: at startup,
-    /// and in an offered Supervisor set before any running process is touched (ADR-0018). Each
+    /// The two keys ADR-0046 retires are refused by name, on both sides of the seam: at startup,
+    /// and in an offered Supervisor set before any running process is touched (ADR-0046). Each
     /// message says what supplies the value now, because a block carrying one was written against
     /// a Client that took it.
     #[test]

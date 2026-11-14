@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 use crate::config::ClientConfig;
-use crate::config_init::Bootstrap;
+use crate::config_init::{Answered, Bootstrap, Offered, Written};
 use crate::engine::{Engine, EngineAgent};
 use crate::service::runtime;
 use crate::shutdown::{shutdown_channel, Shutdown};
@@ -41,23 +41,31 @@ pub fn written(state_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Enrol on a runtime of its own, until the issued certificate is stored or Ctrl-C ends the wait.
+/// Enrol on a runtime of its own, until the issued certificate is stored or Ctrl-C ends the wait;
+/// a run with no bootstrap identity to enrol with, an enrolled Client's, enrols nothing.
 ///
 /// `config` is the configuration the service will run with, its `state_dir` the service's.
+/// `written` is what this run asked and wrote: the bootstrap identity it enrols with, an endpoint
+/// and trust it answered, which replace the file's, and an endpoint named over a kept file, which
+/// holds the file to it (ADR-0044).
+/// `roots` are the data root and the layout root. The CA file and the bootstrap pair are read
+/// once, before anything connects; one in a root or the state directory, which the service's
+/// account owns, is read through that directory, never through a link at its name.
 ///
 /// # Errors
-/// Returns an error when the bootstrap pair cannot be read, when the state directory cannot be
-/// prepared, or when the wait is interrupted before a certificate arrived.
-pub fn run(config: &ClientConfig, bootstrap: &Bootstrap) -> Result<(), String> {
-    let config = config.clone();
-    let bootstrap = bootstrap.clone();
+/// Returns an error when the CA file or the bootstrap pair cannot be read, when the state
+/// directory cannot be prepared, or when the wait is interrupted before a certificate arrived.
+pub fn run(config: &ClientConfig, written: &Written, roots: &[&Path]) -> Result<(), String> {
+    let Some(config) = prepare(config, written, roots)? else {
+        return Ok(());
+    };
     runtime::daemon_runtime()?.block_on(async move {
         let (stop, shutdown) = shutdown_channel();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
             let _ = stop.send(true);
         });
-        runtime::on_a_worker(enrol(config, bootstrap, shutdown)).await
+        runtime::on_a_worker(connect(config, shutdown)).await
     })
 }
 
@@ -70,28 +78,23 @@ pub fn run(config: &ClientConfig, bootstrap: &Bootstrap) -> Result<(), String> {
 /// until `shutdown`: a closed window looks the same from here, and whether to try again is the
 /// operator's to decide, not this loop's.
 ///
+/// The CA file and the bootstrap pair are read once, before anything connects, with the state
+/// directory as the account's; [`run`] names the roots too.
+///
 /// # Errors
-/// Returns an error when the bootstrap pair cannot be read, when the state directory cannot be
-/// prepared, or when `shutdown` ends the wait before a certificate arrived.
+/// Returns an error when the CA file or the bootstrap pair cannot be read, when the state
+/// directory cannot be prepared, or when `shutdown` ends the wait before a certificate arrived.
 pub async fn enrol(
     mut config: ClientConfig,
     bootstrap: Bootstrap,
-    mut shutdown: Shutdown,
+    shutdown: Shutdown,
 ) -> Result<(), String> {
-    match bootstrap {
-        Bootstrap::Pair { cert, key } => {
-            let tls = config.tls.get_or_insert(crate::config::TlsConfig {
-                ca_file: None,
-                cert_file: None,
-                key_file: None,
-            });
-            tls.cert_file = Some(cert);
-            tls.key_file = Some(key);
-        }
-        // The decrypted key is never written: the connection reads it from memory (ADR-0027
-        // clause 15).
-        Bootstrap::Pkcs12 { identity, .. } => config.bootstrap_identity = Some(identity),
-    }
+    read_once(&mut config, &bootstrap, &[], &Offered::default())?;
+    connect(config, shutdown).await
+}
+
+/// [`enrol`], with what it connects with already in `config`.
+async fn connect(mut config: ClientConfig, mut shutdown: Shutdown) -> Result<(), String> {
     // A certificate swap a crash cut short is completed before anything reads the state.
     crate::csr::recover(&config.state_dir)?;
     // Read now, so a pair that is no certificate and key is named before anything connects.
@@ -162,5 +165,662 @@ pub async fn enrol(
                 );
             }
         }
+    }
+}
+
+/// `config` as the enrolment connects with it: what the run answered in place of what the file
+/// says (ADR-0044),
+/// and the CA file and the bootstrap pair read once, before anything connects, never again by a
+/// path the account gave (ADR-0021 clause 11). `None` where `written` holds no bootstrap identity,
+/// and so nothing to enrol with.
+fn prepare(
+    config: &ClientConfig,
+    written: &Written,
+    roots: &[&Path],
+) -> Result<Option<ClientConfig>, String> {
+    let Some(bootstrap) = &written.bootstrap else {
+        return Ok(None);
+    };
+    let mut config = config.clone();
+    if let Some(answered) = &written.answered {
+        take_answered(&mut config, answered);
+    }
+    holds_to_named(&config, written)?;
+    read_once(&mut config, bootstrap, roots, &written.offered)?;
+    Ok(Some(config))
+}
+
+/// Refuses the enrolment where `--endpoint` named, over a file the install kept, another endpoint
+/// than the file's: such a run answered nothing, and the file stands for the service
+/// (ADR-0044).
+///
+/// # Errors
+/// Returns an error naming both endpoints.
+pub fn holds_to_named(config: &ClientConfig, written: &Written) -> Result<(), String> {
+    match &written.named_over_kept {
+        Some(named) if *named != config.endpoint => Err(format!(
+            "not enrolling: --endpoint names {named}, and the configuration kept names {}. \
+             Correct the configuration or the flag, and install again",
+            config.endpoint
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Puts what the run answered in place of what `config` read from the file: the endpoint, and the
+/// CA copy with the certificates written into it, or no CA where none was answered
+/// (ADR-0044).
+fn take_answered(config: &mut ClientConfig, answered: &Answered) {
+    config.endpoint.clone_from(&answered.endpoint);
+    let ca_file = answered.ca.as_ref().map(|(copy, _)| copy.clone());
+    config.ca_pem = answered.ca.as_ref().map(|(_, pem)| pem.clone());
+    match &mut config.tls {
+        Some(tls) => tls.ca_file = ca_file,
+        None if ca_file.is_some() => {
+            config.tls = Some(crate::config::TlsConfig {
+                ca_file,
+                cert_file: None,
+                key_file: None,
+            });
+        }
+        None => {}
+    }
+}
+
+/// Reads what a privileged enrolment connects with, once, into `config`: the certificates of
+/// `[tls] ca_file`, and the bootstrap identity, which a `bootstrap.p12` already opened to in
+/// memory (ADR-0027 clause 15). The connection then reads none of these files again.
+///
+/// `service install` and `service config` run as root or an Administrator, and these paths come
+/// from answers whose defaults `supervisor.toml` gives, a file the service's account can rewrite
+/// (ADR-0021 clause 11). So each is read as [`crate::nofollow::read_privileged`] reads it: a path
+/// the questionnaire offered from the file and the answer kept, through no link at its name; any
+/// other as an administrator's path. A file that is no certificate or no key is named.
+fn read_once(
+    config: &mut ClientConfig,
+    bootstrap: &Bootstrap,
+    roots: &[&Path],
+    offered: &Offered,
+) -> Result<(), String> {
+    let state_dir = config.state_dir.clone();
+    let read = |path: &Path| {
+        crate::nofollow::read_privileged(
+            path,
+            roots,
+            Some(&state_dir),
+            offered.naming(path),
+            crate::tls::MAX_PEM_BYTES,
+        )
+        .map_err(|e| e.to_string())
+    };
+    if let (None, Some(ca)) = (&config.ca_pem, config.ca_file()) {
+        config.ca_pem = Some(crate::tls::certificates_in(ca, read(ca)?.to_vec())?);
+    }
+    config.bootstrap_identity = Some(match bootstrap {
+        Bootstrap::Pair { cert, key } => crate::config::BootstrapIdentity {
+            cert_pem: crate::tls::certificates_in(cert, read(cert)?.to_vec())?,
+            key_pem: crate::tls::key_in(key, std::mem::take(&mut *read(key)?))?,
+        },
+        // The decrypted key is never written: the connection reads it from memory.
+        Bootstrap::Pkcs12 { identity, .. } => identity.clone(),
+    });
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A certificate and its key as PEM.
+    fn pair() -> (String, String) {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = rcgen::CertificateParams::new(vec!["bootstrap".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("certificate");
+        (cert.pem(), key.serialize_pem())
+    }
+
+    /// A configuration whose `[tls] ca_file` is `ca`, in a state directory of `dir`.
+    fn config(dir: &Path, ca: &Path) -> ClientConfig {
+        let mut config = ClientConfig {
+            endpoint: "wss://127.0.0.1:9/v1/opamp".to_string(),
+            state_dir: dir.join("state"),
+            ..ClientConfig::default()
+        };
+        config.tls = Some(crate::config::TlsConfig {
+            ca_file: Some(ca.to_path_buf()),
+            cert_file: None,
+            key_file: None,
+        });
+        config
+    }
+
+    /// A bootstrap pair written into `dir`.
+    fn bootstrap(dir: &Path) -> Bootstrap {
+        let (cert, key) = pair();
+        let (cert_path, key_path) = (dir.join("bootstrap.pem"), dir.join("bootstrap-key.pem"));
+        std::fs::write(&cert_path, cert).expect("cert");
+        std::fs::write(&key_path, key).expect("key");
+        Bootstrap::Pair {
+            cert: cert_path,
+            key: key_path,
+        }
+    }
+
+    /// `written`, enrolling with `bootstrap`.
+    fn enrolling(bootstrap: Bootstrap, written: Written) -> Written {
+        Written {
+            bootstrap: Some(bootstrap),
+            ..written
+        }
+    }
+
+    /// [`prepare`] for a run that enrols, as every caller here is.
+    fn prepare_enrolling(
+        config: &ClientConfig,
+        written: &Written,
+        roots: &[&Path],
+    ) -> Result<ClientConfig, String> {
+        prepare(config, written, roots).map(|config| config.expect("a run that enrols"))
+    }
+
+    /// `run`'s error, which must come before anything connects: a run still going after ten
+    /// seconds read something it should have refused.
+    fn refusal(config: ClientConfig, bootstrap: Bootstrap, account: PathBuf) -> String {
+        let (done, wait) = std::sync::mpsc::channel();
+        let written = enrolling(bootstrap, Written::default());
+        std::thread::spawn(move || done.send(run(&config, &written, &[&account]).err()));
+        wait.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the enrolment read what it should have refused")
+            .expect("refused")
+    }
+
+    /// A `[tls]` path that names a device is refused, naming it, without reading it: the CA file
+    /// and either file of the bootstrap pair alike (HARDENING.md H21).
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_device_a_tls_path_names_is_refused_unread() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (ca, _) = pair();
+        let ca_path = admin.path().join("ca.pem");
+        std::fs::write(&ca_path, ca).expect("ca");
+        let zero = PathBuf::from("/dev/zero");
+
+        let refused = refusal(
+            config(account.path(), &zero),
+            bootstrap(admin.path()),
+            account.path().to_path_buf(),
+        );
+        assert!(refused.contains("/dev/zero"), "{refused}");
+        assert!(refused.contains("not a regular file"), "{refused}");
+
+        let Bootstrap::Pair { cert, key } = bootstrap(admin.path()) else {
+            unreachable!()
+        };
+        for pair in [
+            Bootstrap::Pair {
+                cert: zero.clone(),
+                key: key.clone(),
+            },
+            Bootstrap::Pair {
+                cert,
+                key: zero.clone(),
+            },
+        ] {
+            let refused = refusal(
+                config(account.path(), &ca_path),
+                pair,
+                account.path().to_path_buf(),
+            );
+            assert!(refused.contains("/dev/zero"), "{refused}");
+        }
+    }
+
+    /// A `[tls]` file over the bound is refused, naming it.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_tls_file_over_the_bound_is_refused() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let large = admin.path().join("large.pem");
+        let file = std::fs::File::create(&large).expect("large");
+        file.set_len(crate::tls::MAX_PEM_BYTES + 1).expect("size");
+
+        let refused = refusal(
+            config(account.path(), &large),
+            bootstrap(admin.path()),
+            account.path().to_path_buf(),
+        );
+        assert!(refused.contains("large.pem"), "{refused}");
+        assert!(refused.contains("at most"), "{refused}");
+    }
+
+    /// A link the account placed at the CA copy in the data root is not followed, even to a file
+    /// of certificates (HARDENING.md H21).
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_ca_copy_is_not_followed() {
+        let account = tempfile::tempdir().expect("account");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let (ca, _) = pair();
+        let target = elsewhere.path().join("their-ca.pem");
+        std::fs::write(&target, ca).expect("ca");
+        let copy = account.path().join(crate::config_init::SERVER_CA_FILE);
+        std::os::unix::fs::symlink(&target, &copy).expect("symlink");
+
+        let refused = refusal(
+            config(account.path(), &copy),
+            bootstrap(elsewhere.path()),
+            account.path().to_path_buf(),
+        );
+        assert!(refused.contains("is a link"), "{refused}");
+    }
+
+    /// A file beneath a directory of the account's but not directly in it is refused, naming it,
+    /// since a directory between could be a link.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_tls_path_deeper_in_the_account_s_directory_is_refused() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (ca, _) = pair();
+        let deeper = account.path().join("sub");
+        std::fs::create_dir(&deeper).expect("sub");
+        std::fs::write(deeper.join("ca.pem"), &ca).expect("ca");
+
+        let refused = refusal(
+            config(account.path(), &deeper.join("ca.pem")),
+            bootstrap(admin.path()),
+            account.path().to_path_buf(),
+        );
+        assert!(refused.contains("not directly in it"), "{refused}");
+        assert!(refused.contains("ca.pem"), "{refused}");
+    }
+
+    /// A directory of the root's that the account swapped for a link to a directory elsewhere
+    /// carries no read past the root: the path is refused as lying deeper beneath it, as it is
+    /// while the directory is a real one.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_place_of_a_directory_of_the_root_s_is_not_read_through() {
+        let account = tempfile::tempdir().expect("account");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let (ca, _) = pair();
+        std::fs::write(elsewhere.path().join("ca.pem"), ca).expect("ca");
+        let sub = account.path().join("certs");
+        std::os::unix::fs::symlink(elsewhere.path(), &sub).expect("symlink");
+
+        let refused = refusal(
+            config(account.path(), &sub.join("ca.pem")),
+            bootstrap(elsewhere.path()),
+            account.path().to_path_buf(),
+        );
+        assert!(refused.contains("not directly in it"), "{refused}");
+
+        // Nor spelled with `..` from elsewhere, nor through the administrator's own link to it.
+        let around = elsewhere.path().join("..").join(
+            account
+                .path()
+                .file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .as_ref(),
+        );
+        let admin_link = elsewhere.path().join("certs");
+        std::os::unix::fs::symlink(&sub, &admin_link).expect("the administrator's link");
+        for spelled in [
+            around.join("certs").join("ca.pem"),
+            admin_link.join("ca.pem"),
+        ] {
+            let refused = refusal(
+                config(account.path(), &spelled),
+                bootstrap(elsewhere.path()),
+                account.path().to_path_buf(),
+            );
+            assert!(
+                refused.contains("not directly in it"),
+                "{}: {refused}",
+                spelled.display()
+            );
+        }
+    }
+
+    /// A file the administrator named outside the account's directories may be reached through a
+    /// link, as a distribution's CA bundle often is; where the link leads is judged again, so one
+    /// that leads to a link at the CA copy is refused.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn an_administrator_s_link_outside_the_account_s_directories_is_followed() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (ca, _) = pair();
+        let bundle = admin.path().join("ca-bundle.crt");
+        std::fs::write(&bundle, &ca).expect("ca");
+        let link = admin.path().join("ca.pem");
+        std::os::unix::fs::symlink(&bundle, &link).expect("symlink");
+        let mut followed = config(account.path(), &link);
+
+        read_once(
+            &mut followed,
+            &bootstrap(admin.path()),
+            &[account.path()],
+            &Offered::default(),
+        )
+        .expect("read");
+        assert_eq!(followed.ca_pem.as_deref(), Some(ca.as_bytes()));
+
+        // Where the link leads, the rules of the account's directories hold.
+        let theirs = admin.path().join("theirs.pem");
+        std::fs::write(&theirs, &ca).expect("theirs");
+        let copy = account.path().join(crate::config_init::SERVER_CA_FILE);
+        std::os::unix::fs::symlink(&theirs, &copy).expect("link at the copy");
+        let into = admin.path().join("into.pem");
+        std::os::unix::fs::symlink(&copy, &into).expect("link to the copy");
+        let refused = refusal(
+            config(account.path(), &into),
+            bootstrap(admin.path()),
+            account.path().to_path_buf(),
+        );
+        assert!(refused.contains("is a link"), "{refused}");
+    }
+
+    /// The bootstrap pair the questionnaire offers from `[tls] cert_file` and `key_file`, which
+    /// the service's account may write, is refused where a link stands at either name, outside
+    /// the account's directories too; the same links the administrator typed are followed.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_an_offered_bootstrap_pair_file_is_refused_and_not_read() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let (ca, _) = pair();
+        let ca_path = admin.path().join("ca.pem");
+        std::fs::write(&ca_path, ca).expect("ca");
+        let Bootstrap::Pair { cert, key } = bootstrap(elsewhere.path()) else {
+            unreachable!()
+        };
+        let (cert_link, key_link) = (admin.path().join("boot.pem"), admin.path().join("key.pem"));
+        std::os::unix::fs::symlink(&cert, &cert_link).expect("link");
+        std::os::unix::fs::symlink(&key, &key_link).expect("link");
+        let linked = Bootstrap::Pair {
+            cert: cert_link.clone(),
+            key: key_link.clone(),
+        };
+        let prepared = |offered: Offered, bootstrap: &Bootstrap| {
+            let written = enrolling(
+                bootstrap.clone(),
+                Written {
+                    offered,
+                    ..Written::default()
+                },
+            );
+            prepare_enrolling(
+                &config(account.path(), &ca_path),
+                &written,
+                &[account.path()],
+            )
+        };
+
+        for (offered_cert, offered_key) in [(true, false), (false, true)] {
+            let mut file = config(account.path(), &ca_path);
+            file.tls = Some(crate::config::TlsConfig {
+                ca_file: None,
+                cert_file: offered_cert.then(|| cert_link.clone()),
+                key_file: offered_key.then(|| key_link.clone()),
+            });
+            let refused = prepared(Offered::of(&file), &linked).expect_err("a link");
+            assert!(refused.contains("is a link"), "{refused}");
+            let named = if offered_cert { "boot.pem" } else { "key.pem" };
+            assert!(refused.contains(named), "{refused}");
+        }
+
+        let typed = prepared(Offered::default(), &linked).expect("the administrator's links");
+        let identity = typed.bootstrap_identity.expect("read");
+        assert_eq!(
+            identity.cert_pem,
+            std::fs::read(&cert).expect("cert"),
+            "read through the link"
+        );
+    }
+
+    /// A state directory the account swapped for a link is not read through: a file named in it
+    /// is refused, though the link leads to a plain directory (ADR-0021 clause 12).
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_state_directory_that_is_a_link_is_not_read_through() {
+        let account = tempfile::tempdir().expect("account");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let (ca, _) = pair();
+        std::fs::write(elsewhere.path().join("ca.pem"), ca).expect("ca");
+        let state = account.path().join("state");
+        std::os::unix::fs::symlink(elsewhere.path(), &state).expect("symlink");
+        let mut config = config(account.path(), &state.join("ca.pem"));
+        config.state_dir.clone_from(&state);
+
+        let refused = refusal(
+            config,
+            bootstrap(elsewhere.path()),
+            account.path().to_path_buf(),
+        );
+        assert!(refused.contains("state/ca.pem"), "{refused}");
+        // Refused at the state directory's own name, not as lying deeper beneath the root.
+        assert!(!refused.contains("not directly in it"), "{refused}");
+    }
+
+    /// A file directly in a real state directory beneath a root, the default layout, is read
+    /// through the state directory.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_file_in_the_state_directory_beneath_a_root_is_read() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (ca, _) = pair();
+        let state = account.path().join("state");
+        std::fs::create_dir(&state).expect("state");
+        std::fs::write(state.join("ca.pem"), &ca).expect("ca");
+        let mut config = config(account.path(), &state.join("ca.pem"));
+        config.state_dir.clone_from(&state);
+
+        read_once(
+            &mut config,
+            &bootstrap(admin.path()),
+            &[account.path()],
+            &Offered::default(),
+        )
+        .expect("read");
+        assert_eq!(config.ca_pem.as_deref(), Some(ca.as_bytes()));
+    }
+
+    /// A path that reaches a root through a link outside it is read as a file of that root: a
+    /// link at the CA copy is refused however the path spells the directory.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_path_through_a_link_to_a_root_is_held_to_the_root() {
+        let account = tempfile::tempdir().expect("account");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let (ca, _) = pair();
+        let target = elsewhere.path().join("their-ca.pem");
+        std::fs::write(&target, ca).expect("ca");
+        std::os::unix::fs::symlink(&target, account.path().join("server-ca.pem")).expect("link");
+        let around = elsewhere.path().join("around");
+        std::os::unix::fs::symlink(account.path(), &around).expect("symlink");
+
+        let refused = refusal(
+            config(account.path(), &around.join("server-ca.pem")),
+            bootstrap(elsewhere.path()),
+            account.path().to_path_buf(),
+        );
+        assert!(refused.contains("is a link"), "{refused}");
+    }
+
+    /// What the enrolment connects with is read once, into memory: once read, the files can go
+    /// and the connection's TLS is still built.
+    /// Verifies: ADR-0021
+    #[test]
+    fn the_enrolment_s_trust_and_identity_are_read_once_into_memory() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (ca, _) = pair();
+        let copy = account.path().join(crate::config_init::SERVER_CA_FILE);
+        std::fs::write(&copy, &ca).expect("ca");
+        let pair = bootstrap(admin.path());
+        let mut config = config(account.path(), &copy);
+
+        read_once(&mut config, &pair, &[account.path()], &Offered::default()).expect("read");
+        assert_eq!(config.ca_pem.as_deref(), Some(ca.as_bytes()));
+        assert!(config.bootstrap_identity.is_some());
+
+        std::fs::remove_file(&copy).expect("remove the copy");
+        let Bootstrap::Pair { cert, key } = pair else {
+            unreachable!()
+        };
+        std::fs::remove_file(cert).expect("remove the cert");
+        std::fs::remove_file(key).expect("remove the key");
+        let tls = crate::tls::client_tls(&config).expect("built from memory");
+        assert_eq!(tls.ca_pem.as_deref(), Some(ca.as_bytes()));
+        assert!(tls.identity.is_some());
+    }
+
+    /// The run that answered enrols with its answers: a `supervisor.toml` rewritten after the
+    /// write, to another endpoint and another CA, changes neither the endpoint the enrolment
+    /// connects to nor the trust it connects with, and the rewritten CA is not read at all.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_run_that_answered_enrols_with_its_answers_whatever_the_file_says_by_now() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (answered_ca, _) = pair();
+        let copy = account.path().join(crate::config_init::SERVER_CA_FILE);
+        let answered = Answered {
+            endpoint: "wss://fleet.example.com/v1/opamp".to_string(),
+            ca: Some((copy.clone(), answered_ca.clone().into_bytes())),
+        };
+        // What the account rewrote: another endpoint, and a CA that is no file to read.
+        let mut rewritten = config(account.path(), Path::new("/dev/zero"));
+        rewritten.endpoint = "wss://theirs.example.net/v1/opamp".to_string();
+
+        let prepared = prepare_enrolling(
+            &rewritten,
+            &enrolling(
+                bootstrap(admin.path()),
+                Written {
+                    answered: Some(answered.clone()),
+                    ..Written::default()
+                },
+            ),
+            &[account.path()],
+        )
+        .expect("prepared from the answers");
+        assert_eq!(prepared.endpoint, answered.endpoint);
+        assert_eq!(prepared.ca_file(), Some(copy.as_path()));
+        let tls = crate::tls::client_tls(&prepared).expect("built");
+        assert_eq!(tls.ca_pem.as_deref(), Some(answered_ca.as_bytes()));
+
+        // An answer without a CA leaves the built-in roots, whatever the file names.
+        let without = Answered {
+            ca: None,
+            ..answered.clone()
+        };
+        let prepared = prepare_enrolling(
+            &rewritten,
+            &enrolling(
+                bootstrap(admin.path()),
+                Written {
+                    answered: Some(without),
+                    ..Written::default()
+                },
+            ),
+            &[account.path()],
+        )
+        .expect("prepared from the answers");
+        assert_eq!(prepared.ca_file(), None);
+        assert_eq!(
+            crate::tls::client_tls(&prepared).expect("built").ca_pem,
+            None
+        );
+    }
+
+    /// A run with no bootstrap identity, an enrolled Client's, enrols nothing and reads nothing:
+    /// the identity it would enrol with is the one `Written` holds, taken from nowhere else.
+    /// Verifies: ADR-0027
+    #[test]
+    fn a_run_with_no_bootstrap_identity_enrols_nothing() {
+        let account = tempfile::tempdir().expect("account");
+        // A CA that would be refused, were it read.
+        let file = config(account.path(), Path::new("/dev/zero"));
+        let written = Written::default();
+
+        assert!(prepare(&file, &written, &[account.path()])
+            .expect("nothing read")
+            .is_none());
+        run(&file, &written, &[account.path()]).expect("nothing to enrol");
+    }
+
+    /// A run that answered nothing takes the endpoint and the CA from the file: the residual the
+    /// decision names.
+    /// Verifies: ADR-0044
+    #[test]
+    fn a_run_that_answered_nothing_enrols_with_what_the_file_says() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (ca, _) = pair();
+        let copy = account.path().join(crate::config_init::SERVER_CA_FILE);
+        std::fs::write(&copy, &ca).expect("ca");
+        let mut file = config(account.path(), &copy);
+        file.endpoint = "wss://in-the-file.example.com/v1/opamp".to_string();
+
+        let prepared = prepare_enrolling(
+            &file,
+            &enrolling(bootstrap(admin.path()), Written::default()),
+            &[account.path()],
+        )
+        .expect("prepared from the file");
+        assert_eq!(prepared.endpoint, file.endpoint);
+        assert_eq!(prepared.ca_pem.as_deref(), Some(ca.as_bytes()));
+    }
+
+    /// `--endpoint` over a kept file that names another endpoint refuses the enrolment, naming
+    /// both; where the two are the same, the run enrols with what the file says.
+    /// Verifies: ADR-0044
+    #[test]
+    fn an_endpoint_named_over_a_kept_file_that_names_another_refuses_the_enrolment() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let (ca, _) = pair();
+        let copy = account.path().join(crate::config_init::SERVER_CA_FILE);
+        std::fs::write(&copy, &ca).expect("ca");
+        let mut kept = config(account.path(), &copy);
+        kept.endpoint = "wss://theirs.example.net/v1/opamp".to_string();
+        let named = "wss://fleet.example.com/v1/opamp";
+        let written = enrolling(
+            bootstrap(admin.path()),
+            Written {
+                named_over_kept: Some(named.to_string()),
+                ..Written::default()
+            },
+        );
+
+        let refused =
+            prepare_enrolling(&kept, &written, &[account.path()]).expect_err("another endpoint");
+        assert!(refused.contains(named), "{refused}");
+        assert!(
+            refused.contains("wss://theirs.example.net/v1/opamp"),
+            "{refused}"
+        );
+
+        kept.endpoint = named.to_string();
+        let prepared =
+            prepare_enrolling(&kept, &written, &[account.path()]).expect("the same endpoint");
+        assert_eq!(prepared.endpoint, named);
+        assert_eq!(prepared.ca_pem.as_deref(), Some(ca.as_bytes()));
     }
 }

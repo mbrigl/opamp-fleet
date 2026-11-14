@@ -25,7 +25,7 @@ pub mod protocol;
 pub mod ws;
 
 pub use backoff::Backoff;
-pub use connection::{ClientTls, Connection};
+pub use connection::{ClientTls, Connection, Timeouts};
 
 /// The application's side of one connection, carrying any number of Agents. A driver never calls
 /// two of these at once.
@@ -106,10 +106,26 @@ pub trait StopSignal {
 
 /// A `Retry-After` value in delta-seconds, the form a Server that throttles sends; an HTTP date or
 /// anything else unparsable is `None`, and the caller falls back to its own wait.
-pub(crate) fn retry_after_seconds(value: &str) -> Option<std::time::Duration> {
-    value
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(std::time::Duration::from_secs)
+///
+/// Both drivers read the header with it, and so may an application that asks the same Server for
+/// something else — a package download, say.
+#[must_use]
+pub fn retry_after_seconds(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Delta-seconds are read, surrounding blanks and all; an HTTP date, a negative or a fraction
+    /// is not, and the caller falls back to its own wait.
+    #[test]
+    fn retry_after_is_read_in_delta_seconds_only() {
+        assert_eq!(retry_after_seconds("0"), Some(Duration::ZERO));
+        assert_eq!(retry_after_seconds(" 30 "), Some(Duration::from_secs(30)));
+        for unreadable in ["Wed, 21 Oct 2015 07:28:00 GMT", "-1", "1.5", "soon", ""] {
+            assert_eq!(retry_after_seconds(unreadable), None, "{unreadable:?}");
+        }
+    }
 }

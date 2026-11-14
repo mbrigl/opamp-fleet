@@ -47,7 +47,7 @@ pub fn client_tls_for(
     config: &ClientConfig,
     candidate_cert: Option<&[u8]>,
 ) -> Result<ClientTls, String> {
-    let ca_pem = config.ca_file().map(certificates_file).transpose()?;
+    let ca_pem = trust_pem(config)?;
     let identity = match candidate_cert {
         Some(cert) => {
             // An offered certificate belongs to the key this Client generated for its request;
@@ -107,9 +107,17 @@ pub fn client_tls_for(
 /// Returns an error naming the CA file that cannot be read or holds no certificate.
 pub fn trust(config: &ClientConfig) -> Result<ClientTls, String> {
     Ok(ClientTls {
-        ca_pem: config.ca_file().map(certificates_file).transpose()?,
+        ca_pem: trust_pem(config)?,
         identity: None,
     })
+}
+
+/// The certificates of `[tls] ca_file`: those an enrolment read into memory, else the file's.
+fn trust_pem(config: &ClientConfig) -> Result<Option<Vec<u8>>, String> {
+    match &config.ca_pem {
+        Some(pem) => Ok(Some(pem.clone())),
+        None => config.ca_file().map(certificates_file).transpose(),
+    }
 }
 
 /// A PEM file of certificates, parsed here so that a bad one is named by its path.
@@ -117,7 +125,7 @@ pub(crate) fn certificates_file(path: &Path) -> Result<Vec<u8>, String> {
     certificates_in(path, read(path)?)
 }
 
-fn certificates_in(path: &Path, pem: Vec<u8>) -> Result<Vec<u8>, String> {
+pub(crate) fn certificates_in(path: &Path, pem: Vec<u8>) -> Result<Vec<u8>, String> {
     opamp::tls::certificates(&pem).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(pem)
 }
@@ -128,7 +136,7 @@ pub(crate) fn key_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
     key_in(path, read(path)?)
 }
 
-fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, String> {
+pub(crate) fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, String> {
     let pem = Zeroizing::new(pem);
     opamp::tls::private_key(&pem)
         .map(Zeroizing::new)
@@ -136,37 +144,21 @@ fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, String> {
     Ok(pem)
 }
 
-/// The identity in the PKCS#12 file at `path`, under `password`, as PEM in memory (ADR-0027
-/// clause 15). A file over [`fleet_core::pkcs12::MAX_FILE_BYTES`] is refused before it is read.
+/// The identity in `bytes`, the PKCS#12 file at `path`, under `password`, as PEM in memory
+/// (ADR-0027 clause 15). The caller reads the file, through no link the service's account placed
+/// and at most [`fleet_core::pkcs12::MAX_FILE_BYTES`] of it (ADR-0021 clause 11).
 ///
 /// # Errors
 /// [`OpenError::WrongPassword`](fleet_core::pkcs12::file::OpenError) when the password does not
 /// open it, and `Invalid` naming the file for everything else.
 pub fn pkcs12_identity(
     path: &Path,
+    bytes: &[u8],
     password: &str,
 ) -> Result<crate::config::BootstrapIdentity, fleet_core::pkcs12::file::OpenError> {
     use fleet_core::pkcs12::file::OpenError;
-    use std::io::Read as _;
     let invalid = |why: String| OpenError::Invalid(format!("{}: {why}", path.display()));
-    let limit = fleet_core::pkcs12::MAX_FILE_BYTES;
-    // Before it is read, and only a regular file, so a pipe cannot hold the install.
-    let meta = std::fs::metadata(path).map_err(|e| invalid(format!("cannot read it: {e}")))?;
-    if !meta.is_file() {
-        return Err(invalid("not a regular file".to_string()));
-    }
-    if meta.len() > limit {
-        return Err(invalid(format!("larger than {limit} bytes")));
-    }
-    let file = std::fs::File::open(path).map_err(|e| invalid(format!("cannot read it: {e}")))?;
-    // Read at its final size, so no grown buffer is left behind unwiped (ADR-0014).
-    let mut bytes = Zeroizing::new(Vec::with_capacity(
-        usize::try_from(meta.len()).unwrap_or_default(),
-    ));
-    file.take(limit + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| invalid(format!("cannot read it: {e}")))?;
-    let opened = fleet_core::pkcs12::file::open(&bytes, password).map_err(|e| match e {
+    let opened = fleet_core::pkcs12::file::open(bytes, password).map_err(|e| match e {
         OpenError::WrongPassword => OpenError::WrongPassword,
         OpenError::Invalid(why) => invalid(why),
     })?;
@@ -201,23 +193,96 @@ pub(crate) fn pem_block(label: &str, der: &[u8]) -> Zeroizing<String> {
     pem
 }
 
+/// A file `[tls]` names, read by its path: the run-time Client's own files, which its operator
+/// may reach through a link. A privileged enrolment reads them through
+/// [`crate::nofollow::read_privileged`] instead, and never by this path (ADR-0021 clause 11).
 fn read(path: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    read_bounded(path)
+        .map(|mut bytes| std::mem::take(&mut *bytes))
+        .map_err(|why| format!("cannot read {}: {why}", path.display()))
+}
+
+/// The most a PEM file of certificates or a key may hold: a bundle of many certificates is far
+/// below it.
+pub(crate) const MAX_PEM_BYTES: u64 = 1 << 20;
+
+/// The bytes of the regular file at `path`, of at most [`MAX_PEM_BYTES`], in a buffer wiped when
+/// it is dropped (ADR-0014). The error says why, and leaves naming the file to the caller.
+///
+/// Anything but a regular file is refused before it is opened, and again by what was opened, so
+/// a FIFO or a device at the name — `/dev/zero` — is never read. On Unix the open does not block,
+/// so a FIFO swapped in between the two looks is refused as well.
+///
+/// # Errors
+/// Returns why the file was not read.
+pub(crate) fn read_bounded(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
+    let before = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    check_regular(&before)?;
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK);
+    crate::nofollow::read_opened(open.open(path).map_err(|e| e.to_string())?, MAX_PEM_BYTES)
+        .map_err(|e| e.to_string())
+}
+
+fn check_regular(meta: &std::fs::Metadata) -> Result<(), String> {
+    if meta.is_file() && meta.len() <= MAX_PEM_BYTES {
+        Ok(())
+    } else {
+        Err(not_regular())
+    }
+}
+
+fn not_regular() -> String {
+    format!("not a regular file of at most {MAX_PEM_BYTES} bytes")
 }
 
 /// A file of the state directory, never read through a link: an install reads it as root, and the
 /// directory belongs to the service's account (ADR-0021).
 fn state_file(path: &Path) -> Result<Vec<u8>, String> {
-    crate::nofollow::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    crate::nofollow::read(path, MAX_PEM_BYTES)
+        .map(|mut bytes| std::mem::take(&mut *bytes))
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The run-time Client reads a `[tls]` file only as a regular file within the bound: a file
+    /// over it is refused, naming it, and so is a FIFO, without waiting for a writer.
+    #[test]
+    fn a_tls_file_is_read_only_as_a_regular_file_within_the_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let large = dir.path().join("large.pem");
+        std::fs::File::create(&large)
+            .expect("large")
+            .set_len(MAX_PEM_BYTES + 1)
+            .expect("size");
+        let refused = certificates_file(&large).expect_err("over the bound");
+        assert!(refused.contains("large.pem"), "{refused}");
+        assert!(refused.contains("at most"), "{refused}");
+
+        #[cfg(unix)]
+        {
+            let fifo = dir.path().join("fifo.pem");
+            let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("name");
+            // SAFETY: `name` is a valid NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo");
+            let (done, wait) = std::sync::mpsc::channel();
+            std::thread::spawn(move || done.send(key_file(&fifo).err()));
+            let refused = wait
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the FIFO held the read up")
+                .expect("refused");
+            assert!(refused.contains("not a regular file"), "{refused}");
+        }
+    }
+
     /// A `bootstrap.p12` opens to PEM in memory and stands in for the configured identity until
-    /// the Server's certificate is stored; a file over the bound is refused unread (ADR-0027
-    /// clause 15).
+    /// the Server's certificate is stored (ADR-0027 clause 15). The bound its read is held to is
+    /// `config_init`'s, tested there.
     /// Verifies: ADR-0027
     #[test]
     fn an_opened_bootstrap_p12_is_presented_until_the_client_is_enrolled() {
@@ -235,11 +300,12 @@ mod tests {
                 .expect("sealed"),
         )
         .expect("write");
+        let bytes = std::fs::read(&p12).expect("read");
         assert_eq!(
-            pkcs12_identity(&p12, "not the password"),
+            pkcs12_identity(&p12, &bytes, "not the password"),
             Err(OpenError::WrongPassword)
         );
-        let identity = pkcs12_identity(&p12, "twelve chars").expect("opens");
+        let identity = pkcs12_identity(&p12, &bytes, "twelve chars").expect("opens");
         assert_eq!(
             opamp::tls::certificates(&identity.cert_pem).expect("pem")[0].as_ref(),
             cert.der().as_ref()
@@ -276,15 +342,6 @@ mod tests {
             issued_cert.pem().into_bytes(),
             "the issued certificate outranks the bootstrap identity"
         );
-
-        let large = dir.path().join("large.p12");
-        let file = std::fs::File::create(&large).expect("create");
-        file.set_len(fleet_core::pkcs12::MAX_FILE_BYTES + 1)
-            .expect("size");
-        assert!(matches!(
-            pkcs12_identity(&large, "twelve chars"),
-            Err(OpenError::Invalid(why)) if why.contains("larger than")
-        ));
     }
 
     /// The Client's secrets are held in buffers wiped when they are dropped: the key of a
@@ -302,8 +359,9 @@ mod tests {
             packages.archive_key
         }
         let reads_key: fn(&Path) -> Result<Zeroizing<Vec<u8>>, String> = key_file;
-        let reads_password: fn(&Path, &str) -> Result<Zeroizing<String>, String> =
-            crate::config_init::read_password_file;
+        let reads_password = |path: &Path| -> Result<Zeroizing<String>, String> {
+            crate::config_init::read_password_file(path, "--flag", &[])
+        };
         let makes_token: fn() -> Result<Zeroizing<String>, String> =
             crate::supervisor::endpoint::new_token;
 
@@ -318,9 +376,7 @@ mod tests {
         let password_path = dir.path().join("password");
         std::fs::write(&password_path, "twelve chars\n").expect("write");
         assert_eq!(
-            reads_password(&password_path, "--flag")
-                .expect("a password")
-                .as_str(),
+            reads_password(&password_path).expect("a password").as_str(),
             "twelve chars"
         );
         assert_eq!(makes_token().expect("a token").len(), 64);

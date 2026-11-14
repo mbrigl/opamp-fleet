@@ -14,7 +14,80 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.8.2]
+## [0.8.3]
+
+### Changed
+
+- **A Server with `[blobs] store = "s3"` refuses to start with `max_package_size_bytes` above
+  5 GiB**
+  ([ADR-0023](docs/adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+  An upload is placed in the bucket with one copy, and S3 copies at most 5 GiB (5368709120 bytes)
+  at once, so a larger bound named an artifact the Server could not place. The refusal names the
+  key and the bound.
+  **What to do:** before the upgrade, lower `max_package_size_bytes` to at most 5368709120 where
+  the blobs are on S3.
+
+### Fixed
+
+- **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
+  ([ADR-0045](docs/adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  clauses 8 and 9). On PostgreSQL, an instance that placed an Agent before another instance bound
+  the Client Agent of its Host, or before the Client Agent first arrived behind the same Gateway on
+  another instance, held the Agent without the Client Agent's labels in its memory until the group
+  was placed again for another reason. The notice of a binding now places that Host's group again,
+  and a new notice that a Client Agent arrived behind a Gateway, sent after its commit, places that
+  Gateway's groups again. The fleet view, the reach counts and what a rollout releases read the
+  database and were not affected. An instance of 0.8.2 or earlier beside this release reads
+  everything again at each such arrival, as for any notice it does not know.
+  **What to do:** nothing.
+- **A Host's bound of 256 Agents holds across instances**
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  Two instances binding new Agents of one Host at once could pass it; the binding's own
+  transaction now counts it.
+  **What to do:** nothing.
+- **A restart requested through one instance while another delivers one is sent**
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  A request that landed between the delivery's clear and its end stayed queued in the database
+  until a later take-up; the carrying instance now holds it when its announcement arrives, and
+  when it takes up every Agent after a missed notification.
+  **What to do:** nothing.
+- **The blob and prune locks are let go when their holder ends**
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  A dropped blob hold, or a prune round cut off by its bound, kept its lock until its database
+  session ended.
+  **What to do:** nothing.
+- **A deletion on a shared store is decided by the database, not by an instance's pin cache**
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  A Configuration, a Deployment or a Package an instance's stale cache held pinned was refused
+  although no assignment pinned it any more.
+  **What to do:** nothing.
+- **A Package refusal on PostgreSQL keeps its status**
+  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)).
+  The REST API answers a missing, conflicting or invalid Package by its kind (`404`, `409`,
+  `400`), where on PostgreSQL it could answer by the wording of the message.
+  **What to do:** nothing.
+- **A plain-HTTP Client told to wait zero backs off**
+  ([ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md)).
+  After `Unavailable`, `503` or `429` it waits the named wait or its next backoff step, whichever
+  is longer, where a wait of zero had it ask again at once.
+  **What to do:** nothing.
+- **A Client reconnecting on verified connection settings waits up to 1.5 s for the Server's
+  close**
+  ([ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md)).
+  So the Server ends the connection the Client leaves before the new one arrives, and an Agent
+  without a host is not re-keyed by its own reconnect.
+  **What to do:** nothing.
+- **A configuration offered twice restarts its Managed Process once**
+  ([ADR-0046](docs/adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)
+  clause 56). A heartbeat that left the Client before the Server's push of a rollout arrived still
+  named the old hash, the Server answered it with the offer again, and the Client applied both:
+  the Managed Process restarted once more after reporting `APPLIED`, and the Client's own Agent
+  applied its Supervisor set twice. An offer of the hash an Agent is applying or has applied is now
+  answered with the status it holds, and nothing is stored or restarted; a hash whose apply
+  `FAILED` is applied again when offered again. A restart on purpose stays the `Restart` command.
+  **What to do:** nothing; a rollout restarts each Managed Process once.
+
+## [0.8.2] - 2026-11-08
 
 ### Added
 
@@ -177,8 +250,7 @@ once its tag exists.
   - **Two cases inherit labels in an instance's memory only once their group is placed again**:
     a Client Agent bound to its Host just before another instance first places a fellow Agent of
     that Host, and a Client Agent that arrives behind a Gateway after another instance placed a
-    fellow Agent behind it
-    ([the manual](docs/manual/server.md#labels-on-several-instances)).
+    fellow Agent behind it. Both are placed again at once since 0.8.3.
   - **Beside 0.8.0** four things differ until its last instance stops: `max_agents` may be passed
     by records the two releases create at the same moment, a creation of the same new Agent by
     both may end one of them as a deadlock, answered `Unavailable`, and an instance of 0.8.0

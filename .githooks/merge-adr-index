@@ -7,9 +7,9 @@
 # carries no decision. A rule both sides reworded does carry one, and stops the merge with the usual
 # markers, around the rows as well. A row both sides changed comes out twice, and check 1 of
 # scripts/check-docs.sh fails on a file the index lists twice; pre-merge-commit runs it on the
-# merged tree. .gitattributes names the driver for the file; enabled as the "Git hooks" of
-# CONTRIBUTING.md says, and a clone without the setting merges the index as text, a conflict on
-# every row. scripts/test-git-hooks.sh exercises this driver.
+# merged tree. .gitattributes names the driver for the file; enabled as
+# CONTRIBUTING.md → "Git hooks" says, and a clone without the setting merges the index as text,
+# a conflict on every row. scripts/test-git-hooks.sh exercises this driver.
 #
 # Git calls it with the base, ours, and theirs, the three labels of the markers, and takes the
 # merged file from ours.

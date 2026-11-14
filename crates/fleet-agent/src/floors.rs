@@ -100,7 +100,7 @@ impl FloorFile {
     #[must_use]
     pub fn open(state_dir: &Path, key: Option<Vec<u8>>) -> Self {
         let path = state_dir.join(FILE);
-        let kept = match crate::nofollow::read(&path) {
+        let kept = match crate::nofollow::read(&path, crate::nofollow::MAX_READ_BYTES) {
             Ok(bytes) => parse_kept(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Floors::new()),
             Err(e) => Err(e.to_string()),
@@ -242,14 +242,8 @@ impl crate::supervisor::ports::PackageFloors for FloorFile {
 /// success, or sends a body larger than a body of floors can be.
 pub async fn fetch(config: &ClientConfig) -> Result<Vec<u8>, String> {
     let url = crate::packages::resolve_url(PATH, &config.endpoint)?;
-    let builder = reqwest::Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(FETCH_TIMEOUT);
     let client = crate::tls::client_tls(config)?
-        .apply(builder)?
-        .build()
-        .map_err(|e| format!("cannot build the client: {e}"))?;
+        .https_client(opamp::client::Timeouts::Total(FETCH_TIMEOUT))?;
     let response = client
         .get(&url)
         .send()

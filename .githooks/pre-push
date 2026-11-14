@@ -10,7 +10,8 @@
 # feat/ branch took up since its last push are held to all of them; pre-merge-commit runs only the
 # documentation check on each. It runs them with --changed: the self-tests of what the branch left
 # untouched since main are skipped, since CI runs them, and every check itself still runs;
-# check-all.sh says which run. Enabled as the "Git hooks" of CONTRIBUTING.md says.
+# check-all.sh says which run. Enabled as
+# CONTRIBUTING.md → "Git hooks" says.
 #
 # A push whose every ref is a deletion, such as that of a merged branch, sends nothing to check
 # and proceeds without the checks; a deletion of the remote's main is still refused. A repository

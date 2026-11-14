@@ -21,3 +21,12 @@ skimmed. The design revision drops what prevented nothing
 - **Code cites a clause, never a place in a document** — a comment that relies on a decision
   names the ADR and its clause (`ADR-0021 clause 25`), never "point N", a paragraph, or a line.
   A normalization remaps clauses by their map; a place in a document it cannot follow.
+- **A test waits for its event, never for a time** — a test waits for what it needs to see, under a
+  deadline only a defect reaches. A sleep or a timed budget that holds on an idle host fails on a
+  loaded one, and a race the test meant to provoke goes unprovoked on a fast one. A wait that
+  must be timed, such as the waiter's own poll, carries its reason as `// timed: <why>`, on its
+  line or on a comment line right above it, which `scripts/sensor-tests-kept.sh` reads in place
+  of listing it.
+- **A caller tells errors apart by their kind, never by their text** — where a caller answers two
+  errors differently, the error carries a kind it matches on. A message is reworded for the
+  operator, and a match on its text then answers the wrong status without a test noticing.

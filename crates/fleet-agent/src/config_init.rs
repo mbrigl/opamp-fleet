@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 use dialoguer::{Input, Password};
 
 use crate::config::ClientConfig;
-use crate::nofollow::HeldDir;
 
 /// The file name written inside the install root when the operator named no `--config` path
 /// (ADR-0020): one rule for systemd, launchd, and the SCM instead of an `/etc` vs `/Library` vs
@@ -156,6 +155,7 @@ impl Beside {
         &self,
         config: &ClientConfig,
         password: Option<&str>,
+        roots: &[&Path],
     ) -> Result<Option<Bootstrap>, String> {
         let p12 = match &self.bootstrap {
             Some(BootstrapFiles::Pkcs12(file)) => Some(file),
@@ -184,7 +184,9 @@ impl Beside {
                         file.display()
                     ));
                 };
-                let identity = crate::tls::pkcs12_identity(file, password)
+                // Beside the program or in `--fleet-files`: the administrator's path.
+                let bytes = read_pkcs12(file, &Offered::default(), (roots, &config.state_dir))?;
+                let identity = crate::tls::pkcs12_identity(file, &bytes, password)
                     .map_err(|e| format!("{}: {e} (--bootstrap-password-file)", file.display()))?;
                 Ok(Some(Bootstrap::Pkcs12 {
                     file: file.clone(),
@@ -260,15 +262,77 @@ impl Bootstrap {
     }
 }
 
-/// What the questionnaire left behind: the files it wrote beside the configuration, which an
-/// install hands over to the service account with the file, and the bootstrap identity to enrol
-/// with.
+/// What the questionnaire left behind: what it answered, among it the file it wrote beside the
+/// configuration ([`Written::ca_copy`]), which an install hands over to the service account with
+/// the file, and the bootstrap identity to enrol with.
 #[derive(Debug, Default)]
 pub struct Written {
-    /// The copy of the answered Server CA, when one was answered.
-    pub copies: Vec<PathBuf>,
     /// The identity to enrol with; `None` on an enrolled Client, which was not asked.
     pub bootstrap: Option<Bootstrap>,
+    /// What this run answered and wrote; `None` where it kept the file as it was.
+    pub answered: Option<Answered>,
+    /// The endpoint `--endpoint` named over a file this run kept: no answer, but an enrolment
+    /// refuses a kept file that names another
+    /// (ADR-0044).
+    pub named_over_kept: Option<String>,
+    /// The paths this run's questions offered from the file, which the enrolment reads through no
+    /// link at their name where an answer kept one.
+    pub offered: Offered,
+}
+
+impl Written {
+    /// The copy of the answered Server CA beside the configuration, the one file the run wrote
+    /// there besides it; `None` where no CA was answered or nothing was.
+    #[must_use]
+    pub fn ca_copy(&self) -> Option<&Path> {
+        let (copy, _) = self.answered.as_ref()?.ca.as_ref()?;
+        Some(copy)
+    }
+}
+
+/// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
+/// with these, never with what it would read back from the file the service's account owns
+/// (ADR-0044).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answered {
+    /// The endpoint answered.
+    pub endpoint: String,
+    /// The CA copy beside the configuration and the certificates written into it; `None` where
+    /// no CA was answered, which leaves the built-in roots.
+    pub ca: Option<(PathBuf, Vec<u8>)>,
+}
+
+/// The paths the questionnaire offers from `supervisor.toml`, a file the service's account may
+/// write: `[tls] ca_file`, `cert_file` and `key_file`. An answer that keeps one is read through
+/// no link at its name, wherever it lies; any other answer is the administrator's (ADR-0021
+/// clause 11).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Offered(Vec<PathBuf>);
+
+impl Offered {
+    /// What the configuration `current` offers.
+    #[must_use]
+    pub fn of(current: &ClientConfig) -> Self {
+        Self(
+            current
+                .tls
+                .iter()
+                .flat_map(|tls| [&tls.ca_file, &tls.cert_file, &tls.key_file])
+                .flatten()
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// Whose word `path` is: the file's where it is a path offered, the administrator's else.
+    #[must_use]
+    pub fn naming(&self, path: &Path) -> crate::nofollow::Named {
+        if self.0.iter().any(|offered| offered == path) {
+            crate::nofollow::Named::ByAccountFile
+        } else {
+            crate::nofollow::Named::ByAdministrator
+        }
+    }
 }
 
 /// Ask, write, and report — the whole of `--interactive` and `service config` (ADR-0020).
@@ -283,7 +347,8 @@ pub struct Written {
 /// question (ADR-0027 clause 16).
 ///
 /// The answered CA is copied beside the file first, and the file names the copy
-/// ([`copy_ca_beside`]).
+/// ([`copy_ca_beside`]). `account` is the roots and the state directory, which the service's
+/// account owns: the answered CA is read through no link it placed there.
 ///
 /// # Errors
 /// Returns an error when stdin is not a terminal, when a prompt fails, or when a file cannot be
@@ -294,6 +359,7 @@ pub fn run(
     enrolled: bool,
     beside: &Beside,
     password: Option<&str>,
+    account: (&[&Path], &Path),
 ) -> Result<Written, String> {
     if !std::io::stdin().is_terminal() {
         return Err(format!(
@@ -316,28 +382,40 @@ pub fn run(
         );
     }
     beside.report();
-    let (answers, bootstrap) = ask(current, enrolled, beside, password)?;
-    let (answers, copies) = copy_ca_beside(answers, path)?;
-    for copy in &copies {
-        println!("copied {}", copy.display());
-    }
+    let (answers, bootstrap) = ask(current, enrolled, beside, password, account)?;
+    let offered = Offered::of(current);
+    let (answers, answered) = copy_ca_beside(answers, path, account.0, Some(account.1), &offered)?;
+    report_copy(&answered);
     if existing {
         // The file may hold `[packages] archive_key`: the text read and the text written are wiped
         // when they are dropped; what `toml_edit` keeps while it edits is its own (ADR-0014).
-        let text = std::fs::read_to_string(path)
-            .map(zeroize::Zeroizing::new)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let edited = zeroize::Zeroizing::new(edit(&text, &answers)?);
+        let bytes = crate::config_file::read_held(path)?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| format!("cannot read {}: not UTF-8 text", path.display()))?;
+        let edited = zeroize::Zeroizing::new(edit(text, &answers)?);
         replace(path, &edited)?;
     } else {
         write_new(path, &render(&answers))?;
     }
     println!("wrote {}", path.display());
-    Ok(Written { copies, bootstrap })
+    Ok(Written {
+        bootstrap,
+        answered: Some(answered),
+        named_over_kept: None,
+        offered,
+    })
+}
+
+/// Reports the copy `answered` names, the file written beside the configuration.
+fn report_copy(answered: &Answered) {
+    if let Some((copy, _)) = &answered.ca {
+        println!("copied {}", copy.display());
+    }
 }
 
 /// Copy the answered CA into the directory of the configuration at `config`, under
-/// [`SERVER_CA_FILE`], and return the answers naming the copy together with the copy's path.
+/// [`SERVER_CA_FILE`], and return the answers naming the copy together with what was answered:
+/// the endpoint, and the copy's path with the certificates written into it.
 ///
 /// The configuration then depends on nothing outside its own directory for its trust: the copy
 /// survives the removal of wherever the operator brought the CA from, and it lives where the file
@@ -350,75 +428,69 @@ pub fn run(
 /// and the copy it names lies in the account's directory. This runs as root or an Administrator
 /// and the copy is handed to the account, so the copy holds the file's certificates and nothing
 /// else, wherever a link at the name leads: a key or a password file yields no certificate and is
-/// refused before anything is written, and a FIFO or a device is refused without being read.
+/// refused before anything is written, and a FIFO or a device is refused without being read. An
+/// answer that keeps the path `offered` names is read through no link at its name at all.
 ///
 /// # Errors
 /// Returns an error naming the file that could not be read or written, or that holds no
 /// certificate.
-pub fn copy_ca_beside(answers: Answers, config: &Path) -> Result<(Answers, Vec<PathBuf>), String> {
+pub fn copy_ca_beside(
+    answers: Answers,
+    config: &Path,
+    roots: &[&Path],
+    state_dir: Option<&Path>,
+    offered: &Offered,
+) -> Result<(Answers, Answered), String> {
     let Some(ca) = &answers.ca_file else {
-        return Ok((answers, Vec::new()));
+        let endpoint = answers.endpoint.clone();
+        return Ok((answers, Answered { endpoint, ca: None }));
     };
     let dir = std::path::absolute(config)
         .map_err(|e| format!("cannot resolve {}: {e}", config.display()))?
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| format!("{} names no directory", config.display()))?;
-    let held = held_dir(&dir)?;
+    let held = crate::config_file::held_dir(&dir)?;
     let to = dir.join(SERVER_CA_FILE);
-    let bytes = read_certificates(ca)?;
+    let bytes = read_certificates(ca, roots, state_dir, offered.naming(ca))?;
     held.write(SERVER_CA_FILE, &bytes, 0o600)
         .map_err(|e| format!("cannot write {}: {e}", to.display()))?;
+    let answered = Answered {
+        endpoint: answers.endpoint.clone(),
+        ca: Some((to.clone(), bytes)),
+    };
     Ok((
         Answers {
-            ca_file: Some(to.clone()),
+            ca_file: Some(to),
             ..answers
         },
-        vec![to],
+        answered,
     ))
 }
 
-/// The most a CA file may hold: a bundle of many certificates is far below it.
-const MAX_CA_BYTES: u64 = 1 << 20;
-
-/// The certificates of the CA file at `path`, a regular file, encoded again as PEM: what the
-/// copy holds is these and nothing else the file had beside them. A file without a certificate is
-/// refused, and the refusal never repeats what the file holds.
+/// The certificates of the CA file at `path`, encoded again as PEM: what the copy holds is these
+/// and nothing else the file had beside them. A file without a certificate is refused, and the
+/// refusal never repeats what the file holds.
 ///
-/// Anything but a regular file is refused before it is opened, and again by what was opened: a
-/// FIFO or a device the service's account placed at the name never holds this step up. On Unix
-/// the open does not block, so a FIFO swapped in between the two looks is refused as well.
-fn read_certificates(path: &Path) -> Result<Vec<u8>, String> {
-    use std::io::Read as _;
-    let not_a_file = || {
-        format!(
-            "{} is not a CA file: not a regular file of at most {MAX_CA_BYTES} bytes",
-            path.display()
-        )
-    };
-    let regular = |meta: &std::fs::Metadata| meta.is_file() && meta.len() <= MAX_CA_BYTES;
-    let before =
-        std::fs::metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    if !regular(&before) {
-        return Err(not_a_file());
-    }
-    let mut open = std::fs::OpenOptions::new();
-    open.read(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK);
-    let file = open
-        .open(path)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let meta = file
-        .metadata()
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    if !regular(&meta) {
-        return Err(not_a_file());
-    }
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    file.take(MAX_CA_BYTES)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+/// The file is read as a privileged enrolment reads one, with `roots` and `state_dir` as the
+/// account's: a regular file of at most [`crate::tls::MAX_PEM_BYTES`], so a FIFO or a device the
+/// service's account placed at the name never holds this step up, and through no link the account
+/// placed in its directories, such as one at the copy an earlier answer left in the data root
+/// (ADR-0021 clause 11).
+fn read_certificates(
+    path: &Path,
+    roots: &[&Path],
+    state_dir: Option<&Path>,
+    named_by: crate::nofollow::Named,
+) -> Result<Vec<u8>, String> {
+    let bytes = crate::nofollow::read_privileged(
+        path,
+        roots,
+        state_dir,
+        named_by,
+        crate::tls::MAX_PEM_BYTES,
+    )
+    .map_err(|e| e.to_string())?;
     let certificates = opamp::tls::certificates(&bytes).map_err(|_| {
         format!(
             "{} is not a CA file: it holds no PEM certificate",
@@ -433,29 +505,6 @@ fn read_certificates(path: &Path) -> Result<Vec<u8>, String> {
                 .to_vec()
         })
         .collect())
-}
-
-/// The directory `dir` a configuration is written in, created where it is missing and held: the
-/// data root, or the directory the administrator named with `--config`. Its name is the
-/// administrator's and is followed on Unix, while on Windows a reparse point there is refused
-/// ([`HeldDir::open_root`]); every name in it is then reached without following a link.
-fn held_dir(dir: &Path) -> Result<HeldDir, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    HeldDir::open_root(dir).map_err(|e| format!("cannot open {}: {e}", dir.display()))
-}
-
-/// `path` as its held directory and its file name.
-fn held_file(path: &Path) -> Result<(HeldDir, &str), String> {
-    let name = path
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .ok_or_else(|| format!("{} names no file", path.display()))?;
-    let dir = std::path::absolute(path)
-        .map_err(|e| format!("cannot resolve {}: {e}", path.display()))?
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| format!("{} names no directory", path.display()))?;
-    Ok((held_dir(&dir)?, name))
 }
 
 /// Replace the configuration at `path` with `contents`, keeping who owns it.
@@ -484,9 +533,7 @@ fn replace(path: &Path, contents: &str) -> Result<(), String> {
     };
     #[cfg(not(unix))]
     let owner = None;
-    let (dir, name) = held_file(path)?;
-    dir.write_owned(name, contents.as_bytes(), 0o600, owner)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    crate::config_file::replace(path, contents.as_bytes(), 0o600, owner)
 }
 
 /// Edit the answers into an existing configuration's text, changing only the keys the
@@ -554,6 +601,9 @@ fn table<'a>(
 /// program (ADR-0027 clause 18); a file written without one fails the install's validation and
 /// stays on disk to be completed (ADR-0020).
 ///
+/// Returns the copy it wrote and what it answered; a file it kept answers nothing, and the
+/// endpoint named over it is returned for the enrolment to hold the file to.
+///
 /// # Errors
 /// Returns an error if the endpoint is not one the loader would accept, or if the file cannot be
 /// created.
@@ -562,10 +612,13 @@ pub fn run_with_endpoint(
     endpoint: &str,
     self_update: bool,
     beside: &Beside,
-) -> Result<Vec<PathBuf>, String> {
+) -> Result<Written, String> {
     beside.report();
     if keeping_existing(path) {
-        return Ok(Vec::new());
+        return Ok(Written {
+            named_over_kept: Some(endpoint.trim().to_string()),
+            ..Written::default()
+        });
     }
     // Before the file is created, not after: an install that wrote an unusable file and then failed
     // to load it would leave the operator correcting a file they never typed.
@@ -583,13 +636,17 @@ pub fn run_with_endpoint(
     if let Some(key) = &answers.verification_key {
         println!("took the package verification key {key} from beside the program");
     }
-    let (answers, copies) = copy_ca_beside(answers, path)?;
-    for copy in &copies {
-        println!("copied {}", copy.display());
-    }
+    // The CA beside the program is the administrator's, in none of the account's directories.
+    let (answers, answered) = copy_ca_beside(answers, path, &[], None, &Offered::default())?;
+    report_copy(&answered);
     write_new(path, &render(&answers))?;
     println!("wrote {} for {}", path.display(), answers.endpoint);
-    Ok(copies)
+    Ok(Written {
+        bootstrap: None,
+        answered: Some(answered),
+        named_over_kept: None,
+        offered: Offered::default(),
+    })
 }
 
 /// Whether a configuration is already there — in which case an installer's answer keeps it.
@@ -619,6 +676,7 @@ pub fn ask(
     enrolled: bool,
     beside: &Beside,
     password: Option<&str>,
+    account: (&[&Path], &Path),
 ) -> Result<(Answers, Option<Bootstrap>), String> {
     let defaults = Defaults::of(current, beside);
 
@@ -662,9 +720,10 @@ pub fn ask(
         None
     } else {
         Some(ask_bootstrap(
-            defaults.cert_file,
-            defaults.key_file,
+            (defaults.cert_file, defaults.key_file),
+            &defaults.offered,
             password,
+            account,
         )?)
     };
 
@@ -703,11 +762,13 @@ pub fn ask(
 
 /// The bootstrap identity: its certificate first, then the key of a PEM certificate, or the
 /// password of a PKCS#12 file — asked with input hidden, and again until the file opens. A file
-/// that is no bootstrap identity sends the question back to its path.
+/// that is no bootstrap identity, or cannot be read, sends the question back to its path.
+/// `offered` is what the configuration offers, which [`read_pkcs12`] holds to its own rule.
 fn ask_bootstrap(
-    cert_default: Option<String>,
-    key_default: Option<String>,
+    (cert_default, key_default): (Option<String>, Option<String>),
+    offered: &Offered,
     password: Option<&str>,
+    account: (&[&Path], &Path),
 ) -> Result<Bootstrap, String> {
     use fleet_core::pkcs12::file::OpenError;
     let mut cert_default = cert_default;
@@ -723,8 +784,17 @@ fn ask_bootstrap(
             )?;
             return Ok(Bootstrap::Pair { cert, key });
         }
+        let bytes = match read_pkcs12(&cert, offered, account) {
+            Ok(bytes) => bytes,
+            Err(why) if password.is_some() => return Err(why),
+            Err(why) => {
+                println!("{why}");
+                cert_default = None;
+                continue;
+            }
+        };
         if let Some(password) = password {
-            let identity = crate::tls::pkcs12_identity(&cert, password)
+            let identity = crate::tls::pkcs12_identity(&cert, &bytes, password)
                 .map_err(|e| format!("{}: {e} (--bootstrap-password-file)", cert.display()))?;
             return Ok(Bootstrap::Pkcs12 {
                 file: cert,
@@ -740,7 +810,7 @@ fn ask_bootstrap(
                     .interact()
                     .map_err(prompt_failed)?,
             );
-            match crate::tls::pkcs12_identity(&cert, &typed) {
+            match crate::tls::pkcs12_identity(&cert, &bytes, &typed) {
                 Ok(identity) => {
                     return Ok(Bootstrap::Pkcs12 {
                         file: cert,
@@ -760,6 +830,30 @@ fn ask_bootstrap(
     }
 }
 
+/// The bootstrap PKCS#12 file at `path`, read by a privileged step as
+/// [`crate::nofollow::read_privileged`] reads it, at most [`fleet_core::pkcs12::MAX_FILE_BYTES`]
+/// of it, with `account` — the roots and the state directory — as the service's account's
+/// (ADR-0021 clause 11). Where `path` is one `offered` names, the questionnaire offered it from a
+/// file the account may write, and a link at its name is refused wherever it lies. Any other path
+/// the administrator gave.
+///
+/// # Errors
+/// Returns an error naming the file when it is refused or cannot be read.
+fn read_pkcs12(
+    path: &Path,
+    offered: &Offered,
+    (roots, state_dir): (&[&Path], &Path),
+) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    crate::nofollow::read_privileged(
+        path,
+        roots,
+        Some(state_dir),
+        offered.naming(path),
+        fleet_core::pkcs12::MAX_FILE_BYTES,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// Whether an answered path is read as PKCS#12: by its extension, `.p12` or `.pfx` in any case
 /// (ADR-0027 clause 16).
 #[must_use]
@@ -770,20 +864,28 @@ pub fn is_pkcs12_path(path: &Path) -> bool {
 }
 
 /// The password a password file holds: its first line, without its `\n` or `\r\n` (ADR-0027
-/// clause 18). The file is read once, at most 4 KiB of it, and left as it is. `flag` is the option
-/// that named it, `--bootstrap-password-file` here, for the error. The file's bytes and the
-/// password are held in buffers wiped when they are dropped (ADR-0014).
+/// clause 18). The file is read once and left as it is: the administrator's path, read as
+/// [`crate::nofollow::read_privileged`] reads one with `roots` as the service's account's, and a
+/// file of more than 4 KiB is refused (ADR-0021 clause 11). `flag` is the option that named it,
+/// `--bootstrap-password-file` here, for the error. The file's bytes and the password are held in
+/// buffers wiped when they are dropped (ADR-0014).
 ///
 /// # Errors
 /// Returns an error naming the flag when the file cannot be read or its first line is empty.
-pub fn read_password_file(path: &Path, flag: &str) -> Result<zeroize::Zeroizing<String>, String> {
-    use std::io::Read as _;
-    const LIMIT: usize = 4096;
-    // Sized for all it may read, so it is never grown and left behind.
-    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(LIMIT));
-    std::fs::File::open(path)
-        .and_then(|file| file.take(LIMIT as u64).read_to_end(&mut bytes))
-        .map_err(|e| format!("{flag} {}: {e}", path.display()))?;
+pub fn read_password_file(
+    path: &Path,
+    flag: &str,
+    roots: &[&Path],
+) -> Result<zeroize::Zeroizing<String>, String> {
+    const LIMIT: u64 = 4096;
+    let bytes = crate::nofollow::read_privileged(
+        path,
+        roots,
+        None,
+        crate::nofollow::Named::ByAdministrator,
+        LIMIT,
+    )
+    .map_err(|e| format!("{flag}: {e}"))?;
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| format!("{flag} {}: not UTF-8 text", path.display()))?;
     let line = text.split('\n').next().unwrap_or_default();
@@ -827,6 +929,8 @@ struct Defaults {
     cert_file: Option<String>,
     key_file: Option<String>,
     verification_key: Option<String>,
+    /// Which of the paths above the file offers, which the account may have written.
+    offered: Offered,
 }
 
 impl Defaults {
@@ -850,6 +954,7 @@ impl Defaults {
                 .as_ref()
                 .and_then(|p| p.verification_key.clone())
                 .or_else(|| beside.verification_key.clone()),
+            offered: Offered::of(current),
         }
     }
 }
@@ -935,12 +1040,13 @@ fn commented_top_level_keys() -> &'static str {
 /// a check that raced, and a link at the name is something that is there: it is refused, never
 /// followed. The mode is set in the same call for the same reason: the file names where the
 /// private key lies and may hold `[packages] archive_key` (ADR-0020 clause 25), before any later
-/// mode change could narrow it. The directory is held as [`held_dir`] holds it.
+/// mode change could narrow it. The directory is held as
+/// [`held_dir`](crate::config_file::held_dir) holds it.
 ///
 /// # Errors
 /// Returns an error if the directory cannot be created or the file already exists.
 pub fn write_new(path: &Path, contents: &str) -> Result<(), String> {
-    let (dir, name) = held_file(path)?;
+    let (dir, name) = crate::config_file::held_file(path)?;
     dir.create_new(name, contents.as_bytes(), 0o600)
         .map_err(|e| format!("cannot create {}: {e}", path.display()))
 }
@@ -1344,6 +1450,7 @@ mod tests {
             false,
             &Beside::default(),
             None,
+            (&[], dir.path()),
         )
         .expect_err("no terminal, no questionnaire");
         assert!(err.contains("needs a terminal"), "{err}");
@@ -1466,6 +1573,73 @@ mod tests {
         assert_eq!(edited.cert_file, text(BOOTSTRAP_CERT_FILE));
     }
 
+    /// What an `--endpoint` install answered is handed on: the endpoint as given, and the copy
+    /// with the certificates written into it; a loopback endpoint answers no CA, and a file kept
+    /// answers nothing.
+    /// Verifies: ADR-0044
+    #[test]
+    fn what_an_endpoint_install_answered_is_handed_on() {
+        let program = tempfile::tempdir().expect("tempdir");
+        fleet_files(program.path());
+        let beside = Beside::in_dir(program.path());
+        let data = tempfile::tempdir().expect("tempdir");
+        let path = data.path().join(FILE_NAME);
+        let endpoint = "wss://fleet.example.com/v1/opamp";
+
+        let answered = run_with_endpoint(&path, endpoint, true, &beside)
+            .expect("write")
+            .answered
+            .expect("answered");
+        let copy = data.path().join(SERVER_CA_FILE);
+        assert_eq!(
+            answered,
+            Answered {
+                endpoint: endpoint.to_string(),
+                ca: Some((copy.clone(), std::fs::read(&copy).expect("the copy"))),
+            }
+        );
+        assert!(certificates_in(&copy) == certificates_in(&program.path().join(SERVER_CA_FILE)));
+
+        let kept = run_with_endpoint(&path, "wss://other.example.com/v1/opamp", true, &beside)
+            .expect("kept");
+        assert_eq!(kept.answered, None);
+        assert_eq!(
+            kept.named_over_kept.as_deref(),
+            Some("wss://other.example.com/v1/opamp")
+        );
+
+        let loopback = tempfile::tempdir().expect("tempdir");
+        let answered = run_with_endpoint(
+            &loopback.path().join(FILE_NAME),
+            "ws://127.0.0.1:4320/v1/opamp",
+            true,
+            &beside,
+        )
+        .expect("write")
+        .answered
+        .expect("answered");
+        assert_eq!(answered.endpoint, "ws://127.0.0.1:4320/v1/opamp");
+        assert_eq!(answered.ca, None);
+    }
+
+    /// Answers without a CA are handed on with their endpoint and no CA, and nothing is copied.
+    /// Verifies: ADR-0044
+    #[test]
+    fn answers_without_a_ca_hand_on_their_endpoint_and_no_ca() {
+        let to = tempfile::tempdir().expect("tempdir");
+        let (_, answered) = copy_ca_beside(
+            answers(),
+            &to.path().join(FILE_NAME),
+            &[],
+            None,
+            &Offered::default(),
+        )
+        .expect("nothing to copy");
+        assert_eq!(answered.endpoint, answers().endpoint);
+        assert_eq!(answered.ca, None);
+        assert!(!to.path().join(SERVER_CA_FILE).exists());
+    }
+
     /// `--endpoint` writes the CA and the verification key it finds beside the program, the CA as
     /// a copy beside the file; a loopback `ws://` takes neither, and a file that exists is kept
     /// (ADR-0027 clause 17).
@@ -1478,10 +1652,10 @@ mod tests {
         let data = tempfile::tempdir().expect("tempdir");
         let path = data.path().join(FILE_NAME);
 
-        let copies = run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", true, &beside)
+        let written = run_with_endpoint(&path, "wss://fleet.example.com/v1/opamp", true, &beside)
             .expect("write");
         let copy = data.path().join(SERVER_CA_FILE);
-        assert_eq!(copies, vec![copy.clone()]);
+        assert_eq!(written.ca_copy(), Some(copy.as_path()));
         let loaded = ClientConfig::load(&path).expect("loads");
         assert_eq!(
             loaded.tls.expect("tls").ca_file.as_deref(),
@@ -1500,15 +1674,16 @@ mod tests {
         assert!(
             run_with_endpoint(&path, "wss://other.example.com/v1/opamp", true, &beside)
                 .expect("kept")
-                .is_empty()
+                .ca_copy()
+                .is_none()
         );
         assert_eq!(std::fs::read(&path).expect("read"), before);
 
         let loopback = tempfile::tempdir().expect("tempdir");
         let path = loopback.path().join(FILE_NAME);
-        let copies =
+        let written =
             run_with_endpoint(&path, "ws://127.0.0.1:4320/v1/opamp", true, &beside).expect("write");
-        assert!(copies.is_empty());
+        assert_eq!(written.ca_copy(), None);
         let loaded = ClientConfig::load(&path).expect("loads");
         assert!(loaded.tls.and_then(|t| t.ca_file).is_none());
         assert!(loaded.packages.and_then(|p| p.verification_key).is_none());
@@ -1529,7 +1704,7 @@ mod tests {
             ..ClientConfig::default()
         };
         assert_eq!(
-            beside.unasked_enrolment(&config, None),
+            beside.unasked_enrolment(&config, None, &[]),
             Ok(Some(Bootstrap::Pair {
                 cert: program.path().join(BOOTSTRAP_CERT_FILE),
                 key: program.path().join(BOOTSTRAP_KEY_FILE),
@@ -1540,18 +1715,18 @@ mod tests {
             endpoint: "ws://127.0.0.1:4320/v1/opamp".to_string(),
             ..config.clone()
         };
-        assert_eq!(beside.unasked_enrolment(&loopback, None), Ok(None));
+        assert_eq!(beside.unasked_enrolment(&loopback, None, &[]), Ok(None));
 
         for name in [crate::tls::ISSUED_CERT_FILE, crate::tls::ISSUED_KEY_FILE] {
             std::fs::write(state.path().join(name), "issued").expect("write");
         }
         assert_eq!(
-            beside.unasked_enrolment(&config, None),
+            beside.unasked_enrolment(&config, None, &[]),
             Ok(None),
             "enrolled already"
         );
         assert_eq!(
-            Beside::default().unasked_enrolment(&ClientConfig::default(), None),
+            Beside::default().unasked_enrolment(&ClientConfig::default(), None, &[]),
             Ok(None)
         );
     }
@@ -1569,6 +1744,70 @@ mod tests {
             .expect("sealed");
         std::fs::write(dir.join(BOOTSTRAP_P12_FILE), file).expect("write");
         cert.pem()
+    }
+
+    /// The bootstrap PKCS#12 file the questionnaire offers from `[tls] cert_file`, which the
+    /// service's account may write, is refused where a link stands at its name, wherever it lies,
+    /// and not read; the same path the administrator gave is read through the link, as the CA
+    /// file is. A link in the account's directories is refused either way.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_offered_bootstrap_p12_is_refused_and_not_read() {
+        let account = tempfile::tempdir().expect("account");
+        let state = account.path().join("state");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let admin = tempfile::tempdir().expect("admin");
+        p12_in(elsewhere.path());
+        let target = elsewhere.path().join(BOOTSTRAP_P12_FILE);
+        let link = admin.path().join("offered.p12");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+        let roots = [account.path()];
+        let account_dirs = (&roots[..], state.as_path());
+
+        let offered = Offered(vec![link.clone()]);
+        let refused = read_pkcs12(&link, &offered, account_dirs).expect_err("a link");
+        assert!(refused.contains("offered.p12"), "{refused}");
+        assert!(refused.contains("is a link"), "{refused}");
+
+        let typed = read_pkcs12(&link, &Offered::default(), account_dirs)
+            .expect("the administrator's link");
+        assert_eq!(*typed, std::fs::read(&target).expect("read"));
+        let other = Offered(vec![admin.path().join("other.p12")]);
+        read_pkcs12(&link, &other, account_dirs).expect("not the offered path");
+
+        let planted = account.path().join("planted.p12");
+        std::os::unix::fs::symlink(&target, &planted).expect("link");
+        for offered in [Offered::default(), Offered(vec![planted.clone()])] {
+            let refused = read_pkcs12(&planted, &offered, account_dirs).expect_err("a link");
+            assert!(refused.contains("is a link"), "{refused}");
+        }
+    }
+
+    /// A bootstrap PKCS#12 file over its bound and a password file over 4 KiB are refused,
+    /// naming the file and the bound, before they are read.
+    /// Verifies: ADR-0014, ADR-0021
+    #[test]
+    fn a_bootstrap_p12_or_a_password_file_over_its_bound_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let large = dir.path().join("large.p12");
+        std::fs::File::create(&large)
+            .expect("create")
+            .set_len(fleet_core::pkcs12::MAX_FILE_BYTES + 1)
+            .expect("size");
+        let refused =
+            read_pkcs12(&large, &Offered::default(), (&[], &state)).expect_err("over the bound");
+        assert!(refused.contains("large.p12"), "{refused}");
+        let bound = fleet_core::pkcs12::MAX_FILE_BYTES.to_string();
+        assert!(refused.contains(&bound), "{refused}");
+
+        let password = dir.path().join("password");
+        std::fs::write(&password, "a".repeat(4097)).expect("write");
+        let refused = read_password_file(&password, "--bootstrap-password-file", &[])
+            .expect_err("over the bound");
+        assert!(refused.contains("--bootstrap-password-file"), "{refused}");
+        assert!(refused.contains("4096"), "{refused}");
     }
 
     /// A `bootstrap.p12` is found as a bootstrap identity; lying beside a file of the pair,
@@ -1610,14 +1849,17 @@ mod tests {
         std::fs::write(dir.path().join(SERVER_CA_FILE), ca_pem()).expect("write");
         let named = Beside::in_named_dir(dir.path()).expect("a directory");
         let data = tempfile::tempdir().expect("tempdir");
-        let copies = run_with_endpoint(
+        let written = run_with_endpoint(
             &data.path().join(FILE_NAME),
             "wss://fleet.example.com/v1/opamp",
             true,
             &named,
         )
         .expect("write");
-        assert_eq!(copies, vec![data.path().join(SERVER_CA_FILE)]);
+        assert_eq!(
+            written.ca_copy(),
+            Some(data.path().join(SERVER_CA_FILE).as_path())
+        );
 
         let missing = dir.path().join("no such directory");
         let refused = Beside::in_named_dir(&missing).expect_err("refused");
@@ -1645,14 +1887,14 @@ mod tests {
             ..ClientConfig::default()
         };
         let without = beside
-            .unasked_enrolment(&config, None)
+            .unasked_enrolment(&config, None, &[])
             .expect_err("no password");
         assert!(without.contains("--bootstrap-password-file"), "{without}");
         let wrong = beside
-            .unasked_enrolment(&config, Some("not the password"))
+            .unasked_enrolment(&config, Some("not the password"), &[])
             .expect_err("wrong password");
         assert!(wrong.contains("--bootstrap-password-file"), "{wrong}");
-        match beside.unasked_enrolment(&config, Some(P12_PASSWORD)) {
+        match beside.unasked_enrolment(&config, Some(P12_PASSWORD), &[]) {
             Ok(Some(Bootstrap::Pkcs12 { file, identity })) => {
                 assert_eq!(file, program.path().join(BOOTSTRAP_P12_FILE));
                 assert_eq!(
@@ -1667,7 +1909,7 @@ mod tests {
         let pair_only = tempfile::tempdir().expect("tempdir");
         fleet_files(pair_only.path());
         let refused = Beside::in_dir(pair_only.path())
-            .unasked_enrolment(&config, Some(P12_PASSWORD))
+            .unasked_enrolment(&config, Some(P12_PASSWORD), &[])
             .expect_err("no file to open");
         assert!(refused.contains("--bootstrap-password-file"), "{refused}");
 
@@ -1675,7 +1917,7 @@ mod tests {
             std::fs::write(state.path().join(name), "issued").expect("write");
         }
         assert_eq!(
-            beside.unasked_enrolment(&config, None),
+            beside.unasked_enrolment(&config, None, &[]),
             Ok(None),
             "an enrolled Client takes no bootstrap identity, and needs no password"
         );
@@ -1695,7 +1937,7 @@ mod tests {
         ] {
             std::fs::write(&file, content).expect("write");
             assert_eq!(
-                read_password_file(&file, "--bootstrap-password-file")
+                read_password_file(&file, "--bootstrap-password-file", &[])
                     .expect("read")
                     .as_str(),
                 expected
@@ -1703,10 +1945,12 @@ mod tests {
         }
         std::fs::write(&file, "\nsecret").expect("write");
         assert!(
-            read_password_file(&file, "--bootstrap-password-file").is_err(),
+            read_password_file(&file, "--bootstrap-password-file", &[]).is_err(),
             "an empty first line"
         );
-        assert!(read_password_file(&dir.path().join("none"), "--bootstrap-password-file").is_err());
+        assert!(
+            read_password_file(&dir.path().join("none"), "--bootstrap-password-file", &[]).is_err()
+        );
 
         for (path, p12) in [
             ("bootstrap.p12", true),
@@ -1728,17 +1972,24 @@ mod tests {
         let ca = from.path().join("my-ca.pem");
         std::fs::write(&ca, ca_pem()).expect("write");
         let path = to.path().join(FILE_NAME);
-        let (copied, copies) = copy_ca_beside(
+        let (copied, answered) = copy_ca_beside(
             Answers {
                 ca_file: Some(ca.clone()),
                 ..answers()
             },
             &path,
+            &[],
+            None,
+            &Offered::default(),
         )
         .expect("copy");
 
         let expected = to.path().join(SERVER_CA_FILE);
-        assert_eq!(copies, vec![expected.clone()]);
+        assert_eq!(answered.endpoint, answers().endpoint);
+        let (copy, held) = answered.ca.expect("a CA was answered");
+        assert_eq!(copy, expected);
+        // What the run holds is what it wrote.
+        assert_eq!(held, std::fs::read(&expected).expect("read the copy"));
         assert_eq!(certificates_in(&expected), certificates_in(&ca));
         #[cfg(unix)]
         {
@@ -1782,6 +2033,9 @@ mod tests {
                 ..answers()
             },
             &path,
+            &[],
+            None,
+            &Offered::default(),
         )
         .expect("copy onto itself");
         assert_eq!(certificates_in(&copy), before);
@@ -1794,10 +2048,45 @@ mod tests {
                 ..answers()
             },
             &path,
+            &[],
+            None,
+            &Offered::default(),
         )
         .expect("copy");
         assert_eq!(certificates_in(&copy), certificates_in(&elsewhere));
         assert_ne!(certificates_in(&copy), before);
+    }
+
+    /// The CA file the questionnaire offers from `[tls] ca_file`, which the service's account may
+    /// write, is refused where a link stands at its name, outside the account's directories too,
+    /// and nothing is written; the same link the administrator typed is followed and copied.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_offered_ca_file_is_refused_and_not_read() {
+        let config_dir = tempfile::tempdir().expect("config");
+        let admin = tempfile::tempdir().expect("admin");
+        let path = config_dir.path().join(FILE_NAME);
+        let copy = config_dir.path().join(SERVER_CA_FILE);
+        let target = admin.path().join("real-ca.pem");
+        std::fs::write(&target, ca_pem()).expect("ca");
+        let link = admin.path().join("ca.pem");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+        let answered = || Answers {
+            ca_file: Some(link.clone()),
+            ..answers()
+        };
+        let file: ClientConfig =
+            toml::from_str(&format!("[tls]\nca_file = \"{}\"\n", link.display())).expect("config");
+
+        let refused = copy_ca_beside(answered(), &path, &[], None, &Offered::of(&file))
+            .expect_err("a link at the offered CA");
+        assert!(refused.contains("is a link"), "{refused}");
+        assert!(!copy.exists(), "nothing is written");
+
+        copy_ca_beside(answered(), &path, &[], None, &Offered::default())
+            .expect("the administrator's link is followed");
+        assert!(copy.exists());
     }
 
     /// `service config` runs as root and hands the copy to the service's account, which may have
@@ -1818,6 +2107,9 @@ mod tests {
                 ..answers()
             },
             &path,
+            &[],
+            None,
+            &Offered::default(),
         )
         .expect_err("refused");
         assert!(
@@ -1839,12 +2131,46 @@ mod tests {
                 ..answers()
             },
             &path,
+            &[],
+            None,
+            &Offered::default(),
         )
         .expect("copy");
         let copied = std::fs::read_to_string(&copy).expect("read");
         assert!(copied.contains("BEGIN CERTIFICATE"), "{copied}");
         assert!(!copied.contains("PRIVATE KEY"), "the key is not copied");
         assert!(!copied.contains("secret"), "nor the text beside it");
+    }
+
+    /// The answered CA — on a re-run the copy an earlier answer left in the data root — is read
+    /// through no link the service's account placed there: a link at the copy is refused, though
+    /// it leads to a file of certificates, and nothing is written.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_ca_copy_is_not_followed_by_the_answer() {
+        let data = tempfile::tempdir().expect("data");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let theirs = elsewhere.path().join("theirs.pem");
+        std::fs::write(&theirs, ca_pem()).expect("theirs");
+        let copy = data.path().join(SERVER_CA_FILE);
+        std::os::unix::fs::symlink(&theirs, &copy).expect("link at the copy");
+
+        let refused = copy_ca_beside(
+            Answers {
+                ca_file: Some(copy.clone()),
+                ..answers()
+            },
+            &data.path().join(FILE_NAME),
+            &[data.path()],
+            None,
+            &Offered::default(),
+        )
+        .expect_err("a link at the copy");
+        assert!(refused.contains("is a link"), "{refused}");
+        assert!(std::fs::symlink_metadata(&copy)
+            .expect("still there")
+            .is_symlink());
     }
 
     #[cfg(unix)]
@@ -1865,7 +2191,9 @@ mod tests {
                 ..answers()
             };
             let at = path.clone();
-            std::thread::spawn(move || done.send(copy_ca_beside(answers, &at).err()));
+            std::thread::spawn(move || {
+                done.send(copy_ca_beside(answers, &at, &[], None, &Offered::default()).err())
+            });
             let refused = wait
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap_or_else(|_| panic!("{} held the copy up", named.display()))
@@ -2002,6 +2330,11 @@ mod tests {
             ),
             (None, None, None, None)
         );
+        assert_eq!(
+            fresh.offered,
+            Offered::default(),
+            "nothing is offered from no file"
+        );
 
         let held: ClientConfig = toml::from_str(
             "endpoint = \"wss://fleet.example/v1/opamp\"\n\
@@ -2023,6 +2356,11 @@ mod tests {
                 cert_file: Some("/d/boot.pem".to_string()),
                 key_file: Some("/d/boot-key.pem".to_string()),
                 verification_key: Some("abcd".to_string()),
+                offered: Offered(
+                    ["/d/server-ca.pem", "/d/boot.pem", "/d/boot-key.pem"]
+                        .map(PathBuf::from)
+                        .to_vec()
+                ),
             }
         );
     }

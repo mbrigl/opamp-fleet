@@ -1,6 +1,7 @@
 //! Support shared by the integration tests that start the Client binary.
 
 use std::path::Path;
+use std::time::Duration;
 
 /// Writes a throwaway self-signed client certificate and key into `dir` and returns the `[tls]`
 /// table that names them, to be appended at the end of a `supervisor.toml`.
@@ -116,6 +117,36 @@ pub fn release_to_every_agent(
         );
     }
     release(state, FLEET_DEPLOYMENT, &[CHANNEL], configurations)
+}
+
+/// The deadline of [`wait_until`]: one only a defect reaches, never a time the test waits out.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this support
+pub const WAIT_DEADLINE: Duration = Duration::from_secs(30); // timed: the waiter's own deadline
+
+/// Waits for the event `probe` answers with a value, and returns that value; it panics with
+/// `what` once [`WAIT_DEADLINE`] has passed without it (`docs/CONVENTIONS.md`, "A test waits for
+/// its event, never for a time").
+#[allow(dead_code)] // each integration-test binary uses a different subset of this support
+pub async fn wait_until<T>(what: &str, probe: impl FnMut() -> Option<T>) -> T {
+    wait_until_within(WAIT_DEADLINE, what, probe).await
+}
+
+/// [`wait_until`] under the deadline `deadline`, for a test whose event a loaded host is known to
+/// hold back further.
+#[allow(dead_code)] // each integration-test binary uses a different subset of this support
+pub async fn wait_until_within<T>(
+    deadline: Duration,
+    what: &str,
+    mut probe: impl FnMut() -> Option<T>,
+) -> T {
+    let deadline = std::time::Instant::now() + deadline;
+    while std::time::Instant::now() < deadline {
+        if let Some(value) = probe() {
+            return value;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await; // timed: the waiter's poll
+    }
+    panic!("timed out waiting for {what}");
 }
 
 /// How long [`stop_client`] waits for the Client to exit on `SIGTERM` before it kills it: well

@@ -11,8 +11,8 @@
 # commit. The rest of scripts/check-all.sh runs before the push (pre-push), where it sees every
 # merge at once; a merge that stops on a conflict, the one carrying edits by hand, runs all of it
 # when concluded (pre-commit). A fast-forward makes no commit and runs no hook; 'merge.ff' false
-# prevents one, and the push still gates what it brought. Enabled as the "Git hooks" of
-# CONTRIBUTING.md says.
+# prevents one, and the push still gates what it brought. Enabled as
+# CONTRIBUTING.md → "Git hooks" says.
 #
 # A repository without scripts/check-docs.sh has nothing to run, and the merge proceeds.
 # Bypassable with 'git merge --no-verify'; AGENTS.md, section 6 says who may.

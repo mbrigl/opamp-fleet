@@ -22,7 +22,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fleet_server::fleet::{AgentView, AppState, PackageOffering};
 use fleet_server::packages::{PackageStore, Platform};
@@ -117,16 +117,9 @@ async fn one_at_a_time() -> tokio::sync::MutexGuard<'static, ()> {
     SERIAL.lock().await
 }
 
-async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < deadline {
-        if let Some(value) = probe() {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("timed out waiting for {what}");
-}
+/// The deadline of this file's waits, twice the shared one: a Client that restarts into a newer
+/// version comes up behind the build of [`one_at_a_time`]'s neighbours on a small runner.
+const SLOW_DEADLINE: Duration = Duration::from_secs(60); // timed: a deadline, not a wait
 
 async fn spawn_server(store: PackageStore) -> (std::net::SocketAddr, Arc<AppState>) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -517,7 +510,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
 
     // A saved Package reaches nobody (ADR-0033): the rollout act releases it, and it needs the
     // Client's Agent to be known and fitted — so it is retried until the first report arrived.
-    wait_until("the rollout act to reach the agent", || {
+    common::wait_until_within(SLOW_DEADLINE, "the rollout act to reach the agent", || {
         service.tend();
         state
             .rollout_deployment(&ring_holding(&state, &set))
@@ -528,13 +521,17 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     .await;
 
     // The contract: however many restarts it takes, the Server is told the new version is in.
-    wait_until("the self-update to be reported Installed", || {
-        service.tend();
-        let snapshot = state.snapshot();
-        let agent = view(&snapshot, "self-updating-client")?;
-        let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
-        (package.status == "Installed" && package.version == *version).then_some(())
-    })
+    common::wait_until_within(
+        SLOW_DEADLINE,
+        "the self-update to be reported Installed",
+        || {
+            service.tend();
+            let snapshot = state.snapshot();
+            let agent = view(&snapshot, "self-updating-client")?;
+            let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
+            (package.status == "Installed" && package.version == *version).then_some(())
+        },
+    )
     .await;
 
     // The configured `name` names this instance; the type is the constant `supervisor`, the same
@@ -612,7 +609,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 
     // A supervised Managed Process that stays up and records its pid — rewritten with a fresh one
     // every time it is (re)started. Placed in the Supervisor's own `program/` directory and named
-    // by a bare file name, the only shape a block may carry (ADR-0018): a Managed Process is always
+    // by a bare file name, the only shape a block may carry (ADR-0046): a Managed Process is always
     // one this Client installed.
     let stub = {
         let program_dir = state_dir.join("supervisors/managed/program");
@@ -654,7 +651,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 
     // A saved Set reaches nobody (ADR-0033): the rollout act releases it, and it needs the
     // Client's Agent to be known and fitted — so it is retried until the first report arrived.
-    wait_until("the rollout act to reach the agent", || {
+    common::wait_until_within(SLOW_DEADLINE, "the rollout act to reach the agent", || {
         service.tend();
         state
             .rollout_deployment(&ring_holding(&state, &set))
@@ -664,20 +661,25 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
     })
     .await;
 
-    wait_until("the self-update to be reported Installed", || {
-        service.tend();
-        let snapshot = state.snapshot();
-        let agent = view(&snapshot, "self-updating-client")?;
-        let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
-        (package.status == "Installed" && package.version == *version).then_some(())
-    })
+    common::wait_until_within(
+        SLOW_DEADLINE,
+        "the self-update to be reported Installed",
+        || {
+            service.tend();
+            let snapshot = state.snapshot();
+            let agent = view(&snapshot, "self-updating-client")?;
+            let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
+            (package.status == "Installed" && package.version == *version).then_some(())
+        },
+    )
     .await;
 
     // Every managed pid, in the order the runs began, each run appending its own: the last is the
     // one running once the update has settled, and all before it were superseded by a restart and
     // must have been stopped. The Client that came up after the restart starts its program on its
     // own time, which may follow its report.
-    let seen = wait_until(
+    let seen = common::wait_until_within(
+        SLOW_DEADLINE,
         "the update to restart the Client, and the managed process with it",
         || {
             service.tend();
@@ -755,7 +757,7 @@ async fn a_set_at_the_running_version_reaches_nobody() {
     let mut service = Supervised::start(&program, &config);
 
     let (reported_version, reported_status) =
-        wait_until("the Client to report what it runs", || {
+        common::wait_until_within(SLOW_DEADLINE, "the Client to report what it runs", || {
             service.tend();
             let snapshot = state.snapshot();
             let agent = view(&snapshot, "self-updating-client")?;
@@ -846,7 +848,7 @@ async fn a_self_update_whose_signature_does_not_verify_is_refused_and_the_client
         .as_ref()
         .to_vec();
     let ring = ring_holding_signed(&state, &set, Some((&this_host(), signature)));
-    wait_until("the rollout act to reach the agent", || {
+    common::wait_until_within(SLOW_DEADLINE, "the rollout act to reach the agent", || {
         service.tend();
         state
             .rollout_deployment(&ring)
@@ -856,13 +858,17 @@ async fn a_self_update_whose_signature_does_not_verify_is_refused_and_the_client
     })
     .await;
 
-    let error = wait_until("the self-update to be reported InstallFailed", || {
-        service.tend();
-        let snapshot = state.snapshot();
-        let agent = view(&snapshot, "self-updating-client")?;
-        let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
-        (package.status == "InstallFailed").then(|| package.error.clone())
-    })
+    let error = common::wait_until_within(
+        SLOW_DEADLINE,
+        "the self-update to be reported InstallFailed",
+        || {
+            service.tend();
+            let snapshot = state.snapshot();
+            let agent = view(&snapshot, "self-updating-client")?;
+            let package = agent.packages.iter().find(|p| p.name == "supervisor")?;
+            (package.status == "InstallFailed").then(|| package.error.clone())
+        },
+    )
     .await;
     assert!(
         error.contains("signature"),

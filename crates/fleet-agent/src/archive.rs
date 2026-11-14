@@ -1301,7 +1301,7 @@ mod tests {
     }
 
     /// The next release renames the wrapper, and the configuration must not have to follow it —
-    /// that drift is what ADR-0018 exists to make unspellable, and it applies here too.
+    /// that drift is what ADR-0046 exists to make unspellable, and it applies here too.
     /// Verifies: ADR-0034
     #[test]
     fn the_same_program_path_finds_the_program_under_any_wrapper() {

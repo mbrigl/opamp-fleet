@@ -378,6 +378,37 @@ fn missing_with(test: &TestToken) -> fleet_server::config::Pkcs11Config {
     }
 }
 
+/// A label two tokens of the module carry names no token: startup fails saying so, rather than
+/// taking the first.
+/// Verifies: ADR-0043
+#[test]
+fn a_label_two_tokens_carry_fails_startup() {
+    let Some(test) = TestToken::named() else {
+        return;
+    };
+    let context = fleet_core::pkcs11::context(&test.config.module).expect("module");
+    let free = context
+        .get_all_slots()
+        .expect("slots")
+        .into_iter()
+        .find(|slot| {
+            context
+                .get_token_info(*slot)
+                .is_ok_and(|info| !info.token_initialized())
+        })
+        .expect("a slot with a token not yet initialised");
+    context
+        .init_token(
+            free,
+            &cryptoki::types::AuthPin::from("the-twin-so-pin"),
+            &test.config.token_label,
+        )
+        .expect("a second token with the label");
+    let err =
+        fleet_server::pkcs11::Token::open(&test.config).expect_err("two tokens carry the label");
+    assert!(err.contains("2 tokens carry this label"), "{err}");
+}
+
 /// A module whose manufacturer is `SoftHSM` is a software token: the Server says so in its log
 /// and writes `pkcs11.software_token` at every start.
 /// Verifies: ADR-0043

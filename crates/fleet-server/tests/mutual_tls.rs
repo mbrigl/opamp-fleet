@@ -1331,6 +1331,70 @@ fn revocations_setup(pki: &Pki) -> Setup<'static> {
     }
 }
 
+/// A certificate of the client CA whose facts do not read — a serial of 21 octets, past RFC 5280's
+/// 20 — passes the handshake and is refused behind it alike on `/v1/opamp` and on the download,
+/// with no revocation list armed, while one with a serial of 20 octets reaches both
+/// (ADR-0040 clauses 6 and 18).
+/// Verifies: ADR-0040
+#[tokio::test]
+async fn a_certificate_whose_facts_do_not_read_is_refused_on_both_routes() {
+    let pki = Pki::new();
+    let served = serve(
+        &pki,
+        Setup {
+            client_ca: Some(client_ca_of(&pki)),
+            ..Setup::default()
+        },
+    )
+    .await;
+    let download = served.endpoint.replace(
+        "/v1/opamp",
+        "/api/v1/packages/otelcol/1.0.0/file?os=linux&arch=amd64",
+    );
+    let with_serial = |octets: usize| {
+        let key = KeyPair::generate().expect("key");
+        let mut params = CertificateParams::new(vec!["edge-01".to_string()]).expect("params");
+        params.serial_number = Some(rcgen::SerialNumber::from_slice(&vec![0x5a; octets]));
+        let cert = params.signed_by(&key, &pki.issuer()).expect("signed");
+        client(&served.ca_pem, Some((&cert.pem(), &key.serialize_pem())))
+    };
+
+    let readable = with_serial(20);
+    assert!(
+        post(&readable, &served.endpoint, report(&InstanceUid::default()))
+            .await
+            .status()
+            .is_success()
+    );
+    assert_eq!(
+        readable.get(&download).send().await.expect("send").status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "a readable certificate reaches the download handler"
+    );
+
+    let unreadable = with_serial(21);
+    assert_eq!(
+        post(
+            &unreadable,
+            &served.endpoint,
+            report(&InstanceUid::default())
+        )
+        .await
+        .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        unreadable
+            .get(&download)
+            .send()
+            .await
+            .expect("send")
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "the download admitted what /v1/opamp refuses"
+    );
+}
+
 /// A revoked certificate is refused on plain HTTP, on the WebSocket upgrade and on the download,
 /// without a challenge and without saying it was revoked; revoking it through the REST API lists
 /// it, and lifting it admits the certificate again (ADR-0040 clauses 27, 30 and 31).
@@ -2976,6 +3040,22 @@ async fn an_operator_act_names_the_operator() {
     assert!(!serde_json::to_string(&all).expect("json").contains("guess"));
 }
 
+/// Waits, within seconds, until `audit` refuses what it is asked to record. The probe is a record
+/// of its own, so its failed write may be what makes the audit refuse: what follows decides that a
+/// refusing audit stops what needs a record, not which write failed first.
+async fn audit_refuses(audit: &Arc<dyn fleet_server::audit::Audit>) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while audit
+            .record(fleet_server::audit::Entry::new("test.probe", "probe"))
+            .is_ok()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the audit's failed write made it refuse");
+}
+
 /// A record that cannot be written stops admission: no Agent is admitted without its entry.
 /// Verifies: ADR-0028
 #[tokio::test]
@@ -3007,16 +3087,16 @@ async fn an_audit_that_cannot_write_refuses_admission() {
     let served = serve(
         &pki,
         Setup {
-            audit: Some(audit),
+            audit: Some(audit.clone()),
             ..revocations_setup(&pki)
         },
     )
     .await;
     let (cert, key) = pki.issue("edge-01");
     let http = client(&served.ca_pem, Some((&cert, &key)));
-    // The first admission is queued; its write fails, and from then on nothing is admitted.
+    // The audit fails at its first write, and from then on nothing is admitted.
     let _ = post(&http, &served.endpoint, report(&InstanceUid::default())).await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    audit_refuses(&audit).await;
     let other = client(
         &served.ca_pem,
         Some(pki.issue("edge-02"))
@@ -3065,7 +3145,7 @@ async fn an_audit_that_cannot_write_issues_no_certificate() {
     let served = serve(
         &pki,
         Setup {
-            audit: Some(audit),
+            audit: Some(audit.clone()),
             ..revocations_setup(&pki)
         },
     )
@@ -3077,7 +3157,7 @@ async fn an_audit_that_cannot_write_issues_no_certificate() {
     let uid = InstanceUid::default();
     exchange(&mut socket, &uid).await;
 
-    // The record fails at its next write — another peer's admission — and stays failed.
+    // The record fails at its next write, and stays failed.
     failing.store(true, Ordering::SeqCst);
     let (other_cert, other_key) = pki.issue("edge-02");
     let _ = post(
@@ -3086,7 +3166,7 @@ async fn an_audit_that_cannot_write_issues_no_certificate() {
         report(&InstanceUid::default()),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    audit_refuses(&audit).await;
 
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message as Ws;
@@ -6024,6 +6104,69 @@ async fn a_member_does_not_enrol_and_a_gateway_needs_a_proof() {
     );
 }
 
+/// A Gateway's own CSR with a bootstrap proof of the very certificate it presents and a renewal
+/// proof beside it is no enrolment: it stays on the Gateway's own route, is answered `BadRequest`
+/// naming both proofs, and is recorded as a refused issuance, not as a refused enrolment
+/// (ADR-0016 clauses 21 and 25).
+/// Verifies: ADR-0016
+#[tokio::test]
+async fn a_gateways_own_request_with_both_proofs_stays_on_its_route() {
+    let pki = Pki::new();
+    let bootstrap = Pki::named("opamp-fleet-test-bootstrap-ca");
+    let lines = Lines::default();
+    let audit: Arc<dyn fleet_server::audit::Audit> = Arc::new(
+        fleet_server::audit_log::AuditLog::start(
+            Box::new(lines.clone()),
+            fleet_server::audit_log::Limits::default(),
+            Manual::now(),
+        )
+        .expect("audit"),
+    );
+    let (served, gateway, gateway_cert) =
+        gateway_presenting(&pki, &bootstrap, Some(audit), None).await;
+    // The signatures are of a key of no certificate: the request is refused for carrying both
+    // proofs before either is verified.
+    let key = KeyPair::generate().expect("key").serialize_pem();
+    let both = bootstrap_csr(&gateway_cert, &key, Some((&gateway_cert, &key)));
+    let reply = decode(
+        post(
+            &gateway,
+            &served.endpoint,
+            with_csr(&InstanceUid::default(), both),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        answered(&reply),
+        Answered::BadRequest(fleet_core::csr::BOTH_PROOFS.to_string())
+    );
+    // timed: the deadline of the poll for the audit line
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let all: Vec<serde_json::Value> = lines
+            .0
+            .lock()
+            .expect("lines")
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect();
+        let issuance = named(&all, "issuance.refused");
+        let enrolment = named(&all, "enrolment.refused");
+        if !issuance.is_empty() || !enrolment.is_empty() {
+            assert!(enrolment.is_empty(), "taken for an enrolment: {all:#?}");
+            assert_eq!(issuance[0]["reason"], fleet_core::csr::BOTH_PROOFS);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the refusal was never recorded: {all:#?}"
+        );
+        // timed: the poll for the audit line
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 /// What a relayed enrolment request was answered: throttled by the rate limit, told the queue is
 /// full or its window closed, refused, or taken. Both of the first two are `Unavailable`; only the
 /// message tells them apart.
@@ -6624,7 +6767,7 @@ impl fleet_server::agent_store::AgentStore for HeldWrite {
 /// completes and its report is answered: the report runs off the runtime's workers, so the one
 /// worker of the Server's runtime here stays free, and the fleet lock is not held across the
 /// call.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[test]
 fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_call_waits() {
     let pki = Pki::new();
@@ -6698,7 +6841,7 @@ fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_ca
 /// An Agent whose report waits for its store call is answered a WebSocket ping on the same
 /// connection meanwhile, so a stall of the Server's handling ends no live connection for silence;
 /// its reply follows once the call is let go.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[test]
 fn a_ping_is_answered_on_a_connection_whose_report_waits_for_its_store_call() {
     let pki = Pki::new();

@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use axum::http::{header, StatusCode};
 use axum::routing::post;
-use opamp::client::{AfterReply, ClientTls, Connection, Ended, ReportSink, Session, StopSignal};
+use opamp::client::{
+    AfterReply, ClientTls, Connection, Ended, ReportSink, Session, StopSignal, Timeouts,
+};
 use opamp::proto::{AgentToServer, ServerToAgent};
 use opamp::server::listen::{ClientAuth, Handle, Listener, PeerCertificate, ServerTls};
 use opamp::server::{Handler, NoOutbound, Rejection, Reply, RequestInfo, Settings};
@@ -176,6 +178,27 @@ async fn a_redirect_is_not_followed() {
         .await
         .expect_err("a redirect is a failure");
     assert!(error.contains("307"), "{error}");
+}
+
+/// The one builder of a Client's HTTPS clients follows no redirect either: the answer to the
+/// request is the redirect itself, whoever builds the client.
+/// Verifies: ADR-0008
+#[tokio::test]
+async fn an_https_client_follows_no_redirect() {
+    let pki = Pki::new();
+    let port = serve(&pki);
+    let client = ClientTls {
+        ca_pem: Some(pki.ca_pem.clone().into_bytes()),
+        identity: Some(pki.issue("agent")),
+    }
+    .https_client(Timeouts::Total(Duration::from_secs(10)))
+    .expect("client");
+    let response = client
+        .post(format!("https://localhost:{port}/moved"))
+        .send()
+        .await
+        .expect("an answer");
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
 }
 
 /// One report, then the session ends the run.

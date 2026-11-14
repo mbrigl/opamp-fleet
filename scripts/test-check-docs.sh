@@ -12,7 +12,8 @@
 # a maintainer would meet first — check 9 gets two more for the toolchain job a derived project
 # adds, checks 12 and 13 (inherited ADRs decided and the template's identity replaced once the setup
 # file is gone) have a case for each of their conditions, and check 14 (the template release named)
-# one for each form the line may take.
+# one for each form the line may take, as check 17 (a section named in prose) has for each form a
+# reference takes and each README it may mean.
 #
 # Section references and ADR numbers inside fixtures are assembled, never written literally, so
 # that check-docs.sh does not read this script's own fixtures as references into this repository.
@@ -863,6 +864,89 @@ expect fail "a Project Layout pattern that matches nothing" "$d" "lists 'scripts
 d="$(repo layout-plan-absent)"
 layout "$d" "docs/plan/"
 expect pass "docs/plan/ named while there is no open work" "$d"
+
+# --- cases: a section of a README or CONTRIBUTING.md named in prose (check 17) ----------
+
+# named <file> <heading> — a reference to a heading by name, its arrow assembled for the same
+# reason as sect.
+named() { printf '%s \342\206\222 "%s"' "$1" "$2"; }
+
+d="$(repo named-missing)"
+echo "# Runs the docs ($(named README.md Nowhere))." >> "$d/.github/workflows/checks.yml"
+expect fail "a named section no heading of the README carries" "$d" \
+  '.github/workflows/checks.yml:5: "Nowhere" names no heading of README.md'
+
+d="$(repo named-present)"
+{
+  echo "# Runs the docs ($(named README Template), $(named CONTRIBUTING.md 'Repository settings'))."
+  echo "# Listed as $(named CONTRIBUTING.md 'Project Layout') says."
+} >> "$d/.github/workflows/checks.yml"
+expect pass "a named section of the README and of CONTRIBUTING.md that exists" "$d"
+
+d="$(repo named-wrapped)"
+printf '# Gated (CONTRIBUTING.md \342\206\222 "Repository\n# settings").\n' \
+  >> "$d/.github/workflows/checks.yml"
+expect pass "a named section wrapped inside its heading is joined" "$d"
+
+d="$(repo named-wrapped-missing)"
+printf '# Runs the docs (README.md \342\206\222\n# "Nowhere").\n' >> "$d/.github/workflows/checks.yml"
+expect fail "a named section wrapped after its arrow is joined" "$d" \
+  '.github/workflows/checks.yml:5: "Nowhere" names no heading of README.md'
+
+d="$(repo named-quoted-word)"
+echo '# The release sets "unreleased" in README.md to the tag.' >> "$d/.github/workflows/checks.yml"
+expect pass "a quoted word before 'in README.md' is not read as a heading" "$d"
+
+d="$(repo named-comment-wrap)"
+mkdir -p "$d/src"
+printf '//! Built as README.md \342\206\222\n//! "Nowhere" says.\n' > "$d/src/lib.rs"
+layout "$d" "src/"
+expect fail "a reference wrapped under a '//!' comment is joined" "$d" \
+  'src/lib.rs:1: "Nowhere" names no heading of README.md'
+
+d="$(repo named-fenced)"
+# shellcheck disable=SC2016  # the backticks are a Markdown fence, not a command substitution
+printf '\n```\n## Fenced\n```\n' >> "$d/README.md"
+echo "# Runs the docs ($(named README.md Fenced))." >> "$d/.github/workflows/checks.yml"
+expect fail "a heading inside a fenced code block is no heading" "$d" \
+  '.github/workflows/checks.yml:5: "Fenced" names no heading of README.md'
+
+d="$(repo named-beside)"
+mkdir -p "$d/sub"
+printf '# Sub\n\n## Local\n' > "$d/sub/README.md"
+echo "See $(named README.md Local)." > "$d/sub/notes.md"
+layout "$d" "sub/"
+expect pass "the README beside the file is the one named" "$d"
+
+d="$(repo named-beside-first)"
+mkdir -p "$d/sub"
+printf '# Sub\n\n## Local\n' > "$d/sub/README.md"
+echo "See $(named README Template)." > "$d/sub/notes.md"
+layout "$d" "sub/"
+expect fail "the README beside the file is chosen before the root one" "$d" \
+  'sub/notes.md:1: "Template" names no heading of sub/README.md'
+
+d="$(repo named-up)"
+mkdir -p "$d/sub"
+printf '# Sub\n\n## Local\n' > "$d/sub/README.md"
+echo "See $(named ../README.md Template)." > "$d/sub/notes.md"
+layout "$d" "sub/"
+expect pass "a file name after '../' is a path, past the README beside the file" "$d"
+
+d="$(repo named-up-missing)"
+echo "# Runs the docs ($(named ../README.md Template))." >> "$d/.github/workflows/checks.yml"
+expect fail "a path to a document that does not exist" "$d" \
+  '.github/workflows/checks.yml:5: "Template" names a section of ../README.md, which does not exist'
+
+d="$(repo named-root)"
+mkdir -p "$d/sub"
+echo "See $(named README.md Template)." > "$d/sub/notes.md"
+layout "$d" "sub/"
+expect pass "with no README beside the file, the root one is named" "$d"
+
+d="$(repo named-placeholder)"
+echo "Every $(named README '<Heading>') is checked." >> "$d/README.md"
+expect pass "a placeholder heading in angle brackets names nothing" "$d"
 
 # --- cases: drafts (checks 1, 2, 5, 6, 8, and 16) ---------------------------------------
 

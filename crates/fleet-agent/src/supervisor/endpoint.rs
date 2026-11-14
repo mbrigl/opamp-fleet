@@ -1,4 +1,4 @@
-//! The Supervisor Endpoint (ADR-0016, ADR-0018): the loopback OpAMP endpoint every Supervisor
+//! The Supervisor Endpoint (ADR-0016, ADR-0046): the loopback OpAMP endpoint every Supervisor
 //! exposes, WebSocket-only — what a Managed Process carrying an OpAMP client of its own
 //! (notably the Collector's `opampextension`) connects to.
 //!
@@ -417,7 +417,7 @@ mod tests {
     /// A process that reports its components as a hash alone is asked for the map once per hash:
     /// not again when it answers without the map, again when the hash changes, and not when the
     /// map arrives.
-    /// Verifies: ADR-0018
+    /// Verifies: ADR-0046
     #[tokio::test]
     async fn a_hash_without_the_map_is_asked_for_the_map_once() {
         let (event_tx, _events) = mpsc::channel(16);
@@ -475,13 +475,17 @@ mod tests {
         )
         .expect("endpoint starts");
         shutdown_tx.send(true).expect("signal shutdown");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            tokio_tungstenite::connect_async(format!("ws://{addr}/v1/opamp"))
+        // The endpoint's task ends on its own schedule: asked until it refuses, within seconds.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while tokio_tungstenite::connect_async(format!("ws://{addr}/v1/opamp"))
                 .await
-                .is_err(),
-            "a stopped endpoint accepts no connections"
-        );
+                .is_ok()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a stopped endpoint accepts no connections");
     }
 
     /// A connection that completes the upgrade and is answered: the endpoint is serving.

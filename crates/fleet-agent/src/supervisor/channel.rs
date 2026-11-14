@@ -187,7 +187,7 @@ impl Captured {
 /// directories of the Supervisors one apply purges, all of them together and reaching the service
 /// included: as long as a program has to end when the Client's connection closes. However many
 /// Supervisors are purged and however much the process account wrote, a purge that
-/// outlasts it leaves an orphan, as one the Client cannot delete does (ADR-0018 clause 34), and
+/// outlasts it leaves an orphan, as one the Client cannot delete does (ADR-0046 clause 34), and
 /// the Client's management goes on (ADR-0021 clause 17).
 pub(crate) const PURGE_ANSWER: Duration = CLOSE_GRACE;
 
@@ -3169,7 +3169,7 @@ mod tests {
     /// root's and the Client's account's — and not its own: it runs as the process account, which
     /// is not the Client's. Run unprivileged, a link of this test's own account is refused where
     /// the Client is another account; run as root, a link of the Client's account is followed and
-    /// one of a third account is refused (ADR-0021 clause 20, ADR-0018 clause 33).
+    /// one of a third account is refused (ADR-0021 clause 20, ADR-0046 clause 33).
     /// Verifies: ADR-0021
     #[test]
     fn a_purge_follows_the_clients_links_above_the_root_and_not_the_services() {
@@ -3210,7 +3210,7 @@ mod tests {
     /// so whoever serves the process account's socket holds it [`PURGE_ANSWER`] and no longer,
     /// however many entries the process account wrote: a service that answers each request just
     /// before the Client gives up on it is asked once, and one that never answers is given up on
-    /// (ADR-0021 clause 17, ADR-0018 clause 34).
+    /// (ADR-0021 clause 17, ADR-0046 clause 34).
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_purge_waits_for_the_service_once_however_much_was_written() {
@@ -3597,7 +3597,7 @@ mod tests {
                 .err()
                 .expect("refused");
         assert!(refused.to_string().contains("build"), "{refused}");
-        tokio::time::timeout(Duration::from_secs(1), behind.left_behind())
+        tokio::time::timeout(Duration::from_secs(10), behind.left_behind())
             .await
             .expect("the Client left behind is told so");
         service.abort();
@@ -3745,8 +3745,8 @@ mod tests {
     }
 
     /// A peer that is not the second service is no refusal of the service's, which no restart
-    /// mends: the service is away, and is tried again on a new connection, checked anew, until the
-    /// process the manager names serves the socket.
+    /// mends: the service is away, and is tried again on a new connection until the start gives
+    /// up. On a paused clock, since the start waits out [`RECONNECT`].
     /// Verifies: ADR-0021
     #[tokio::test(start_paused = true)]
     async fn a_peer_that_is_not_the_second_service_is_away_and_tried_anew() {
@@ -3771,7 +3771,19 @@ mod tests {
             asked.load(Ordering::SeqCst) > 1,
             "asked once: the peer was not tried again"
         );
+    }
 
+    /// Each connection is checked anew: the manager is asked once per connection, the two that
+    /// it says another process serves are dropped, and the third, served by the process it names,
+    /// is the one the start goes through. On real time: a paused clock jumps to the next timer
+    /// whenever the runtime has nothing ready, so a moment's real delay before the service
+    /// answers, on a busy machine or beside tests that start processes, would run out the Client's
+    /// handshake on the third connection and make a fourth.
+    /// Verifies: ADR-0021
+    #[tokio::test]
+    async fn each_connection_to_the_second_service_is_checked_anew() {
+        let service = service(own_uid());
+        let me = std::process::id();
         let asked = Arc::new(AtomicU64::new(0));
         let restarted = {
             let asked = Arc::clone(&asked);
@@ -4025,6 +4037,10 @@ mod tests {
         assert!(admit(me, me.wrapping_add(1)).is_err());
     }
 
+    /// What "at once" allows a refusal: well short of the [`HANDSHAKE`] a refusal that waited for
+    /// the handshake would take, so only that defect reaches it, not a loaded host.
+    const AT_ONCE: Duration = Duration::from_millis(HANDSHAKE.as_millis() as u64 / 2);
+
     /// Nothing is read from a refused peer and nothing waits on it: a stranger that says nothing
     /// is told and dropped at once, however many of them connect, rather than each holding a
     /// descriptor for the length of a handshake.
@@ -4037,19 +4053,17 @@ mod tests {
             strangers.push(UnixStream::connect(&service.socket).await.expect("connect"));
         }
         for stranger in &mut strangers {
-            let reply =
-                tokio::time::timeout(Duration::from_secs(1), read_frame::<_, Reply>(stranger))
-                    .await
-                    .expect("refused without waiting for a handshake");
+            let reply = tokio::time::timeout(AT_ONCE, read_frame::<_, Reply>(stranger))
+                .await
+                .expect("refused without waiting for a handshake");
             assert!(
                 matches!(reply, Ok(Some(Reply::Refused { .. }))),
                 "{reply:?}"
             );
             let mut rest = Vec::new();
-            let closed =
-                tokio::time::timeout(Duration::from_secs(1), stranger.read_to_end(&mut rest))
-                    .await
-                    .expect("closed at once");
+            let closed = tokio::time::timeout(AT_ONCE, stranger.read_to_end(&mut rest))
+                .await
+                .expect("closed at once");
             assert!(closed.map_or(true, |n| n == 0), "more after the refusal");
         }
     }
@@ -4065,10 +4079,9 @@ mod tests {
             .write_all(&(64 * 1024u32).to_be_bytes())
             .await
             .expect("a length");
-        let reply =
-            tokio::time::timeout(Duration::from_secs(1), read_frame::<_, Reply>(&mut stream))
-                .await
-                .expect("refused without waiting for the body");
+        let reply = tokio::time::timeout(AT_ONCE, read_frame::<_, Reply>(&mut stream))
+            .await
+            .expect("refused without waiting for the body");
         assert!(
             matches!(reply, Ok(Some(Reply::Refused { .. }))),
             "{reply:?}"
@@ -4592,8 +4605,23 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "the flood never ran");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        // Long enough for the flood to fill the socket and every queue in front of it.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Every queue is full once the socket holds output the service no longer adds to and the
+        // flood sleeps in its write: neither alone says so, since `yes` outruns any reader.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut unread = unread_bytes(&stream);
+        loop {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let now = unread_bytes(&stream);
+            if now > 0 && now == unread && writing_blocked(&marker) {
+                break;
+            }
+            unread = now;
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flood never filled its queues"
+            );
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         for request in [
             Request::Start {
                 id: 2,
@@ -4644,6 +4672,38 @@ mod tests {
                     .split(|b| *b == 0)
                     .any(|word| word == arg.as_bytes())
             }) && alive(pid)
+        })
+    }
+
+    /// The bytes the service sent on `stream` that the test has not read.
+    #[cfg(target_os = "linux")]
+    fn unread_bytes(stream: &impl std::os::fd::AsRawFd) -> libc::c_int {
+        let mut unread: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one c_int through the pointer, which outlives the call.
+        let done = unsafe { libc::ioctl(stream.as_raw_fd(), libc::FIONREAD, &mut unread) };
+        assert_eq!(done, 0, "FIONREAD on the connection");
+        unread
+    }
+
+    /// Whether a live `yes` with `arg` among its arguments sleeps, which it does only in a write
+    /// to a full pipe, since writing is all it does. Its state is read from `/proc/<pid>/stat`,
+    /// the same on every kernel; `wchan` names a function of the kernel, and on CI's runners
+    /// never named `pipe_write`.
+    #[cfg(target_os = "linux")]
+    fn writing_blocked(arg: &str) -> bool {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            std::fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| {
+                cmdline
+                    .split(|b| *b == 0)
+                    .any(|word| word == arg.as_bytes())
+            }) && std::fs::read_to_string(entry.path().join("stat")).is_ok_and(|stat| {
+                // The state follows the command name, which closes with the last ')'.
+                stat.rsplit_once(')')
+                    .is_some_and(|(_, rest)| rest.trim_start().starts_with('S'))
+            })
         })
     }
 

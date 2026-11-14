@@ -80,6 +80,51 @@ pub fn requested_uri(csr_der: &[u8], prefix: &str) -> Result<Option<String>, Str
     }))
 }
 
+/// The two proofs a certificate signing request may carry: a renewal's (ADR-0016 clause 18) and
+/// an enrolment's (clause 20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Proof {
+    Renewal,
+    Bootstrap,
+}
+
+impl Proof {
+    fn prefix(self) -> &'static str {
+        match self {
+            Proof::Renewal => crate::renewal::URI_PREFIX,
+            Proof::Bootstrap => crate::bootstrap_proof::URI_PREFIX,
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Proof::Renewal => Proof::Bootstrap,
+            Proof::Bootstrap => Proof::Renewal,
+        }
+    }
+}
+
+/// What a request that carries both proofs is answered (ADR-0016 clause 21).
+pub const BOTH_PROOFS: &str =
+    "the certificate signing request carries both a renewal proof and a bootstrap proof";
+
+/// The encoded `proof` a certificate signing request (DER, from [`der`]) carries, or `None` when
+/// it carries none: the one reader of a proof, on the Server and on a Gateway alike. Nothing is
+/// verified.
+///
+/// # Errors
+/// Returns an error when the request does not parse, and [`BOTH_PROOFS`] when it carries the
+/// other proof beside this one.
+pub fn proof(csr_der: &[u8], proof: Proof) -> Result<Option<String>, String> {
+    let Some(encoded) = requested_uri(csr_der, proof.prefix())? else {
+        return Ok(None);
+    };
+    if requested_uri(csr_der, proof.other().prefix())?.is_some() {
+        return Err(BOTH_PROOFS.to_string());
+    }
+    Ok(Some(encoded))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +151,50 @@ mod tests {
         assert_eq!(requested_uri(&csr, URI_PREFIX), Ok(Some("abc".to_string())));
         assert_eq!(requested_uri(&csr, crate::renewal::URI_PREFIX), Ok(None));
         assert!(requested_uri(b"not der", URI_PREFIX).is_err());
+    }
+
+    /// A proof is read by its kind, a request without it has none, and a request that carries
+    /// both proofs is refused whichever is asked for (ADR-0016 clause 21).
+    /// Verifies: ADR-0016
+    #[test]
+    fn a_request_with_both_proofs_is_refused_whichever_is_read() {
+        let renewal = format!("{}renewed", crate::renewal::URI_PREFIX);
+        let bootstrap = format!("{URI_PREFIX}enrolled");
+        let request = |uris: &[&str]| {
+            let key = rcgen::KeyPair::generate().expect("key");
+            let mut params =
+                rcgen::CertificateParams::new(vec!["edge".to_string()]).expect("params");
+            for uri in uris {
+                params
+                    .subject_alt_names
+                    .push(rcgen::SanType::URI((*uri).try_into().expect("uri")));
+            }
+            let pem = params
+                .serialize_request(&key)
+                .expect("csr")
+                .pem()
+                .expect("pem");
+            der(pem.as_bytes()).expect("one block")
+        };
+        let read = |uris: &[&str], kind| proof(&request(uris), kind);
+        let found = |text: &str| Ok(Some(text.to_string()));
+        assert_eq!(read(&[], Proof::Renewal), Ok(None));
+        assert_eq!(read(&[], Proof::Bootstrap), Ok(None));
+        assert_eq!(read(&[&renewal], Proof::Renewal), found("renewed"));
+        assert_eq!(read(&[&renewal], Proof::Bootstrap), Ok(None));
+        assert_eq!(read(&[&bootstrap], Proof::Bootstrap), found("enrolled"));
+        assert_eq!(read(&[&bootstrap], Proof::Renewal), Ok(None));
+        for kind in [Proof::Renewal, Proof::Bootstrap] {
+            assert_eq!(
+                read(&[&renewal, &bootstrap], kind),
+                Err(BOTH_PROOFS.to_string())
+            );
+            assert_eq!(
+                read(&[&bootstrap, &renewal], kind),
+                Err(BOTH_PROOFS.to_string())
+            );
+        }
+        assert!(proof(b"not der", Proof::Bootstrap).is_err());
     }
 
     /// One block with whitespace around it is read; text before or after it or on a boundary's

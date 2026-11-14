@@ -262,8 +262,8 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
 ///
 /// Without this, the net catches everything except the one failure a *new* version is most likely
 /// to bring: a file it refuses. A removed configuration key is exactly that
-/// ([ADR-0018](../../../../docs/adr/0018-supervisor-mode-and-its-kinds.md)), and for some kinds there
-/// is no block both versions accept, so the cutover per host cannot be avoided — only caught.
+/// ([ADR-0046](../../../../docs/adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)),
+/// and for some kinds there is no block both versions accept, so the cutover per host cannot be avoided — only caught.
 fn unreadable_config(spec: &RunSpec, error: String) -> Result<Exit, String> {
     let state_dir = recovery_state_dir(spec);
     tracing::error!(error = %error, state_dir = %state_dir.display(), "cannot read the configuration");

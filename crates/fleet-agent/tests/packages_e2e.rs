@@ -9,7 +9,6 @@ mod common;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use fleet_server::fleet::{AgentView, AppState, PackageOffering};
 use fleet_server::packages::{PackageStore, Platform};
@@ -57,17 +56,6 @@ impl Drop for ClientUnderTest {
     fn drop(&mut self) {
         common::stop_client(&mut self.0);
     }
-}
-
-async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if let Some(value) = probe() {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("timed out waiting for {what}");
 }
 
 async fn spawn_server(
@@ -154,7 +142,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 
     // The managed binary starts as a copy of the stub, in the Supervisor's own `program/`
     // directory — which is what a bare `command` names, and what consents to the update
-    // (ADR-0018). The package swap replaces it there.
+    // (ADR-0046). The package swap replaces it there.
     let state_dir = dir.path().join("client-state");
     let program_dir = state_dir.join("supervisors/myagent/program");
     std::fs::create_dir_all(&program_dir).expect("create the program dir");
@@ -194,7 +182,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     // A saved Set reaches nobody (ADR-0033): the rollout act releases it, retried until the
     // Agent has reported and can be assigned — which is the decision, not an accident of the
     // test.
-    wait_until("the rollout act to reach the agent", || {
+    common::wait_until("the rollout act to reach the agent", || {
         state
             .rollout_deployment(&ring_holding_signed(
                 &state,
@@ -209,7 +197,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
 
     // The Agent connects, is offered the package, downloads and verifies it, swaps the binary,
     // and reports Installed at the offered version.
-    wait_until("the package to be reported Installed", || {
+    common::wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
         // The wire name is the Agent type (ADR-0034 clause 9) — the program's file name here, since
@@ -236,7 +224,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         .exists());
 }
 
-/// ADR-0018 clause 54's preflight, reached through the `command` kind's own configuration: `version_args`
+/// ADR-0046 clause 54's preflight, reached through the `command` kind's own configuration: `version_args`
 /// is the arguments an operator has declared safe to invoke the program with, so they are also
 /// what proves a *staged* program runs before the running one is stopped.
 ///
@@ -312,7 +300,7 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
 
     let _client = spawn_client(&config_path);
 
-    wait_until("the rollout act to reach the agent", || {
+    common::wait_until("the rollout act to reach the agent", || {
         state
             .rollout_deployment(&ring_holding_signed(
                 &state,
@@ -325,7 +313,7 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
     })
     .await;
 
-    let error = wait_until("the package to be reported InstallFailed", || {
+    let error = common::wait_until("the package to be reported InstallFailed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
         // The wire name is the Agent type (ADR-0034 clause 9) — the program's file name here, since
@@ -433,7 +421,7 @@ async fn a_signed_package_below_the_floor_the_server_serves_is_refused() {
 
     let _client = spawn_client(&config_path);
 
-    wait_until("the rollout act to reach the agent", || {
+    common::wait_until("the rollout act to reach the agent", || {
         state
             .rollout_deployment(&ring_holding_signed(
                 &state,
@@ -446,7 +434,7 @@ async fn a_signed_package_below_the_floor_the_server_serves_is_refused() {
     })
     .await;
 
-    let error = wait_until("the package to be reported InstallFailed", || {
+    let error = common::wait_until("the package to be reported InstallFailed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;

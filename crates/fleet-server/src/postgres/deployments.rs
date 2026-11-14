@@ -1,7 +1,7 @@
 //! Deployments in PostgreSQL (ADR-0023 clause 6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
-//! (ADR-0025
+//! (ADR-0045
 //! clause 19).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use super::Cached as GenericClient;
 
-use super::{client, sql, Database};
+use super::{client, snapshot, sql, Database};
+use crate::changed::Changed;
 use crate::configs::validate_name;
 use crate::deployments::{
     check_selector, no_configuration, no_package, not_held, Change, Deployment, DeploymentBackend,
@@ -31,10 +32,16 @@ impl PgDeploymentBackend {
 }
 
 impl DeploymentBackend for PgDeploymentBackend {
+    /// The Deployments and their members in one snapshot: a Deployment another instance commits
+    /// with its members between the statements is read whole or not at all, never a member of a
+    /// Deployment the first statement did not see.
     fn load(&self) -> Result<Vec<Deployment>, String> {
         self.database.run(|pool| async move {
-            let client = client(&pool).await?;
-            read(&client, None).await
+            let mut client = client(&pool).await?;
+            let transaction = snapshot(&mut client).await?;
+            let deployments = read(&transaction, None).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(deployments)
         })
     }
 
@@ -59,7 +66,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                 .await
                 .map_err(sql)?;
             let deployment = one(&transaction, &name).await?;
-            super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
+            super::notify::notify(&transaction, Changed::Deployment, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(deployment)
         })
@@ -75,7 +82,7 @@ impl DeploymentBackend for PgDeploymentBackend {
             let decided = change_rows(&transaction, &name, &change).await?;
             let decided = match decided {
                 Ok(()) => {
-                    super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
+                    super::notify::notify(&transaction, Changed::Deployment, &name).await?;
                     Ok(one(&transaction, &name).await?)
                 }
                 Err(refused) => Err(refused),
@@ -130,7 +137,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                     Member::Package(id) => Change::RemovePackage(id.clone()),
                 };
                 if change_rows(&transaction, name, &removed).await?.is_ok() {
-                    super::notify::notify(&transaction, super::notify::DEPLOYMENT, name).await?;
+                    super::notify::notify(&transaction, Changed::Deployment, name).await?;
                     changed.push(one(&transaction, name).await?);
                 }
             }
@@ -178,7 +185,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                 .execute("DELETE FROM deployments WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
-            super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
+            super::notify::notify(&transaction, Changed::Deployment, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Ok(()))
         });
@@ -189,7 +196,7 @@ impl DeploymentBackend for PgDeploymentBackend {
 /// Takes `member` out of every Deployment that holds it inside the transaction that deletes it,
 /// which holds the member's row `FOR UPDATE`: an add that holds that row `FOR KEY SHARE` has
 /// committed before this reads the member rows, and every later one finds the member gone
-/// (ADR-0025
+/// (ADR-0045
 /// clause 19). The Deployments' rows are not held, so this takes no lock in the order of an add,
 /// which holds the Deployment's row before the member's.
 pub(super) async fn drop_member_rows(
@@ -219,7 +226,7 @@ pub(super) async fn drop_member_rows(
     .map_err(sql)?;
     let left: BTreeSet<String> = rows.iter().map(|row| row.get(0)).collect();
     for name in &left {
-        super::notify::notify(client, super::notify::DEPLOYMENT, name).await?;
+        super::notify::notify(client, Changed::Deployment, name).await?;
     }
     Ok(())
 }
@@ -634,7 +641,7 @@ mod tests {
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0023, ADR-0045
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -643,6 +650,121 @@ mod tests {
         let database = test.open();
         store_members(&test);
         contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
+    }
+
+    /// A stored Deployment is loaded by the rules it was written by (ADR-0023 clause 6). A
+    /// Package reference with a field no write puts there is refused. A second Package of one
+    /// Agent type is refused in the words the write refuses it with, rather than loaded with the
+    /// last one kept. Each refusal names the file.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_stored_deployment_is_held_to_the_write_rules_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = FsDeploymentBackend::open(dir.path()).expect("open");
+        store
+            .put(&deployment("stable", Some("1.2.3"), &[]))
+            .expect("put");
+        let write = store
+            .amend(
+                "stable",
+                &Change::PutPackage {
+                    id: id("1.3.0"),
+                    replace: false,
+                },
+            )
+            .expect_err("the write refuses a second Package of the type")
+            .to_string();
+        let file = dir.path().join("deployments/stable.json");
+        let written = std::fs::read(&file).expect("read");
+        let plant = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut meta: serde_json::Value = serde_json::from_slice(&written).expect("json");
+            change(&mut meta["packages"]);
+            std::fs::write(&file, meta.to_string()).expect("write");
+            store.load().map(|_| ()).expect_err("refused")
+        };
+
+        let unknown = plant(&|packages| packages[0]["extra"] = 1.into());
+        assert!(unknown.contains("stable.json"), "{unknown}");
+        assert!(unknown.contains("unknown field `extra`"), "{unknown}");
+        let second = plant(&|packages| {
+            packages
+                .as_array_mut()
+                .expect("packages")
+                .push(serde_json::json!({"agent_type": "otelcol", "version": "1.3.0"}));
+        });
+        assert!(second.contains("stable.json"), "{second}");
+        assert!(second.ends_with(&write), "{second}");
+    }
+
+    /// The database cannot hold what the filesystem test plants: a Package of a Deployment is a
+    /// row of two columns keyed by its Agent type, so a second of one type is refused by the
+    /// database itself, and no field beside the two has a place.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_second_package_of_one_agent_type_cannot_be_stored_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        store_members(&test);
+        put(
+            &PgDeploymentBackend::new(database.clone()),
+            &deployment("stable", Some("1.2.3"), &[]),
+        );
+        let planted = database.run(|pool| async move {
+            client(&pool)
+                .await?
+                .execute(
+                    "INSERT INTO deployment_packages (deployment, agent_type, version) \
+                     VALUES ('stable', 'otelcol', '1.3.0')",
+                    &[],
+                )
+                .await
+                .map_err(sql)
+        });
+        let err = planted.expect_err("refused by the database");
+        assert!(err.contains("(23505)"), "a unique violation: {err}");
+    }
+
+    /// A Deployment created with its member through another instance between the statements of
+    /// `load` is read whole or not at all: the members are read in the snapshot the Deployments
+    /// were, so none names a Deployment the read did not see, and the load does not fail.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_deployment_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let backend = PgDeploymentBackend::new(test.open());
+        let gate = test.hold_reads(
+            "deployment_packages",
+            "INSERT INTO deployments (name, selector, packages, configurations) \
+             VALUES ('late', '{\"channel\": \"late\"}', '[]', '{}'); \
+             INSERT INTO deployment_packages (deployment, agent_type, version) \
+             VALUES ('late', 'otelcol', '1.2.3')",
+        );
+        std::thread::scope(|scope| {
+            let loading = scope.spawn(|| backend.load());
+            // timed: the deadline of the poll for the lock wait
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test
+                .sessions("wait_event_type = 'Lock' AND query LIKE 'SELECT%deployment_packages%'")
+                == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "load never waited for the members"
+                );
+                // timed: the poll for the lock wait
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            gate.open();
+            let loaded = loading.join().expect("load").expect("one committed state");
+            assert!(
+                loaded.iter().all(|deployment| deployment.name != "late"),
+                "the Deployment committed after the snapshot is not read"
+            );
+        });
     }
 
     /// A save or a change that fails leaves the Deployment as it was, on either store. `refuse`
@@ -760,7 +882,7 @@ mod tests {
 
     /// Migration 5 moves the members out of the Deployments' columns into rows of their own, and
     /// the Deployments load as the release before left them.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_members_move_out_of_the_deployments_columns() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -798,7 +920,7 @@ mod tests {
     /// write, so the second runs exactly then; the gate opens once the second waits for the
     /// Deployment's row, or has reached the gate itself, which only an amendment that took no hold
     /// does.
-    /// Verifies: ADR-0025, ADR-0034
+    /// Verifies: ADR-0045, ADR-0034
     #[test]
     fn two_packages_of_one_type_added_at_once_add_one() {
         let Some(test) = TestDatabase::named() else {
@@ -818,9 +940,11 @@ mod tests {
              CREATE TRIGGER fleet_test_wait BEFORE INSERT ON deployment_packages \
              FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
         );
-        let sessions = |condition: &str| test.sessions(condition);
-        let at_gate =
-            || sessions("wait_event = 'PgSleep' AND query LIKE 'INSERT INTO deployment_packages%'");
+        let at_gate = || {
+            test.sessions(
+                "wait_event = 'PgSleep' AND query LIKE 'INSERT INTO deployment_packages%'",
+            )
+        };
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !done() {
@@ -841,7 +965,7 @@ mod tests {
         let second = add("2.0.0");
         until("the second waits for the row, or reaches the gate", &|| {
             at_gate() == 2
-                || sessions(
+                || test.sessions(
                     "wait_event_type = 'Lock' AND query LIKE \
                      'SELECT 1 FROM deployments WHERE name = $1 FOR UPDATE'",
                 ) == 1
@@ -870,7 +994,7 @@ mod tests {
     /// The deletion of a Configuration or a Package takes it out of every Deployment that holds it
     /// in the transaction that deletes it: nothing the fleet does after, which a crash would cut
     /// off, is needed for no Deployment to name it.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: ADR-0045, ADR-0033
     #[test]
     fn a_deleted_member_leaves_every_deployment_in_the_transaction_that_deletes_it() {
         use crate::configs::{ConfigBackend as _, Removal};
@@ -926,7 +1050,7 @@ mod tests {
     /// A deletion of a Deployment through B while a rollout through A that releases through it
     /// has not yet committed waits for the rollout, and then refuses it from the assignment the
     /// rollout stored: the rollout holds the Deployment's row until it commits.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: ADR-0045, ADR-0033
     #[test]
     fn a_deletion_waits_for_a_rollout_through_the_deployment_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};

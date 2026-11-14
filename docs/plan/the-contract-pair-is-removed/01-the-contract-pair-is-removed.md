@@ -24,7 +24,7 @@ the arrays. The arrays themselves go with ticket 02. This follows ADR-0023 claus
 ## Read first
 
 - ADR-0023 clause 22;
-  ADR-0025
+  ADR-0045
   clause 16
 - `postgres/schema.rs`, `postgres/ledger.rs`, `postgres/deployments.rs`
 

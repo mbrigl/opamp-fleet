@@ -12,9 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio_postgres::NoTls;
-
-use super::{client, sql, Database, Tls};
+use super::{client, snapshot, sql, Database, SessionLock};
 use crate::audit_log::line_hash;
 use crate::checkpoint::{CheckpointSource, Head, Prepared, Tip};
 
@@ -34,8 +32,8 @@ pub(crate) const LOCK_DEAD_AFTER: Duration = Duration::from_secs(30);
 pub struct Checkpoints {
     database: Arc<Database>,
     held: crate::instance::Held,
-    /// The connection that holds the signer's lock, while this instance holds it.
-    lock: Option<tokio_postgres::Client>,
+    /// The signer's lock, on a session of its own, while this instance holds it.
+    lock: Option<SessionLock>,
 }
 
 impl Checkpoints {
@@ -49,48 +47,59 @@ impl Checkpoints {
         }
     }
 
-    /// Whether this instance holds the signer's lock: kept where its connection still answers,
-    /// taken where no other instance holds it.
+    /// Whether this instance holds the signer's lock: kept where its session still holds it and
+    /// answers, taken where no other instance holds it.
     fn locked(&mut self) -> Result<bool, String> {
         if let Some(lock) = self.lock.take() {
-            let answers = self
-                .database
-                .bridge
-                .run(super::bounded(LOCK_BOUND, async move {
-                    lock.simple_query("SELECT 1").await.map_err(sql)?;
-                    Ok::<_, String>(lock)
-                }));
-            match answers {
-                Ok(lock) => {
-                    self.lock = Some(lock);
-                    return Ok(true);
-                }
-                Err(e) => tracing::warn!(
-                    database = %self.database.name,
-                    error = %e,
-                    "the connection that held the lock of the audit's signer ended; the lock \
-                     passes to the next instance that tries"
-                ),
+            let (lock, holds) = self.database.bridge.run(async move {
+                let holds = lock.holds(LOCK_BOUND).await;
+                (lock, holds)
+            });
+            if holds {
+                self.lock = Some(lock);
+                return Ok(true);
             }
+            tracing::warn!(
+                database = %self.database.name,
+                "the session that held the lock of the audit's signer ended or does not answer; \
+                 the lock passes to the next instance that tries"
+            );
         }
         let (pg, tls) = (self.database.pg.clone(), self.database.tls.clone());
-        let (lock, held) = self
+        let lock = self
             .database
             .bridge
             .run(super::bounded(LOCK_BOUND, async move {
-                let lock = connect(&pg, &tls).await?;
-                let held: bool = lock
-                    .query_one(&format!("SELECT pg_try_advisory_lock({SIGNER_LOCK})"), &[])
-                    .await
-                    .map_err(sql)?
-                    .get(0);
-                Ok::<_, String>((lock, held))
+                let (pg, setup) = dead_after(&pg);
+                let lock = SessionLock::open(&pg, &tls, SIGNER_LOCK, &setup, |_, why| {
+                    tracing::debug!(error = %why, "the session of the audit signer's lock ended");
+                })
+                .await?;
+                Ok::<_, String>(lock.try_lock().await?.then_some(lock))
             }))
             .map_err(|e| format!("cannot reach the {}: {e}", self.database.name))?;
-        if held {
-            self.lock = Some(lock);
-        }
+        let held = lock.is_some();
+        self.lock = lock;
         Ok(held)
+    }
+
+    /// Lets go of the signer's lock, if this instance holds it, before it answers: the next
+    /// instance that tries has it at once.
+    fn let_go(&mut self) {
+        if let Some(lock) = self.lock.take() {
+            let let_go =
+                self.database.bridge.run(super::bounded(
+                    LOCK_BOUND,
+                    async move { lock.unlock().await },
+                ));
+            if let Err(e) = let_go {
+                tracing::warn!(
+                    database = %self.database.name,
+                    error = %e,
+                    "the lock of the audit's signer was not let go; it goes when its session ends"
+                );
+            }
+        }
     }
 }
 
@@ -98,7 +107,7 @@ impl CheckpointSource for Checkpoints {
     fn prepare(&mut self) -> Result<Option<Prepared>, String> {
         if self.held.borrow().is_none() {
             // No live lease: the lock, if this instance held it, passes on.
-            self.lock = None;
+            self.let_go();
             return Ok(None);
         }
         if !self.locked()? {
@@ -106,13 +115,7 @@ impl CheckpointSource for Checkpoints {
         }
         let (tip, chains) = self.database.run(|pool| async move {
             let mut client = client(&pool).await?;
-            let transaction = client
-                .build_transaction()
-                .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-                .read_only(true)
-                .start()
-                .await
-                .map_err(sql)?;
+            let transaction = snapshot(&mut client).await?;
             let newest = transaction
                 .query_one("SELECT seq, hash FROM audit_checkpoint_head", &[])
                 .await
@@ -163,48 +166,89 @@ impl CheckpointSource for Checkpoints {
     }
 }
 
-/// One connection outside the pool, its task on the current runtime, whose session and socket
-/// count it dead after [`LOCK_DEAD_AFTER`] without an answer: keepalives after 10 s idle, every
-/// 5 s, 3 of them unanswered, and a TCP user timeout of the same 30 s.
-async fn connect(pg: &tokio_postgres::Config, tls: &Tls) -> Result<tokio_postgres::Client, String> {
+/// The settings of the lock's session, `pg` and what runs on the session first, under which its
+/// session and socket count it dead after [`LOCK_DEAD_AFTER`] without an answer: keepalives after
+/// 10 s idle, every 5 s, 3 of them unanswered, and a TCP user timeout of the same 30 s, on either
+/// end, so the database's session ends as soon, and the lock with it.
+fn dead_after(pg: &tokio_postgres::Config) -> (tokio_postgres::Config, String) {
     let mut pg = pg.clone();
     pg.keepalives(true)
         .keepalives_idle(Duration::from_secs(10))
         .keepalives_interval(Duration::from_secs(5))
         .keepalives_retries(3)
         .tcp_user_timeout(LOCK_DEAD_AFTER);
-    let client = connect_plain(&pg, tls).await?;
-    // The database's side: its session ends as soon, and the lock with it.
-    client
-        .batch_execute(&format!(
-            "SET tcp_keepalives_idle = 10; SET tcp_keepalives_interval = 5; \
-             SET tcp_keepalives_count = 3; SET tcp_user_timeout = {}",
-            LOCK_DEAD_AFTER.as_millis()
-        ))
-        .await
-        .map_err(sql)?;
-    Ok(client)
+    let setup = format!(
+        "SET tcp_keepalives_idle = 10; SET tcp_keepalives_interval = 5; \
+         SET tcp_keepalives_count = 3; SET tcp_user_timeout = {}",
+        LOCK_DEAD_AFTER.as_millis()
+    );
+    (pg, setup)
 }
 
-async fn connect_plain(
-    pg: &tokio_postgres::Config,
-    tls: &Tls,
-) -> Result<tokio_postgres::Client, String> {
-    let ended = |result: Result<(), tokio_postgres::Error>| {
-        if let Err(e) = result {
-            tracing::debug!(error = %e, "the connection of the audit signer's lock ended");
-        }
-    };
-    match tls {
-        Tls::Rustls(tls) => {
-            let (client, connection) = pg.connect(tls.clone()).await.map_err(sql)?;
-            tokio::spawn(async move { ended(connection.await) });
-            Ok(client)
-        }
-        Tls::Plain => {
-            let (client, connection) = pg.connect(NoTls).await.map_err(sql)?;
-            tokio::spawn(async move { ended(connection.await) });
-            Ok(client)
-        }
+#[cfg(test)]
+mod tests {
+    use tokio::sync::watch;
+
+    use super::super::testing::TestDatabase;
+    use super::*;
+
+    /// The source of an instance that holds a lease, and what ends its lease.
+    fn signing(test: &TestDatabase) -> (Checkpoints, watch::Sender<Option<String>>) {
+        let (lease, held) = watch::channel(Some("the lease".to_string()));
+        (Checkpoints::new(test.open(), held), lease)
+    }
+
+    /// The signer's lock, by its key in the test's schema, as a gate takes it.
+    fn the_lock(test: &TestDatabase) -> i64 {
+        test.rows(&format!("SELECT {SIGNER_LOCK}"))[0][0]
+            .as_deref()
+            .expect("key")
+            .parse()
+            .expect("a bigint")
+    }
+
+    /// A signer whose lease ends lets go of its lock before it answers, so another instance takes
+    /// it at once rather than once the database has ended the session.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_signer_whose_lease_ends_lets_go_of_its_lock_at_once() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (mut signer, lease) = signing(&test);
+        assert!(signer.prepare().expect("prepare").is_some(), "it signs");
+        assert!(!test.lock_is_free(SIGNER_LOCK), "held while it signs");
+        lease.send_replace(None);
+        assert!(
+            signer.prepare().expect("prepare").is_none(),
+            "no lease, no checkpoint"
+        );
+        assert!(
+            test.lock_is_free(SIGNER_LOCK),
+            "the lock stayed with the session"
+        );
+    }
+
+    /// A signer whose session the database ends learns at its next interval that its lock is gone:
+    /// it signs nothing while another session holds the lock, and signs again once it can take it.
+    /// Verifies: ADR-0041
+    #[test]
+    fn a_signer_whose_session_the_database_ends_learns_its_lock_is_gone() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (mut signer, _lease) = signing(&test);
+        assert!(signer.prepare().expect("prepare").is_some(), "it signs");
+        test.end_the_holder_of(SIGNER_LOCK);
+        let elsewhere = test.gate(the_lock(&test));
+        assert!(
+            signer.prepare().expect("prepare").is_none(),
+            "signed without the lock"
+        );
+        elsewhere.open();
+        assert!(
+            signer.prepare().expect("prepare").is_some(),
+            "it signs again"
+        );
     }
 }

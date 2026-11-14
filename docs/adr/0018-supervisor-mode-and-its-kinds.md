@@ -1,7 +1,7 @@
 # ADR-0018: Supervisor Mode and its kinds
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-10-10
+- **Status:** ⚪ superseded by [ADR-0046](0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)
+- **Date:** 2026-11-13
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and the delivered-block check (`check_delivered_block`) each kind states, the Client Agent in `build_engine`, the capability set and the handling of a received or stored remote configuration of the Client Agent and of a Supervisor's Agent in agent.rs), crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` and `remote_config_disabled` keys), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[[supervisor]]` blocks and the `[supervisors]` section of supervisor.toml (among them `delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`), the `[features]` table of crates/fleet-agent/Cargo.toml, the artifact documents under docs/artifacts/ each wrapped kind adds
 

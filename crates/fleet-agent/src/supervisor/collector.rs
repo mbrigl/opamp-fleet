@@ -1,4 +1,4 @@
-//! The `collector` plugin: the Collector Supervisor (ADR-0018). It owns an OpenTelemetry
+//! The `collector` plugin: the Collector Supervisor (ADR-0046). It owns an OpenTelemetry
 //! Collector: spawns the configured binary with one `--config` flag per written config-map
 //! entry — the Collector merges multiple configs itself, so no YAML is touched here — and
 //! restarts it when a new remote configuration arrives. Until a configuration exists nothing
@@ -20,7 +20,7 @@ use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, Versio
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
-/// `binary` is not among them: the core takes it out and resolves it (ADR-0018), and what arrives
+/// `binary` is not among them: the core takes it out and resolves it (ADR-0046), and what arrives
 /// here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,7 +30,7 @@ struct CollectorSettings {
     args: Vec<String>,
     /// Additional environment for the Collector process. Environment is not a `command`-only
     /// feature — a Collector's config reads `${env:VAR}` too — so it is honoured here just as the
-    /// command plugin honours it, values expanded through the same placeholders (ADR-0018).
+    /// command plugin honours it, values expanded through the same placeholders (ADR-0046).
     #[serde(default)]
     env: BTreeMap<String, String>,
 }
@@ -72,7 +72,7 @@ fn collector_spec(
         args,
         env: env.to_vec(),
         working_dir: None,
-        // One process, no worker of its own — signalling a group would gain nothing (ADR-0018 clause 53).
+        // One process, no worker of its own — signalling a group would gain nothing (ADR-0046 clause 53).
         own_process_group: false,
         // A Collector writes nothing outside what the install and the config
         // directory already provide.
@@ -95,7 +95,7 @@ impl Plugin for CollectorPlugin {
         "binary"
     }
 
-    /// Nothing: a Collector's distribution is a decision the block states (ADR-0018), and a
+    /// Nothing: a Collector's distribution is a decision the block states (ADR-0046), and a
     /// Foreign Agent is by definition one nobody has written a wrapper for.
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
         crate::supervisor::ports::KindDefaults {
@@ -116,7 +116,7 @@ impl Plugin for CollectorPlugin {
             std::mem::take(&mut ctx.settings),
         )?;
         // Everything the operator wrote about *where* things are goes through the placeholders
-        // (ADR-0018) — the same for the Collector's extra args and its environment as for a command.
+        // (ADR-0046) — the same for the Collector's extra args and its environment as for a command.
         let extra_args: Vec<String> = settings.args.iter().map(|a| ctx.expand(a)).collect();
         let env: Vec<(String, String)> = settings
             .env
@@ -147,7 +147,7 @@ impl Plugin for CollectorPlugin {
                 args: vec!["--version".to_string()],
             }),
             // The same `--version`, asked of the *staged* program before the running one is stopped
-            // (ADR-0018). It is the same question the probe above asks and the same cost, so asking
+            // (ADR-0046). It is the same question the probe above asks and the same cost, so asking
             // it early costs nothing: otherwise the swap itself would be the first thing to try a
             // new binary, and a build the host cannot run — one linked against a libc newer than
             // this host's — would pay for that with a stop, a swap, a failed start and a rollback
@@ -160,7 +160,7 @@ impl Plugin for CollectorPlugin {
                 env: Vec::new(),
             }),
             // The Collector has no reload convention — a configuration is applied by restart,
-            // the generic behaviour (ADR-0018), which is also what the reference supervisor does.
+            // the generic behaviour (ADR-0046), which is also what the reference supervisor does.
             reload_signal: None,
             // The Client itself, or the second service where a process account is registered
             // (ADR-0021 clause 18): the registry says which.
@@ -184,7 +184,7 @@ impl Plugin for CollectorPlugin {
 mod tests {
     use super::*;
 
-    /// `binary` is gone from these settings — the core resolves it (ADR-0018) — so a block that
+    /// `binary` is gone from these settings — the core resolves it (ADR-0046) — so a block that
     /// still carries it here would be an unknown key, which is exactly what must fail.
     #[test]
     fn settings_parse_strictly() {

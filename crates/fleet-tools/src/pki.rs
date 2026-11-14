@@ -18,10 +18,10 @@ use clap::Subcommand;
 use fleet_core::ending::Standing;
 use fleet_core::naming;
 // The serial and the start every certificate gets, as the client CA's (ADR-0042 clause 5).
-use fleet_core::x509::issue::{random_serial, CLOCK_SKEW};
+use fleet_core::x509::issue::{self, random_serial, Role, CLOCK_SKEW};
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    Issuer, KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose, SanType,
 };
 use time::{Duration, OffsetDateTime};
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -795,7 +795,7 @@ fn p12_password(
     file: &Path,
 ) -> Result<Zeroizing<String>, String> {
     if let Some(path) = password_file {
-        return fleet_agent::config_init::read_password_file(path, "--password-file");
+        return fleet_agent::config_init::read_password_file(path, "--password-file", &[]);
     }
     if !terminal {
         return Err(
@@ -820,12 +820,23 @@ fn p12_password(
 /// # Errors
 /// Returns the message to print when the file does not open, either file exists, or writing fails.
 pub fn p12_extract(file: &Path, password: &str, out: &Path) -> Result<Vec<String>, String> {
-    let identity = fleet_agent::tls::pkcs12_identity(file, password).map_err(|e| match e {
-        fleet_core::pkcs12::file::OpenError::WrongPassword => {
-            format!("{}: the password does not open it", file.display())
-        }
-        fleet_core::pkcs12::file::OpenError::Invalid(why) => why,
-    })?;
+    // Read as the install reads an administrator's path, here with no directory of a service's
+    // account to refuse a link in.
+    let bytes = fleet_agent::nofollow::read_privileged(
+        file,
+        &[],
+        None,
+        fleet_agent::nofollow::Named::ByAdministrator,
+        fleet_core::pkcs12::MAX_FILE_BYTES,
+    )
+    .map_err(|e| e.to_string())?;
+    let identity =
+        fleet_agent::tls::pkcs12_identity(file, &bytes, password).map_err(|e| match e {
+            fleet_core::pkcs12::file::OpenError::WrongPassword => {
+                format!("{}: the password does not open it", file.display())
+            }
+            fleet_core::pkcs12::file::OpenError::Invalid(why) => why,
+        })?;
     write_all(&[Target {
         dir: out.to_path_buf(),
         files: vec![
@@ -903,11 +914,8 @@ impl Ending {
 /// Returns the message to print when the file cannot be read or holds no certificate.
 pub fn read_ending(file: &Path) -> Result<Ending, String> {
     let pem = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    let der = opamp::tls::certificates(&pem)
-        .map_err(|e| format!("cannot read {}: {e}", file.display()))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| format!("{} holds no certificate", file.display()))?;
+    let der = opamp::tls::first_certificate(&pem)
+        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let (_, cert) = X509Certificate::from_der(der.as_ref())
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     Ok(Ending {
@@ -1018,19 +1026,15 @@ fn server_certificate(
             params.subject_alt_names.push(san);
         }
     }
-    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     leaf(params, ca, days)
 }
 
-/// Signs a leaf: `CA:FALSE`, `digitalSignature`, a random serial, and a life that never reaches
-/// past the CA's end (ADR-0042 clause 13).
+/// Signs a server certificate's leaf: `CA:FALSE`, `digitalSignature`, `serverAuth`, a random
+/// serial, and a life that never reaches past the CA's end (ADR-0042 clause 13).
 fn leaf(mut params: CertificateParams, ca: &Authority, days: u32) -> Result<Made, String> {
     let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
     let (not_before, not_after, cut) = life(days, Some(ca.end))?;
-    let serial = random_serial()?;
-    params.is_ca = IsCa::ExplicitNoCa;
-    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    params.serial_number = Some(serial.clone());
+    let serial = issue::leaf(&mut params, Role::Server)?;
     params.not_before = not_before;
     params.not_after = not_after;
     let cert = params
@@ -1075,20 +1079,13 @@ fn cut_notice(made: &Made, ca: &Authority) -> Option<String> {
 fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
     let cert_file = dir.join(format!("{stem}.pem"));
     let key_file = dir.join(format!("{stem}-key.pem"));
-    let cert_pem = std::fs::read_to_string(&cert_file)
+    let cert_pem = std::fs::read(&cert_file)
         .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
-    let key_pem = std::fs::read_to_string(&key_file)
-        .map(Zeroizing::new)
-        .map_err(|e| format!("cannot read {}: {e}", key_file.display()))?;
-    let key = KeyPair::from_pem(&key_pem)
-        .map_err(|e| format!("cannot read {}: {e}", key_file.display()))?;
+    let der = opamp::tls::first_certificate(&cert_pem)
+        .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
+    let issuer = issue::authority(&cert_file, &der, issue::read_key(&key_file)?)?;
     let ending = read_ending(&cert_file)?;
     let (common_name, organization) = {
-        let der = opamp::tls::certificates(cert_pem.as_bytes())
-            .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("{} holds no certificate", cert_file.display()))?;
         let (_, cert) = X509Certificate::from_der(der.as_ref())
             .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
         let first = |values: Vec<&x509_parser::x509::AttributeTypeAndValue<'_>>| {
@@ -1105,8 +1102,6 @@ fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
         };
         (common_name, organization)
     };
-    let issuer = Issuer::from_ca_cert_pem(&cert_pem, key)
-        .map_err(|e| format!("cannot use {} as a CA: {e}", cert_file.display()))?;
     Ok(Authority {
         issuer,
         end: ending.not_after,
@@ -1277,7 +1272,59 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot create {}: {e}", dir.display()))
 }
 
-/// Writes a new file; a key is `0600` from the moment it exists.
+/// Writes the private key `contents` at `path` by the rule [`write_all`] keeps (ADR-0042 clause
+/// 15): refused when `path` exists, written `0600` into a new temporary directory beside it, and
+/// linked into place only once complete, so a process killed part-way leaves no half-written key at
+/// `path`, only the staging directory. The link, unlike a rename, refuses a file that appeared at
+/// `path` in the meantime; where the file system has no links, such as FAT, the key is renamed
+/// into place once `path` is found free again. The directory `path` names must exist.
+pub(crate) fn write_key(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let never_replaced = || {
+        format!(
+            "{} exists, and a private key is never replaced: move it away or delete it first",
+            path.display()
+        )
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{} names no file", path.display()))?;
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if path.exists() {
+        return Err(never_replaced());
+    }
+    let temp = dir.join(format!(".pki-{}", hex::encode(nonce()?)));
+    // `mut` is used only by the Unix block below; on Windows there is nothing to set.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&temp)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    let staged = temp.join(name);
+    let placed = write_file(&staged, contents, true).and_then(|()| {
+        match std::fs::hard_link(&staged, path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(never_replaced()),
+            Err(_) if path.exists() => Err(never_replaced()),
+            Err(_) => std::fs::rename(&staged, path)
+                .map_err(|e| format!("cannot place {}: {e}", path.display())),
+        }
+    });
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_dir(&temp);
+    placed
+}
+
+/// Writes a new file; a key is `0600` from the moment it exists, and an existing file is never
+/// replaced (ADR-0042 clause 15). The one writer of every private key the tool makes, through
+/// [`write_all`] or [`write_key`]. A write that fails part-way removes what it wrote.
 fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
     use std::io::Write as _;
     let mut options = std::fs::OpenOptions::new();
@@ -1294,7 +1341,11 @@ fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     file.write_all(contents)
         .and_then(|()| file.sync_all())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        .map_err(|e| {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            format!("cannot write {}: {e}", path.display())
+        })
 }
 
 /// Whether two directories sit on one file system (ADR-0042 clause 8).
@@ -1983,7 +2034,6 @@ mod tests {
     /// directory of its PIN file, and the test's turn on the module; `None`, said aloud, without
     /// one.
     fn fresh_token() -> Option<(crate::token::TokenOptions, (tempfile::TempDir, Turn))> {
-        use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
         use cryptoki::session::UserType;
         use cryptoki::types::AuthPin;
         let Some(module) = std::env::var_os("FLEET_TEST_PKCS11_MODULE").filter(|m| !m.is_empty())
@@ -1998,8 +2048,7 @@ mod tests {
         let turn = TURN
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let context = Pkcs11::new(&module).expect("module");
-        let _ = context.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK));
+        let context = fleet_core::pkcs11::context(std::path::Path::new(&module)).expect("module");
         let random = |n: usize| hex::encode(&nonce().expect("random")[..n]);
         let label = format!("fleetctl-{}", random(6));
         let (so_pin, user_pin) = (AuthPin::from(random(8).as_str()), random(8));
@@ -2016,16 +2065,8 @@ mod tests {
         context
             .init_token(free, &so_pin, &label)
             .expect("init token");
-        let slot = context
-            .get_slots_with_token()
-            .expect("slots")
-            .into_iter()
-            .find(|slot| {
-                context
-                    .get_token_info(*slot)
-                    .is_ok_and(|info| info.label() == label)
-            })
-            .expect("the token");
+        let slot =
+            fleet_core::pkcs11::slot_of(&context, &label, "--token-label").expect("the token");
         let session = context.open_rw_session(slot).expect("session");
         session.login(UserType::So, Some(&so_pin)).expect("SO");
         session

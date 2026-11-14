@@ -134,7 +134,9 @@ struct DeploymentMeta {
     configurations: Vec<String>,
 }
 
+/// One Package a Deployment holds. Unknown fields are refused, as they are in the file around it.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PackageRefMeta {
     agent_type: String,
     version: String,
@@ -161,23 +163,26 @@ impl DeploymentMeta {
         let named = |e: String| format!("invalid deployment in {}: {e}", path.display());
         validate_name(&self.name).map_err(|e| named(format!("name {:?}: {e}", self.name)))?;
         check_selector(&self.selector).map_err(named)?;
-        let mut packages = BTreeMap::new();
+        let mut deployment = Deployment {
+            name: self.name,
+            selector: self.selector,
+            packages: BTreeMap::new(),
+            configurations: BTreeSet::new(),
+        };
         for reference in self.packages {
             let id = PackageId::load(&reference.agent_type, &reference.version).map_err(named)?;
-            packages.insert(id.agent_type.clone(), id);
+            // Each Package goes in as a write puts it, so a second of an Agent type is refused in
+            // the write's words rather than loaded with the last one kept.
+            Change::PutPackage { id, replace: false }
+                .apply(&mut deployment)
+                .map_err(|e| named(e.to_string()))?;
         }
-        let mut configurations = BTreeSet::new();
         for configuration in self.configurations {
             validate_name(&configuration)
                 .map_err(|e| named(format!("configuration {configuration:?}: {e}")))?;
-            configurations.insert(configuration);
+            deployment.configurations.insert(configuration);
         }
-        Ok(Deployment {
-            name: self.name,
-            selector: self.selector,
-            packages,
-            configurations,
-        })
+        Ok(deployment)
     }
 }
 

@@ -32,7 +32,7 @@ pub trait FloorStore: Send + Sync {
 
     /// Stores `floor` for `agent_type` unless its version orders below the one stored, deciding
     /// from what the store holds, as another instance may have raised it since this one read it
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 19).
     ///
     /// # Errors
@@ -148,7 +148,7 @@ impl PackageFloors {
     }
 
     /// Reads the floors again from the store, as another instance set or removed one
-    /// (ADR-0025
+    /// (ADR-0045
     /// clauses 9 and 12), so what this instance serves is what is stored. It reads under the lock,
     /// so no write of this instance's own lands between the read and the swap.
     ///

@@ -17,7 +17,7 @@ publish.workspace = true
 name = "supervisor"
 path = "src/main.rs"
 
-# ADR-0018 clause 2: each wrapped Supervisor kind is a feature named after its `type`, all of them
+# ADR-0046 clause 2: each wrapped Supervisor kind is a feature named after its `type`, all of them
 # in the published build. `collector` and `command` are the core's own and always compiled in.
 [features]
 default = []
@@ -37,7 +37,7 @@ prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-# ADR-0018: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
+# ADR-0046: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
 # the file — comments, ordering, formatting — exactly as written; the questionnaire's edit of an
 # existing file does the same (ADR-0020 clause 24).
 toml_edit.workspace = true
@@ -81,7 +81,7 @@ zip.workspace = true
 # (ADR-0012).
 zeroize.workspace = true
 
-# ADR-0018: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
+# ADR-0046: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
 # which has no SIGTERM equivalent (there, kill is the stop).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -170,5 +170,5 @@ rustls.workspace = true
 # encoder rides here alone, since `pack` lives in its own crate (ADR-0008) — a dev-dependency
 # reaches the tests and no shipped binary.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
-# ADR-0018: the end-to-end test runs the real Server in-process against the real Client binary.
+# ADR-0046: the end-to-end test runs the real Server in-process against the real Client binary.
 fleet-server = { path = "../fleet-server" }

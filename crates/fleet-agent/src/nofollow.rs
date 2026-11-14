@@ -22,9 +22,20 @@
 //! The directory a [`HeldDir`] is opened at is resolved as a path up to its parent: those
 //! components are the operator's choice, and only the last one lies in a directory the account
 //! writes. A directory below it is reached through [`HeldDir::dir`], one held name at a time.
+//!
+//! Every file is read one way: opened as a regular file, through no link at its name, and read
+//! within a bound into a buffer sized before it reads and wiped when it is dropped (ADR-0014), so
+//! a privileged step never reads more than it expects, and no grown copy of a secret is left
+//! behind. A path a privileged step did not choose itself is resolved by [`read_privileged`].
 
 use std::io;
 use std::path::{Path, PathBuf};
+
+use zeroize::Zeroizing;
+
+/// The most a file of the Client's own is read to: a certificate, a key, a record of the state
+/// directory, `supervisor.toml`. A bundle of many certificates is far below it.
+pub const MAX_READ_BYTES: u64 = 1 << 20;
 
 /// A directory opened without following a link at its name, held while it is used.
 pub struct HeldDir {
@@ -89,14 +100,13 @@ impl HeldDir {
         sys::dir(self, name, mode)
     }
 
-    /// The bytes of the regular file `name`, refusing a link.
+    /// The bytes of the regular file `name`, refusing a link, read as `read_opened` reads.
     ///
     /// # Errors
-    /// Returns an error when the file cannot be read, or is no regular file.
-    pub fn read(&self, name: &str) -> io::Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut self.open_file(name)?, &mut bytes)?;
-        Ok(bytes)
+    /// Returns an error when the file cannot be read, is no regular file, or holds more than
+    /// `limit` bytes.
+    pub fn read(&self, name: &str, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
+        read_opened(self.open_file(name)?, limit)
     }
 
     /// The regular file `name`, opened for reading, refusing a link: what its metadata says is
@@ -194,13 +204,220 @@ impl std::os::fd::AsRawFd for HeldDir {
     }
 }
 
-/// Reads the regular file at `path`, refusing a link at it or at its directory's name.
+/// Reads the regular file at `path`, refusing a link at it or at its directory's name, as
+/// `read_opened` reads.
 ///
 /// # Errors
-/// Returns an error when the file cannot be read, or a link stands at either name.
-pub fn read(path: &Path) -> io::Result<Vec<u8>> {
+/// Returns an error when the file cannot be read, a link stands at either name, or it holds more
+/// than `limit` bytes.
+pub fn read(path: &Path, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
     let (dir, name) = held_parent(path)?;
-    dir.read(name)
+    dir.read(name, limit)
+}
+
+/// What the opened `file` holds, where it is a regular file of at most `limit` bytes: the one read
+/// of this module. The buffer is sized before it reads, so it is never grown and a copy left
+/// behind, and it is wiped when it is dropped (ADR-0014). A file that grew past the bound since
+/// is refused.
+///
+/// # Errors
+/// Returns an error when the file is no regular file, holds more than `limit` bytes, or cannot be
+/// read. It leaves naming the file to the caller.
+pub(crate) fn read_opened(file: std::fs::File, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
+    use std::io::Read as _;
+    let over = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("larger than the {limit} bytes it may hold at most"),
+        )
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a regular file",
+        ));
+    }
+    if meta.len() > limit {
+        return Err(over());
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(meta.len()).unwrap_or_default(),
+    ));
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(over());
+    }
+    Ok(bytes)
+}
+
+/// Whose word a path a privileged step reads is, which decides what a link on it may do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Named {
+    /// The administrator gave it: typed at a prompt, or named by a flag. A link on the way is
+    /// followed outside the service's account's directories, as the administrator's own.
+    ByAdministrator,
+    /// The step offers it from a file the service's account may write, such as `[tls] cert_file`
+    /// in `supervisor.toml`: a link at the file's own name is refused, wherever the file lies.
+    ByAccountFile,
+}
+
+/// The most links a privileged read follows on an administrator's path, as Linux's `ELOOP` bound.
+const MAX_LINKS: usize = 40;
+
+/// The file at `path`, read by a privileged step: a regular file of at most `limit` bytes, opened
+/// without blocking, so a device or a FIFO is never read, and read as `read_opened` reads.
+///
+/// The roots — the data root and the layout root — and the state directory belong to the
+/// service's account. The path is resolved one component at a time, `..` and every link on the
+/// way included, and each directory it passes is judged:
+///
+/// - **A root or the state directory** that the walk reaches must hold the file directly: the
+///   name after it is opened in that directory, held, and a link at the name is refused. A root
+///   is held as [`HeldDir::open_root`] holds it (ADR-0021 clause 13), the state directory without
+///   following a link at its own name (clauses 11 and 12). The state directory directly in a root
+///   is reached by that name too, and counts as the account's where it is missing.
+/// - **A path that goes on beneath one of them** is refused: a directory there could be a link
+///   the account put in place.
+/// - **Anywhere else** the path is the administrator's, and a link on it is followed, at most
+///   [`MAX_LINKS`]. The file is opened by its name in the directory the walk ends in, held.
+///
+/// A path [`Named::ByAccountFile`] is held to one rule more: a link at the file's own name is
+/// refused wherever it lies, and the file is not read.
+///
+/// # Errors
+/// Returns an error naming `path` when the file is refused or cannot be read.
+pub fn read_privileged(
+    path: &Path,
+    roots: &[&Path],
+    state_dir: Option<&Path>,
+    named_by: Named,
+    limit: u64,
+) -> io::Result<Zeroizing<Vec<u8>>> {
+    let named = |why: String| io::Error::other(format!("cannot read {}: {why}", path.display()));
+    // The roots as resolved; the state directory by its resolved parent and its own name, not
+    // followed, so it counts as the account's even where it is missing or a link.
+    let state = state_dir
+        .and_then(|dir| dir.parent().zip(dir.file_name()))
+        .and_then(|(parent, name)| Some(std::fs::canonicalize(parent).ok()?.join(name)));
+    let owned: Vec<(PathBuf, &Path, bool)> = roots
+        .iter()
+        .filter_map(|root| Some((std::fs::canonicalize(root).ok()?, *root, true)))
+        .chain(
+            state
+                .clone()
+                .zip(state_dir)
+                .map(|(form, dir)| (form, dir, false)),
+        )
+        .collect();
+    let absolute = std::path::absolute(path).map_err(|e| named(e.to_string()))?;
+    let mut pending: std::collections::VecDeque<Part> =
+        absolute.components().map(Part::of).collect();
+    let mut at = PathBuf::new();
+    let mut links = 0;
+    while let Some(next) = pending.pop_front() {
+        match next {
+            Part::Up => {
+                at.pop();
+            }
+            Part::Here => {}
+            Part::Name(name) => {
+                let here = at.join(&name);
+                let meta = std::fs::symlink_metadata(&here).map_err(|e| named(e.to_string()))?;
+                if meta.file_type().is_symlink() {
+                    if pending.is_empty() && named_by == Named::ByAccountFile {
+                        return Err(named(refused_link(&here).to_string()));
+                    }
+                    links += 1;
+                    if links > MAX_LINKS {
+                        return Err(named(format!("more than {MAX_LINKS} links on the way")));
+                    }
+                    let target = std::fs::read_link(&here).map_err(|e| named(e.to_string()))?;
+                    if target.is_absolute() {
+                        at = PathBuf::new();
+                    }
+                    for part in target.components().rev() {
+                        pending.push_front(Part::of(part));
+                    }
+                    continue;
+                }
+                at = here;
+            }
+            // The root, and on Windows the drive.
+            Part::Root(root) => at.push(root),
+        }
+        if pending.is_empty() {
+            break;
+        }
+        // A directory the walk reached: one of the account's holds the file directly, or not at all.
+        let real = std::fs::canonicalize(&at).map_err(|e| named(e.to_string()))?;
+        if let Some((_, dir, root)) = owned.iter().find(|(form, _, _)| *form == real) {
+            // The state directory directly in a root holds its own files, reached by its name.
+            if let (2, Some(Part::Name(sub)), Some(Part::Name(name))) =
+                (pending.len(), pending.front(), pending.back())
+            {
+                if let (Some(dir), true) = (state_dir, state.as_ref() == Some(&real.join(sub))) {
+                    return read_in(HeldDir::open(dir), name, limit, &named);
+                }
+            }
+            let (1, Some(Part::Name(name))) = (pending.len(), pending.front()) else {
+                return Err(named(format!(
+                    "it lies beneath {}, which the service's account owns, but not directly in it",
+                    dir.display()
+                )));
+            };
+            let held = if *root {
+                HeldDir::open_root(dir)
+            } else {
+                HeldDir::open(dir)
+            };
+            return read_in(held, name, limit, &named);
+        }
+    }
+    let (dir, name) = match (at.parent(), at.file_name()) {
+        (Some(dir), Some(name)) => (dir, name),
+        _ => return Err(named("it names no file".to_string())),
+    };
+    let held = if dir.parent().is_some() {
+        HeldDir::open(dir)
+    } else {
+        HeldDir::open_root(dir)
+    };
+    read_in(held, name, limit, &named)
+}
+
+/// One component of a path being resolved, owned, so a link's target can be put in its place.
+enum Part {
+    Root(std::ffi::OsString),
+    Here,
+    Up,
+    Name(std::ffi::OsString),
+}
+
+impl Part {
+    fn of(component: std::path::Component<'_>) -> Self {
+        use std::path::Component;
+        match component {
+            Component::Prefix(_) | Component::RootDir => Part::Root(component.as_os_str().into()),
+            Component::CurDir => Part::Here,
+            Component::ParentDir => Part::Up,
+            Component::Normal(name) => Part::Name(name.into()),
+        }
+    }
+}
+
+/// The regular file `name` in `held`, read within `limit`, a link at the name refused.
+fn read_in(
+    held: io::Result<HeldDir>,
+    name: &std::ffi::OsStr,
+    limit: u64,
+    named: &impl Fn(String) -> io::Error,
+) -> io::Result<Zeroizing<Vec<u8>>> {
+    let name = name
+        .to_str()
+        .ok_or_else(|| named("its name is not UTF-8".to_string()))?;
+    held.and_then(|held| held.read(name, limit))
+        .map_err(|e| named(e.to_string()))
 }
 
 /// Writes `contents` to `path` as [`HeldDir::write`] does, refusing a link at its directory's name.
@@ -651,5 +868,36 @@ mod sys {
     #[allow(clippy::unnecessary_wraps)]
     pub(super) fn sync(_: &HeldDir) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A link at the file's own name is refused for a path the account's file offered, and
+    /// followed for the administrator's; a file over the bound is refused, naming the bound.
+    /// Verifies: ADR-0021
+    #[test]
+    fn a_privileged_read_holds_a_link_at_the_name_to_whose_word_the_path_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        std::fs::write(&target, "bytes").expect("write");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+
+        let refused = read_privileged(&link, &[], None, Named::ByAccountFile, 16)
+            .expect_err("a link at the name");
+        assert!(refused.to_string().contains("is a link"), "{refused}");
+        let followed = read_privileged(&link, &[], None, Named::ByAdministrator, 16).expect("read");
+        assert_eq!(&**followed, b"bytes");
+
+        let over = read_privileged(&target, &[], None, Named::ByAdministrator, 4)
+            .expect_err("over the bound");
+        let over = over.to_string();
+        assert!(
+            over.contains("larger than") && over.contains("4 bytes"),
+            "{over}"
+        );
     }
 }

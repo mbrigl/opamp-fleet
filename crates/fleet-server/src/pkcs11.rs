@@ -8,19 +8,20 @@
 //! `CKM_ECDSA` over the SHA-256 the Server computes. The key never leaves the token.
 //!
 //! PKCS#11 initialises a module once per process, so every token opened on one module shares one
-//! context: instances that share a process, as the tests run them, share it too.
+//! context: instances that share a process, as the tests run them, share it too. The context, the
+//! slot lookup, the login, the curve and the signature's DER are `fleet_core::pkcs11`'s, which the
+//! operator program uses for the same token.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
+use cryptoki::context::Pkcs11;
 use cryptoki::error::{Error as CkError, RvError};
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, AttributeType, ObjectClass, ObjectHandle};
-use cryptoki::session::{Session, UserType};
+use cryptoki::session::Session;
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
+use fleet_core::pkcs11::{der_signature, ec_point, log_in, slot_of, text, P256_PARAMS};
 
 use crate::audit::{Audit, Entry, Permit};
 use crate::config::Pkcs11Config;
@@ -28,9 +29,6 @@ pub use crate::fleet::UseCase;
 
 /// The sessions a token keeps open at most; no setting changes it.
 pub const SESSIONS: usize = 4;
-
-/// The DER of the named curve P-256 (`prime256v1`), as `CKA_EC_PARAMS` holds it.
-pub const P256_PARAMS: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 
 /// The word a software token's module names as its manufacturer.
 const SOFTWARE_MANUFACTURER: &str = "SoftHSM";
@@ -44,139 +42,6 @@ pub const SOFTWARE_TOKEN: &str = "pkcs11.software_token";
 /// The record the token's signatures are written to, set once the record is open: the keys are
 /// loaded before it, so that a key that is missing fails startup before anything is decided.
 pub type AuditCell = Arc<OnceLock<Arc<dyn Audit>>>;
-
-/// One context per module per process.
-fn contexts() -> &'static Mutex<HashMap<PathBuf, Pkcs11>> {
-    static CONTEXTS: OnceLock<Mutex<HashMap<PathBuf, Pkcs11>>> = OnceLock::new();
-    CONTEXTS.get_or_init(Mutex::default)
-}
-
-/// The context of `module`, loaded and initialised on its first use in this process.
-///
-/// # Errors
-/// Returns an error naming the module when it does not load or does not initialise.
-pub fn context(module: &Path) -> Result<Pkcs11, String> {
-    let mut contexts = contexts()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(context) = contexts.get(module) {
-        return Ok(context.clone());
-    }
-    let context = Pkcs11::new(module)
-        .map_err(|e| format!("[pkcs11] module {}: {}", module.display(), text(&e)))?;
-    match context.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
-        Ok(()) | Err(CkError::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => {}
-        Err(e) => {
-            return Err(format!(
-                "[pkcs11] module {}: {}",
-                module.display(),
-                text(&e)
-            ))
-        }
-    }
-    contexts.insert(module.to_path_buf(), context.clone());
-    Ok(context)
-}
-
-/// A `cryptoki` error in a line: the function and the return value's name, not the
-/// specification's paragraph that `Display` gives.
-#[must_use]
-pub fn text(error: &CkError) -> String {
-    match error {
-        CkError::Pkcs11(rv, function) => format!("{function}: {rv:?}"),
-        other => other.to_string(),
-    }
-}
-
-/// The slot that holds the token labelled `label`.
-///
-/// # Errors
-/// Returns an error naming the token when no slot, or more than one, holds it.
-pub fn slot_of(context: &Pkcs11, label: &str) -> Result<Slot, String> {
-    let mut found = Vec::new();
-    for slot in context
-        .get_slots_with_token()
-        .map_err(|e| format!("[pkcs11] cannot list the slots: {}", text(&e)))?
-    {
-        let info = context
-            .get_token_info(slot)
-            .map_err(|e| format!("[pkcs11] cannot read a token: {}", text(&e)))?;
-        if info.token_initialized() && info.label() == label {
-            found.push(slot);
-        }
-    }
-    match found.as_slice() {
-        [slot] => Ok(*slot),
-        [] => Err(format!(
-            "[pkcs11] token_label {label:?}: no token of the module carries this label"
-        )),
-        _ => Err(format!(
-            "[pkcs11] token_label {label:?}: {} tokens carry this label",
-            found.len()
-        )),
-    }
-}
-
-/// Logs the user in on `session`; a user logged in already, by another session of this process,
-/// is logged in.
-///
-/// # Errors
-/// Returns an error when the PIN is refused.
-pub fn log_in(session: &Session, pin: &AuthPin) -> Result<(), CkError> {
-    match session.login(UserType::User, Some(pin)) {
-        Ok(()) | Err(CkError::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
-/// The uncompressed point of a P-256 public key from its `CKA_EC_POINT`, which a module gives as
-/// the DER `OCTET STRING` around it or, against the specification, bare.
-///
-/// # Errors
-/// Returns an error when it is neither.
-pub fn ec_point(raw: &[u8]) -> Result<Vec<u8>, String> {
-    match raw {
-        [0x04, 0x41, point @ ..] if point.len() == 65 && point[0] == 0x04 => Ok(point.to_vec()),
-        [0x04, ..] if raw.len() == 65 => Ok(raw.to_vec()),
-        _ => Err("its public key is no uncompressed P-256 point".to_string()),
-    }
-}
-
-/// The DER `ECDSA-Sig-Value` X.509 carries (RFC 5480) for the `r || s` a token signs with
-/// `CKM_ECDSA`.
-///
-/// # Errors
-/// Returns an error when the signature is not 64 bytes, as a P-256 one is.
-pub fn der_signature(raw: &[u8]) -> Result<Vec<u8>, String> {
-    if raw.len() != 64 {
-        return Err(format!(
-            "the token's signature is {} bytes, not the 64 of P-256",
-            raw.len()
-        ));
-    }
-    let integer = |bytes: &[u8]| {
-        let trimmed = {
-            let start = bytes
-                .iter()
-                .position(|b| *b != 0)
-                .unwrap_or(bytes.len() - 1);
-            &bytes[start..]
-        };
-        let mut out = vec![0x02];
-        let pad = trimmed[0] & 0x80 != 0;
-        out.push(u8::try_from(trimmed.len() + usize::from(pad)).unwrap_or(0));
-        if pad {
-            out.push(0);
-        }
-        out.extend_from_slice(trimmed);
-        out
-    };
-    let (r, s) = (integer(&raw[..32]), integer(&raw[32..]));
-    let mut out = vec![0x30, u8::try_from(r.len() + s.len()).unwrap_or(0)];
-    out.extend(r);
-    out.extend(s);
-    Ok(out)
-}
 
 /// The sessions of one token: those idle, and how many are open.
 struct Pool {
@@ -217,13 +82,14 @@ impl Token {
     pub fn open(config: &Pkcs11Config) -> Result<Arc<Self>, String> {
         let pin = crate::config::read_secret_file("[pkcs11] pin_file", &config.pin_file)?;
         let pin = AuthPin::from(pin.as_str());
-        let context = context(&config.module)?;
+        let context = fleet_core::pkcs11::context(&config.module)
+            .map_err(|e| format!("[pkcs11] module {}: {}", config.module.display(), text(&e)))?;
         let software = context
             .get_library_info()
             .map_err(|e| format!("[pkcs11] module {}: {}", config.module.display(), text(&e)))?
             .manufacturer_id()
             .contains(SOFTWARE_MANUFACTURER);
-        let slot = slot_of(&context, &config.token_label)?;
+        let slot = slot_of(&context, &config.token_label, "[pkcs11] token_label")?;
         let login = context.open_ro_session(slot).map_err(|e| {
             format!(
                 "[pkcs11] token_label {:?}: cannot open a session: {}",
@@ -522,38 +388,4 @@ pub fn signed_entry(
         .with("issuer", id.map(|id| id.issuer.clone()))
         .with("serial", id.map(|id| id.serial.clone()))
         .with("use_case", use_case.as_str())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A P-256 `r || s` becomes the DER X.509 carries, a high bit padded with a zero and leading
-    /// zeros dropped.
-    /// Verifies: ADR-0043
-    #[test]
-    fn a_raw_signature_becomes_der() {
-        let mut raw = [0u8; 64];
-        raw[0] = 0x80;
-        raw[31] = 1;
-        raw[63] = 2;
-        let der = der_signature(&raw).expect("der");
-        assert_eq!(&der[..4], &[0x30, 38, 0x02, 33]);
-        assert_eq!(der[4], 0);
-        assert_eq!(&der[der.len() - 3..], &[0x02, 1, 2]);
-        assert!(der_signature(&[0; 63]).is_err());
-    }
-
-    /// The point is read with or without the `OCTET STRING` around it.
-    /// Verifies: ADR-0043
-    #[test]
-    fn the_point_is_read_wrapped_or_bare() {
-        let mut bare = vec![0x04];
-        bare.extend([7u8; 64]);
-        let mut wrapped = vec![0x04, 0x41];
-        wrapped.extend(&bare);
-        assert_eq!(ec_point(&bare).expect("bare"), bare);
-        assert_eq!(ec_point(&wrapped).expect("wrapped"), bare);
-        assert!(ec_point(&[0x04, 1, 2]).is_err());
-    }
 }

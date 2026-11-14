@@ -115,17 +115,6 @@ impl Drop for ClientUnderTest {
     }
 }
 
-async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if let Some(value) = probe() {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("timed out waiting for {what}");
-}
-
 async fn spawn_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(AppState::new(dir.path().join("fleet-configs")).expect("config store"));
@@ -164,7 +153,7 @@ fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
 
 /// One host supervising its own process *and* gatewaying for another Client: three Agents reach the
 /// Server, each its own, over the connections this one Client holds.
-/// Places the stub where a Managed Process must live (ADR-0018): inside the Supervisor's own
+/// Places the stub where a Managed Process must live (ADR-0046): inside the Supervisor's own
 /// `program/` directory, under a bare name the configuration can spell. Copied rather than
 /// symlinked so the file is one this Client owns in fact as well as by rule — which is what an
 /// installed package would leave behind.
@@ -228,7 +217,7 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
     let _client = spawn_client(&config_path);
 
     // Supervisor Mode first: the Client's own Agent and the one it supervises.
-    let agents = wait_until("both local agents", || {
+    let agents = common::wait_until("both local agents", || {
         let snapshot = state.snapshot();
         (snapshot.len() == 2).then_some(snapshot)
     })
@@ -263,7 +252,7 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
 
     // Three Agents, from one host running both modes — and the Server tells them apart by
     // `instance_uid` alone, never by which connection carried them (ADR-0016).
-    let agents = wait_until("the gatewayed agent too", || {
+    let agents = common::wait_until("the gatewayed agent too", || {
         let snapshot = state.snapshot();
         (snapshot.len() == 3).then_some(snapshot)
     })
@@ -345,13 +334,12 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
     // The offer is applied and acknowledged — which is what ends the transport run and restarts the
     // gateway task underneath. The Client reports the offer applied once it verified it by
     // connecting; the Server's record of the Agent holds that report. The Client dials its second
-    // connection as soon as it closes the first, so its report may arrive while the Server still
-    // holds the first connection open: with no host presented that is a duplicate, and the Server
-    // re-keys the Agent (ADR-0025 clause 8). Two records then carry the name, so the wait looks at
-    // each and follows the one that holds the report, by its `instance_uid`.
+    // connection only once the Server answered the close of the first, so the Server no longer
+    // holds it open and does not take the report for a duplicate to re-key (ADR-0045 clause 8):
+    // one record carries the name, under the `instance_uid` it had.
     let records = fleet_server::fs::FsAgentStore::open(&dir.path().join("fleet-configs"))
         .expect("the server's records");
-    let (applied_uid, applied_at) = wait_until("the offer reported applied", || {
+    let (applied_uid, applied_at) = common::wait_until("the offer reported applied", || {
         state
             .snapshot()
             .into_iter()
@@ -366,12 +354,23 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
             })
     })
     .await;
+    let named: Vec<String> = state
+        .snapshot()
+        .into_iter()
+        .filter(|a| a.service_instance_name == "edge-host")
+        .map(|a| a.instance_uid)
+        .collect();
+    assert_eq!(
+        named,
+        std::slice::from_ref(&applied_uid),
+        "the reconnect on the verified offer re-keyed the Agent"
+    );
     // Proof that the offer is in force, and not merely reported: the file configures no
     // heartbeat, so the default is 30 s and this Agent would report only on change. The offer sets
     // 5 s. Two reports more on their own are therefore the offered interval in force, which only
     // happens after the run restarted on it. Without this the test would pass whether or not the
     // gateway was ever rebuilt.
-    wait_until("the offered heartbeat in force", || {
+    common::wait_until("the offered heartbeat in force", || {
         state
             .snapshot()
             .iter()
@@ -405,9 +404,8 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
         .await
         .expect("send through the restarted gateway");
 
-    // The Agent behind the restarted Gateway arrives. It is looked for by its `instance_uid`,
-    // not by a count of records, which a re-key of the Client's Agent raises by one.
-    let agents = wait_until("the gatewayed agent after the restart", || {
+    // The Agent behind the restarted Gateway arrives, looked for by its `instance_uid`.
+    let agents = common::wait_until("the gatewayed agent after the restart", || {
         let snapshot = state.snapshot();
         snapshot
             .iter()
@@ -453,7 +451,7 @@ async fn a_gateway_that_cannot_bind_is_loud() {
 
     // The Client itself still reaches the Server: Gateway Mode failing to bind is loud in the log
     // and fatal to the Gateway, not to the host's own management (ADR-0016 clause 1).
-    wait_until("the Client's own Agent despite the blocked gateway", || {
+    common::wait_until("the Client's own Agent despite the blocked gateway", || {
         state
             .snapshot()
             .iter()
@@ -511,7 +509,7 @@ async fn an_unreadable_store_of_bindings_refuses_downstream_and_the_host_goes_on
         .expect("write supervisor.toml");
     let _client = spawn_client(&config_path);
 
-    let agents = wait_until("both local agents", || {
+    let agents = common::wait_until("both local agents", || {
         let snapshot = state.snapshot();
         (snapshot.len() == 2).then_some(snapshot)
     })

@@ -2,19 +2,17 @@
 //! PKCS#11 token, on the Server host
 //! (ADR-0042 clauses 5, 8 and 12): P-256, generated on the
 //! token with `CKA_EXTRACTABLE` false and `CKA_SENSITIVE` true, and used only through `C_Sign`. The
-//! CA certificates are built here and signed by the token with their own key.
+//! CA certificates are built here and signed by the token with their own key. The module, the
+//! slot, the login, the curve and the signature's DER are `fleet_core::pkcs11`'s, the Server's own.
 
 use std::path::{Path, PathBuf};
 
-use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
-use cryptoki::error::{Error as CkError, RvError};
+use cryptoki::error::Error as CkError;
 use cryptoki::mechanism::Mechanism;
 use cryptoki::object::{Attribute, AttributeType, ObjectHandle};
-use cryptoki::session::{Session, UserType};
+use cryptoki::session::Session;
 use cryptoki::types::AuthPin;
-
-/// The DER of the named curve P-256, as `CKA_EC_PARAMS` holds it.
-const P256_PARAMS: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+use fleet_core::pkcs11::{der_signature, ec_point, log_in, slot_of, text, P256_PARAMS};
 
 /// Where a token is reached: the module, the token's label, and the file of the user PIN.
 #[derive(clap::Args, Clone, Debug)]
@@ -30,19 +28,9 @@ pub struct TokenOptions {
     pub pin_file: PathBuf,
 }
 
-/// A `cryptoki` error in a line.
-fn text(error: &CkError) -> String {
-    match error {
-        CkError::Pkcs11(rv, function) => format!("{function}: {rv:?}"),
-        other => other.to_string(),
-    }
-}
-
 /// A session on the token, logged in as the user.
 pub struct Token {
-    // Dropped before the context it was opened on.
     session: Session,
-    _context: Pkcs11,
     label: String,
 }
 
@@ -60,44 +48,24 @@ impl Token {
                 text(e)
             )
         };
-        let context = Pkcs11::new(&options.pkcs11_module).map_err(|e| module(&e))?;
-        match context.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
-            Ok(()) | Err(CkError::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => {}
-            Err(e) => return Err(module(&e)),
-        }
-        let slots = context.get_slots_with_token().map_err(|e| module(&e))?;
-        let slot = slots
-            .into_iter()
-            .find(|slot| {
-                context.get_token_info(*slot).is_ok_and(|info| {
-                    info.token_initialized() && info.label() == options.token_label
-                })
-            })
-            .ok_or_else(|| {
-                format!(
-                    "--token-label {:?}: no token of the module carries this label",
-                    options.token_label
-                )
-            })?;
+        let context =
+            fleet_core::pkcs11::context(&options.pkcs11_module).map_err(|e| module(&e))?;
+        let slot = slot_of(&context, &options.token_label, "--token-label")?;
         let pin = zeroize::Zeroizing::new(
             std::fs::read_to_string(&options.pin_file)
                 .map_err(|e| format!("--pin-file {}: {e}", options.pin_file.display()))?,
         );
         let pin = AuthPin::from(pin.trim());
         let session = context.open_rw_session(slot).map_err(|e| module(&e))?;
-        match session.login(UserType::User, Some(&pin)) {
-            Ok(()) | Err(CkError::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
-            Err(e) => {
-                return Err(format!(
-                    "--pin-file {}: the token refuses the PIN: {}",
-                    options.pin_file.display(),
-                    text(&e)
-                ))
-            }
-        }
+        log_in(&session, &pin).map_err(|e| {
+            format!(
+                "--pin-file {}: the token refuses the PIN: {}",
+                options.pin_file.display(),
+                text(&e)
+            )
+        })?;
         Ok(Token {
             session,
-            _context: context,
             label: options.token_label.clone(),
         })
     }
@@ -198,11 +166,7 @@ impl Token {
                 _ => None,
             })
             .ok_or_else(|| format!("the token gave no public key for {label:?}"))?;
-        let point = match point.as_slice() {
-            [0x04, 0x41, rest @ ..] if rest.len() == 65 => rest.to_vec(),
-            [0x04, ..] if point.len() == 65 => point,
-            _ => return Err(format!("the key {label:?} is no uncompressed P-256 point")),
-        };
+        let point = ec_point(&point).map_err(|e| format!("the key {label:?}: {e}"))?;
         Ok(TokenKey {
             session: &self.session,
             private,
@@ -236,34 +200,8 @@ impl rcgen::SigningKey for TokenKey<'_> {
             .session
             .sign(&Mechanism::Ecdsa, self.private, &Sha256::digest(msg))
             .map_err(|_| rcgen::Error::RemoteKeyError)?;
-        der_signature(&raw).ok_or(rcgen::Error::RemoteKeyError)
+        der_signature(&raw).map_err(|_| rcgen::Error::RemoteKeyError)
     }
-}
-
-/// The DER `ECDSA-Sig-Value` for a P-256 `r || s`.
-fn der_signature(raw: &[u8]) -> Option<Vec<u8>> {
-    if raw.len() != 64 {
-        return None;
-    }
-    let integer = |bytes: &[u8]| {
-        let start = bytes
-            .iter()
-            .position(|b| *b != 0)
-            .unwrap_or(bytes.len() - 1);
-        let trimmed = &bytes[start..];
-        let pad = trimmed[0] & 0x80 != 0;
-        let mut out = vec![0x02, u8::try_from(trimmed.len() + usize::from(pad)).ok()?];
-        if pad {
-            out.push(0);
-        }
-        out.extend_from_slice(trimmed);
-        Some(out)
-    };
-    let (r, s) = (integer(&raw[..32])?, integer(&raw[32..])?);
-    let mut out = vec![0x30, u8::try_from(r.len() + s.len()).ok()?];
-    out.extend(r);
-    out.extend(s);
-    Some(out)
 }
 
 /// An absolute path for `path`, as a fragment names it.
@@ -277,22 +215,4 @@ pub fn absolute(path: &Path) -> Result<PathBuf, String> {
     std::env::current_dir()
         .map(|dir| dir.join(path))
         .map_err(|e| format!("cannot resolve {}: {e}", path.display()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A P-256 `r || s` becomes the DER X.509 carries.
-    /// Verifies: ADR-0042
-    #[test]
-    fn a_raw_signature_becomes_der() {
-        let mut raw = [0u8; 64];
-        raw[0] = 0x80;
-        raw[63] = 2;
-        let der = der_signature(&raw).expect("der");
-        assert_eq!(&der[..4], &[0x30, 38, 0x02, 33]);
-        assert_eq!(&der[der.len() - 3..], &[0x02, 1, 2]);
-        assert!(der_signature(&[0; 10]).is_none());
-    }
 }

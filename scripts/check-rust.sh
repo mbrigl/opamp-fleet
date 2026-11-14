@@ -11,7 +11,7 @@
 #
 # fleet-agent is linted without any wrapped Supervisor kind and with each one alone, and tested
 # without any: the default build carries every kind, so only these show that a build leaving one
-# out still compiles and refuses the kind as unknown (ADR-0018 clause 2).
+# out still compiles and refuses the kind as unknown (ADR-0046 clause 2).
 #
 # Needs the Rust toolchain of rust-toolchain.toml, and SoftHSM2 for the tests of the keys on a
 # token; the Dev Container provides both.
@@ -36,7 +36,15 @@ log="$(mktemp)"
 trap 'rm -rf "$log" ${SOFTHSM_DIR:+"$SOFTHSM_DIR"}' EXIT
 
 cargo build --workspace --locked
-cargo test --workspace --locked
+# The tests on the stores run in scripts/check-store.sh, which runs the whole library and the
+# integration tests that open them, and the G-20 tests in scripts/check-g20.sh. Run here as well,
+# they would run twice, and two test processes on one database open twice the schemas each caps
+# itself at. So the workspace's tests run without the variables that name a store or the G-20
+# stack, and their tests on them skip. A store's variables are dropped by their prefix, so one
+# added later is dropped too.
+unnamed=(-u FLEET_G20_STACK)
+for name in "${!FLEET_TEST_POSTGRES_@}" "${!FLEET_TEST_S3_@}"; do unnamed+=(-u "$name"); done
+env "${unnamed[@]}" cargo test --workspace --locked
 # The test harness keeps a passing test's output to itself, so the tests of the keys on a token
 # run again with theirs shown, for the skip they would say aloud.
 if [[ -n "${FLEET_TEST_PKCS11_MODULE:-}" ]]; then

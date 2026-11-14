@@ -925,15 +925,50 @@ mod tests {
         let _ = child.wait().await;
         let size = || std::fs::metadata(&marker).map(|m| m.len()).unwrap_or(0);
         let wait = || tokio::time::sleep(std::time::Duration::from_secs(3));
+        // What the program left behind writes on.
         let before = size();
-        wait().await;
-        assert!(size() > before, "what the program left behind runs");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while size() <= before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "what the program left behind runs"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         drop(child);
         drop(channel);
-        wait().await;
+        // The job is torn down once no process runs the loop any more.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while running_script(&looping).await {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the job outlived the connection"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
         let after = size();
         wait().await;
         assert_eq!(size(), after, "and ends with the connection");
+    }
+
+    /// Whether a live process names `script` on its command line, as Windows reports it: the
+    /// query's own process, which names it too, aside.
+    async fn running_script(script: &std::path::Path) -> bool {
+        let query = format!(
+            "@(Get-CimInstance Win32_Process | Where-Object {{ $_.ProcessId -ne $PID -and \
+             $_.CommandLine -like '*{}*' }}).Count",
+            script.display()
+        );
+        let out = tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &query])
+            .output()
+            .await
+            .expect("powershell");
+        let count = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        count
+            .parse::<u32>()
+            .unwrap_or_else(|_| panic!("no count: {count:?}"))
+            > 0
     }
 
     /// The Supervisor Endpoint's token is laid over the program's environment last (ADR-0021

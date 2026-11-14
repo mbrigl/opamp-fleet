@@ -340,6 +340,16 @@ fn a_recorded_decision_reaches_the_export_receiver_as_the_stored_line() {
     }
 }
 
+/// The lines of the audit record under the data directory in `dir`.
+fn record_of(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir.join("data").join("audit"))
+        .expect("audit")
+        .flatten()
+        .filter_map(|file| std::fs::read_to_string(file.path()).ok())
+        .flat_map(|text| text.lines().map(str::to_string).collect::<Vec<_>>())
+        .collect()
+}
+
 /// With `[audit.export]` naming a receiver that takes connections and never answers, the Server
 /// still answers every act, its export drops what its queue cannot hold, and the count of what it
 /// dropped reaches the record as `audit.export_dropped` at shutdown.
@@ -363,6 +373,36 @@ fn a_silent_receiver_blocks_no_decision_and_the_dropped_count_reaches_the_record
         "the acts waited on the export"
     );
 
+    // Waits until the record holds more than `after` of the acts' entries; only a defect takes a
+    // minute.
+    let holds_more_than = |after: usize| {
+        let deadline = Instant::now() + Duration::from_secs(60); // timed: a deadline, not a wait
+        loop {
+            let written = record_of(dir.path())
+                .iter()
+                .filter(|line| line.contains("\"event\":\"operator.act\""))
+                .count();
+            if written > after {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the record holds {written} of the acts' entries, not more than {after}"
+            );
+            std::thread::sleep(Duration::from_millis(50)); // timed: the wait's poll
+        }
+    };
+    // The shutdown counts what was dropped before it writes the record out: a line the writer had
+    // not yet handed to the export then reaches it after the count, and is logged, not counted in
+    // the record, when it is dropped. The writer hands a batch to the export only once the store
+    // holds it, so a record that holds all 3000 entries may not yet have handed over the last
+    // batch. It has once the record holds a line written after them: the writer writes the next
+    // batch only after it handed over the one before. So the test acts once more, and stops the
+    // server once the record holds that act's entry too.
+    holds_more_than(2999);
+    act(operator, &cert);
+    holds_more_than(3000);
+
     // SAFETY: kill(2) on the pid of a child this test started and has not yet reaped.
     let sent = unsafe { libc::kill(server.0.id() as libc::pid_t, libc::SIGTERM) };
     assert_eq!(sent, 0, "send SIGTERM");
@@ -372,12 +412,7 @@ fn a_silent_receiver_blocks_no_decision_and_the_dropped_count_reaches_the_record
         assert!(Instant::now() < deadline, "the server did not exit");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let record: Vec<String> = std::fs::read_dir(dir.path().join("data").join("audit"))
-        .expect("audit")
-        .flatten()
-        .filter_map(|file| std::fs::read_to_string(file.path()).ok())
-        .flat_map(|text| text.lines().map(str::to_string).collect::<Vec<_>>())
-        .collect();
+    let record = record_of(dir.path());
     let dropped: u64 = record
         .iter()
         .filter(|line| line.contains("\"event\":\"audit.export_dropped\""))

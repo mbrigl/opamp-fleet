@@ -3,7 +3,7 @@
 //! request in a row of its own. Each act is one transaction on the rows it names, written before
 //! it is answered; taking a request in holds the queue against every other taker while it counts,
 //! so the queue's bounds hold for every instance on the database
-//! (ADR-0025
+//! (ADR-0045
 //! clause 19).
 
 use std::sync::Arc;
@@ -14,8 +14,9 @@ use tokio_postgres::error::Severity;
 
 use deadpool_postgres::Object;
 
-use super::notify::{notify, ENROLMENT, WINDOW};
-use super::{client, signed, sql, unsigned, Database};
+use super::notify::notify;
+use super::{client, signed, snapshot, sql, unsigned, Database};
+use crate::changed::Changed;
 use crate::enrolment::{
     Approval, Decided, Decision, DecisionError, EnrolmentStore, Persisted, PersistedRequest,
     Registrar, Signing, Took,
@@ -36,6 +37,18 @@ impl Held {
     /// The connection, back to the pool once the transaction has ended.
     fn let_go(mut self) -> Object {
         self.0.take().expect("held until let go")
+    }
+
+    /// Rolls the transaction back and waits for the database's answer before the call answers
+    /// `answer`, as [`rolled_back`] does, and lets the connection go back to the pool. Closed
+    /// instead, the connection keeps the request's row until the database has noticed: a
+    /// rejection made right after would find it held and be answered [`Decided::Deciding`]. A
+    /// rollback that fails closes the connection; the answer stands.
+    async fn rolled_back<T>(self, answer: T) -> T {
+        if self.client().batch_execute("ROLLBACK").await.is_ok() {
+            drop(self.let_go());
+        }
+        answer
     }
 }
 
@@ -63,12 +76,27 @@ fn held_elsewhere(error: &tokio_postgres::Error) -> bool {
     error.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
 }
 
+/// Rolls `transaction` back and waits for the database's answer before the call answers `answer`.
+/// A transaction dropped instead only sends its rollback, and keeps the request's row until the
+/// database has read it: a rejection made right after, which takes the row without a wait, would
+/// find it held and be answered [`Decided::Deciding`]. A rejection's early returns end this way,
+/// so that none answers with its transaction still open. A rollback that fails leaves a
+/// connection the database rolls back as it ends; the answer stands.
+async fn rolled_back<T>(
+    transaction: deadpool_postgres::Transaction<'_>,
+    answer: T,
+) -> Result<T, String> {
+    let _ = transaction.rollback().await;
+    Ok(answer)
+}
+
 /// How the transaction that decides an approved request ended.
 enum Ended {
     /// Committed, leaving the revocation list's version where the register entry written with
     /// it moved it, if one was.
     Committed(Option<u64>),
-    /// The register refused the entry; the transaction was rolled back.
+    /// The register refused the entry; the transaction was rolled back, or ends as its connection
+    /// is closed where the rollback fails.
     Refused(String),
     /// The database server answered an error at the commit or at the statement before it: the
     /// transaction was rolled back, for certain.
@@ -128,10 +156,15 @@ impl PgEnrolmentStore {
 }
 
 impl EnrolmentStore for PgEnrolmentStore {
+    /// The window, the rejected keys and the queue in one snapshot: what another instance commits
+    /// between the statements is read whole or not at all.
     fn load(&self) -> Result<Option<Persisted>, String> {
         self.database.run(|pool| async move {
-            let client = client(&pool).await?;
-            read(&client).await
+            let mut client = client(&pool).await?;
+            let transaction = snapshot(&mut client).await?;
+            let persisted = read(&transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(persisted)
         })
     }
 
@@ -141,7 +174,7 @@ impl EnrolmentStore for PgEnrolmentStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             write(&transaction, &persisted).await?;
-            notify(&transaction, WINDOW, "").await?;
+            notify(&transaction, Changed::Window, "").await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -219,50 +252,9 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&transaction, ENROLMENT, &id).await?;
+            notify(&transaction, Changed::Enrolment, &id).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Took::Added)
-        })
-    }
-
-    /// The request's row is held while it is read and written, so two instances deciding one
-    /// request decide it once. A wait for the row that outlasts the session's `lock_timeout`, as
-    /// behind an approval that signs, is answered [`Decided::Deciding`].
-    fn decide(&self, id: &str, decision: &Decision) -> Result<Decided, String> {
-        let id = id.to_string();
-        let decision = serde_json::to_value(decision).expect("a decision serializes");
-        self.database.run(move |pool| async move {
-            let mut client = client(&pool).await?;
-            let transaction = client.transaction().await.map_err(sql)?;
-            let row = match transaction
-                .query_opt(
-                    "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE",
-                    &[&id],
-                )
-                .await
-            {
-                Ok(row) => row,
-                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
-                Err(e) => return Err(sql(e)),
-            };
-            let Some(row) = row else {
-                return Ok(Decided::NotWaiting);
-            };
-            let mut request: Value = row.get(0);
-            if request.get("decision").is_some_and(|d| !d.is_null()) {
-                return Ok(Decided::NotWaiting);
-            }
-            request["decision"] = decision;
-            transaction
-                .execute(
-                    "UPDATE enrolment_requests SET request = $2 WHERE id = $1",
-                    &[&id, &request],
-                )
-                .await
-                .map_err(sql)?;
-            notify(&transaction, ENROLMENT, &id).await?;
-            transaction.commit().await.map_err(sql)?;
-            Ok(Decided::Written)
         })
     }
 
@@ -283,7 +275,9 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
             {
                 Ok(()) => {}
-                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) if held_elsewhere(&e) => {
+                    return rolled_back(transaction, Decided::Deciding).await
+                }
                 Err(e) => return Err(sql(e)),
             }
             let row = match transaction
@@ -294,12 +288,14 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
             {
                 Ok(row) => row,
-                Err(e) if held_elsewhere(&e) => return Ok(Decided::Deciding),
+                Err(e) if held_elsewhere(&e) => {
+                    return rolled_back(transaction, Decided::Deciding).await
+                }
                 Err(e) => return Err(sql(e)),
             };
             let decided = match row.map(|row| row.get::<_, Value>(0)) {
                 Some(request) if request.get("decision").is_some_and(|d| !d.is_null()) => {
-                    return Ok(Decided::NotWaiting);
+                    return rolled_back(transaction, Decided::NotWaiting).await;
                 }
                 Some(mut request) => {
                     request["decision"] = rejected;
@@ -322,7 +318,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&transaction, ENROLMENT, &id).await?;
+            notify(&transaction, Changed::Enrolment, &id).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(decided)
         })
@@ -350,50 +346,57 @@ impl EnrolmentStore for PgEnrolmentStore {
         let bootstrap = bootstrap.clone();
         let (held, found) = self.database.run(move |pool| async move {
             let held = Held(Some(client(&pool).await?));
-            held.client().batch_execute("BEGIN").await.map_err(sql)?;
-            let row = match held
-                .client()
-                .query_opt(
-                    "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE",
-                    &[&request_id],
-                )
-                .await
-            {
-                Ok(row) => row,
-                Err(e) if held_elsewhere(&e) => return Ok((held, Found::Deciding)),
-                Err(e) => return Err(sql(e)),
-            };
-            let rejected = held
-                .client()
-                .query_opt(
-                    "SELECT 1 FROM enrolment_rejected WHERE key = $1",
-                    &[&request_id],
-                )
-                .await
-                .map_err(sql)?
-                .is_some();
-            let found = match row.map(|row| row.get::<_, Value>(0)) {
-                // A rejected key is never signed, though an instance of 0.8.0 queued it.
-                _ if rejected => Found::NotWaiting,
-                Some(request) if request.get("decision").is_none_or(Value::is_null) => {
-                    if super::ledger::names(&***held.client(), &bootstrap).await? {
-                        held.client()
-                            .execute(
-                                "DELETE FROM enrolment_requests WHERE id = $1",
-                                &[&request_id],
-                            )
-                            .await
-                            .map_err(sql)?;
-                        // Announced by the call that commits it, below, so a commit whose answer
-                        // is lost is read again.
-                        Found::Revoked
-                    } else {
-                        Found::Waiting(request)
+            let found = async {
+                held.client().batch_execute("BEGIN").await.map_err(sql)?;
+                let row = match held
+                    .client()
+                    .query_opt(
+                        "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE",
+                        &[&request_id],
+                    )
+                    .await
+                {
+                    Ok(row) => row,
+                    Err(e) if held_elsewhere(&e) => return Ok(Found::Deciding),
+                    Err(e) => return Err(sql(e)),
+                };
+                let rejected = held
+                    .client()
+                    .query_opt(
+                        "SELECT 1 FROM enrolment_rejected WHERE key = $1",
+                        &[&request_id],
+                    )
+                    .await
+                    .map_err(sql)?
+                    .is_some();
+                let found = match row.map(|row| row.get::<_, Value>(0)) {
+                    // A rejected key is never signed, though an instance of 0.8.0 queued it.
+                    _ if rejected => Found::NotWaiting,
+                    Some(request) if request.get("decision").is_none_or(Value::is_null) => {
+                        if super::ledger::names(&***held.client(), &bootstrap).await? {
+                            held.client()
+                                .execute(
+                                    "DELETE FROM enrolment_requests WHERE id = $1",
+                                    &[&request_id],
+                                )
+                                .await
+                                .map_err(sql)?;
+                            // Announced by the call that commits it, below, so a commit whose
+                            // answer is lost is read again.
+                            Found::Revoked
+                        } else {
+                            Found::Waiting(request)
+                        }
                     }
-                }
-                _ => Found::NotWaiting,
-            };
-            Ok((held, found))
+                    _ => Found::NotWaiting,
+                };
+                Ok(found)
+            }
+            .await;
+            match found {
+                Ok(found) => Ok((held, found)),
+                Err(e) => Err(held.rolled_back(e).await),
+            }
         })?;
         let (finish, answer) = match found {
             Found::NotWaiting => ("ROLLBACK", Ok(Approval::NotWaiting)),
@@ -407,40 +410,50 @@ impl EnrolmentStore for PgEnrolmentStore {
                     let id = id.to_string();
                     let registering = approved.clone();
                     let ended = self.database.run(move |_| async move {
-                        let mut version = None;
-                        if let Some(approved) = &registering {
-                            let registered = super::ledger::register_in(
-                                &***held.client(),
-                                approved.issued(),
-                                &approved.bounds,
-                                approved.mint(),
-                                Some(&approved.bootstrap),
-                            )
-                            .await?;
-                            if let Err(refused) = crate::revocation::refusal(registered) {
-                                held.client().batch_execute("ROLLBACK").await.map_err(sql)?;
-                                drop(held.let_go());
-                                return Ok(Ended::Refused(refused));
+                        let ended = async {
+                            let mut version = None;
+                            if let Some(approved) = &registering {
+                                let registered = super::ledger::register_in(
+                                    &***held.client(),
+                                    approved.issued(),
+                                    &approved.bounds,
+                                    approved.mint(),
+                                    Some(&approved.bootstrap),
+                                )
+                                .await?;
+                                if let Err(refused) = crate::revocation::refusal(registered) {
+                                    return Ok(Ended::Refused(refused));
+                                }
+                                version = Some(
+                                    super::ledger::read_list_version(&***held.client()).await?,
+                                );
                             }
-                            version =
-                                Some(super::ledger::read_list_version(&***held.client()).await?);
+                            if let Err(e) = held
+                                .client()
+                                .execute(
+                                    "UPDATE enrolment_requests SET request = $2 WHERE id = $1",
+                                    &[&id, &request],
+                                )
+                                .await
+                            {
+                                return refused_by_the_server(e, At::Update);
+                            }
+                            notify(&***held.client(), Changed::Enrolment, &id).await?;
+                            if let Err(e) = held.client().batch_execute("COMMIT").await {
+                                return refused_by_the_server(e, At::Commit);
+                            }
+                            Ok(Ended::Committed(version))
                         }
-                        if let Err(e) = held
-                            .client()
-                            .execute(
-                                "UPDATE enrolment_requests SET request = $2 WHERE id = $1",
-                                &[&id, &request],
-                            )
-                            .await
-                        {
-                            return refused_by_the_server(e, At::Update);
+                        .await;
+                        match ended {
+                            Ok(Ended::Committed(version)) => {
+                                drop(held.let_go());
+                                Ok(Ended::Committed(version))
+                            }
+                            // A refusal and an error end the transaction before they are answered;
+                            // after a commit the database answered, the rollback finds none.
+                            ended => held.rolled_back(ended).await,
                         }
-                        notify(&***held.client(), ENROLMENT, &id).await?;
-                        if let Err(e) = held.client().batch_execute("COMMIT").await {
-                            return refused_by_the_server(e, At::Commit);
-                        }
-                        drop(held.let_go());
-                        Ok(Ended::Committed(version))
                     })?;
                     let written = match ended {
                         Ended::Committed(written) => written,
@@ -466,12 +479,20 @@ impl EnrolmentStore for PgEnrolmentStore {
         };
         let id = id.to_string();
         self.database.run(move |_| async move {
-            if finish == "COMMIT" {
-                notify(&***held.client(), ENROLMENT, &id).await?;
+            let finished = async {
+                if finish == "COMMIT" {
+                    notify(&***held.client(), Changed::Enrolment, &id).await?;
+                }
+                held.client().batch_execute(finish).await.map_err(sql)
             }
-            held.client().batch_execute(finish).await.map_err(sql)?;
-            drop(held.let_go());
-            answer
+            .await;
+            match finished {
+                Ok(()) => {
+                    drop(held.let_go());
+                    answer
+                }
+                Err(e) => Err(held.rolled_back(e).await),
+            }
         })
     }
 
@@ -515,7 +536,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
                 .map_err(sql)?;
             if taken > 0 {
-                notify(&transaction, ENROLMENT, &id).await?;
+                notify(&transaction, Changed::Enrolment, &id).await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -537,7 +558,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
                 .map_err(sql)?;
             if withdrawn > 0 {
-                notify(&transaction, ENROLMENT, &serial).await?;
+                notify(&transaction, Changed::Enrolment, &serial).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(usize::try_from(withdrawn).unwrap_or(usize::MAX))
@@ -558,7 +579,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
                 .map_err(sql)?;
             if withdrawn > 0 {
-                notify(&transaction, ENROLMENT, "").await?;
+                notify(&transaction, Changed::Enrolment, "").await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -576,7 +597,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&transaction, WINDOW, "").await?;
+            notify(&transaction, Changed::Window, "").await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -597,7 +618,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .execute("DELETE FROM enrolment_requests", &[])
                 .await
                 .map_err(sql)?;
-            notify(&transaction, WINDOW, "").await?;
+            notify(&transaction, Changed::Window, "").await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -618,7 +639,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                     .execute("DELETE FROM enrolment_requests", &[])
                     .await
                     .map_err(sql)?;
-                notify(&transaction, WINDOW, "").await?;
+                notify(&transaction, Changed::Window, "").await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(ended > 0)
@@ -742,6 +763,7 @@ mod tests {
     use crate::enrolment::{Decided, Decision, PersistedRequest, Took};
     use crate::fs::FsEnrolmentStore;
     use crate::postgres::testing::TestDatabase;
+    use crate::postgres::Opening;
 
     fn persisted(until: Option<u64>, ids: &[&str]) -> Persisted {
         let requests: Vec<Value> = ids
@@ -828,15 +850,20 @@ mod tests {
         );
 
         let approved = Decision::Approved("-----BEGIN CERTIFICATE-----".to_string());
-        assert_eq!(store.decide("a", &approved), Ok(Decided::Written));
+        let mut sign = || Ok((approved.clone(), None));
+        let kept = crate::enrolment::tests::kept();
         assert_eq!(
-            store.decide("a", &Decision::Rejected),
-            Ok(Decided::NotWaiting),
+            store.approve("a", &bootstrap("1"), &mut sign, &kept),
+            Ok(Approval::Approved(approved.clone()))
+        );
+        assert_eq!(
+            store.approve("a", &bootstrap("1"), &mut sign, &kept),
+            Ok(Approval::NotWaiting),
             "decided once"
         );
         assert_eq!(
-            store.decide("none", &Decision::Rejected),
-            Ok(Decided::NotWaiting)
+            store.approve("none", &bootstrap("1"), &mut sign, &kept),
+            Ok(Approval::NotWaiting)
         );
         let mut decided = request("a", "1");
         decided.decision = Some(approved);
@@ -884,7 +911,7 @@ mod tests {
         acts(&|| Box::new(FsEnrolmentStore::open(dir.path())));
     }
 
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_enrolment_acts_hold_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -895,9 +922,9 @@ mod tests {
     }
 
     /// Two instances take a request each into a queue with one place left, behind a barrier, and
-    /// exactly one is taken while the other finds the queue full; two deciding one request decide
-    /// it once.
-    /// Verifies: ADR-0025
+    /// exactly one is taken while the other finds the queue full; two rejecting one request reject
+    /// it once, and the other finds it decided.
+    /// Verifies: ADR-0045
     #[test]
     fn two_takers_at_the_queues_bound_take_one_request_between_them() {
         let Some(test) = TestDatabase::named() else {
@@ -943,15 +970,14 @@ mod tests {
         for request in &held {
             let barrier = std::sync::Barrier::new(2);
             let id = request.id.clone();
-            let decided: Vec<bool> = std::thread::scope(|scope| {
+            let mut decided: Vec<Decided> = std::thread::scope(|scope| {
                 let racers: Vec<_> = stores
                     .iter()
                     .map(|store| {
                         let (barrier, id) = (&barrier, id.clone());
                         scope.spawn(move || {
                             barrier.wait();
-                            store.decide(&id, &Decision::Rejected).expect("decide")
-                                == Decided::Written
+                            store.reject(&id, 1).expect("reject")
                         })
                     })
                     .collect();
@@ -960,11 +986,8 @@ mod tests {
                     .map(|r| r.join().expect("racer"))
                     .collect()
             });
-            assert_eq!(
-                decided.iter().filter(|d| **d).count(),
-                1,
-                "{id}: {decided:?}"
-            );
+            decided.sort_by_key(|d| *d != Decided::Written);
+            assert_eq!(decided, [Decided::Written, Decided::NotWaiting], "{id}");
         }
     }
 
@@ -1075,11 +1098,70 @@ mod tests {
         approvals(&|| Box::new(PgEnrolmentStore::new(database.clone())));
     }
 
+    /// A window opened with a rejected key through another instance between the statements of
+    /// `load` is read whole or not at all: the rejected keys are read in the snapshot the window
+    /// was, so the load is never the key without its window.
+    /// Verifies: ADR-0045
+    #[test]
+    fn an_enrolment_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgEnrolmentStore::new(test.open());
+        let gate = test.hold_reads(
+            "enrolment_rejected",
+            "INSERT INTO enrolment_window (singleton, until_ms) VALUES (true, 1000); \
+             INSERT INTO enrolment_rejected (key, rejected_ms) VALUES ('late', 1)",
+        );
+        std::thread::scope(|scope| {
+            let loading = scope.spawn(|| store.load());
+            // timed: the deadline of the poll for the lock wait
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test
+                .sessions("wait_event_type = 'Lock' AND query LIKE 'SELECT%enrolment_rejected%'")
+                == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "load never waited for the rejected keys"
+                );
+                // timed: the poll for the lock wait
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            gate.open();
+            let loaded = loading.join().expect("load").expect("one committed state");
+            assert_eq!(loaded, None, "nothing committed after the snapshot is read");
+        });
+    }
+
+    /// Holds the approver that signs until the other one has met the request: it waits for the
+    /// request's row, or it has answered. Where both sign, a defect, neither waits for the other.
+    fn other_approver_met(
+        test: &TestDatabase,
+        signing: &std::sync::atomic::AtomicUsize,
+        finished: &std::sync::atomic::AtomicUsize,
+    ) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while signing.load(SeqCst) < 2
+            && finished.load(SeqCst) == 0
+            && test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT request FROM enrolment_requests%'",
+            ) == 0
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the other approver never met the request"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     /// Of two instances approving one request, one signs and records it and the other finds it
     /// decided, signing nothing: the request's row is held from before the signature until the
     /// decision is written. The other finds it still being decided instead when it waited out
     /// its `lock_timeout`, as on a database slowed by load.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_approvers_of_one_request_sign_it_once() {
         let Some(test) = TestDatabase::named() else {
@@ -1097,26 +1179,30 @@ mod tests {
                 .take(&request(&id, "1"), 1_000, 100, 100)
                 .expect("take");
             let signed = std::sync::atomic::AtomicUsize::new(0);
+            let finished = std::sync::atomic::AtomicUsize::new(0);
             let barrier = std::sync::Barrier::new(2);
             let answers: Vec<Approval> = std::thread::scope(|scope| {
                 let racers: Vec<_> = stores
                     .iter()
                     .map(|store| {
-                        let (barrier, id, signed) = (&barrier, id.clone(), &signed);
+                        let (barrier, id, signed, finished, test) =
+                            (&barrier, id.clone(), &signed, &finished, &test);
                         scope.spawn(move || {
                             barrier.wait();
-                            store
+                            let answer = store
                                 .approve(
                                     &id,
                                     &bootstrap("1"),
                                     &mut || {
                                         signed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                        std::thread::sleep(std::time::Duration::from_millis(20));
+                                        other_approver_met(test, signed, finished);
                                         Ok((Decision::Approved(format!("pem {id}")), None))
                                     },
                                     &crate::enrolment::tests::kept(),
                                 )
-                                .expect("approve")
+                                .expect("approve");
+                            finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            answer
                         })
                     })
                     .collect();
@@ -1145,7 +1231,7 @@ mod tests {
     /// A withdrawal of a request whose bootstrap certificate the list names announces itself in the
     /// call that commits it: where that call loses its answer, the instance is handed the
     /// notification, so it reads its queue again.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_withdrawal_whose_commit_lost_its_answer_is_handed_on() {
         let Some(test) = TestDatabase::named() else {
@@ -1195,7 +1281,10 @@ mod tests {
         );
         assert_eq!(
             handing.recv_timeout(std::time::Duration::from_secs(30)),
-            Ok(crate::postgres::notify::Notice::new(ENROLMENT, "a")),
+            Ok(crate::postgres::notify::Notice::new(
+                Changed::Enrolment,
+                "a"
+            )),
             "handed on at once"
         );
         gate.open();
@@ -1268,7 +1357,7 @@ mod tests {
     /// Two instances on one database approving one request: one hands it out, the other answers
     /// that it is not found, or that it is being decided when it waited out its `lock_timeout`,
     /// and the request is signed and recorded once.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_instances_approving_one_request_record_one_certificate() {
         use crate::enrolment::tests::{request as submitted, requester, Echo, Manual};
@@ -1294,9 +1383,10 @@ mod tests {
             assert_eq!(a.submit(submitted(&key), requester()), Submitted::Waiting);
             assert_eq!(b.submit(submitted(&key), requester()), Submitted::Waiting);
             let recorded = std::sync::atomic::AtomicUsize::new(0);
+            let finished = std::sync::atomic::AtomicUsize::new(0);
             let record = |_: &crate::revocation::Signed, _: &[u8], _: &CertId| {
                 recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                other_approver_met(&test, &recorded, &finished);
                 Ok(())
             };
             let barrier = std::sync::Barrier::new(2);
@@ -1304,16 +1394,19 @@ mod tests {
                 let racers: Vec<_> = [&a, &b]
                     .into_iter()
                     .map(|enrolment| {
-                        let (barrier, key, record) = (&barrier, key.clone(), &record);
+                        let (barrier, key, record, finished) =
+                            (&barrier, key.clone(), &record, &finished);
                         scope.spawn(move || {
                             barrier.wait();
-                            enrolment.approve(
+                            let answer = enrolment.approve(
                                 &key,
                                 &Echo,
                                 "host",
                                 &crate::enrolment::tests::Recording::new(record),
                                 &|_| false,
-                            )
+                            );
+                            finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            answer
                         })
                     })
                     .collect();
@@ -1341,7 +1434,7 @@ mod tests {
 
     /// A take that read the window open before another instance closed it does not land in the
     /// closed window: the window's row is held for share while the request is written.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_take_does_not_land_in_a_window_closed_meanwhile() {
         let Some(test) = TestDatabase::named() else {
@@ -1367,7 +1460,18 @@ mod tests {
             .expect("closing");
         let taken = std::thread::scope(|scope| {
             let taker = scope.spawn(|| store.take(&request("late", "1"), 1_000, 8, 8));
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            // The taker waits for the window's row, which the close holds.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT until_ms FROM enrolment_window%'",
+            ) == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the take never waited for the window's row"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             database
                 .run(move |_| async move {
                     closing
@@ -1508,7 +1612,7 @@ mod tests {
     /// for longer than a wait for a lock lasts, is answered that the request is being decided, and
     /// signs nothing; the other instance's approval stands, and once it is written the request is
     /// no longer waiting.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_decision_on_a_request_another_instance_holds_long_is_answered_deciding() {
         let Some(test) = TestDatabase::named() else {
@@ -1523,7 +1627,7 @@ mod tests {
         a.take(&request("p", "1"), 1_000, 100, 100).expect("take");
         let (signing, signs) = std::sync::mpsc::channel::<()>();
         let (answered, answers) = std::sync::mpsc::channel();
-        let (b_approved, b_decided, b_rejected, b_listed) = std::thread::scope(|scope| {
+        let (b_approved, b_rejected, b_listed) = std::thread::scope(|scope| {
             // A signs until B has answered, however long B waits.
             let first = scope.spawn(move || {
                 a.approve(
@@ -1545,7 +1649,6 @@ mod tests {
                     &mut || Ok((Decision::Approved("pem b".to_string()), None)),
                     &crate::enrolment::tests::kept(),
                 ),
-                b.decide("p", &Decision::Rejected),
                 b.reject("p", 1),
                 // A key the queue does not hold is rejected beside the approval, without a wait.
                 b.reject("q", 1),
@@ -1558,7 +1661,6 @@ mod tests {
             answer
         });
         assert_eq!(b_approved, Ok(Approval::Deciding));
-        assert_eq!(b_decided, Ok(Decided::Deciding));
         assert_eq!(b_rejected, Ok(Decided::Deciding));
         assert_eq!(b_listed, Ok(Decided::Listed));
         assert_eq!(
@@ -1570,12 +1672,123 @@ mod tests {
             ),
             Ok(Approval::NotWaiting)
         );
-        assert_eq!(b.decide("p", &Decision::Rejected), Ok(Decided::NotWaiting));
         assert_eq!(
             b.reject("p", 1),
             Ok(Decided::NotWaiting),
             "the approval stands"
         );
+    }
+
+    /// A proxy on loopback to `target` that keeps the database's end of each connection open after
+    /// its client closed it: the client's `Terminate` is not passed on, so the database ends the
+    /// session's transaction only once the proxy is dropped, not as soon as the client is gone.
+    /// Each database end is kept from the moment it is connected, so the drop shuts every one.
+    struct Lingering {
+        port: u16,
+        kept: Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+    }
+
+    impl Lingering {
+        fn to(target: (String, u16)) -> Self {
+            use std::io::{Read as _, Write as _};
+            const TERMINATE: [u8; 5] = [b'X', 0, 0, 0, 4];
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let keeping = kept.clone();
+            std::thread::spawn(move || {
+                for client in listener.incoming().flatten() {
+                    let server =
+                        std::net::TcpStream::connect((target.0.as_str(), target.1)).expect("db");
+                    keeping
+                        .lock()
+                        .expect("kept")
+                        .push(server.try_clone().expect("clone"));
+                    let (mut from_server, mut to_client) = (
+                        server.try_clone().expect("clone"),
+                        client.try_clone().expect("clone"),
+                    );
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut from_server, &mut to_client);
+                        let _ = to_client.shutdown(std::net::Shutdown::Both);
+                    });
+                    let (mut from_client, mut to_server) = (client, server);
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 16 * 1024];
+                        loop {
+                            let n = match from_client.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => n,
+                            };
+                            let passed = buf[..n].strip_suffix(&TERMINATE).unwrap_or(&buf[..n]);
+                            if to_server.write_all(passed).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            Lingering { port, kept }
+        }
+    }
+
+    impl Drop for Lingering {
+        fn drop(&mut self) {
+            for server in self.kept.lock().expect("kept").drain(..) {
+                let _ = server.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+
+    /// An approval that fails once it holds the request ends its transaction before it answers:
+    /// a rejection made right after, which takes the row without a wait, finds the request waiting
+    /// and rejects it, rather than answer that another instance is deciding it. The approval fails
+    /// on the client while the database's transaction lives: the list's version has no row, so
+    /// the register's write gets no row back where it moves the version. The database is reached
+    /// through a proxy that keeps a closed connection's session open, so an approval that let its
+    /// connection close instead would leave the request held.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_rejection_after_a_failed_approval_finds_the_request_waiting() {
+        use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
+        use crate::enrolment::{Rejection, Submitted};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        test.open();
+        let proxy = Lingering::to((test.config.host.clone(), test.config.port));
+        let mut through = test.config();
+        through.port = proxy.port;
+        let database = Database::open(
+            &through,
+            Opening {
+                exclusive: crate::postgres::Exclusive::Alone(
+                    "server migrate-to-postgres".to_string(),
+                ),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
+        let register = register_on(&database);
+        let enrolment = enrolment_on(&database);
+        enrolment.open(600).expect("window");
+        assert_eq!(
+            enrolment.submit(submitted("k"), requester()),
+            Submitted::Waiting
+        );
+        test.sql("DELETE FROM revocation_list_version");
+        enrolment
+            .approve(
+                "k",
+                &Counting::default(),
+                "host-1",
+                &Registering::on(&register),
+                &|_| false,
+            )
+            .expect_err("the list's version cannot be moved");
+        assert_eq!(enrolment.reject("k"), Ok(Rejection::Queued));
     }
 
     /// A rejection of a request another instance holds while it signs it answers at once that the
@@ -1665,7 +1878,15 @@ mod tests {
         assert_eq!(store.take(&request("a", "1"), now, 3, 3), Ok(Took::Added));
         assert_eq!(store.take(&request("b", "1"), now, 3, 3), Ok(Took::Added));
         let approved = Decision::Approved("-----BEGIN CERTIFICATE-----".to_string());
-        assert_eq!(store.decide("b", &approved), Ok(Decided::Written));
+        assert_eq!(
+            store.approve(
+                "b",
+                &bootstrap("1"),
+                &mut || Ok((approved.clone(), None)),
+                &crate::enrolment::tests::kept()
+            ),
+            Ok(Approval::Approved(approved.clone()))
+        );
         assert_eq!(store.reject("a", 7), Ok(Decided::Written));
         assert_eq!(
             store.reject("a", 8),
@@ -1918,7 +2139,7 @@ mod tests {
 
     /// Two instances approve one request, and the first one's commit fails: the second, which
     /// waited for the request's row, signs it once when the first rolls back, and the request ends
-    /// decided once, with one certificate in the register (ADR-0023 clause 9, ADR-0025 clause 19).
+    /// decided once, with one certificate in the register (ADR-0023 clause 9, ADR-0045 clause 19).
     /// Verifies: ADR-0023
     #[test]
     fn two_instances_approving_one_request_whose_first_commit_fails_sign_it_once_more() {

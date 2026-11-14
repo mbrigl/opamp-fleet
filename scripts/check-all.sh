@@ -34,9 +34,11 @@
 # Usage:
 #     scripts/check-all.sh [--changed] [--verbose]   (or: bash scripts/check-all.sh …)
 # CHECK_ALL_JOBS=<n> runs at most n checks at once, 1 one after another; the default is the
-# number of processors.
-# Exit code 0 when every check passes, 1 when any of them fails, 2 on an unknown argument or a
-# CHECK_ALL_JOBS that is no number from 1 up.
+# number of processors. FLEET_MIN_FREE_GB=<n> is the free space, in GB, the build needs on the
+# file system of its target directory; the default is 20, and 0 turns the guard off.
+# Exit code 0 when every check passes, 1 when any of them fails or the disk is short, 2 on an
+# unknown argument, a CHECK_ALL_JOBS that is no number from 1 up, or a FLEET_MIN_FREE_GB that is
+# no number.
 
 set -uo pipefail
 
@@ -66,6 +68,30 @@ for arg in "$@"; do
     *) echo "check-all: unknown argument '$arg' — usage: scripts/check-all.sh [--changed] [--verbose]" >&2; exit 2 ;;
   esac
 done
+
+# A full disk fails the build with a linker bus error or ENOSPC, which reads as a failure of the
+# code. So the free space of the file system that holds the target directory is read before any
+# check starts, and a short disk stops the run with what is free where. CHECK_ALL_FREE_GB stands
+# in for the space found, for the self-test.
+min_free="${FLEET_MIN_FREE_GB:-20}"
+if [[ ! "$min_free" =~ ^[0-9]{1,9}$ ]]; then
+  echo "check-all: FLEET_MIN_FREE_GB must be a number of GB, not '$min_free'" >&2
+  exit 2
+fi
+# Read in base 10: a leading zero would make bash read it as octal.
+min_free=$((10#$min_free))
+if ((min_free > 0)); then
+  target="${CARGO_TARGET_DIR:-$ROOT/target}"
+  # Cargo reads a relative target directory against the working directory.
+  [[ "$target" == /* ]] || target="$PWD/$target"
+  probe="$target"
+  while [[ ! -d "$probe" ]]; do probe="${probe%/*}"; [[ -n "$probe" ]] || probe=/; done
+  free_gb="${CHECK_ALL_FREE_GB:-$(df -Pk "$probe" | awk 'NR == 2 { print int($4 / 1048576) }')}"
+  if ((free_gb < min_free)); then
+    echo "check-all: only $free_gb GB free on the file system of $target; the build needs $min_free GB. Reclaim space with 'cargo clean', or by removing target/debug/incremental and old target directories in /tmp, or set FLEET_MIN_FREE_GB lower on a smaller machine." >&2
+    exit 1
+  fi
+fi
 
 # The paths changed against the merge base with origin/main, else main, read once: the local
 # main may lag the remote's, or a clone without the hooks may have moved it. On main, or without
@@ -116,8 +142,9 @@ needs_run() {
 # files are printed in the order of the list below once all have finished, so the output reads as
 # a run one after another would. A check therefore depends on no other and writes nowhere another
 # reads: the self-tests build their fixtures in a directory of their own, and a run line added
-# for a project's build keeps to the same. A runner stopped by a signal stops the checks it
-# started and waits for them; what a check started in turn may outlive it.
+# for a project's build keeps to the same. The two store steps are the exception: they run last,
+# each alone (see alone() below). A runner stopped by a signal stops the checks it started and
+# waits for them; what a check started in turn may outlive it.
 max_jobs="${CHECK_ALL_JOBS:-$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 if [[ ! "$max_jobs" =~ ^[1-9][0-9]*$ ]]; then
   echo "check-all: CHECK_ALL_JOBS is '$max_jobs', not a number of checks from 1 up" >&2
@@ -125,22 +152,25 @@ if [[ ! "$max_jobs" =~ ^[1-9][0-9]*$ ]]; then
 fi
 out="$(mktemp -d)"
 labels=() kinds=() running=0
-# stop — on every exit, a signal's included: stop every job the runner still has, the one started
-# an instant before included, wait for them, and remove their files.
+# stop — on every exit, a signal's included: tell every job the runner still has to stop its
+# check, the one started an instant before included, wait for them, and remove their files.
 # shellcheck disable=SC2317 # run by the trap
 stop() {
   local running_jobs
   running_jobs="$(jobs -p)"
   # shellcheck disable=SC2086 # one process id per word
-  [[ -n "$running_jobs" ]] && kill $running_jobs 2>/dev/null
+  [[ -n "$running_jobs" ]] && kill -USR1 $running_jobs 2>/dev/null
   wait
   rm -rf "$out"
 }
 trap stop EXIT
 
-# run <label> <script> [args...] — start one check, its output and exit code kept under $out. The
-# subshell passes a TERM on to the check and waits for it, so stop() returns once each has ended;
-# its trap stands before the check starts, so a TERM never finds the check without it.
+# run <label> <script> [args...] — start one check, its output and exit code kept under $out. On
+# a USR1 the subshell sends the check a TERM and waits for it, so stop() returns once each has
+# ended; its trap stands before the check starts, so a USR1 never finds the check without it.
+# The subshell's jobs name the check, as $! is not yet read when the USR1 comes right after the
+# fork. The subshell traps USR1 and not TERM: a check forked and not yet running its script still
+# has the subshell's traps, and would lose a TERM it trapped.
 run() {
   local label="$1" script="$2" i="${#labels[@]}"
   shift 2
@@ -153,14 +183,19 @@ run() {
   fi
   while ((running >= max_jobs)); do wait -n; running=$((running - 1)); done
   {
-    check=""
-    trap '[[ -n "$check" ]] && kill "$check" 2>/dev/null && wait "$check"; exit 143' TERM
+    trap 'kill $(jobs -p) 2>/dev/null; wait; exit 143' USR1
     bash "$ROOT/$script" "$@" > "$out/$i" 2>&1 &
-    check=$!
-    wait "$check"
+    wait "$!"
     echo $? > "$out/$i.rc"
   } &
   running=$((running + 1))
+}
+
+# alone — wait until every check started so far has ended, so the next one starts by itself. A
+# check skipped in changed mode started nothing, so it is not waited for.
+alone() {
+  wait
+  running=0
 }
 
 run "Documentation self-test" scripts/test-check-docs.sh
@@ -209,6 +244,8 @@ run "Build hardening self-test" scripts/test-check-build-hardening.sh
 run "Build hardening" scripts/check-build-hardening.sh
 run "Fuzz target self-test" scripts/test-check-fuzz-targets.sh
 run "Fuzz targets" scripts/check-fuzz-targets.sh
+# The store checks themselves run last, below.
+run "Store check self-test" scripts/test-check-store.sh
 run "Fixture isolation" scripts/test-fixture-isolation.sh
 # The repository settings sensor reads GitHub and runs on a human's instruction (ADR-0002); its
 # self-test runs here.
@@ -230,8 +267,6 @@ run "Build, test and lint" scripts/check-rust.sh
 # throwaway machine, the G-20 stack — and fails instead in a CI run, where a skip would read as a
 # pass.
 run "Client on its platform" scripts/check-client-platform.sh
-run "S3 store" scripts/check-store.sh s3
-run "PostgreSQL store" scripts/check-store.sh postgres
 run "Release build of the Client" scripts/check-release-build.sh fleet-agent
 run "Release build of the Server" scripts/check-release-build.sh fleet-server
 run "Supply chain" scripts/check-deny.sh
@@ -239,6 +274,13 @@ run "Fuzzing" scripts/check-fuzz.sh
 run "Interop with opamp-go" scripts/check-interop.sh
 run "Service smoke test" scripts/check-service-smoke.sh
 run "G-20 failover and load" scripts/check-g20.sh
+# The store checks run last, each alone. A test schema fsyncs every new relation file, and beside
+# the builds' writes each sync takes seconds, so opening a schema outlasts the tests' timeout. With
+# a bucket named, both run the Server's tests against the same stores.
+alone
+run "S3 store" scripts/check-store.sh s3
+alone
+run "PostgreSQL store" scripts/check-store.sh postgres
 # The release publishes; it is no gate, and check-build-hardening.sh holds its steps.
 # Not a gate: .github/workflows/release.yml
 

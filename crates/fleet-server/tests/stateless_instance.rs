@@ -9,7 +9,13 @@
 //! with a schema of its name, which it drops afterwards. It runs against the database the
 //! `FLEET_TEST_POSTGRES_*` variables name and the bucket the `FLEET_TEST_S3_*` ones name, and skips,
 //! saying so, where either is not named. `scripts/check-store.sh postgres` runs it, and fails on a
-//! skip.
+//! skip. Beside them, a Server on PostgreSQL alone, its blobs in a data directory, takes its lease
+//! before it opens a listener (ADR-0023 clause 23).
+//!
+//! The commands an operator runs against those stores run here as the binary: `server
+//! blobs-to-s3`, its arguments refused without a store, and `server audit-verify --config`. The
+//! Server's image runs read-only and with no volume where `FLEET_TEST_SERVER_IMAGE` names one, and
+//! that test skips, saying so, where none is named.
 #![cfg(unix)]
 
 mod ports;
@@ -86,8 +92,29 @@ impl Role {
             ca_file: variable("FLEET_TEST_POSTGRES_CA_FILE").map(Into::into),
             name: format!("fleet_test_{}", random_hex()),
         };
+        // The test makes a role of its own; a developer database whose user may not says so.
+        assert_eq!(
+            role.query(
+                "",
+                Some(
+                    "SELECT count(*) FROM pg_roles WHERE rolname = current_user \
+                     AND (rolsuper OR (rolcreaterole \
+                     AND has_database_privilege(current_database(), 'CREATE')))"
+                        .to_string()
+                ),
+            ),
+            Some(1),
+            "the FLEET_TEST_POSTGRES_USER {user} lacks CREATEROLE or CREATE on the database, which \
+             this test needs to make a role and a schema of its own: ALTER ROLE {user} CREATEROLE; \
+             GRANT CREATE ON DATABASE {dbname} TO {user}",
+            user = role.user,
+            dbname = role.dbname
+        );
+        // The schema is made for the role, which since PostgreSQL 16 its maker may do only as a
+        // member of it: a maker without SUPERUSER holds the role with ADMIN, so grants it itself.
         role.sql(&format!(
             "CREATE ROLE {name} LOGIN PASSWORD '{name}'; \
+             GRANT {name} TO CURRENT_USER; \
              CREATE SCHEMA {name} AUTHORIZATION {name};",
             name = role.name
         ));
@@ -108,13 +135,59 @@ impl Role {
     /// Runs `statements` as the administrator, in the role's schema, and then `count`, a query of
     /// one number, answering it.
     fn query(&self, statements: &str, count: Option<String>) -> Option<i64> {
+        let statements = format!("SET search_path = {};{statements}", self.name);
+        let (pg, roots) = self.connection();
+        std::thread::spawn(move || {
+            session(pg, roots, |client| async move {
+                client.batch_execute(&statements).await.expect("sql");
+                match count {
+                    Some(query) => Some(
+                        client
+                            .query_one(query.as_str(), &[])
+                            .await
+                            .expect("count")
+                            .get::<_, i64>(0),
+                    ),
+                    None => None,
+                }
+            })
+        })
+        .join()
+        .expect("the statements' thread")
+    }
+
+    /// Runs `statements` as the administrator, in the role's schema, in a session held open until
+    /// the answer is dropped: what they lock stays locked until then.
+    fn hold(&self, statements: &str) -> Held {
+        let statements = format!("SET search_path = {};{statements}", self.name);
+        let (pg, roots) = self.connection();
+        let (ran, running) = mpsc::channel();
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            session(pg, roots, |client| async move {
+                client.batch_execute(&statements).await.expect("sql");
+                let _ = ran.send(());
+                let _ = released.await;
+            });
+        });
+        running
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the held statements ran");
+        Held {
+            release: Some(release),
+            thread: Some(thread),
+        }
+    }
+
+    /// How to reach the database as the administrator, and the roots its certificate is checked
+    /// against where it is reached over TLS.
+    fn connection(&self) -> (tokio_postgres::Config, Option<rustls::RootCertStore>) {
         let mut pg = tokio_postgres::Config::new();
         pg.host(&self.host)
             .port(self.port)
             .dbname(&self.dbname)
             .user(&self.user)
             .password(&self.password);
-        let statements = format!("SET search_path = {};{statements}", self.name);
         let roots = self.ca_file.as_ref().map(|path| {
             opamp::tls::root_store(&std::fs::read(path).expect("FLEET_TEST_POSTGRES_CA_FILE"))
                 .expect("roots")
@@ -122,46 +195,7 @@ impl Role {
         if roots.is_some() {
             pg.ssl_mode(tokio_postgres::config::SslMode::Require);
         }
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime")
-                .block_on(async move {
-                    let client = match roots {
-                        Some(roots) => {
-                            opamp::tls::install_ring_provider();
-                            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
-                                opamp::tls::client_builder()
-                                    .with_root_certificates(roots)
-                                    .with_no_client_auth(),
-                            );
-                            let (client, connection) = pg.connect(tls).await.expect("db");
-                            tokio::spawn(connection);
-                            client
-                        }
-                        None => {
-                            let (client, connection) =
-                                pg.connect(tokio_postgres::NoTls).await.expect("db");
-                            tokio::spawn(connection);
-                            client
-                        }
-                    };
-                    client.batch_execute(&statements).await.expect("sql");
-                    match count {
-                        Some(query) => Some(
-                            client
-                                .query_one(query.as_str(), &[])
-                                .await
-                                .expect("count")
-                                .get::<_, i64>(0),
-                        ),
-                        None => None,
-                    }
-                })
-        })
-        .join()
-        .expect("the statements' thread")
+        (pg, roots)
     }
 
     /// `[database.postgres]` for the role, its password in a file under `dir`.
@@ -184,6 +218,57 @@ impl Role {
             password_file.display().to_string(),
         )
     }
+}
+
+/// A session of [`Role::hold`], closed on drop.
+struct Held {
+    release: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Connects as `pg` says, over TLS where `roots` are given, and runs `act` on the client, on a
+/// runtime of its own.
+fn session<T, F, Fut>(pg: tokio_postgres::Config, roots: Option<rustls::RootCertStore>, act: F) -> T
+where
+    F: FnOnce(tokio_postgres::Client) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async move {
+            let client = match roots {
+                Some(roots) => {
+                    opamp::tls::install_ring_provider();
+                    let tls = tokio_postgres_rustls::MakeRustlsConnect::new(
+                        opamp::tls::client_builder()
+                            .with_root_certificates(roots)
+                            .with_no_client_auth(),
+                    );
+                    let (client, connection) = pg.connect(tls).await.expect("db");
+                    tokio::spawn(connection);
+                    client
+                }
+                None => {
+                    let (client, connection) = pg.connect(tokio_postgres::NoTls).await.expect("db");
+                    tokio::spawn(connection);
+                    client
+                }
+            };
+            act(client).await
+        })
 }
 
 impl Drop for Role {
@@ -325,7 +410,7 @@ fn instance_id() -> String {
     )
 }
 
-// Verifies: ADR-0023, ADR-0025
+// Verifies: ADR-0023, ADR-0045
 #[test]
 fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
     opamp::tls::install_ring_provider();
@@ -492,9 +577,9 @@ fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
 /// the Server before it takes its lease: no lease row and no audit chain is left for another
 /// instance to count as live or to close as lapsed
 /// (ADR-0023 clause 16,
-/// ADR-0025
+/// ADR-0045
 /// clause 2).
-// Verifies: ADR-0023, ADR-0025
+// Verifies: ADR-0023, ADR-0045
 #[test]
 fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
     opamp::tls::install_ring_provider();
@@ -568,9 +653,9 @@ fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
 /// An instance whose lease lapsed while a newer Server migrated the schema stops at its new lease
 /// as at a failed start: it prints the refusal, naming the version the schema needs and its own,
 /// and exits with status 1
-/// (ADR-0025
+/// (ADR-0045
 /// clause 16).
-// Verifies: ADR-0025
+// Verifies: ADR-0045
 #[test]
 fn an_instance_whose_lease_lapsed_on_a_newer_schema_exits_naming_both_versions() {
     opamp::tls::install_ring_provider();
@@ -669,5 +754,758 @@ fn an_instance_whose_lease_lapsed_on_a_newer_schema_exits_naming_both_versions()
         role.count("leases WHERE expires_at > now()"),
         0,
         "no new lease"
+    );
+}
+
+/// A Server on PostgreSQL takes its lease before it opens either listener: while the lock its
+/// lease is taken under is held elsewhere, it waits for it, and neither plane takes a connection;
+/// once the lock is let go it holds a lease and both planes serve
+/// (ADR-0023 clause 23).
+/// Its blobs lie in a data directory, so no bucket is needed.
+// Verifies: ADR-0023
+#[test]
+fn an_instance_takes_its_lease_before_it_opens_a_listener() {
+    opamp::tls::install_ring_provider();
+    let Some(role) = Role::named() else { return };
+    let files = tempfile::tempdir().expect("tempdir");
+    let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("a self-signed certificate");
+    std::fs::write(files.path().join("cert.pem"), cert.cert.pem()).expect("write cert");
+    std::fs::write(
+        files.path().join("key.pem"),
+        cert.signing_key.serialize_pem(),
+    )
+    .expect("write key");
+    let (agent, operator) = (ports::spare_port(), ports::spare_port());
+    let config = files.path().join("server.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "listen = \"127.0.0.1:{agent}\"\ndata_dir = {data:?}\n\
+             [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {cert:?}\n\
+             [rest]\nlisten = \"127.0.0.1:{operator}\"\n\
+             [database]\nstore = \"postgres\"\n{database}",
+            data = files.path().join("data").display().to_string(),
+            cert = files.path().join("cert.pem").display().to_string(),
+            key = files.path().join("key.pem").display().to_string(),
+            database = role.section(files.path()),
+        ),
+    )
+    .expect("write server.toml");
+    // The lock a lease is taken under, as the Server names it for the schema it works in.
+    let held = role.hold(
+        "SELECT pg_advisory_lock(hashtextextended('opamp-fleet-server-leases:' || \
+         coalesce(current_schema(), ''), 0));",
+    );
+
+    let mut server = ServerUnderTest(
+        Command::new(env!("CARGO_BIN_EXE_server"))
+            .arg("--config")
+            .arg(&config)
+            .current_dir(files.path())
+            .env("RUST_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the server"),
+    );
+    let (lines, logged) = mpsc::channel();
+    let stderr = server.0.stderr.take().expect("stderr");
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let takes = |port: u16| {
+        std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(200),
+        )
+        .is_ok()
+    };
+    // The Server's session waits for the lock: it is taking its lease. Its `lock_timeout` of five
+    // seconds bounds how long the lock may be held before its start fails.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while role.count(&format!(
+        "pg_locks l JOIN pg_stat_activity a USING (pid) \
+         WHERE l.locktype = 'advisory' AND NOT l.granted AND a.usename = '{}'",
+        role.name
+    )) == 0
+    {
+        assert!(
+            server.0.try_wait().expect("the server's status").is_none(),
+            "the server exited before it took its lease:\n{}",
+            logged.try_iter().collect::<Vec<_>>().join("\n")
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the server never asked for its lease"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !takes(agent) && !takes(operator),
+        "a plane took a connection before the lease was held"
+    );
+    assert_eq!(role.count("leases"), 0, "no lease yet");
+    drop(held);
+
+    let mut seen = Vec::new();
+    let came_up = loop {
+        match logged.recv_timeout(Duration::from_secs(60)) {
+            Ok(line) if line.contains("serving the REST API") => break true,
+            Ok(line) => seen.push(line),
+            Err(_) => break false,
+        }
+    };
+    assert!(came_up, "the server never came up:\n{}", seen.join("\n"));
+    assert_eq!(role.count("leases WHERE expires_at > now()"), 1, "a lease");
+    assert!(takes(agent) && takes(operator), "both planes serve");
+}
+
+/// A Server on PostgreSQL with its blobs in `data_dir` under `files`, both planes on the loopback
+/// over TLS with the certificate `files` holds, its lease lapsing three seconds after it stops:
+/// its `server.toml`, the port of its Operator plane, and the certificate's PEM.
+fn on_postgres_with_a_data_dir(role: &Role, files: &Path) -> (PathBuf, u16, String) {
+    let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("a self-signed certificate");
+    std::fs::write(files.join("cert.pem"), cert.cert.pem()).expect("write cert");
+    std::fs::write(files.join("key.pem"), cert.signing_key.serialize_pem()).expect("write key");
+    let operator = ports::spare_port();
+    let config = files.join("server.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "listen = \"127.0.0.1:{agent}\"\ndata_dir = {data:?}\n\
+             [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {cert:?}\n\
+             [rest]\nlisten = \"127.0.0.1:{operator}\"\n\
+             [database]\nstore = \"postgres\"\nlease_renew_secs = 1\nlease_secs = 3\n{database}",
+            agent = ports::spare_port(),
+            data = files.join("data").display().to_string(),
+            cert = files.join("cert.pem").display().to_string(),
+            key = files.join("key.pem").display().to_string(),
+            database = role.section(files),
+        ),
+    )
+    .expect("write server.toml");
+    (config, operator, cert.cert.pem())
+}
+
+/// Starts the Server on `config` and waits until it serves.
+fn serving(config: &Path) -> ServerUnderTest {
+    let mut server = ServerUnderTest(
+        Command::new(env!("CARGO_BIN_EXE_server"))
+            .arg("--config")
+            .arg(config)
+            .current_dir(config.parent().expect("a directory"))
+            .env("RUST_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the server"),
+    );
+    let (lines, logged) = mpsc::channel();
+    let stderr = server.0.stderr.take().expect("stderr");
+    // Read to the end, past the start this waits for: once its reader is gone, every later write
+    // of the Server's log fails, its audit record's among them, and an act it cannot record is
+    // refused.
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = lines.send(line);
+        }
+    });
+    let mut seen = Vec::new();
+    let came_up = loop {
+        match logged.recv_timeout(Duration::from_secs(60)) {
+            Ok(line) if line.contains("serving the REST API") => break true,
+            Ok(line) => seen.push(line),
+            Err(_) => break false,
+        }
+    };
+    assert!(came_up, "the server never came up:\n{}", seen.join("\n"));
+    server
+}
+
+/// Runs the `server` binary with `args` in `dir`, no configuration named by the environment.
+fn command(dir: &Path, args: &[&str]) -> (Option<i32>, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_server"))
+        .args(args)
+        .current_dir(dir)
+        .env_remove("FLEET_SERVER_CONFIG")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run the server");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// `server blobs-to-s3` refuses an argument missing, unknown or given twice with its usage line,
+/// which names the arguments, and exit status 2; a configuration without a bucket, naming the
+/// keys to set, and a `--data-dir` that holds no `blobs/`, naming `--data-dir`, with status 1.
+/// No store is reached, so it runs everywhere.
+// Verifies: ADR-0023
+#[test]
+fn blobs_to_s3_names_a_missing_or_wrong_argument() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let usage = "server blobs-to-s3 --data-dir <data_dir> [--config <server.toml>]";
+    for args in [
+        &["blobs-to-s3"][..],
+        &["blobs-to-s3", "--data-dir"],
+        &["blobs-to-s3", "--config", "server.toml"],
+        &["blobs-to-s3", "--data-dir", "data", "--bucket", "fleet"],
+        &["blobs-to-s3", "--data-dir", "data", "--data-dir", "data"],
+    ] {
+        let (status, _, stderr) = command(dir.path(), args);
+        assert_eq!(status, Some(2), "{args:?}:\n{stderr}");
+        assert!(
+            stderr.contains(usage),
+            "{args:?} names the arguments:\n{stderr}"
+        );
+    }
+
+    std::fs::write(dir.path().join("password"), "unused").expect("password");
+    let database = format!(
+        "[tls]\ncert_file = \"cert.pem\"\nkey_file = \"key.pem\"\nclient_ca_file = \"cert.pem\"\n[database]\nstore = \"postgres\"\n[database.postgres]\nhost = \"127.0.0.1\"\n\
+         dbname = \"fleet\"\nuser = \"fleet\"\npassword_file = {:?}\ntls = false\n",
+        dir.path().join("password").display().to_string()
+    );
+    std::fs::write(dir.path().join("no-bucket.toml"), &database).expect("write");
+    std::fs::write(
+        dir.path().join("server.toml"),
+        format!(
+            "{database}[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"http://127.0.0.1:1\"\n\
+             bucket = \"fleet\"\nregion = \"us-east-1\"\n"
+        ),
+    )
+    .expect("write");
+    std::fs::create_dir(dir.path().join("data")).expect("data");
+    let (status, _, stderr) = command(
+        dir.path(),
+        &[
+            "blobs-to-s3",
+            "--data-dir",
+            "data",
+            "--config",
+            "no-bucket.toml",
+        ],
+    );
+    assert_eq!(status, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("no database or no bucket") && stderr.contains("[blobs] store = \"s3\""),
+        "a configuration without a bucket names the keys to set:\n{stderr}"
+    );
+    let (status, _, stderr) = command(dir.path(), &["blobs-to-s3", "--data-dir", "data"]);
+    assert_eq!(status, Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("--data-dir: ") && stderr.contains("holds no blobs/"),
+        "a data directory without blobs is named by its argument:\n{stderr}"
+    );
+}
+
+/// `server blobs-to-s3`, run as the operator runs it once every instance has stopped, uploads the
+/// artifact of an entry the Server on PostgreSQL kept in its data directory into the bucket and
+/// checks the bucket holds it; run again with the artifact neither in the data directory nor in
+/// the bucket, it exits non-zero naming the entry
+/// (ADR-0023 clause 19).
+// Verifies: ADR-0023
+#[test]
+fn blobs_to_s3_copies_an_entrys_artifact_into_the_bucket_and_checks_it() {
+    opamp::tls::install_ring_provider();
+    let Some(role) = Role::named() else { return };
+    let Some(bucket) = Bucket::named() else {
+        return;
+    };
+    let files = tempfile::tempdir().expect("tempdir");
+    let (config, operator, cert) = on_postgres_with_a_data_dir(&role, files.path());
+    let server = serving(&config);
+    let package = format!("https://127.0.0.1:{operator}/api/v1/packages/otelcol/1.0.0");
+    let artifact = b"an artifact kept in the data directory".to_vec();
+    let (created, uploaded) = bucket.runtime.block_on(async {
+        let client = reqwest::Client::builder()
+            .tls_certs_only([reqwest::Certificate::from_pem(cert.as_bytes()).expect("the root")])
+            .build()
+            .expect("a client");
+        let created = client
+            .put(&package)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("create the package");
+        let uploaded = client
+            .put(format!("{package}/entries/linux/amd64"))
+            .body(artifact.clone())
+            .send()
+            .await
+            .expect("upload the entry");
+        (created.status(), uploaded.status())
+    });
+    assert_eq!((created.as_u16(), uploaded.as_u16()), (200, 200));
+    drop(server);
+    // The command runs only once no instance holds a live lease.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while role.count("leases WHERE expires_at > now()") > 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the stopped Server's lease never lapsed"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // The configuration the Server will start with: the database and the bucket, no data_dir.
+    let s3 = files.path().join("s3.toml");
+    std::fs::write(
+        &s3,
+        format!(
+            "[tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {cert:?}\n\
+             [database]\nstore = \"postgres\"\n{}{}",
+            role.section(files.path()),
+            bucket.section(),
+            cert = files.path().join("cert.pem").display().to_string(),
+            key = files.path().join("key.pem").display().to_string(),
+        ),
+    )
+    .expect("write s3.toml");
+    let data = files.path().join("data");
+    let args = [
+        "blobs-to-s3",
+        "--data-dir",
+        data.to_str().expect("UTF-8"),
+        "--config",
+        s3.to_str().expect("UTF-8"),
+    ];
+    let (status, stdout, stderr) = command(files.path(), &args);
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    let sha256 = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&artifact));
+    assert_eq!(
+        bucket.keys(),
+        [format!("{}blobs/{sha256}", bucket.prefix)],
+        "the artifact is copied"
+    );
+    assert!(
+        stdout.contains("1 blobs in bucket") && stdout.contains("holds every artifact"),
+        "{stdout}"
+    );
+
+    // Gone from both, the artifact is named by its entry.
+    std::fs::remove_file(data.join("blobs").join(&sha256)).expect("the kept artifact");
+    bucket
+        .runtime
+        .block_on(
+            bucket
+                .store
+                .delete(&Key::from(format!("{}blobs/{sha256}", bucket.prefix))),
+        )
+        .expect("delete the copy");
+    let (status, stdout, stderr) = command(files.path(), &args);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "package otelcol@1.0.0 for linux-amd64: its artifact {sha256} is neither in "
+        )),
+        "the check names the entry whose artifact is missing:\n{stderr}"
+    );
+}
+
+/// `server audit-verify --config`, with no schema named, reads the record in the schema that is
+/// the role's default, where the Server wrote it: it lists the Server's chain and exits 0 while
+/// the record holds, and exits 1 naming the entry once a line is changed
+/// (ADR-0029 clause 5).
+// Verifies: ADR-0029
+#[test]
+fn audit_verify_with_no_schema_named_reads_the_default_and_fails_where_the_record_does_not_hold() {
+    opamp::tls::install_ring_provider();
+    let Some(role) = Role::named() else { return };
+    let files = tempfile::tempdir().expect("tempdir");
+    let (config, _, _) = on_postgres_with_a_data_dir(&role, files.path());
+    // Stopped as an orchestrator stops it, the Server closes its chain.
+    let mut server = serving(&config);
+    // SAFETY: kill(2) on the pid of a child this test started and has not yet reaped.
+    let sent = unsafe { libc::kill(server.0.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(sent, 0, "send SIGTERM");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while server.0.try_wait().expect("the server's status").is_none() {
+        assert!(Instant::now() < deadline, "the server did not stop");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let entries = role.count("audit_entries");
+    assert!(
+        entries >= 2,
+        "the Server wrote its chain: {entries} entries"
+    );
+    let args = ["audit-verify", "--config", config.to_str().expect("UTF-8")];
+
+    let (status, stdout, stderr) = command(files.path(), &args);
+    assert_eq!(status, Some(0), "the record holds:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.lines().any(|line| line.starts_with("chain ")
+            && line.ends_with(&format!(": {entries} entries, closed"))),
+        "the chain of the role's schema is read:\n{stdout}"
+    );
+
+    role.sql(
+        "UPDATE audit_entries SET line = replace(line, '\"seq\":1,', '\"seq\":1, ') \
+         WHERE seq = 1;",
+    );
+    let (status, stdout, stderr) = command(files.path(), &args);
+    assert_eq!(
+        status,
+        Some(1),
+        "the record does not hold:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("the chain breaks: chain ")
+                && line.contains(", entry 2: its prev ")),
+        "the entry after the changed line is named:\n{stdout}\n{stderr}"
+    );
+}
+
+/// The `docker run` of [`the_image_read_only_and_without_a_volume_serves_on_postgresql_and_s3`],
+/// its container removed on drop.
+struct Container {
+    name: String,
+    child: Child,
+}
+
+impl Drop for Container {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["rm", "--force", &self.name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The Server's image, run as an orchestrator runs it with `--read-only` and no volume of the
+/// operator's, on PostgreSQL and S3, starts, admits an Agent over mutual TLS, and writes nothing
+/// (ADR-0023 clause 1):
+/// - its own filesystem stays unchanged, with no writable directory, `$TMPDIR` and `$HOME`
+///   included;
+/// - the anonymous volume the image's `VOLUME` makes stays empty;
+/// - beside the files it reads nothing appears. They are mounted read-only, each at its own path.
+///
+/// The image is the one `FLEET_TEST_SERVER_IMAGE` names, built from
+/// `packaging/container/Containerfile`, run by `docker` with the host's network; where no image is
+/// named the test says so and skips.
+// Verifies: ADR-0023
+#[test]
+fn the_image_read_only_and_without_a_volume_serves_on_postgresql_and_s3() {
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use opamp::proto::{AgentCapabilities, AgentDescription, AgentToServer, AnyValue, KeyValue};
+    use rcgen::{CertificateParams, IsCa, Issuer, KeyPair, SanType};
+    use std::os::unix::fs::MetadataExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+
+    opamp::tls::install_ring_provider();
+    let Some(image) = variable("FLEET_TEST_SERVER_IMAGE") else {
+        eprintln!(
+            "skipped: no Server image is named — set FLEET_TEST_SERVER_IMAGE to an image built \
+             from packaging/container/Containerfile to run the test of the image read-only"
+        );
+        return;
+    };
+    let Some(role) = Role::named() else { return };
+    let Some(bucket) = Bucket::named() else {
+        return;
+    };
+
+    // The Server's certificate, and a CA of the hosts' that issues the Agent's.
+    let files = tempfile::tempdir().expect("tempdir");
+    let server = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+        .expect("the server's certificate");
+    let ca_key = KeyPair::generate().expect("ca key");
+    let mut ca = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+    ca.distinguished_name
+        .push(rcgen::DnType::CommonName, "opamp-fleet-image-test-ca");
+    ca.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca = ca.self_signed(&ca_key).expect("ca");
+    let host_key = KeyPair::generate().expect("host key");
+    let mut host = CertificateParams::new(Vec::<String>::new()).expect("host params");
+    host.distinguished_name
+        .push(rcgen::DnType::CommonName, "image-host");
+    host.subject_alt_names = vec![SanType::URI(
+        "urn:opamp-fleet:host:image-host"
+            .try_into()
+            .expect("a host URI"),
+    )];
+    let host = host
+        .signed_by(
+            &host_key,
+            &Issuer::from_ca_cert_pem(&ca.pem(), ca_key).expect("issuer"),
+        )
+        .expect("the host's certificate");
+    std::fs::write(files.path().join("cert.pem"), server.cert.pem()).expect("write cert");
+    std::fs::write(
+        files.path().join("key.pem"),
+        server.signing_key.serialize_pem(),
+    )
+    .expect("write key");
+    std::fs::write(files.path().join("hosts-ca.pem"), ca.pem()).expect("write the hosts' CA");
+    let (agent, operator) = (ports::spare_port(), ports::spare_port());
+    let config = files.path().join("server.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {ca:?}\n\
+             [database]\nstore = \"postgres\"\n{database}{blobs}",
+            cert = files.path().join("cert.pem").display().to_string(),
+            key = files.path().join("key.pem").display().to_string(),
+            ca = files.path().join("hosts-ca.pem").display().to_string(),
+            database = role.section(files.path()),
+            blobs = bucket.section(),
+        ),
+    )
+    .expect("write server.toml");
+    let read = tree(files.path());
+
+    // Every file the Server reads, mounted read-only where the configuration names it; the files'
+    // owner runs it, so that the password files kept to their owner are read.
+    let mut mounts = vec![files.path().display().to_string()];
+    mounts.extend(role.ca_file.as_ref().map(|ca| ca.display().to_string()));
+    mounts.extend(bucket.secret_access_key_file.clone());
+    let owner = std::fs::metadata(files.path()).expect("the files' owner");
+    let name = format!("fleet-test-{}", random_hex());
+    let mut run = Command::new("docker");
+    run.args([
+        "run",
+        "--rm",
+        "--name",
+        &name,
+        "--read-only",
+        "--network",
+        "host",
+    ])
+    .arg(format!("--user={}:{}", owner.uid(), owner.gid()))
+    .arg(format!("--env=FLEET_SERVER__LISTEN=127.0.0.1:{agent}"))
+    .arg(format!(
+        "--env=FLEET_SERVER__REST__LISTEN=127.0.0.1:{operator}"
+    ))
+    .arg("--env=RUST_LOG=info");
+    for path in &mounts {
+        run.arg(format!("--volume={path}:{path}:ro"));
+    }
+    let mut container = Container {
+        name: name.clone(),
+        child: run
+            .arg(&image)
+            .arg("--config")
+            .arg(&config)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("cannot run docker: {e}")),
+    };
+    let (lines, logged) = mpsc::channel();
+    let stderr = container.child.stderr.take().expect("stderr");
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = Vec::new();
+    // An image pulled or started slowly on a loaded runner is still waited for.
+    let came_up = loop {
+        match logged.recv_timeout(Duration::from_secs(120)) {
+            Ok(line) if line.contains("serving the REST API") => break true,
+            Ok(line) => seen.push(line),
+            Err(_) => break false,
+        }
+    };
+    assert!(came_up, "the image never came up:\n{}", seen.join("\n"));
+
+    // An Agent on the host's certificate is admitted: its report is answered without an error,
+    // and the database holds its record.
+    let uid = opamp::uid::InstanceUid::from_wire(&[7; 16]).expect("a uid");
+    let pair = |key: &str, value: &str| KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(opamp::proto::any_value::Value::StringValue(
+                value.to_string(),
+            )),
+        }),
+    };
+    let report = AgentToServer {
+        instance_uid: uid.as_bytes().to_vec(),
+        sequence_num: 1,
+        capabilities: AgentCapabilities::ReportsStatus as u64,
+        agent_description: Some(AgentDescription {
+            identifying_attributes: vec![
+                pair("service.name", "otelcol"),
+                pair("service.instance.id", &uid.to_string()),
+            ],
+            non_identifying_attributes: vec![pair("host.name", "image-host")],
+        }),
+        ..Default::default()
+    };
+    let tls = opamp::tls::client_builder()
+        .with_root_certificates(
+            opamp::tls::root_store(server.cert.pem().as_bytes()).expect("roots"),
+        )
+        .with_client_auth_cert(
+            vec![host.der().clone()],
+            rustls::pki_types::PrivateKeyDer::Pkcs8(host_key.serialize_der().into()),
+        )
+        .expect("client auth");
+    let reply = bucket.runtime.block_on(async {
+        let limit = opamp::frame::DEFAULT_MAX_MESSAGE_SIZE;
+        let mut socket = opamp::client::ws::connect(
+            &format!("wss://127.0.0.1:{agent}/v1/opamp"),
+            &Default::default(),
+            Some(opamp::client::ws::Connector::Rustls(std::sync::Arc::new(
+                tls,
+            ))),
+            limit,
+        )
+        .await
+        .expect("the Agent plane takes the host's certificate");
+        socket
+            .send(Message::Binary(
+                opamp::frame::encode_within(&report, limit)
+                    .expect("within the limit")
+                    .into(),
+            ))
+            .await
+            .expect("send the report");
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(60), socket.next())
+                .await
+                .expect("an answer")
+                .expect("an open connection")
+                .expect("a frame");
+            if let Message::Binary(data) = message {
+                break opamp::frame::decode::<opamp::proto::ServerToAgent>(&data, limit)
+                    .expect("decode");
+            }
+        }
+    });
+    assert_eq!(reply.instance_uid, uid.as_bytes().to_vec(), "{reply:?}");
+    assert!(reply.error_response.is_none(), "{reply:?}");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while role.count("agents") == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the admitted Agent was never recorded"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Nothing written: the container's own filesystem is unchanged but for the mount points the
+    // runtime made for the files it reads, and so is what it reads.
+    let diff = Command::new("docker")
+        .args(["diff", &name])
+        .output()
+        .expect("diff the container");
+    assert!(
+        diff.status.success(),
+        "{}",
+        String::from_utf8_lossy(&diff.stderr)
+    );
+    assert_eq!(
+        written(&String::from_utf8_lossy(&diff.stdout), &mounts),
+        Vec::<String>::new(),
+        "the container's filesystem is unchanged"
+    );
+    let mut volume = Command::new("docker")
+        .args(["cp", &format!("{name}:/var/lib/opamp-fleet"), "-"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("copy the image's volume out");
+    let listed = Command::new("tar")
+        .arg("-tf")
+        .arg("-")
+        .stdin(volume.stdout.take().expect("the copy's output"))
+        .output()
+        .expect("list the image's volume");
+    assert!(
+        volume.wait().expect("the copy").success(),
+        "the volume copied out"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout).trim_end(),
+        "opamp-fleet/",
+        "the image's volume stays empty"
+    );
+    assert!(
+        container
+            .child
+            .try_wait()
+            .expect("the run's status")
+            .is_none(),
+        "the image still serves"
+    );
+    drop(container);
+    assert_eq!(
+        tree(files.path()),
+        read,
+        "nothing is written beside what it reads"
+    );
+}
+
+/// The lines of `docker diff` that are not a mount point of `mounts` or a directory above one. The
+/// runtime makes each mount point the image lacks, and the directories above it, before it turns
+/// the root filesystem read-only, so those are added (`A`) or changed (`C`) without the Server
+/// having written anything; every other line is something written.
+fn written(diff: &str, mounts: &[String]) -> Vec<String> {
+    diff.lines()
+        .filter(|line| {
+            let made = line
+                .strip_prefix("A ")
+                .or_else(|| line.strip_prefix("C "))
+                .is_some_and(|path| {
+                    mounts.iter().any(|mount| {
+                        mount == path
+                            || path == "/"
+                            || mount
+                                .strip_prefix(path)
+                                .is_some_and(|below| below.starts_with('/'))
+                    })
+                });
+            !made
+        })
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// [`written`] passes over the mount points the runtime made and the directories above them, and
+/// keeps every other line, a file beside a mount point or below a directory above one included.
+#[test]
+fn the_mount_points_the_runtime_made_are_not_counted_as_written() {
+    let mounts = [
+        "/tmp/.tmpAbC123".to_string(),
+        "/home/runner/work/_temp/s3-secret".to_string(),
+        "/home/runner/work/_temp/postgres-tls/ca.pem".to_string(),
+    ];
+    let made = "C /tmp\nA /tmp/.tmpAbC123\nC /home\nA /home/runner\nA /home/runner/work\n\
+                A /home/runner/work/_temp\nA /home/runner/work/_temp/s3-secret\n\
+                A /home/runner/work/_temp/postgres-tls\n\
+                A /home/runner/work/_temp/postgres-tls/ca.pem\n";
+    assert_eq!(written(made, &mounts), Vec::<String>::new());
+    assert_eq!(written("", &mounts), Vec::<String>::new());
+    let stray = "C /tmp\nA /tmp/.tmpAbC123\nA /tmp/.tmpAbC1234\nA /tmp/server.log\n\
+                 A /home/runner/.cache\nD /home\nC /etc/passwd\nA /home/runner/work/_temp/s3\n";
+    assert_eq!(
+        written(stray, &mounts),
+        [
+            "A /tmp/.tmpAbC1234",
+            "A /tmp/server.log",
+            "A /home/runner/.cache",
+            "D /home",
+            "C /etc/passwd",
+            "A /home/runner/work/_temp/s3",
+        ]
     );
 }

@@ -114,7 +114,7 @@ finish() {
         <<< "$(sed -E 's/, and /\n/g; s/ and /\n/g; s/, /\n/g' <<< "$applies")" \
         && prose+=("ADR-$key: $applies")
     done < <(show docs/adr/README.md 2>/dev/null | awk -F'|' '
-      /^### Binding/ { p = 1; next } p && /^#/ { exit }
+      /^### Binding/ { p = 1; next } p && /^(#|##|###) / { exit }
       p && /^\| \[/ {
         key = $2; sub(/^ *\[/, "", key); sub(/\].*/, "", key)
         applies = $4; gsub(/^ +| +$/, "", applies)

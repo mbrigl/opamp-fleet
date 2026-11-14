@@ -16,7 +16,7 @@ The link this document is about is **Client ↔ Server**. In this project's voca
 lives *inside* the Client
 ([`crates/fleet-agent/src/supervisor/`](../crates/fleet-agent/src/supervisor/)) and
 does not speak to the Server itself — the Client carries every Supervisor's Agent over its one
-connection (ADR-0016, ADR-0018). Where other OpAMP material says "Supervisor ↔ Server", this is the
+connection (ADR-0016, ADR-0046). Where other OpAMP material says "Supervisor ↔ Server", this is the
 link it means.
 
 One adjacent surface is in scope because it terminates on the same host and carries the same
@@ -182,9 +182,9 @@ has:
   `..` and through no link or junction; anything else is refused before anything is written. A
   Supervisors' root the file places outside them is never created, restricted or handed over. The
   hand-over and the cut act on a link or junction itself on every platform.
-- **A delivered Supervisor block reaches no further than the package signature** (ADR-0018): no
+- **A delivered Supervisor block reaches no further than the package signature** (ADR-0046): no
   environment or arguments beyond what the running block has or the operator allowed, and no file
-  outside its own `config/` directory. Under ADR-0018 clause 35's rule — no variable that steers
+  outside its own `config/` directory. Under ADR-0046 clause 35's rule — no variable that steers
   which code a program loads, no value pointing where the Server delivers unsigned files — the
   Client refuses the names and placeholders the clause lists, and further loader variables
   (`PATHEXT`, `COMSPEC`, `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB`, `RUBYLIB`) and new values
@@ -203,8 +203,26 @@ has:
   a root is created one held directory at a time; and the `current` pointer is switched in the
   held layout root on Windows, while on Unix it is switched by name in the layout root, whose own
   name lies in a directory only root writes, each step acting on the name and following no link.
-  A test holds the modules these steps run in to no path-based write, removal, rename or mode
+  A privileged step reads `supervisor.toml` through the held data root too. The enrolment of
+  `service install` and `service config` reads the CA file and the bootstrap pair once, before it
+  connects, and holds them in memory: each only as a regular file of at most 1 MiB, so a device or
+  a FIFO is refused unread, and each by its name in a held directory, refusing a link there. The
+  path is resolved one component at a time, `..` and every link on it included: a root or the
+  state directory it passes must hold the file directly, and a path that goes on beneath one is
+  refused, except the state directory directly in a root, which is held by its name without
+  following a link there. Elsewhere a link on the administrator's path is followed. The
+  questionnaire reads an answered CA the same way, the copy an earlier answer left included.
+  A test holds the modules these steps run in to no path-based read, write, removal, rename or mode
   change outside a justified list (`privileged_steps_follow_no_link.rs`).
+- **A privileged enrolment connects where its own run answered**
+  ([ADR-0044](adr/0044-a-privileged-enrolment-connects-where-its-own-run-answered.md)):
+  a run that answered the questionnaire or `--endpoint` enrols with the endpoint and the CA
+  certificates it answered, held in memory, and does not read them back from `supervisor.toml`,
+  which the service's account can rewrite meanwhile. An answer without a CA leaves the built-in
+  roots. `--endpoint` over a file the install keeps answers nothing, and the install refuses to
+  enrol where the kept file names another endpoint, naming both. Residual: a run that answered
+  nothing, such as an upgrade over an existing file, takes the endpoint and the CA from the file,
+  read once as above; under a matching `--endpoint`, the CA still comes from the file.
 - **No credential in `server.toml` authenticates on its own** (ADR-0040 clause 21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).
@@ -360,19 +378,19 @@ Agent's host. They deserve at least as much attention as the transport, and argu
 through seven channels. It **can** write any files into a Supervisor's own `config/` directory and
 restart its process, except for a Supervisor the host lists in `[supervisors]
 remote_config_disabled`, whose Agent takes no remote configuration and whose delivered block must
-repeat the one it runs (ADR-0018); add, change, purge and restart Supervisors of the compiled-in
+repeat the one it runs (ADR-0046); add, change, purge and restart Supervisors of the compiled-in
 kinds, each running a program from its own `program/` directory, except on a host that sets
-`[supervisors] server_manages_set = false`, whose own Agent takes no Supervisor set (ADR-0018);
+`[supervisors] server_manages_set = false`, whose own Agent takes no Supervisor set (ADR-0046);
 install any package signed with the operator's key into a Supervisor, and a newer signed Client
 build into the Client itself; move the
 fleet to another TLS endpoint its trust accepts, install a certificate for
 the key the Client generated, and set its telemetry destinations; restart a Managed Process; and
 re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a command it
 names, a receiver bound to any port — it allows as the process's account; that is the product.
-The switch of ADR-0018 binds a name: while the Server manages the set, it can remove a listed
+The switch of ADR-0046 binds a name: while the Server manages the set, it can remove a listed
 Supervisor and deliver the same agent under a name that is not listed, whose configuration is then
 the Server's again. A host that also sets `server_manages_set = false` closes that: the Server
-can neither remove the listed Supervisor nor add another (ADR-0018). Both keys hold against the
+can neither remove the listed Supervisor nor add another (ADR-0046). Both keys hold against the
 Server only while every Supervisor whose configuration language can run commands as the Client's
 account — a command an agent's configuration names, the configuration a `command`
 kind's program reads — is in `remote_config_disabled`; otherwise the Server can configure such a

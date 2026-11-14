@@ -19,7 +19,7 @@ use std::path::Path;
 
 use opamp::uid::InstanceUid;
 
-use super::{client, schema, sql, Database, IMPORT_TIMEOUT};
+use super::{client, schema, sql, Database, Exclusive, Opening, IMPORT_TIMEOUT};
 use crate::agent_store::{AgentStore as _, PersistedAgent};
 use crate::blobs::BlobStore as _;
 use crate::bootstrap::{BootstrapStore as _, Entry as BootstrapEntry};
@@ -230,8 +230,19 @@ pub(crate) fn run_in(
 }
 
 /// The database `config` names, checked to hold none of the Server's tables.
-fn checked(config: &PostgresConfig, schema: Option<&str>) -> Result<Database, String> {
-    let database = Database::connect(config, schema)?;
+fn checked(
+    config: &PostgresConfig,
+    schema: Option<&str>,
+) -> Result<std::sync::Arc<Database>, String> {
+    let database = Database::open(
+        config,
+        Opening {
+            exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+            schema,
+            migrations: None,
+            ..Opening::default()
+        },
+    )?;
     let tables = database.server_tables()?;
     if !tables.is_empty() {
         return Err(format!(
@@ -381,12 +392,15 @@ pub(crate) fn blobs_to_s3_in(
             data_dir.display()
         ));
     }
-    let database = std::sync::Arc::new(Database::connect_as(
+    let database = Database::open(
         config,
-        schema,
-        super::CALL_TIMEOUT,
-        super::Exclusive::Alone("server blobs-to-s3".to_string()),
-    )?);
+        Opening {
+            exclusive: Exclusive::Alone("server blobs-to-s3".to_string()),
+            schema,
+            migrations: None,
+            ..Opening::default()
+        },
+    )?;
     if database.server_tables()?.is_empty() {
         return Err(format!(
             "the {} holds none of the Server's tables — name the database the Server runs on",
@@ -435,32 +449,52 @@ fn upload(
         .collect();
     let uploaded =
         crate::s3::copy_from_filesystem(blobs, referenced.iter().map(String::as_str), store)?;
-    let held: std::collections::HashSet<String> = store
-        .list()?
-        .into_iter()
-        .map(|(sha256, _)| sha256)
-        .collect();
-    for package in packages {
-        for (platform, entry) in &package.entries {
-            let sha256 = hex::encode(&entry.content_hash);
-            if !held.contains(&sha256) {
-                return Err(format!(
-                    "package {} for {}: its artifact {sha256} is neither in {} nor in bucket {} — \
-                     restore it from a backup, or delete the entry, and copy again",
-                    package.id,
-                    platform.tag(),
-                    blobs.display(),
-                    bucket.bucket
-                ));
-            }
-        }
-    }
+    let held: std::collections::HashMap<String, u64> = store.list()?.into_iter().collect();
+    check_held(packages, &held, blobs, &bucket.bucket)?;
     Ok(format!(
         "{} blobs in bucket {}, {uploaded} of them uploaded from {}",
         referenced.len(),
         bucket.bucket,
         blobs.display()
     ))
+}
+
+/// Whether the bucket, by what it `held` (each object's name and size), holds every artifact of
+/// `packages` whole: an object of another length under an artifact's name is refused as one
+/// missing is, naming the artifact, since the next start would refuse it.
+fn check_held(
+    packages: &[Package],
+    held: &std::collections::HashMap<String, u64>,
+    blobs: &Path,
+    bucket: &str,
+) -> Result<(), String> {
+    for package in packages {
+        for (platform, entry) in &package.entries {
+            let sha256 = hex::encode(&entry.content_hash);
+            match held.get(&sha256) {
+                None => {
+                    return Err(format!(
+                        "package {} for {}: its artifact {sha256} is neither in {} nor in bucket \
+                         {bucket} — restore it from a backup, or delete the entry, and copy again",
+                        package.id,
+                        platform.tag(),
+                        blobs.display(),
+                    ))
+                }
+                Some(&size) if size != entry.size => {
+                    return Err(format!(
+                        "package {} for {}: bucket {bucket} holds {size} bytes under its artifact \
+                         {sha256}, which is {} bytes — delete that object and copy again",
+                        package.id,
+                        platform.tag(),
+                        entry.size,
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The entries of `dir` by name, read and nothing else. A name that is not UTF-8 is refused, as
@@ -495,6 +529,8 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::postgres::lease::Terms;
+    use crate::postgres::Opening;
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -503,6 +539,48 @@ mod tests {
     use crate::audit::{Audit as _, Entry};
     use crate::postgres::testing::TestDatabase;
     use crate::revocation::{CertId, Facts, Host, Issued, Revocation, Revoked, SubjectValues};
+
+    /// The final check of `blobs-to-s3` refuses an object of another length under an artifact's
+    /// name, naming the artifact and both sizes, as it refuses one missing; the right length
+    /// passes.
+    /// Verifies: ADR-0023
+    #[test]
+    fn an_object_of_the_wrong_size_under_an_artifact_fails_the_check_naming_it() {
+        let platform = crate::packages::Platform::new("linux", "amd64").expect("platform");
+        let sha256 = "ab".repeat(32);
+        let packages = [Package {
+            id: crate::packages::PackageId::new("otelcol", "1.2.3").expect("id"),
+            entries: BTreeMap::from([(
+                platform.clone(),
+                crate::packages::Entry {
+                    platform,
+                    content_hash: hex::decode(&sha256).expect("hex"),
+                    size: 12,
+                    signature: None,
+                },
+            )]),
+        }];
+        let check = |held: &[(&str, u64)]| {
+            let held = held
+                .iter()
+                .map(|(name, size)| ((*name).to_string(), *size))
+                .collect();
+            check_held(&packages, &held, Path::new("/data/blobs"), "fleet")
+        };
+        assert_eq!(check(&[(&sha256, 12)]), Ok(()));
+        let short = check(&[(&sha256, 11)]).expect_err("the wrong size");
+        assert!(short.contains("otelcol@1.2.3"), "{short}");
+        assert!(short.contains(&sha256), "{short}");
+        assert!(
+            short.contains("11 bytes") && short.contains("12 bytes"),
+            "{short}"
+        );
+        let missing = check(&[]).expect_err("missing");
+        assert!(
+            missing.contains("neither in /data/blobs nor in bucket fleet"),
+            "{missing}"
+        );
+    }
 
     /// Every path under `root` with its mode and, for a file, its bytes: what "unchanged" is
     /// checked against — a directory created or removed, a mode changed, a file removed or
@@ -947,11 +1025,19 @@ mod tests {
         assert!(err.contains("otelcol@1.2.3"), "{err}");
         assert!(err.contains(&artifact), "{err}");
         assert!(
-            crate::postgres::Database::connect(&second.config(), Some(&second.schema))
-                .expect("connect")
-                .server_tables()
-                .expect("tables")
-                .is_empty(),
+            crate::postgres::Database::open(
+                &second.config(),
+                Opening {
+                    exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                    schema: Some(&second.schema),
+                    migrations: None,
+                    ..Opening::default()
+                }
+            )
+            .expect("connect")
+            .server_tables()
+            .expect("tables")
+            .is_empty(),
             "the database holds none of the Server's tables"
         );
         clear(&store);
@@ -1225,8 +1311,16 @@ mod tests {
             err.contains("nothing was written into the database"),
             "{err}"
         );
-        let database = crate::postgres::Database::connect(&test.config(), Some(&test.schema))
-            .expect("connect");
+        let database = crate::postgres::Database::open(
+            &test.config(),
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         assert!(database.server_tables().expect("tables").is_empty());
         assert!(!new.exists(), "the new data_dir is left as it was: absent");
     }
@@ -1251,10 +1345,20 @@ mod tests {
         // The first lease opens the first chain.
         let database = test.shared();
         let first = database
-            .take_lease("host-a", std::time::Duration::from_secs(30))
+            .take_lease(
+                "host-a",
+                // timed: a lease term, not a wait
+                std::time::Duration::from_secs(30),
+                &Terms::default(),
+            )
             .expect("lease");
         let second = database
-            .take_lease("host-b", std::time::Duration::from_secs(30))
+            .take_lease(
+                "host-b",
+                // timed: a lease term, not a wait
+                std::time::Duration::from_secs(30),
+                &Terms::default(),
+            )
             .expect("lease");
         let opened = test.rows(&format!(
             "SELECT line FROM audit_entries WHERE chain = '{}' AND seq = 1",
@@ -1279,9 +1383,20 @@ mod tests {
         );
 
         // Through the connection `audit-verify --config` makes.
-        let checked =
-            super::super::audit::verify_in(&test.config(), Some(&test.schema), Some(&archive))
-                .expect("verify");
+        let checked = super::super::audit::verify(
+            &crate::postgres::Database::open(
+                &test.config(),
+                Opening {
+                    schema: Some(&test.schema),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
+            Some(&archive),
+            None,
+        )
+        .expect("verify");
         assert!(!checked.failed, "{:?}", checked.lines);
         assert!(
             checked
@@ -1291,7 +1406,7 @@ mod tests {
             "{:?}",
             checked.lines
         );
-        let unchecked = super::super::audit::verify(&database, None).expect("verify");
+        let unchecked = super::super::audit::verify(&database, None, None).expect("verify");
         assert!(!unchecked.failed, "{:?}", unchecked.lines);
         assert!(
             unchecked
@@ -1311,7 +1426,7 @@ mod tests {
         let mut lines: Vec<&str> = text.lines().collect();
         lines.pop();
         std::fs::write(&newest, lines.join("\n") + "\n").expect("write");
-        let removed = super::super::audit::verify(&database, Some(&archive)).expect("verify");
+        let removed = super::super::audit::verify(&database, Some(&archive), None).expect("verify");
         assert!(removed.failed, "{:?}", removed.lines);
         assert!(
             removed
@@ -1330,7 +1445,7 @@ mod tests {
             .replace("\"n\":\"2\"", "\"n\":\"9\"");
         changed.push(last);
         std::fs::write(&newest, changed.join("\n") + "\n").expect("write");
-        let altered = super::super::audit::verify(&database, Some(&archive)).expect("verify");
+        let altered = super::super::audit::verify(&database, Some(&archive), None).expect("verify");
         assert!(altered.failed, "{:?}", altered.lines);
         assert!(
             altered
@@ -1366,8 +1481,16 @@ mod tests {
             err.contains("torn") && err.contains(&file.display().to_string()),
             "{err}"
         );
-        let database = crate::postgres::Database::connect(&test.config(), Some(&test.schema))
-            .expect("connect");
+        let database = crate::postgres::Database::open(
+            &test.config(),
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         assert!(database.server_tables().expect("tables").is_empty());
     }
 }
