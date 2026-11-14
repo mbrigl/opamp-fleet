@@ -18,7 +18,6 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use fleet_server::fleet::{AgentView, AppState, PackageOffering};
 use fleet_server::packages::{PackageStore, Platform};
@@ -60,17 +59,6 @@ impl Drop for ClientUnderTest {
     fn drop(&mut self) {
         common::stop_client(&mut self.0);
     }
-}
-
-async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if let Some(value) = probe() {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("timed out waiting for {what}");
 }
 
 fn view<'a>(agents: &'a [AgentView], name: &str) -> Option<&'a AgentView> {
@@ -157,7 +145,7 @@ async fn a_configuration_rollout_reaches_a_polling_client() {
 
     let _client = spawn_client(&config_path);
 
-    wait_until("the polling agent to appear", || {
+    common::wait_until("the polling agent to appear", || {
         let s = state.snapshot();
         view(&s, "otelcol").filter(|a| a.connected).map(|_| ())
     })
@@ -170,7 +158,7 @@ async fn a_configuration_rollout_reaches_a_polling_client() {
     common::save(&state, "fleet", "receivers: {}\n", &agent_type);
     common::release_to_every_agent(&state, &["fleet"]);
 
-    wait_until("the polling agent to apply the configuration", || {
+    common::wait_until("the polling agent to apply the configuration", || {
         let s = state.snapshot();
         view(&s, "otelcol")
             .filter(|a| a.in_sync && a.remote_config_status == "APPLIED")
@@ -261,7 +249,7 @@ async fn a_package_rollout_reaches_a_polling_client() {
 
     let _client = spawn_client(&config_path);
 
-    wait_until("the rollout act to reach the agent", || {
+    common::wait_until("the rollout act to reach the agent", || {
         state
             .rollout_deployment(&ring_holding_signed(
                 &state,
@@ -273,7 +261,7 @@ async fn a_package_rollout_reaches_a_polling_client() {
             .map(|_| ())
     })
     .await;
-    wait_until("the package to be reported Installed", || {
+    common::wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
         // The wire name is the Agent type (ADR-0034 clause 9), and this block states none — so it

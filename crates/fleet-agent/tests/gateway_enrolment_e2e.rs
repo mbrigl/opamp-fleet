@@ -7,7 +7,7 @@ mod common;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fleet_agent::config::ClientConfig;
 use fleet_agent::gateway::Timings;
@@ -93,17 +93,6 @@ struct ClientUnderTest(Child);
 impl Drop for ClientUnderTest {
     fn drop(&mut self) {
         common::stop_client(&mut self.0);
-    }
-}
-
-async fn until<T>(what: &str, within: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + within;
-    loop {
-        if let Some(found) = probe() {
-            return found;
-        }
-        assert!(Instant::now() < deadline, "{what} did not happen in time");
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -533,10 +522,11 @@ async fn the_client_enrols_through_a_gateway_and_then_reports_through_it() {
             .expect("spawn the client"),
     );
 
-    let pending = until("an enrolment request", Duration::from_secs(20), || {
-        fleet.enrolment.pending().into_iter().next()
-    })
-    .await;
+    let pending =
+        common::wait_until_within(Duration::from_secs(20), "an enrolment request", || {
+            fleet.enrolment.pending().into_iter().next()
+        })
+        .await;
     assert_eq!(
         pending.requester.gateway.as_deref(),
         Some(fleet.gateway_host.as_str()),
@@ -549,10 +539,11 @@ async fn the_client_enrols_through_a_gateway_and_then_reports_through_it() {
     );
     fleet.state.approve_enrolment(&pending.id).expect("approve");
 
-    let issued = until("the issued certificate", Duration::from_secs(20), || {
-        std::fs::read(state_dir.join("client-cert.pem")).ok()
-    })
-    .await;
+    let issued =
+        common::wait_until_within(Duration::from_secs(20), "the issued certificate", || {
+            std::fs::read(state_dir.join("client-cert.pem")).ok()
+        })
+        .await;
     let host = fleet_server::ca::facts(opamp::tls::certificates(&issued).expect("pem")[0].as_ref())
         .expect("facts")
         .host
@@ -561,7 +552,7 @@ async fn the_client_enrols_through_a_gateway_and_then_reports_through_it() {
 
     let uid = std::fs::read_to_string(state_dir.join("instance-uid")).expect("uid");
     let uid = uid.trim().to_string();
-    let first = until("a report as a member", Duration::from_secs(20), || {
+    let first = common::wait_until_within(Duration::from_secs(20), "a report as a member", || {
         fleet
             .state
             .snapshot()
@@ -570,7 +561,7 @@ async fn the_client_enrols_through_a_gateway_and_then_reports_through_it() {
             .map(|agent| agent.sequence_num)
     })
     .await;
-    until("a later report", Duration::from_secs(20), || {
+    common::wait_until_within(Duration::from_secs(20), "a later report", || {
         fleet
             .state
             .snapshot()

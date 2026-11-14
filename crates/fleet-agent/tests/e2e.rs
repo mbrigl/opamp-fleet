@@ -12,7 +12,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fleet_server::fleet::{AgentView, AppState};
 
@@ -23,17 +23,6 @@ impl Drop for ClientUnderTest {
     fn drop(&mut self) {
         common::stop_client(&mut self.0);
     }
-}
-
-async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if let Some(value) = probe() {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("timed out waiting for {what}");
 }
 
 async fn spawn_server() -> (std::net::SocketAddr, Arc<AppState>, tempfile::TempDir) {
@@ -282,7 +271,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // Both Supervisors appear as their own connected Agents — over the one WebSocket connection
     // this Client maintains (ADR-0016: routed by instance_uid alone) — and so does the Client
     // itself, which is an Agent (ADR-0019) whether or not it supervises anything.
-    let agents = wait_until("every agent connected", || {
+    let agents = common::wait_until("every agent connected", || {
         let snapshot = state.snapshot();
         (snapshot.len() == AGENTS && snapshot.iter().all(|a| a.connected)).then_some(snapshot)
     })
@@ -312,8 +301,8 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // The Foreign Agent runs from the start; the Collector awaits its first configuration. Its
     // first report may still say it is starting, so the wait is for the report that follows.
-    let first_stub_pid = wait_until("the stub to run", || stub_pid(&stub_marker)).await;
-    wait_until("the collector awaiting configuration", || {
+    let first_stub_pid = common::wait_until("the stub to run", || stub_pid(&stub_marker)).await;
+    common::wait_until("the collector awaiting configuration", || {
         let snapshot = state.snapshot();
         view(&snapshot, "otelcol")
             .is_some_and(|a| !a.healthy && a.health_status == "awaiting configuration")
@@ -342,7 +331,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         .filter(|a| ["otelcol", "stub"].contains(&a.service_instance_name.as_str()))
         .map(|a| (a.instance_uid.clone(), a.sequence_num))
         .collect();
-    wait_until(
+    common::wait_until(
         "a heartbeat from each supervised agent after the rollout",
         || {
             let snapshot = state.snapshot();
@@ -363,7 +352,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // files. The Client's own Agent receives the one typed for it — its configuration is its
     // Supervisor set (ADR-0046), and a YAML body is not one: the Client refuses it loudly rather
     // than pretend it took effect.
-    wait_until("the supervised agents in sync, the client refusing", || {
+    common::wait_until("the supervised agents in sync, the client refusing", || {
         let snapshot = state.snapshot();
         let supervised = ["otelcol", "stub"].iter().all(|name| {
             view(&snapshot, name).is_some_and(|a| a.in_sync && a.remote_config_status == "APPLIED")
@@ -373,12 +362,12 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         (supervised && refused).then_some(())
     })
     .await;
-    let collector_pid = wait_until("the collector to start on the new config", || {
+    let collector_pid = common::wait_until("the collector to start on the new config", || {
         stub_pid(&otelcol_marker)
     })
     .await;
     assert!(collector_pid > 0);
-    let restarted_stub_pid = wait_until("the stub to restart", || {
+    let restarted_stub_pid = common::wait_until("the stub to restart", || {
         stub_pid(&stub_marker).filter(|pid| *pid != first_stub_pid)
     })
     .await;
@@ -395,7 +384,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     );
 
     // Both Agents report healthy now.
-    wait_until("both agents healthy", || {
+    common::wait_until("both agents healthy", || {
         let snapshot = state.snapshot();
         snapshot.iter().all(|a| a.healthy).then_some(())
     })
@@ -404,7 +393,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // The probed process version arrived for both *supervised* Agents: the collector plugin
     // probes `--version` by itself, the command plugin because the block sets `version_args`. The
     // stub prints its SemVer inside free text ("stub_agent version 9.9.9 (test build)").
-    wait_until("both supervised agents report the probed version", || {
+    common::wait_until("both supervised agents report the probed version", || {
         let snapshot = state.snapshot();
         ["otelcol", "stub"]
             .iter()
@@ -478,7 +467,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         1,
         "the edge Deployment claims the stub alone"
     );
-    wait_until("the stub to apply both entries", || {
+    common::wait_until("the stub to apply both entries", || {
         let snapshot = state.snapshot();
         let stub = view(&snapshot, "stub")?;
         (stub.in_sync
@@ -487,7 +476,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             .then_some(())
     })
     .await;
-    wait_until("the collector to stay on the fleet configuration", || {
+    common::wait_until("the collector to stay on the fleet configuration", || {
         let snapshot = state.snapshot();
         let otelcol = view(&snapshot, "otelcol")?;
         (otelcol.in_sync && otelcol.matched_configurations == ["fleet"]).then_some(())
@@ -520,7 +509,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         .snapshot()
         .iter()
         .all(|a| a.capabilities.iter().any(|c| c == "ReportsHeartbeat")));
-    wait_until(
+    common::wait_until(
         "heartbeats to advance every agent's sequence number",
         || {
             let snapshot = state.snapshot();
@@ -557,7 +546,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             .rollout_deployment(deployment)
             .expect("roll out without it");
     }
-    wait_until("the supervised agents to settle on the fleet map", || {
+    common::wait_until("the supervised agents to settle on the fleet map", || {
         let snapshot = state.snapshot();
         ["otelcol", "stub"]
             .iter()
@@ -603,7 +592,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         &["client-supervisors"],
     );
 
-    wait_until("the added supervisor to connect, the set applied", || {
+    common::wait_until("the added supervisor to connect, the set applied", || {
         let snapshot = state.snapshot();
         let added = view(&snapshot, "added").is_some_and(|a| a.connected);
         let applied = view(&snapshot, "Supervisor Agent")
@@ -611,7 +600,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         (added && applied).then_some(())
     })
     .await;
-    let _ = wait_until("the added stub to run", || stub_pid(&added_marker)).await;
+    let _ = common::wait_until("the added stub to run", || stub_pid(&added_marker)).await;
     let rewritten = std::fs::read_to_string(&config_path).expect("read back supervisor.toml");
     assert!(rewritten.contains("name = \"added\""), "{rewritten}");
     assert!(
@@ -636,7 +625,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         .rollout_deployment(common::FLEET_DEPLOYMENT)
         .expect("roll out the shrunken set");
 
-    wait_until("the added supervisor to say goodbye", || {
+    common::wait_until("the added supervisor to say goodbye", || {
         let snapshot = state.snapshot();
         let gone = view(&snapshot, "added").is_some_and(|a| !a.connected);
         let applied = view(&snapshot, "Supervisor Agent")
@@ -654,7 +643,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // A removed Supervisor is purged (ADR-0046): its whole directory — identity, program, written
     // configuration — goes with it, while the supervisors that stay keep theirs.
-    wait_until("the removed supervisor's directory to be purged", || {
+    common::wait_until("the removed supervisor's directory to be purged", || {
         (!state_dir.join("supervisors/added").exists()).then_some(())
     })
     .await;
@@ -699,8 +688,8 @@ async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
     stage_owned_program(&state_dir, "stub", &program);
     let _client = spawn_client(&config_path);
 
-    let pid = wait_until("the stub to run", || stub_pid(&marker)).await;
-    wait_until("the Client's own Agent", || {
+    let pid = common::wait_until("the stub to run", || stub_pid(&marker)).await;
+    common::wait_until("the Client's own Agent", || {
         view(&state.snapshot(), "Supervisor Agent").map(|_| ())
     })
     .await;
@@ -724,7 +713,7 @@ async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
     common::save(&state, "supervisor-set", &offered, "supervisor");
     common::release_to_every_agent(&state, &["supervisor-set"]);
 
-    let refusal = wait_until("the Client to refuse the set", || {
+    let refusal = common::wait_until("the Client to refuse the set", || {
         view(&state.snapshot(), "Supervisor Agent")
             .filter(|agent| agent.remote_config_status == "FAILED")
             .map(|agent| agent.remote_config_error.clone())
@@ -790,7 +779,7 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
     std::fs::write(&operators_file, "mine\n").expect("the operator's file");
 
     let client = spawn_client(&write_config("[\"closed\"]"));
-    wait_until("every agent connected", || {
+    common::wait_until("every agent connected", || {
         let snapshot = state.snapshot();
         (snapshot.len() == AGENTS && snapshot.iter().all(|a| a.connected)).then_some(())
     })
@@ -815,7 +804,7 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
         .clone();
     common::save(&state, "fleet", "receivers: {}\n", &supervised_type);
     common::release_to_every_agent(&state, &["fleet"]);
-    wait_until("the unlisted Supervisor in sync", || {
+    common::wait_until("the unlisted Supervisor in sync", || {
         view(&state.snapshot(), "open")
             .filter(|a| a.in_sync && a.remote_config_status == "APPLIED")
             .map(|_| ())
@@ -838,7 +827,7 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
     // Switched back on: the next start declares both and takes what is released.
     drop(client);
     let _client = spawn_client(&write_config("[]"));
-    wait_until(
+    common::wait_until(
         "the formerly listed Supervisor to apply the release",
         || {
             view(&state.snapshot(), "closed")
@@ -903,8 +892,8 @@ async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {
     stage_owned_program(&state_dir, "stub", &program);
     let client = spawn_client(&config_path);
 
-    let pid = wait_until("the stub to run", || stub_pid(&marker)).await;
-    let capabilities = wait_until("the Client's own Agent", || {
+    let pid = common::wait_until("the stub to run", || stub_pid(&marker)).await;
+    let capabilities = common::wait_until("the Client's own Agent", || {
         view(&state.snapshot(), "Supervisor Agent")
             .filter(|a| a.connected)
             .map(|a| a.capabilities.clone())
@@ -951,7 +940,7 @@ async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {
     drop(client);
     write_config(true);
     let _client = spawn_client(&config_path);
-    wait_until("the Client to apply the released set", || {
+    common::wait_until("the Client to apply the released set", || {
         view(&state.snapshot(), "Supervisor Agent")
             .filter(|a| {
                 a.connected
@@ -1009,7 +998,7 @@ async fn a_dropped_client_leaves_none_of_its_programs_running() {
         .expect("write supervisor.toml");
     stage_owned_program(&state_dir, "stub", &program);
     let client = spawn_client(&config_path);
-    let pid = wait_until("the stub to run", || stub_pid(&marker)).await;
+    let pid = common::wait_until("the stub to run", || stub_pid(&marker)).await;
     assert!(running(pid), "the stub runs when the Client is dropped");
 
     drop(client);
@@ -1019,7 +1008,7 @@ async fn a_dropped_client_leaves_none_of_its_programs_running() {
         "no other stub was started, so this one's ending is the Client's doing"
     );
 
-    wait_until("the stub to end with the Client", || {
+    common::wait_until("the stub to end with the Client", || {
         (!running(pid)).then_some(())
     })
     .await;
