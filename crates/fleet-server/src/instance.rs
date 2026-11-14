@@ -572,7 +572,8 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 /// or the Agent dropped; an Agent taken by another instance has its holder read again, and is no
 /// longer carried here where the row names this instance no more. Every time the listening connection is made, since what
 /// was committed before it was not heard, and for a kind this instance does not know, everything is
-/// read again. What this instance announced itself is never heard: it holds what it committed.
+/// read again, the Agents it holds caught up from one read of their records and one of their
+/// holders. What this instance announced itself is never heard: it holds what it committed.
 /// What is heard while a read runs is taken up by one read after it, and a read that fails is tried
 /// again until one holds. With `renewals`, the ledger is read again at each lease renewal, so a
 /// notification that was missed without the connection ending, and a notice that was to follow a
@@ -635,17 +636,7 @@ pub fn follow(
         // The Configurations before the assignments, so an Agent released a revision another
         // instance saved is offered it from what this one holds.
         state.reload_catalogue(due.configurations, due.deployments, due.packages)?;
-        if let Some(take_up) = due.agents.take_up() {
-            state.take_up_agents(take_up)?;
-        }
-        // Once the ledger is read again, so a group of a Host is placed under its bindings now.
-        state.place_hosts_again(&due.hosts);
-        if let Some(take_up) = due.holders.take_up() {
-            state.release_taken(take_up)?;
-        }
-        if let Some(take_up) = due.restarts.take_up() {
-            state.take_up_restarts(take_up)?;
-        }
+        take_up_held(&state, &due)?;
         // Counted once the whole read is done, so a read counted has taken up everything it was
         // due.
         if due.ledger {
@@ -656,6 +647,44 @@ pub fn follow(
     };
     tokio::spawn(take_up(hearing, read, RELOAD_RETRY_FIRST, RELOAD_RETRY_MAX));
     following
+}
+
+/// Takes up what `due` names of the Agents `state` holds: a catch-up from one read where every
+/// Agent is due of any kind, and otherwise the take-ups of the Agents named. Read once the ledger
+/// is read again, so a group of a Host is placed under its bindings now.
+fn take_up_held(state: &AppState, due: &Due) -> Result<(), String> {
+    if due.catches_up() {
+        state.catch_up()?;
+        // A request another instance announced is that restart, even where a delivery cleared it
+        // since: the catch-up drops only the put-backs whose record still queues one.
+        if let Some(uids) = due.restarts.named() {
+            state.drop_kept_restarts(uids);
+        }
+        return Ok(());
+    }
+    if let Some(uids) = due.agents.named() {
+        state.take_up_agents(uids)?;
+    }
+    state.place_hosts_again(&due.hosts);
+    if let Some(uids) = due.holders.named() {
+        state.release_taken(uids)?;
+    }
+    if let Some(uids) = due.restarts.named() {
+        state.take_up_restarts(uids)?;
+    }
+    Ok(())
+}
+
+/// [`take_up_held`] for what `heard` calls for as one read, as [`follow`] answers it: for a test
+/// of a store [`follow`] does not run on.
+#[cfg(test)]
+pub(crate) fn take_up_held_for(state: &AppState, heard: &[Heard]) -> Result<(), String> {
+    let due = heard
+        .iter()
+        .map(Due::of)
+        .reduce(Due::and)
+        .unwrap_or_default();
+    take_up_held(state, &due)
 }
 
 /// Writes the presence of the Agents this instance carries every `interval`, in one batch under the
@@ -796,12 +825,11 @@ enum Agents {
 }
 
 impl Agents {
-    /// What a take-up acts on, `None` where no Agent is named.
-    fn take_up(&self) -> Option<crate::fleet::TakeUp<'_>> {
+    /// The Agents named, `None` where none is named or every one is.
+    fn named(&self) -> Option<&HashSet<InstanceUid>> {
         match self {
-            Agents::Named(uids) if uids.is_empty() => None,
-            Agents::Named(uids) => Some(crate::fleet::TakeUp::Named(uids)),
-            Agents::All => Some(crate::fleet::TakeUp::Everything),
+            Agents::Named(uids) if !uids.is_empty() => Some(uids),
+            _ => None,
         }
     }
 
@@ -846,8 +874,8 @@ struct Due {
     /// now.
     restarts: Agents,
     /// The Hosts whose groups are placed again: a binding of the Host changed, or a Client Agent
-    /// first arrived over it as a Gateway's. Every group is placed again with `agents` of
-    /// [`Agents::All`].
+    /// first arrived over it as a Gateway's. Every group is placed again where any of `agents`,
+    /// `holders` and `restarts` is [`Agents::All`] ([`Due::catches_up`]).
     hosts: BTreeSet<String>,
 }
 
@@ -865,6 +893,15 @@ impl Due {
         restarts: Agents::All,
         hosts: BTreeSet::new(),
     };
+
+    /// Whether every Agent is due, of any of the kinds an Agent's state is read again for: the
+    /// instance then catches up from one read of what it holds
+    /// ([`AppState::catch_up`](crate::fleet::AppState::catch_up)), which places every group too.
+    fn catches_up(&self) -> bool {
+        [&self.agents, &self.holders, &self.restarts]
+            .into_iter()
+            .any(|agents| *agents == Agents::All)
+    }
 
     /// What `what` calls for.
     fn of(what: &Heard) -> Due {

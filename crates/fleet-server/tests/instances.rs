@@ -1804,6 +1804,239 @@ async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_
     );
 }
 
+/// A and B on one database, B following through a listening connection of its own that the
+/// returned network cuts: what A commits while it is cut, B hears nothing of.
+async fn apart(pki: &Pki, schema: &Schema) -> (Instance, Instance, Cuttable) {
+    let network = Cuttable::to(database_address(schema));
+    let a = Instance::start(pki, schema, schema.config_on(schema.config.port)).await;
+    let mut b = Instance::start_deaf(pki, schema, schema.config_on(schema.config.port)).await;
+    b.follow_through(schema, schema.config_on(network.port))
+        .await;
+    assert!(b.has_read(1).await, "B never listened");
+    (a, b, network)
+}
+
+/// Runs `change` on A's state while B's listening connection is cut, and restores it after.
+async fn while_cut<T: Send + 'static>(
+    network: &Cuttable,
+    a: &Instance,
+    change: impl FnOnce(&fleet_server::fleet::AppState) -> T + Send + 'static,
+) -> T {
+    network.cut();
+    let state = a.state.clone();
+    let changed = tokio::task::spawn_blocking(move || change(&state))
+        .await
+        .expect("change");
+    network.restore();
+    changed
+}
+
+/// An assignment A releases to an Agent B carries while B's listening connection is cut is held
+/// by B once it listens again.
+/// Verifies: ADR-0045
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_assignment_committed_while_the_listening_connection_was_cut_is_held_once_back() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0xc1; 16]);
+    let configurable = AgentCapabilities::AcceptsRemoteConfig as u64
+        | AgentCapabilities::ReportsRemoteConfig as u64;
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, configurable, PACKAGED, true).await;
+
+    let assigned = while_cut(&network, &a, |a| {
+        a.save_configuration(
+            "collector",
+            fleet_server::configs::Revision {
+                body: "receivers: {}".to_string(),
+                role: String::new(),
+                service_name: "otelcol".to_string(),
+            },
+        )?;
+        a.deployment_store()
+            .expect("deployments")
+            .put(
+                "stable",
+                std::collections::BTreeMap::from([(
+                    "service.name".to_string(),
+                    "otelcol".to_string(),
+                )]),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        a.put_deployment_configuration("stable", "collector")
+            .map_err(|e| format!("{e:?}"))?;
+        a.rollout_deployment("stable").map_err(|e| format!("{e:?}"))
+    })
+    .await;
+    assert_eq!(assigned, Ok(1), "A released to the Agent B carries");
+
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            view_of(&b, uid).is_some_and(|view| view.assigned_deployment == "stable")
+        })
+        .await,
+        "B did not hold the assignment once it listened again"
+    );
+}
+
+/// A restart A queues for an Agent B carries while B's listening connection is cut is held by B
+/// once it listens again, which sends it.
+/// Verifies: ADR-0045
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_requested_while_the_listening_connection_was_cut_is_sent_once_back() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0xc2; 16]);
+    let restartable = AgentCapabilities::AcceptsRestartCommand as u64;
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, restartable, PACKAGED, true).await;
+
+    let requested = while_cut(&network, &a, move |a| a.request_restart(&uid).is_ok()).await;
+    assert!(requested, "A queues the restart of an Agent B carries");
+
+    let sent = next_message(&mut session, Duration::from_secs(15))
+        .await
+        .expect("B did not send the restart once it listened again");
+    assert!(
+        sent.command
+            .is_some_and(|command| command.r#type == opamp::proto::CommandType::Restart as i32),
+        "B sent something else"
+    );
+}
+
+/// Labels A sets on an Agent B carries while B's listening connection is cut are held by B once
+/// it listens again.
+/// Verifies: ADR-0045, ADR-0030
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn labels_set_while_the_listening_connection_was_cut_are_held_once_back() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0xc3; 16]);
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, 0, PACKAGED, true).await;
+
+    let set = while_cut(&network, &a, move |a| {
+        a.set_labels(
+            &uid,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok()
+    })
+    .await;
+    assert!(set, "A sets the labels of an Agent B carries");
+
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            view_of(&b, uid)
+                .is_some_and(|view| view.labels.get("tier").map(String::as_str) == Some("edge"))
+        })
+        .await,
+        "B did not hold the labels once it listened again"
+    );
+}
+
+/// Labels A sets on a Client Agent it carries while B's listening connection is cut reach the
+/// Agent of the same Host B carries, which inherits them once B listens again.
+/// Verifies: ADR-0045, ADR-0030
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_agents_labels_set_while_the_listening_connection_was_cut_are_inherited_once_back()
+{
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue_to_host("h1");
+    let (client, agent) = (InstanceUid([0xc4; 16]), InstanceUid([0xc5; 16]));
+    let mut client_session = websocket(&a, &pki, &cert, &key).await;
+    report_as(
+        &mut client_session,
+        client,
+        1,
+        0,
+        (
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true")],
+        ),
+        true,
+    )
+    .await;
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut session, agent, 1, 0, PACKAGED, true).await;
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            view_of(&b, agent).is_some_and(|view| view.client_agent == client.to_string())
+        })
+        .await,
+        "B places the Agent under the Client Agent A carries"
+    );
+
+    let set = while_cut(&network, &a, move |a| {
+        a.set_labels(
+            &client,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok()
+    })
+    .await;
+    assert!(set, "A labels the Client Agent");
+
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            view_of(&b, agent).is_some_and(|view| {
+                view.inherited_labels.get("tier").map(String::as_str) == Some("edge")
+            })
+        })
+        .await,
+        "B's Agent did not inherit the labels once B listened again"
+    );
+}
+
+/// An Agent B carries that A takes while B's listening connection is cut is carried by B no more
+/// once it listens again.
+/// Verifies: ADR-0045
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_taken_while_the_listening_connection_was_cut_is_released_once_back() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0xc6; 16]);
+    let mut on_b = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut on_b, uid, 1, 0, PACKAGED, true).await;
+
+    network.cut();
+    let mut on_a = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut on_a, uid, 2, 0, PACKAGED, true).await;
+    let holder = schema.query(&format!(
+        "SELECT holder::text FROM agents WHERE instance_uid = '{uid}'"
+    ));
+    assert_eq!(holder, [a.instance_id().expect("a lease")], "A took it");
+    network.restore();
+
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            view_of(&b, uid).is_some_and(|view| !view.connected)
+        })
+        .await,
+        "B still carries the Agent A took once it listened again"
+    );
+}
+
 /// A notification of a kind the instance does not know, as a newer version sends, has it read
 /// everything again: a revocation it was not told of ends its session.
 /// Verifies: ADR-0045
@@ -4104,8 +4337,7 @@ fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_it
     b.process(report(2), Transport::WebSocket, Some(9));
     a.process(report(1), Transport::WebSocket, Some(7));
     assert_eq!(stored(), [format!("{lease_a} true")]);
-    b.release_taken(fleet_server::fleet::TakeUp::Everything)
-        .expect("B hears of the take");
+    b.catch_up().expect("B hears of the take");
     assert!(!carried(&b), "B stops carrying it");
     a.mark_disconnected(&[uid], 7);
     a.write_presence(lease_a).expect("A's batch");
@@ -4231,10 +4463,8 @@ fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carri
     a.process(report(1), Transport::WebSocket, Some(7));
     b.process(report(2), Transport::WebSocket, Some(9));
     let named = std::collections::HashSet::from([uid]);
-    a.release_taken(fleet_server::fleet::TakeUp::Named(&named))
-        .expect("A hears of B's take");
-    b.release_taken(fleet_server::fleet::TakeUp::Named(&named))
-        .expect("B hears of A's take");
+    a.release_taken(&named).expect("A hears of B's take");
+    b.release_taken(&named).expect("B hears of A's take");
     let carried = |state: &AppState| {
         state
             .snapshot()
@@ -4296,11 +4526,9 @@ fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_li
                 (&b, &a, 7)
             };
             sequence_num += 1;
-            to.release_taken(fleet_server::fleet::TakeUp::Named(&named))
-                .expect("hears of the take");
+            to.release_taken(&named).expect("hears of the take");
             to.process(report(sequence_num), Transport::WebSocket, Some(conn));
-            from.release_taken(fleet_server::fleet::TakeUp::Named(&named))
-                .expect("hears of the take");
+            from.release_taken(&named).expect("hears of the take");
             assert_eq!(likely(), usize::from(change == 11), "after change {change}");
         }
     });

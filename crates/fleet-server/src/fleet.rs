@@ -35,7 +35,6 @@ use crate::packages::{
 use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor, SubjectValues};
 
 mod held;
-pub use held::TakeUp;
 use held::{Carried, Kept, PendingRekey, Settled, Taking, Took, UnsureRekey, AGENT_LOCKS};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
@@ -1388,37 +1387,35 @@ impl AppState {
         if let Group::Behind { gateway, machine } = group {
             return clients_behind(gateway, machine, self.arrived_over(gateway).as_ref(), held);
         }
-        let (Group::Host(host), Some(revocations)) = (group, &self.revocations) else {
+        let Group::Host(host) = group else {
             return Vec::new();
         };
-        let SpeaksFor::Agents(bound) = revocations.speaks_for(host) else {
-            return Vec::new();
-        };
-        let elsewhere: Vec<InstanceUid> = bound
-            .iter()
-            .filter_map(|uid| parse_hex_uid(uid))
+        let elsewhere: Vec<InstanceUid> = self
+            .bound_to(host)
+            .into_iter()
             .filter(|uid| !held(uid))
             .collect();
         if elsewhere.is_empty() {
             return Vec::new();
         }
         match self.agent_store.get_many(&elsewhere) {
-            Ok(found) => {
-                let mut clients: Vec<(InstanceUid, BTreeMap<String, String>)> = found
-                    .into_iter()
-                    .filter(|(_, record)| {
-                        record.host.as_deref() == Some(host.as_str())
-                            && crate::labels::is_client_agent(record.description.as_ref())
-                    })
-                    .map(|(uid, record)| (uid, record.labels))
-                    .collect();
-                clients.sort_by_key(|(uid, _)| uid.0);
-                clients
-            }
+            Ok(found) => clients_of_host(host, found.iter()),
             Err(e) => {
                 warn!(host = %host, error = %e, "cannot read the agents of the host that another instance carries");
                 Vec::new()
             }
+        }
+    }
+
+    /// The Agents the host register binds to `host`, none where it binds every one or there is no
+    /// register.
+    fn bound_to(&self, host: &str) -> Vec<InstanceUid> {
+        let Some(revocations) = &self.revocations else {
+            return Vec::new();
+        };
+        match revocations.speaks_for(host) {
+            SpeaksFor::Agents(bound) => bound.iter().filter_map(|uid| parse_hex_uid(uid)).collect(),
+            SpeaksFor::Any => Vec::new(),
         }
     }
 
@@ -4733,6 +4730,24 @@ fn clients_behind(
     }
 }
 
+/// The Client Agents among `found` that arrived over `host`, with their labels, in the order of
+/// their `instance_uid`: of a Host's group, those of the Agents the host register binds to it.
+fn clients_of_host<'a>(
+    host: &str,
+    found: impl IntoIterator<Item = (&'a InstanceUid, &'a PersistedAgent)>,
+) -> Vec<(InstanceUid, BTreeMap<String, String>)> {
+    let mut clients: Vec<(InstanceUid, BTreeMap<String, String>)> = found
+        .into_iter()
+        .filter(|(_, record)| {
+            record.host.as_deref() == Some(host)
+                && crate::labels::is_client_agent(record.description.as_ref())
+        })
+        .map(|(uid, record)| (*uid, record.labels.clone()))
+        .collect();
+    clients.sort_by_key(|(uid, _)| uid.0);
+    clients
+}
+
 /// Places the members of one group under their Client Agent (ADR-0030 clause 19): with exactly
 /// one, the others inherit its labels; with more than one, nobody inherits and every member is
 /// marked ambiguous; with none, nobody inherits. `elsewhere` are the group's Client Agents that
@@ -6519,7 +6534,7 @@ mod tests {
             Ok(Some(false)),
             "requested through another instance"
         );
-        state.take_up_agents(TakeUp::Everything).expect("taken up");
+        state.catch_up().expect("taken up");
         assert!(state.restart_command_for(&uid, 1).is_some(), "delivered");
         assert_eq!(state.retry_restarts(), 0, "nothing is kept");
         assert!(
@@ -6558,7 +6573,7 @@ mod tests {
         state.mark_disconnected(&[here, elsewhere], 1);
         assert!(state.forget_agent(&here).is_ok(), "forgotten here");
         stored.remove(&elsewhere).expect("forgotten elsewhere");
-        state.take_up_agents(TakeUp::Everything).expect("taken up");
+        state.catch_up().expect("taken up");
         for (uid, conn) in [(here, 2), (elsewhere, 3)] {
             state.process(restartable(&uid, 1), Transport::WebSocket, Some(conn));
         }
@@ -6573,6 +6588,41 @@ mod tests {
                 "the Agent that came back is not restarted"
             );
         }
+    }
+
+    /// A request announced by name in one read with a missed notification drops its kept
+    /// put-back though the record no longer queues it, delivered through the other instance
+    /// meanwhile: the catch-up keeps such a put-back, and the named request still drops it, so
+    /// the Agent is not restarted twice.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_request_announced_with_a_missed_notification_drops_a_put_back_its_delivery_left() {
+        use crate::postgres::notify::{Heard, Notice, RESTART, TAKEN};
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x3a; 16]);
+        kept_put_back(&state, &failing, &uid);
+        assert_eq!(stored.set_restart_pending(&uid, true), Ok(Some(false)));
+        assert_eq!(
+            stored.set_restart_pending(&uid, false),
+            Ok(Some(true)),
+            "requested and delivered through another instance"
+        );
+
+        // A take that names no Agent has every holder read again: a catch-up.
+        crate::instance::take_up_held_for(
+            &state,
+            &[
+                Heard::Notified(Notice::new(TAKEN, "")),
+                Heard::Notified(Notice::new(RESTART, &uid.to_string())),
+            ],
+        )
+        .expect("taken up");
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        assert_eq!(
+            queued(&stored, &uid),
+            Some(false),
+            "no second restart is queued"
+        );
     }
 
     /// A try found due is not made once a request and its delivery dropped the put-back before
@@ -6622,7 +6672,7 @@ mod tests {
             Ok(Some(false))
         );
         state
-            .take_up_restarts(TakeUp::Named(&HashSet::from([announced])))
+            .take_up_restarts(&HashSet::from([announced]))
             .expect("taken up");
         assert_eq!(
             stored.set_restart_pending(&announced, false),
@@ -6631,9 +6681,7 @@ mod tests {
         );
 
         assert_eq!(stored.set_restart_pending(&queued, true), Ok(Some(false)));
-        state
-            .take_up_restarts(TakeUp::Everything)
-            .expect("taken up");
+        state.catch_up().expect("taken up");
         assert_eq!(
             stored.set_restart_pending(&queued, false),
             Ok(Some(true)),
@@ -7135,7 +7183,7 @@ mod tests {
                 "kept while the re-key is not read back"
             );
         }
-        a.take_up_agents(TakeUp::Everything).expect("read again");
+        a.catch_up().expect("read again");
         let held = held_by(&a);
         assert_eq!(held.len(), 1);
         let new = InstanceUid::parse(&held[0]).expect("a uid");
@@ -8954,14 +9002,14 @@ mod tests {
         assert!(view(&state, &supervisor).inherited_labels.is_empty());
 
         state
-            .take_up_agents(TakeUp::Named(&HashSet::from([client, supervisor])))
+            .take_up_agents(&HashSet::from([client, supervisor]))
             .expect("take up");
         assert_eq!(view(&state, &client).labels, labels);
         assert_eq!(view(&state, &supervisor).inherited_labels, labels);
         assert!(state.fleet.lock().expect("fleet")[&supervisor].restart_pending);
 
         other.remove(&client).expect("forget");
-        state.take_up_agents(TakeUp::Everything).expect("take up");
+        state.catch_up().expect("take up");
         assert!(!state.fleet.lock().expect("fleet").contains_key(&client));
         assert!(
             view(&state, &supervisor).inherited_labels.is_empty(),
@@ -9736,9 +9784,7 @@ mod tests {
             [here.to_string()],
             "it holds the Agent that reported to it"
         );
-        state
-            .take_up_agents(TakeUp::Everything)
-            .expect("read everything again");
+        state.catch_up().expect("read everything again");
         assert_eq!(
             loads.load(Ordering::SeqCst),
             0,
@@ -10903,7 +10949,7 @@ mod tests {
                 let _ = taken_back.send(());
             });
         }));
-        a.release_taken(TakeUp::Everything).expect("release");
+        a.catch_up().expect("release");
         assert!(
             after_holders.lock().expect("hook lock").is_none(),
             "the take came while the holder was read"
@@ -10997,8 +11043,7 @@ mod tests {
         *after_get.lock().expect("hook lock") = Some(Box::new(move || {
             label(&on_a.upgrade().expect("A"), &uid, &[("tier", "core")]);
         }));
-        a.take_up_agents(TakeUp::Named(&HashSet::from([uid])))
-            .expect("take up");
+        a.take_up_agents(&HashSet::from([uid])).expect("take up");
         assert_eq!(view(&a, &uid).labels["tier"], "core", "A's own act stays");
     }
 
@@ -11066,8 +11111,7 @@ mod tests {
             batched_gets.load(Ordering::SeqCst),
         );
 
-        a.take_up_agents(TakeUp::Named(&HashSet::from(uids)))
-            .expect("take up");
+        a.take_up_agents(&HashSet::from(uids)).expect("take up");
         for uid in &uids {
             assert_eq!(view(&a, uid).labels["tier"], "edge", "{uid} taken up");
         }
@@ -11080,6 +11124,145 @@ mod tests {
             batched_gets.load(Ordering::SeqCst) - batched_before,
             1,
             "and one read of all three under it"
+        );
+    }
+
+    /// A catch-up after a missed notification takes up every kind of state this instance keeps of
+    /// the Agents it holds from one read of their records and one of their holders, however many
+    /// kinds there are: an assignment, labels, the labels of a Client Agent another instance
+    /// carries, which the group inherits, of a Host and behind a Gateway, a requested restart, a
+    /// put-back kept for retry, and a take. The Agents behind the Gateway are read once, before the
+    /// fleet lock.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_catch_up_reads_the_records_once_and_the_holders_once() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let (probe, failing) = (hooked.probe.clone(), hooked.failing_restarts.clone());
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000a".to_string())).1,
+        );
+        let dir = tempfile::tempdir().expect("blobs");
+        let b = delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+            dir.path(),
+        );
+        b.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000b".to_string())).1,
+        );
+        let [client, agent, restarted, kept, taken, gateway, behind_client, behind] =
+            [0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8].map(|byte| InstanceUid([byte; 16]));
+        let subject = crate::revocation::SubjectValues::default;
+        report_over(
+            &b,
+            "h1",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        report_over(
+            &b,
+            "gw",
+            subject(),
+            gateway,
+            &[("supervisor.kind.collector", "true"), ("host.id", "gw-1")],
+        );
+        assert!(b.set_gateway("gw", true).expect("marked"));
+        report_over(
+            &b,
+            "gw",
+            subject(),
+            behind_client,
+            &[("supervisor.kind.collector", "true"), ("host.id", "m-1")],
+        );
+        a.revocations()
+            .expect("register")
+            .reload_ledger()
+            .expect("the binding and the mark B made");
+        report_over(&a, "h1", subject(), agent, &[]);
+        report_over(&a, "gw", subject(), behind, &[("host.id", "m-1")]);
+        a.process(restartable(&restarted, 1), Transport::WebSocket, Some(1));
+        kept_put_back(&a, &failing, &kept);
+        a.process(report(&taken, 1), Transport::WebSocket, Some(2));
+
+        // What B changes, A hears nothing of.
+        label(&b, &client, &[("site", "wien")]);
+        label(&b, &agent, &[("ring", "early")]);
+        label(&b, &behind_client, &[("site", "graz")]);
+        aim_at_the_early_ring(&b);
+        assert!(b.rollout_to_agent(&agent, None).is_ok(), "released");
+        assert!(b.request_restart(&restarted).is_ok(), "requested");
+        assert!(b.request_restart(&kept).is_ok(), "requested again");
+        b.process(report(&taken, 2), Transport::WebSocket, Some(9));
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (calls, on) = (calls.clone(), Arc::downgrade(&a));
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, _| {
+                // Whether the fleet lock is held at the call: another thread tries it.
+                let a = on.upgrade().expect("A");
+                let locked = std::thread::spawn(move || a.fleet.try_lock().is_err())
+                    .join()
+                    .expect("tried");
+                calls.lock().expect("calls").push((call, locked));
+            }));
+        }
+        a.catch_up().expect("caught up");
+        *probe.lock().expect("hook lock") = None;
+        let calls = calls.lock().expect("calls").clone();
+        let count = |name: &str| calls.iter().filter(|(call, _)| *call == name).count();
+        assert_eq!(
+            (
+                count("get"),
+                count("get_many"),
+                count("holders"),
+                count("query_page")
+            ),
+            (0, 1, 1, 1),
+            "one read of the records, one of the holders and one of the Gateway: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|(call, locked)| *locked == (*call == "get_many")),
+            "only the records are read under the fleet lock: {calls:?}"
+        );
+
+        let held = view(&a, &agent);
+        assert_eq!(held.assigned_deployment, "early", "the assignment");
+        assert_eq!(held.labels["ring"], "early", "the labels");
+        assert_eq!(
+            held.inherited_labels.get("site").map(String::as_str),
+            Some("wien"),
+            "the Client Agent's labels"
+        );
+        assert!(
+            a.fleet.lock().expect("fleet")[&restarted].restart_pending,
+            "the restart requested"
+        );
+        assert!(
+            !a.kept
+                .unput_restarts
+                .lock()
+                .expect("restarts lock")
+                .contains_key(&kept),
+            "the put-back, its restart queued again"
+        );
+        assert!(!view(&a, &taken).connected, "the take");
+        assert_eq!(
+            view(&a, &behind)
+                .inherited_labels
+                .get("site")
+                .map(String::as_str),
+            Some("graz"),
+            "the labels of the Client Agent behind the Gateway"
         );
     }
 
@@ -12675,8 +12858,7 @@ mod tests {
             format!("{LEASE_B} true 2"),
             "B's take stays"
         );
-        a.release_taken(TakeUp::Everything)
-            .expect("A hears of the takes");
+        a.catch_up().expect("A hears of the takes");
         for uid in [gone, dead] {
             assert!(!view(&a, &uid).connected, "A no longer carries {uid}");
         }
@@ -12785,8 +12967,7 @@ mod tests {
         b.mark_disconnected(&[uid], 9);
         b.write_presence(LEASE_B).expect("B's batch");
         assert_eq!(stored_presence(&test, &uid), "none false 2");
-        a.release_taken(TakeUp::Everything)
-            .expect("A hears of the take");
+        a.catch_up().expect("A hears of the take");
         hooks.failing_takes.store(true, Ordering::SeqCst);
         a.process(report(&uid, 3), Transport::WebSocket, Some(8));
         hooks.failing_takes.store(false, Ordering::SeqCst);
@@ -13617,7 +13798,7 @@ mod tests {
                 let a = a.upgrade().expect("A");
                 let (on_a, done) = (a.clone(), finished.clone());
                 std::thread::spawn(move || {
-                    let read = on_a.release_taken(TakeUp::Named(&HashSet::from([uid])));
+                    let read = on_a.release_taken(&HashSet::from([uid]));
                     done.store(true, Ordering::SeqCst);
                     let _ = heard.send(read);
                 });
@@ -13681,7 +13862,7 @@ mod tests {
                     "a restart is refused before the record names its capabilities"
                 );
                 let a = a.upgrade().expect("A");
-                a.take_up_agents(TakeUp::Named(&HashSet::from([uid])))
+                a.take_up_agents(&HashSet::from([uid]))
                     .expect("A takes it up");
             }));
         }
@@ -13820,7 +14001,7 @@ mod tests {
                 test(&gone);
                 on.upgrade()
                     .expect("A")
-                    .take_up_agents(TakeUp::Named(&HashSet::from([uid])))
+                    .take_up_agents(&HashSet::from([uid]))
                     .expect("A hears the Agent forgotten");
             }));
         }
@@ -13935,8 +14116,8 @@ mod tests {
                     let requested = b.request_restart(&uid).is_ok();
                     // The announcement, once the request committed.
                     let named = HashSet::from([uid]);
-                    let taken = again.take_up_agents(TakeUp::Named(&named)).is_ok()
-                        && again.take_up_restarts(TakeUp::Named(&named)).is_ok();
+                    let taken = again.take_up_agents(&named).is_ok()
+                        && again.take_up_restarts(&named).is_ok();
                     done.store(true, Ordering::SeqCst);
                     let _ = answered.send(requested && taken);
                 });
@@ -13962,8 +14143,8 @@ mod tests {
     }
 
     /// The same request taken up after a missed notification, which names no Agent, is not lost
-    /// either: the take-up of every Agent reads a restart the store queues under the Agent's own
-    /// lock, waits for the delivery, and holds the request, which is sent next.
+    /// either: the catch-up reads the restart the store queues under the Agent's own lock, waits
+    /// for the delivery, and holds the request, which is sent next.
     /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_after_a_missed_notification(
@@ -13995,9 +14176,8 @@ mod tests {
                 let (again, done) = (a.clone(), finished.clone());
                 std::thread::spawn(move || {
                     let requested = b.request_restart(&uid).is_ok();
-                    // The announcement is missed: every Agent is taken up, as a notice does then.
-                    let taken = again.take_up_agents(TakeUp::Everything).is_ok()
-                        && again.take_up_restarts(TakeUp::Everything).is_ok();
+                    // The announcement is missed: the instance catches up, as it does then.
+                    let taken = again.catch_up().is_ok();
                     done.store(true, Ordering::SeqCst);
                     let _ = answered.send(requested && taken);
                 });
@@ -14072,8 +14252,8 @@ mod tests {
                     // The announcement reaches the carrying instance once the request committed,
                     // which takes the Agent up and then its kept restarts, as a notice does.
                     let named = HashSet::from([uid]);
-                    a.take_up_agents(TakeUp::Named(&named)).expect("taken up");
-                    a.take_up_restarts(TakeUp::Named(&named)).expect("taken up");
+                    a.take_up_agents(&named).expect("taken up");
+                    a.take_up_restarts(&named).expect("taken up");
                     requested
                 })
             };
@@ -14178,7 +14358,7 @@ mod tests {
                 test(&gone);
                 on.upgrade()
                     .expect("A")
-                    .take_up_agents(TakeUp::Named(&HashSet::from([uid])))
+                    .take_up_agents(&HashSet::from([uid]))
                     .expect("A hears the Agent forgotten");
             }));
         }
@@ -14228,7 +14408,7 @@ mod tests {
                 test(&gone);
                 on.upgrade()
                     .expect("A")
-                    .take_up_agents(TakeUp::Named(&HashSet::from([uid])))
+                    .take_up_agents(&HashSet::from([uid]))
                     .expect("A hears the Agent forgotten");
                 other
                     .put(&uid, &crate::agent_store::tests::record())
@@ -14271,10 +14451,11 @@ mod tests {
         {
             let on = Arc::downgrade(&a);
             *after_rekey.lock().expect("hook lock") = Some(Box::new(move || {
-                // As after a missed notification: everything held is read again.
+                // As on a notice naming it. A catch-up cannot come here: it waits for the
+                // Agent's own lock, which the report holds.
                 on.upgrade()
                     .expect("A")
-                    .take_up_agents(TakeUp::Everything)
+                    .take_up_agents(&HashSet::from([uid]))
                     .expect("read again");
             }));
         }

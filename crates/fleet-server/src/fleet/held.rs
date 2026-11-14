@@ -5,26 +5,6 @@
 
 use super::*;
 
-/// What a take-up acts on: the Agents a notice names, or every Agent, which a missed notification
-/// calls for.
-#[derive(Clone, Copy, Debug)]
-pub enum TakeUp<'a> {
-    /// The Agents a notice names.
-    Named(&'a HashSet<InstanceUid>),
-    /// Every Agent: a notification was missed.
-    Everything,
-}
-
-impl<'a> TakeUp<'a> {
-    /// The Agents named, or `None` for every Agent.
-    pub(super) fn named(self) -> Option<&'a HashSet<InstanceUid>> {
-        match self {
-            TakeUp::Named(uids) => Some(uids),
-            TakeUp::Everything => None,
-        }
-    }
-}
-
 /// How many locks the Agents' own locks are spread over: two Agents share one only by their
 /// `instance_uid`, and then one waits for the other's report.
 pub(super) const AGENT_LOCKS: usize = 1024;
@@ -423,8 +403,8 @@ impl Kept {
 impl AppState {
     /// Takes up what another instance wrote to the records of Agents this one holds
     /// (ADR-0045
-    /// clauses 8 and 9): the record of each Agent of `uids` this instance holds, or of every one
-    /// it holds where `uids` is `None`, is read again from the store. Its assignment, its labels and
+    /// clauses 8 and 9): the record of each Agent of `uids` this instance holds is read again from
+    /// the store. Its assignment, its labels and
     /// its queued restart are taken into what is held, its group is placed again for its labels,
     /// and one the store no longer holds, forgotten through another instance, is dropped. The
     /// WebSocket loops are woken, so a connected Agent is offered what it was released, or sent the
@@ -441,35 +421,21 @@ impl AppState {
     /// On a shared store an Agent of `uids` this instance does not hold may be the Client Agent of
     /// a Host whose Agents it holds, carried by another instance: those groups are placed again,
     /// so what they inherit follows its labels, or its forgetting.
-    pub fn take_up_agents(&self, take_up: TakeUp<'_>) -> Result<(), String> {
-        let uids = take_up.named();
+    pub fn take_up_agents(&self, uids: &HashSet<InstanceUid>) -> Result<(), String> {
         if self.agent_store.is_shared() {
-            self.place_again_for(take_up);
+            self.place_again_for(uids);
         }
         let held: Vec<InstanceUid> = {
             let fleet = self.fleet.lock().expect("fleet lock");
-            match uids {
-                None => fleet.keys().copied().collect(),
-                Some(uids) => uids
-                    .iter()
-                    .filter(|uid| fleet.contains_key(uid))
-                    .copied()
-                    .collect(),
-            }
+            uids.iter()
+                .filter(|uid| fleet.contains_key(uid))
+                .copied()
+                .collect()
         };
-        let stored: Vec<(InstanceUid, Option<PersistedAgent>)> = match uids {
-            // The Agents held, in one read, and not the fleet.
-            None => {
-                let mut all = self.agent_store.get_many(&held)?;
-                held.into_iter()
-                    .map(|uid| (uid, all.remove(&uid)))
-                    .collect()
-            }
-            Some(_) => held
-                .into_iter()
-                .map(|uid| Ok((uid, self.agent_store.get(&uid)?)))
-                .collect::<Result<_, String>>()?,
-        };
+        let stored: Vec<(InstanceUid, Option<PersistedAgent>)> = held
+            .into_iter()
+            .map(|uid| Ok((uid, self.agent_store.get(&uid)?)))
+            .collect::<Result<_, String>>()?;
         let mut fleet = self.fleet.lock().expect("fleet lock");
         let differing: Vec<InstanceUid> = stored
             .into_iter()
@@ -536,6 +502,228 @@ impl AppState {
         }
     }
 
+    /// Catches up after a missed notification, which counts as every notification
+    /// (ADR-0045
+    /// clause 10): what other instances changed of the Agents this instance holds is taken up from
+    /// one read of their records and one of their holders, whatever kinds of state it keeps of
+    /// them. From these two reads:
+    ///
+    /// - each record's assignment, queued restart and labels are taken into what is held, and an
+    ///   Agent whose record the store no longer holds, forgotten through another instance, is
+    ///   dropped, or kept where a re-key of this instance's own whose answer was lost moved it
+    ///   ([`drop_forgotten`](Self::drop_forgotten));
+    /// - a put-back of a restart kept for retry is dropped where its record shows a restart queued;
+    /// - an Agent carried here whose row names another holder is carried no more
+    ///   ([`release_taken`](Self::release_taken));
+    /// - on a shared store every group is placed again (clause 8): the Client Agents of a Host's
+    ///   group that the host register binds to it are among the records read, and those behind a
+    ///   Gateway are read through the Agents that arrived over its Host, once per Gateway, before
+    ///   the fleet lock is taken. A group that came to be meanwhile is read and placed once the
+    ///   locks are let go.
+    ///
+    /// The holders are read under the own locks of the Agents held or being taken, which every
+    /// take of this instance holds. The records are read under those locks and the fleet lock: a
+    /// delivery clears a restart in the store under the Agent's own lock before it takes the clear
+    /// into memory, and an act of this instance, which it never hears announced, writes the store
+    /// and what is held together under the fleet lock. The fleet lock thus waits for one round
+    /// trip, however many Agents this instance holds. The WebSocket loops are woken where anything
+    /// moved, so a connected Agent is offered what it was released, or sent the restart requested.
+    ///
+    /// # Errors
+    /// Returns an error when the store cannot be read, and then keeps what is held. Returns one
+    /// too when a re-key whose answer was lost cannot be read back, once everything else is taken
+    /// up; that Agent is then kept under its old identity.
+    pub fn catch_up(&self) -> Result<(), String> {
+        let shared = self.agent_store.is_shared();
+        let holder = if shared {
+            self.lease.get().and_then(|lease| lease.borrow().clone())
+        } else {
+            None
+        };
+        let mut concerned: HashSet<InstanceUid> = self
+            .fleet
+            .lock()
+            .expect("fleet lock")
+            .keys()
+            .copied()
+            .collect();
+        if holder.is_some() {
+            concerned.extend(self.taking.lock().expect("taking lock").iter().copied());
+        }
+        let agents = self.agent_locks_of(&concerned);
+        let holders = match &holder {
+            Some(_) => {
+                let carried: Vec<InstanceUid> = {
+                    let fleet = self.fleet.lock().expect("fleet lock");
+                    concerned
+                        .iter()
+                        .filter(|uid| fleet.get(uid).is_some_and(|record| record.connected))
+                        .copied()
+                        .collect()
+                };
+                if carried.is_empty() {
+                    HashMap::new()
+                } else {
+                    self.agent_store.holders(&carried)?
+                }
+            }
+            None => HashMap::new(),
+        };
+        // The Client Agents behind each Gateway, read before the fleet lock, as a report's
+        // placement reads them, and sifted of what is held as each group is placed.
+        let mut behind: ClientsByGroup = HashMap::new();
+        if shared {
+            let gateways: Vec<Group> = self
+                .groups
+                .lock()
+                .expect("groups lock")
+                .keys()
+                .filter(|group| matches!(group, Group::Behind { .. }))
+                .cloned()
+                .collect();
+            let mut arrived = HashMap::new();
+            for group in gateways {
+                let Group::Behind { gateway, machine } = &group else {
+                    continue;
+                };
+                let arrived = arrived
+                    .entry(gateway.clone())
+                    .or_insert_with(|| self.arrived_over(gateway));
+                let found = clients_behind(gateway, machine, arrived.as_ref(), &|_| false);
+                behind.insert(group, found);
+            }
+        }
+
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        // Only the Agents whose own locks are held: one that arrived since was read at its report.
+        let held: Vec<InstanceUid> = concerned
+            .into_iter()
+            .filter(|uid| fleet.contains_key(uid))
+            .collect();
+        let groups: Vec<Group> = if shared {
+            self.groups
+                .lock()
+                .expect("groups lock")
+                .keys()
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let bound: HashMap<&str, Vec<InstanceUid>> = groups
+            .iter()
+            .filter_map(|group| match group {
+                Group::Host(host) => Some(host.as_str()),
+                Group::Behind { .. } => None,
+            })
+            .map(|host| (host, self.bound_to(host)))
+            .collect();
+        let mut wanted: HashSet<InstanceUid> = held.iter().copied().collect();
+        wanted.extend(
+            self.kept
+                .unput_restarts
+                .lock()
+                .expect("restarts lock")
+                .keys()
+                .copied(),
+        );
+        wanted.extend(bound.values().flatten().copied());
+        let mut stored = if wanted.is_empty() {
+            HashMap::new()
+        } else {
+            self.agent_store
+                .get_many(&wanted.into_iter().collect::<Vec<_>>())?
+        };
+
+        // What every group's Client Agents held elsewhere are, sifted of what is held as each group
+        // is placed. A Gateway's group not read before the lock is placed once it is let go.
+        let mut read = behind;
+        for host in bound.keys() {
+            let found = clients_of_host(
+                host,
+                bound[host]
+                    .iter()
+                    .filter_map(|uid| stored.get(uid).map(|record| (uid, record))),
+            );
+            read.insert(Group::Host((*host).to_string()), found);
+        }
+        let mut elsewhere = Elsewhere::Read {
+            read,
+            missed: Vec::new(),
+        };
+
+        let mut moved = 0usize;
+        self.kept
+            .unput_restarts
+            .lock()
+            .expect("restarts lock")
+            .retain(|uid, _| !stored.get(uid).is_some_and(|record| record.restart_pending));
+        let mut unknown = None;
+        for uid in held {
+            let Some(persisted) = stored.remove(&uid) else {
+                let unsure = self.read_unsure_rekey(&uid);
+                if let Gone::Unknown(e) =
+                    self.drop_forgotten_read(&mut fleet, &uid, unsure, &mut elsewhere)
+                {
+                    unknown = Some(e);
+                }
+                moved += 1;
+                continue;
+            };
+            let Some(record) = fleet.get_mut(&uid) else {
+                continue;
+            };
+            let mut changed = false;
+            if record.assignment != persisted.assignment {
+                record.assignment = persisted.assignment;
+                changed = true;
+            }
+            if record.restart_pending != persisted.restart_pending {
+                record.restart_pending = persisted.restart_pending;
+                changed = true;
+            }
+            if record.labels != persisted.labels {
+                record.labels = persisted.labels;
+                changed = true;
+            }
+            if changed {
+                self.kept.written.lock().expect("written lock").remove(&uid);
+                moved += 1;
+            }
+        }
+        if let Some(holder) = &holder {
+            let taken = holders
+                .into_iter()
+                .filter(|(_, stored)| stored.as_deref() != Some(holder.as_str()))
+                .map(|(uid, _)| uid);
+            self.stop_carrying(&mut fleet, holder, taken);
+        }
+        if shared {
+            let groups = self.groups.lock().expect("groups lock");
+            let placed: Vec<Group> = groups.keys().cloned().collect();
+            for group in &placed {
+                self.inherit_held(&mut fleet, &groups, group, &mut elsewhere);
+            }
+        }
+        drop(fleet);
+        drop(agents);
+        // A group the reads did not cover, one that came to be meanwhile, is read and placed again.
+        self.place_again(elsewhere);
+        if moved > 0 {
+            self.push.send_modify(|rev| *rev += 1);
+            debug!(
+                agents = moved,
+                "caught up with what other instances wrote to the agents' records"
+            );
+        }
+        match unknown {
+            Some(e) => Err(format!(
+                "cannot read back a re-key whose answer was lost: {e}"
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Whether this instance holds anything of `uid`: its record, a place in a group, or anything
     /// [`Kept`] of it. What waits for a connection's loop to end its session is not counted, nor
     /// the presence's generation, each of which outlives the Agent on purpose.
@@ -554,33 +742,28 @@ impl AppState {
 
     /// Places again each group this instance holds members of whose Client Agent may be one of
     /// `uids` that it does not hold — the group's Client Agent now, or, of a Host, an Agent the
-    /// host register binds to it — or every group where `uids` is `None`. Behind a Gateway a
-    /// Client Agent another instance carries that the group was not placed under yet is found here
-    /// only where `uids` is `None`; the notice of its arrival places the group again
-    /// ([`place_hosts_again`](AppState::place_hosts_again)).
-    pub(super) fn place_again_for(&self, take_up: TakeUp<'_>) {
-        let uids = take_up.named();
+    /// host register binds to it. Behind a Gateway a Client Agent another instance carries that
+    /// the group was not placed under yet is not found here: the notice of its arrival places the
+    /// group again ([`place_hosts_again`](AppState::place_hosts_again)), and so does a catch-up
+    /// ([`catch_up`](AppState::catch_up)).
+    pub(super) fn place_again_for(&self, uids: &HashSet<InstanceUid>) {
         let Some(revocations) = &self.revocations else {
             return;
         };
         let mut fleet = self.fleet.lock().expect("fleet lock");
-        // The notified Agents this instance does not hold; `None` for every one.
-        let elsewhere: Option<Vec<InstanceUid>> = uids.map(|uids| {
-            uids.iter()
-                .filter(|uid| !fleet.contains_key(uid))
-                .copied()
-                .collect()
-        });
-        if elsewhere.as_ref().is_some_and(Vec::is_empty) {
+        // The notified Agents this instance does not hold.
+        let elsewhere: Vec<InstanceUid> = uids
+            .iter()
+            .filter(|uid| !fleet.contains_key(uid))
+            .copied()
+            .collect();
+        if elsewhere.is_empty() {
             return;
         }
         let groups = self.groups.lock().expect("groups lock");
         let due: Vec<Group> = groups
             .iter()
             .filter(|(group, members)| {
-                let Some(elsewhere) = &elsewhere else {
-                    return true;
-                };
                 // Behind a Gateway the register binds no Agent; the group's Client Agent is the
                 // one it was placed under.
                 let bound = match group {
@@ -893,99 +1076,64 @@ impl AppState {
         }
     }
 
-    /// Takes up what another instance announced of the restarts of `uids`, every Agent where a
-    /// notification was missed: a request there is this restart now, so a put-back still kept is
-    /// dropped. After a missed notification only one whose record shows a restart queued is
+    /// Takes up what another instance announced of the restarts of `uids`: a request there is this
+    /// restart now, so a put-back still kept is dropped
     /// (ADR-0045
     /// clause 8).
     ///
-    /// A request of an Agent held here, announced or found after a missed notification, is read
-    /// under the Agent's own lock and held: a delivery clears a restart in the store under that
-    /// lock before it takes the clear into memory, and a request committed between the two is
-    /// otherwise taken out of memory with it.
+    /// A request of an Agent held here is read under the Agent's own lock and held: a delivery
+    /// clears a restart in the store under that lock before it takes the clear into memory, and a
+    /// request committed between the two is otherwise taken out of memory with it. The records are
+    /// read in one read, so the locks are held for one round trip.
     ///
     /// # Errors
     /// Returns an error when a record cannot be read; what is kept stays kept.
-    pub fn take_up_restarts(&self, take_up: TakeUp<'_>) -> Result<(), String> {
-        let uids = take_up.named();
-        self.hold_restarts(uids)?;
-        let _fleet = self.fleet.lock().expect("fleet lock");
-        let mut kept = self.kept.unput_restarts.lock().expect("restarts lock");
-        match uids {
-            Some(uids) => kept.retain(|uid, _| !uids.contains(uid)),
-            None => {
-                let named: Vec<InstanceUid> = kept.keys().copied().collect();
-                for uid in named {
-                    if self
-                        .agent_store
-                        .get(&uid)?
-                        .is_some_and(|stored| stored.restart_pending)
-                    {
-                        kept.remove(&uid);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Holds the restart the store queues for each Agent of `uids` held here, every one where
-    /// `None`, read under its own lock ([`take_up_restarts`](Self::take_up_restarts)).
-    ///
-    /// Where `uids` is `None`, the Agents held are read first without their locks, and only those
-    /// whose record queues a restart are read again under theirs, so the take-up does not wait for
-    /// every lock. A request is committed before the first read it races, so that read finds it
-    /// queued, unless a delivery cleared it since, which sent it.
-    fn hold_restarts(&self, uids: Option<&HashSet<InstanceUid>>) -> Result<(), String> {
-        let held: Vec<InstanceUid> = {
+    pub fn take_up_restarts(&self, uids: &HashSet<InstanceUid>) -> Result<(), String> {
+        let held: HashSet<InstanceUid> = {
             let fleet = self.fleet.lock().expect("fleet lock");
-            match uids {
-                None => fleet.keys().copied().collect(),
-                Some(uids) => uids
-                    .iter()
-                    .filter(|uid| fleet.contains_key(uid))
-                    .copied()
-                    .collect(),
-            }
+            uids.iter()
+                .filter(|uid| fleet.contains_key(uid))
+                .copied()
+                .collect()
         };
-        let held: HashSet<InstanceUid> = match uids {
-            Some(_) => held.into_iter().collect(),
-            None if held.is_empty() => HashSet::new(),
-            // One read of them all, without their locks.
-            None => self
+        if !held.is_empty() {
+            let _agents = self.agent_locks_of(&held);
+            let queued: Vec<InstanceUid> = self
                 .agent_store
-                .get_many(&held)?
+                .get_many(&held.into_iter().collect::<Vec<_>>())?
                 .into_iter()
                 .filter(|(_, stored)| stored.restart_pending)
                 .map(|(uid, _)| uid)
-                .collect(),
-        };
-        if held.is_empty() {
-            return Ok(());
-        }
-        let _agents = self.agent_locks_of(Some(&held));
-        // One read of them all, so their locks are held for one round trip.
-        let queued: Vec<InstanceUid> = self
-            .agent_store
-            .get_many(&held.into_iter().collect::<Vec<_>>())?
-            .into_iter()
-            .filter(|(_, stored)| stored.restart_pending)
-            .map(|(uid, _)| uid)
-            .collect();
-        let mut fleet = self.fleet.lock().expect("fleet lock");
-        let mut moved = false;
-        for uid in queued {
-            if let Some(record) = fleet.get_mut(&uid).filter(|record| !record.restart_pending) {
-                record.restart_pending = true;
-                self.kept.written.lock().expect("written lock").remove(&uid);
-                moved = true;
+                .collect();
+            let mut fleet = self.fleet.lock().expect("fleet lock");
+            let mut moved = false;
+            for uid in queued {
+                if let Some(record) = fleet.get_mut(&uid).filter(|record| !record.restart_pending) {
+                    record.restart_pending = true;
+                    self.kept.written.lock().expect("written lock").remove(&uid);
+                    moved = true;
+                }
+            }
+            drop(fleet);
+            if moved {
+                self.push.send_modify(|rev| *rev += 1);
             }
         }
-        drop(fleet);
-        if moved {
-            self.push.send_modify(|rev| *rev += 1);
-        }
+        self.drop_kept_restarts(uids);
         Ok(())
+    }
+
+    /// Drops the put-backs kept for retry of the Agents of `uids`, whose restart another instance
+    /// requested: that request is the restart now, whether or not its record still queues it
+    /// (ADR-0045
+    /// clause 8).
+    pub(crate) fn drop_kept_restarts(&self, uids: &HashSet<InstanceUid>) {
+        let _fleet = self.fleet.lock().expect("fleet lock");
+        self.kept
+            .unput_restarts
+            .lock()
+            .expect("restarts lock")
+            .retain(|uid, _| !uids.contains(uid));
     }
 
     /// Drops the put-back of `uid`'s restart kept for retry, if one is: what a request, a delivery
@@ -1258,7 +1406,7 @@ impl AppState {
         }
     }
 
-    /// Stops carrying each Agent of `uids`, every one this instance carries where `None`, whose
+    /// Stops carrying each Agent of `uids` this instance carries whose
     /// stored presence no longer names this instance as its holder: another instance took it
     /// (ADR-0045
     /// clause 8). It is held as on a closed connection, and its disconnect is not written, since
@@ -1272,15 +1420,14 @@ impl AppState {
     ///
     /// # Errors
     /// Returns an error when the holders cannot be read; what is held is then kept.
-    pub fn release_taken(&self, take_up: TakeUp<'_>) -> Result<(), String> {
-        let uids = take_up.named();
+    pub fn release_taken(&self, uids: &HashSet<InstanceUid>) -> Result<(), String> {
         if !self.agent_store.is_shared() {
             return Ok(());
         }
         let Some(holder) = self.lease.get().and_then(|lease| lease.borrow().clone()) else {
             return Ok(());
         };
-        let named = |uid: &InstanceUid| uids.is_none_or(|uids| uids.contains(uid));
+        let named = |uid: &InstanceUid| uids.contains(uid);
         let carried = |fleet: &HashMap<InstanceUid, AgentRecord>| -> HashSet<InstanceUid> {
             fleet
                 .iter()
@@ -1300,7 +1447,7 @@ impl AppState {
         if concerned.is_empty() {
             return Ok(());
         }
-        let _agents = self.agent_locks_of(Some(&concerned));
+        let _agents = self.agent_locks_of(&concerned);
         let held: Vec<InstanceUid> = {
             let fleet = self.fleet.lock().expect("fleet lock");
             let carried = carried(&fleet);
@@ -1323,6 +1470,18 @@ impl AppState {
             return Ok(());
         }
         let mut fleet = self.fleet.lock().expect("fleet lock");
+        self.stop_carrying(&mut fleet, &holder, taken);
+        Ok(())
+    }
+
+    /// Stops carrying each Agent of `taken` still connected here, whose row names another holder
+    /// than `holder`: it is held as on a closed connection, and its disconnect is not written.
+    fn stop_carrying(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        holder: &str,
+        taken: impl IntoIterator<Item = InstanceUid>,
+    ) {
         let mut written = self.kept.presence_written.lock().expect("presence lock");
         for uid in taken {
             let Some(record) = fleet.get_mut(&uid).filter(|record| record.connected) else {
@@ -1330,14 +1489,13 @@ impl AppState {
             };
             record.connected = false;
             record.owner = None;
-            if written.holder.as_deref() == Some(holder.as_str()) {
+            if written.holder.as_deref() == Some(holder) {
                 written.agents.insert(uid, record.presence());
             }
             written.unsure.remove(&uid);
             written.changed(uid);
             debug!(agent = %uid, "another instance took the agent; this one no longer carries it");
         }
-        Ok(())
     }
 
     /// The Agents forgotten while connection `conn` carried them, taken once: its loop ends their
@@ -1377,16 +1535,12 @@ impl AppState {
         self.agent_lock_at(Self::agent_lock_index(uid))
     }
 
-    /// Takes the own locks of the Agents of `uids`, every one where `None`, in the order of
-    /// their index.
+    /// Takes the own locks of the Agents of `uids`, in the order of their index.
     pub(super) fn agent_locks_of(
         &self,
-        uids: Option<&HashSet<InstanceUid>>,
+        uids: &HashSet<InstanceUid>,
     ) -> Vec<std::sync::MutexGuard<'_, ()>> {
-        let indexes: BTreeSet<usize> = match uids {
-            Some(uids) => uids.iter().map(Self::agent_lock_index).collect(),
-            None => (0..AGENT_LOCKS).collect(),
-        };
+        let indexes: BTreeSet<usize> = uids.iter().map(Self::agent_lock_index).collect();
         indexes
             .into_iter()
             .map(|index| self.agent_lock_at(index))

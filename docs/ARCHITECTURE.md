@@ -193,10 +193,12 @@ no module.
   row's count of takes and announces the take where it replaced another holder, and an instance
   writes the presence of what it carries in batches. What one instance holds of them — the take and
   the release, the presence it writes, the re-keys whose answer was lost, the restarts kept for
-  retry, the take-up of what other instances announced (a `TakeUp` names Agents or, after a missed
-  notification, every Agent), and the per-Agent locks — is the core module `fleet::held`, behind the
-  same `AppState` entry points. What it keeps of each Agent beside its record is one entry, `Kept`,
-  which a forget drops and a re-key moves as one.
+  retry, the take-up of what other instances announced of the Agents a notice names, the catch-up
+  after a missed notification (`catch_up`: one read of the records and one of the holders of every
+  Agent held, from which each kind of kept state and every group is taken up), and the per-Agent
+  locks — is the core module `fleet::held`, behind the same `AppState` entry points. What it keeps
+  of each Agent beside its record is one entry, `Kept`, which a forget drops and a re-key moves as
+  one.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the

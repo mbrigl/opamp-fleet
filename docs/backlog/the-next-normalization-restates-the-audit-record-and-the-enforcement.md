@@ -23,9 +23,9 @@ one:
   - ADR-0012: `plaintext_off_the_loopback_is_refused_before_connecting` "carries no marker". It
     now carries `Verifies: ADR-0012`.
 
-  ADR-0030 clause 2 also says `get_many` reads under the fleet lock. `hold_restarts` in
-  `crates/fleet-server/src/fleet/held.rs` calls it without that lock, as the take-up of named
-  Agents did before (183f49ca8).
+  ADR-0030 clause 2 also says `get_many` reads under the fleet lock. `take_up_restarts` in
+  `crates/fleet-server/src/fleet/held.rs` calls it under the Agents' own locks without that lock,
+  for the Agents a notice names (183f49ca8); `catch_up` calls it under both.
 
 **Idea.** The next normalization merges the four audit ADRs into one new ADR, names the three tests,
 drops the three sentences and says how `get_many` reads. A superseding ADR through `propose-adr`
