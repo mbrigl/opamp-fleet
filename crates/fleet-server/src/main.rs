@@ -197,9 +197,9 @@ fn load_config(named: Option<PathBuf>) -> Layered {
     layered
 }
 
-/// `server pki status [--config <server.toml>]` (ADR-0042 clause 22): when each certificate the
+/// `server pki status [--config <server.toml>]` (ADR-0047 clause 22): when each certificate the
 /// Server host depends on ends. The commands that make certificates are the operator tool's
-/// (ADR-0042); the Server binary makes none.
+/// (ADR-0047); the Server binary makes none.
 fn pki(mut args: impl Iterator<Item = String>) -> ! {
     use fleet_server::pki;
     let named = match (
@@ -784,7 +784,7 @@ async fn serve() {
     };
     // What the Server serves, trusts and signs with until it restarts, read right after the files
     // above were: the warnings below judge these, not whatever the files hold later
-    // (ADR-0042 clause 21).
+    // (ADR-0047 clause 21).
     let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
         // ADR-0030 clause 16.
@@ -1037,7 +1037,7 @@ async fn serve() {
         enrolment.set_audit(audit.clone());
     }
     // Before a certificate the Server depends on ends, say so: at startup and once a day
-    // (ADR-0042 clause 21). Nothing stops; the hosts decide for themselves.
+    // (ADR-0047 clause 21). Nothing stops; the hosts decide for themselves.
     fleet_server::pki::warn_endings(
         &watched,
         Some(audit.as_ref()),

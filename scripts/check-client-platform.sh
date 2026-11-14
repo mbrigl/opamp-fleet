@@ -4,7 +4,7 @@
 # jobs of .github/workflows/checks.yml run it on Windows and macOS. The Client carries
 # platform-specific service paths, the Windows SCM shim and launchd's semantics, that a lint on
 # Linux never compiles (ADR-0020). fleet-tools is linted too: every Client archive carries
-# `opamp-fleetctl`, Windows included (ADR-0042). On Linux, scripts/check-rust.sh lints and tests
+# `opamp-fleetctl`, Windows included (ADR-0047). On Linux, scripts/check-rust.sh lints and tests
 # the Client for Linux, so this one lints it for Windows through cargo-xwin, as README.md → "Build,
 # Test & Run" writes it, and a Windows-only compile error shows before a push rather than in CI.
 # Without cargo-xwin or its target it says so and skips; no CI job runs it on Linux.

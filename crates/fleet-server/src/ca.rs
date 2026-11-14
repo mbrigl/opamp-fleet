@@ -33,7 +33,7 @@ pub struct ClientCa {
     /// (ADR-0043
     /// clause 13).
     trusted: Vec<Vec<u8>>,
-    /// The common name every certificate it signs carries, derived from the CA's (ADR-0042
+    /// The common name every certificate it signs carries, derived from the CA's (ADR-0047
     /// clause 19).
     leaf_name: String,
     validity_days: u32,
@@ -44,7 +44,7 @@ pub struct ClientCa {
 impl ClientCa {
     /// Loads the CA from `[client_ca]`, its key from a file. Either file being unreadable, or a key
     /// that is not PKCS#8, fails startup rather than the first enrolment (ADR-0008), and so does a
-    /// CA whose name gives its certificates a common name longer than 64 characters (ADR-0042
+    /// CA whose name gives its certificates a common name longer than 64 characters (ADR-0047
     /// clause 19). Whether the key belongs to the certificate is not checked here.
     ///
     /// # Errors
@@ -725,7 +725,7 @@ impl crate::fleet::CertificateSigner for ClientCa {
 /// (ADR-0027). Loaded once at startup from `[enrolment]`.
 pub struct BootstrapCa {
     issuer: Issuer<'static, CaKey>,
-    /// The common name every bootstrap certificate carries (ADR-0042 clause 19).
+    /// The common name every bootstrap certificate carries (ADR-0047 clause 19).
     leaf_name: String,
     not_after_ms: u64,
     key_fingerprint: String,
@@ -737,7 +737,7 @@ impl BootstrapCa {
     /// # Errors
     /// Refuses a file that cannot be read, a key that is not PKCS#8, a key that does not belong
     /// to `bootstrap_ca_file`, a key that is the client CA's (ADR-0040 clause 17), and a CA whose
-    /// name gives its certificates a common name longer than 64 characters (ADR-0042 clause 19).
+    /// name gives its certificates a common name longer than 64 characters (ADR-0047 clause 19).
     pub fn from_config(
         enrolment: &crate::config::EnrolmentConfig,
         client_ca: Option<&ClientCaConfig>,
@@ -966,7 +966,7 @@ impl rcgen::SigningKey for CaKey {
     }
 }
 
-/// The common name a CA's certificates carry (ADR-0042 clause 19), from the CA's own common name,
+/// The common name a CA's certificates carry (ADR-0047 clause 19), from the CA's own common name,
 /// or its whole subject when it has none.
 ///
 /// # Errors
@@ -1202,8 +1202,8 @@ mod tests {
     }
 
     /// A host certificate's subject is the Server's: the common name derived from the client CA's
-    /// and nothing of the request's (ADR-0027 clause 11 and ADR-0042 clause 19).
-    /// Verifies: ADR-0042
+    /// and nothing of the request's (ADR-0027 clause 11 and ADR-0047 clause 19).
+    /// Verifies: ADR-0047
     #[test]
     fn a_host_certificate_is_named_by_its_ca_not_by_its_request() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1228,8 +1228,8 @@ mod tests {
     }
 
     /// A CA whose certificates' name would exceed 64 characters stops the Server at startup
-    /// (ADR-0042 clause 19).
-    /// Verifies: ADR-0042
+    /// (ADR-0047 clause 19).
+    /// Verifies: ADR-0047
     #[test]
     fn a_ca_whose_certificates_name_is_too_long_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1249,8 +1249,8 @@ mod tests {
         assert!(ClientCa::from_config(&client_ca_config(dir.path(), &cert_pem, &key_pem)).is_ok());
     }
 
-    /// The bootstrap CA names its certificates as the client CA does (ADR-0042 clause 19).
-    /// Verifies: ADR-0042
+    /// The bootstrap CA names its certificates as the client CA does (ADR-0047 clause 19).
+    /// Verifies: ADR-0047
     #[test]
     fn a_bootstrap_certificate_is_named_by_its_ca() {
         use crate::bootstrap::BootstrapSigner as _;

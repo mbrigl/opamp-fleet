@@ -1,5 +1,5 @@
 //! What every certificate this project makes gets, by the Server's client and bootstrap CAs and by
-//! the operator tool alike (ADR-0008 clause 18, ADR-0042 clause 5): a random serial, a life that
+//! the operator tool alike (ADR-0008 clause 18, ADR-0047 clause 5): a random serial, a life that
 //! starts a little before it is signed, the shape of a leaf by its role, and the authority that
 //! signs it, loaded from a CA's certificate and its key file.
 
@@ -104,7 +104,7 @@ mod tests {
     /// The authority a CA's certificate and key make signs a leaf that verifies under that CA; a key
     /// file that cannot be read or holds no key, and a certificate that cannot serve as a CA, are
     /// refused, naming their file.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn an_authority_signs_what_its_certificate_verifies_and_a_key_file_is_named_when_refused() {
         use x509_parser::prelude::{FromDer as _, X509Certificate};
@@ -136,7 +136,7 @@ mod tests {
     }
 
     /// A leaf is what its role says and nothing more, whatever the parameters asked for.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_leaf_is_its_role_alone() {
         for (role, purpose) in [
@@ -156,7 +156,7 @@ mod tests {
     }
 
     /// A serial is 16 bytes, positive, and not the one before.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0047
     #[test]
     fn a_serial_is_sixteen_random_positive_bytes() {
         let first = random_serial().expect("serial").to_bytes();

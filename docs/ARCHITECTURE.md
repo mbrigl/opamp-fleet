@@ -114,7 +114,7 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   fetch (`fetch`), pack, hash and sign package artifacts — or sign a Package's signing file from
   the UI (`signing`, ADR-0034) — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
-  of a PKCS#12 file (ADR-0042).
+  of a PKCS#12 file (ADR-0047).
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
@@ -224,7 +224,7 @@ no module.
   from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)). `pki` is `server pki status`
-  and the running Server's warnings before a certificate it depends on ends (ADR-0042).
+  and the running Server's warnings before a certificate it depends on ends (ADR-0047).
 - **Server admission** — `transport::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Behind

@@ -1,5 +1,5 @@
 //! What the Server's token adapter and the operator program's alike do on a PKCS#11 token
-//! (ADR-0043, ADR-0042 clause 5), with `cryptoki`: the module loaded once per process, the slot of
+//! (ADR-0043, ADR-0047 clause 5), with `cryptoki`: the module loaded once per process, the slot of
 //! a token found by its label, the user logged in, the curve P-256 named as a key's
 //! `CKA_EC_PARAMS`, its point read, and the `r || s` a token signs with `CKM_ECDSA` written as the
 //! DER X.509 carries. Each program names its own setting in what it reports; the Server's pool of

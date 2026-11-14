@@ -4970,8 +4970,8 @@ async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refu
 
 /// Without the bootstrap CA's key the Server issues nothing and says why, a request outside the
 /// bounds is refused, and one naming only a customer, a site and a password is issued (ADR-0027
-/// clauses 1 and 3, ADR-0042 clause 14 and ADR-0040 clause 17).
-/// Verifies: ADR-0027, ADR-0042
+/// clauses 1 and 3, ADR-0047 clause 14 and ADR-0040 clause 17).
+/// Verifies: ADR-0027, ADR-0047
 #[tokio::test]
 async fn issuing_needs_the_key_and_a_request_within_bounds() {
     let pki = Pki::new();
@@ -5048,7 +5048,7 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
     let issued: serde_json::Value = issued.json().await.expect("json");
     assert_eq!(
         issued["subject"], "O=Kunde GmbH, OU=Werk Nord, CN=acme bootstrap Certificate",
-        "the Server sets the common name from the CA's (ADR-0042 clause 19)"
+        "the Server sets the common name from the CA's (ADR-0047 clause 19)"
     );
 }
 
