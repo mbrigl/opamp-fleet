@@ -153,11 +153,18 @@ async fn a_client_renews_each_certificate_before_it_expires() {
         seen.len(),
         std::fs::read_to_string(&log_path).unwrap_or_default()
     );
-    assert!(
-        state
-            .snapshot()
-            .first()
-            .is_some_and(|agent| agent.connected),
-        "the Client stayed with the Server"
-    );
+    // The Client reconnects with each certificate it stores, so the snapshot may be read between
+    // the store and the new connection: the Client is back with the Server, not connected at
+    // the instant the third certificate is read.
+    common::wait_until(
+        "the Client back with the Server after its third certificate",
+        || {
+            state
+                .snapshot()
+                .first()
+                .is_some_and(|agent| agent.connected)
+                .then_some(())
+        },
+    )
+    .await;
 }
