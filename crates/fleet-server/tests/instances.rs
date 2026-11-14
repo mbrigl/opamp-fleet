@@ -1927,6 +1927,7 @@ async fn a_restart_requested_while_the_listening_connection_was_cut_is_sent_once
     let requested = while_cut(&network, &a, move |a| a.request_restart(&uid).is_ok()).await;
     assert!(requested, "A queues the restart of an Agent B carries");
 
+    // timed: the deadline for the message, not a wait
     let sent = next_message(&mut session, Duration::from_secs(15))
         .await
         .expect("B did not send the restart once it listened again");

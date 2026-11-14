@@ -6141,6 +6141,7 @@ async fn a_gateways_own_request_with_both_proofs_stays_on_its_route() {
         answered(&reply),
         Answered::BadRequest(fleet_core::csr::BOTH_PROOFS.to_string())
     );
+    // timed: the deadline of the poll for the audit line
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let all: Vec<serde_json::Value> = lines
@@ -6161,6 +6162,7 @@ async fn a_gateways_own_request_with_both_proofs_stays_on_its_route() {
             tokio::time::Instant::now() < deadline,
             "the refusal was never recorded: {all:#?}"
         );
+        // timed: the poll for the audit line
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }

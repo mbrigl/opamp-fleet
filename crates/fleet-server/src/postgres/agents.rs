@@ -2700,6 +2700,7 @@ mod tests {
         };
         let database = test.open();
         let a = database
+            // timed: a lease term, not a wait
             .take_lease("a", std::time::Duration::from_secs(60), &Terms::default())
             .expect("lease")
             .instance_id;
@@ -2988,6 +2989,7 @@ mod tests {
         let a = database
             .take_lease(
                 "host-a",
+                // timed: a lease term, not a wait
                 std::time::Duration::from_secs(60),
                 &Terms::default(),
             )
@@ -3247,6 +3249,7 @@ mod tests {
         };
         let database = test.open();
         let a = database
+            // timed: a lease term, not a wait
             .take_lease("a", std::time::Duration::from_secs(60), &Terms::default())
             .expect("lease")
             .instance_id;

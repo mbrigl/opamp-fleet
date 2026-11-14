@@ -745,6 +745,7 @@ mod tests {
         );
         std::thread::scope(|scope| {
             let loading = scope.spawn(|| backend.load());
+            // timed: the deadline of the poll for the lock wait
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while test
                 .sessions("wait_event_type = 'Lock' AND query LIKE 'SELECT%deployment_packages%'")
@@ -754,6 +755,7 @@ mod tests {
                     std::time::Instant::now() < deadline,
                     "load never waited for the members"
                 );
+                // timed: the poll for the lock wait
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             gate.open();

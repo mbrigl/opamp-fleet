@@ -1362,12 +1362,15 @@ mod tests {
             let (database, audit, own) = (a.database.clone(), a.audit.clone(), a.chain.clone());
             move || prune_round(&database, audit, Some(own), RETAIN)
         });
+        // timed: the deadline of the poll for the lock wait
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while !test.waits_for(KEY) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the entries never waited"
             );
+            // timed: the poll for the lock wait
+            std::thread::sleep(Duration::from_millis(10));
         }
         test.end_the_holder_of(PRUNE_LOCK);
         gate.open();

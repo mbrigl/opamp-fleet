@@ -2035,6 +2035,7 @@ mod tests {
             Opening {
                 exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
                 migrations: None,
+                // timed: the bound of a call, not a wait
                 bound: Duration::from_millis(500),
                 ..Opening::default()
             },
@@ -2303,6 +2304,7 @@ mod tests {
                 Opening {
                     exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
                     migrations: None,
+                    // timed: the bound of a call, not a wait
                     bound: Duration::from_secs(5),
                     ..Opening::default()
                 },
@@ -2732,6 +2734,7 @@ mod tests {
         )
         .expect("0.8.4 migrates");
         let held = older
+            // timed: a lease term, not a wait
             .take_lease("host-older", Duration::from_secs(3600), &Terms::default())
             .expect("a lease");
         let before = schema_rows();
@@ -2773,6 +2776,7 @@ mod tests {
         lease_as_0_8_0_takes_it(&test, true);
         let opened = open_ahead().expect("only leases taken over");
         let taken = opened
+            // timed: a lease term, not a wait
             .take_lease("host-ahead", Duration::from_secs(3600), &Terms::default())
             .expect("a lease");
         assert_eq!(taken.taken_over.len(), 2, "both taken over");
@@ -2804,6 +2808,7 @@ mod tests {
         )
         .expect("a patch release beside 0.8.0");
         patch
+            // timed: a lease term, not a wait
             .take_lease("host-patch", Duration::from_secs(3600), &Terms::default())
             .expect("serves");
         let mut releases = test.rows("SELECT release FROM leases ORDER BY release");
@@ -2881,6 +2886,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(10));
             }
             let taking = scope.spawn(|| {
+                // timed: a lease term, not a wait
                 older.take_lease("host-older", Duration::from_secs(3600), &Terms::default())
             });
             waits_for_the_migrations(1);

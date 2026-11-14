@@ -1347,6 +1347,7 @@ mod tests {
         let first = database
             .take_lease(
                 "host-a",
+                // timed: a lease term, not a wait
                 std::time::Duration::from_secs(30),
                 &Terms::default(),
             )
@@ -1354,6 +1355,7 @@ mod tests {
         let second = database
             .take_lease(
                 "host-b",
+                // timed: a lease term, not a wait
                 std::time::Duration::from_secs(30),
                 &Terms::default(),
             )
