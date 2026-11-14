@@ -373,24 +373,35 @@ fn a_silent_receiver_blocks_no_decision_and_the_dropped_count_reaches_the_record
         "the acts waited on the export"
     );
 
-    // The shutdown counts what was dropped before it writes the record out: an entry the writer
-    // had not yet written then reaches the export after the count, and is logged, not counted in
-    // the record, when it is dropped. So the test stops the server once the record holds all 3000.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let written = record_of(dir.path())
-            .iter()
-            .filter(|line| line.contains("\"event\":\"operator.act\""))
-            .count();
-        if written >= 3000 {
-            break;
+    // Waits until the record holds more than `after` of the acts' entries; only a defect takes a
+    // minute.
+    let holds_more_than = |after: usize| {
+        let deadline = Instant::now() + Duration::from_secs(60); // timed: a deadline, not a wait
+        loop {
+            let written = record_of(dir.path())
+                .iter()
+                .filter(|line| line.contains("\"event\":\"operator.act\""))
+                .count();
+            if written > after {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the record holds {written} of the acts' entries, not more than {after}"
+            );
+            std::thread::sleep(Duration::from_millis(50)); // timed: the wait's poll
         }
-        assert!(
-            Instant::now() < deadline,
-            "the record holds {written} of the 3000 entries"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    };
+    // The shutdown counts what was dropped before it writes the record out: a line the writer had
+    // not yet handed to the export then reaches it after the count, and is logged, not counted in
+    // the record, when it is dropped. The writer hands a batch to the export only once the store
+    // holds it, so a record that holds all 3000 entries may not yet have handed over the last
+    // batch. It has once the record holds a line written after them: the writer writes the next
+    // batch only after it handed over the one before. So the test acts once more, and stops the
+    // server once the record holds that act's entry too.
+    holds_more_than(2999);
+    act(operator, &cert);
+    holds_more_than(3000);
 
     // SAFETY: kill(2) on the pid of a child this test started and has not yet reaped.
     let sent = unsafe { libc::kill(server.0.id() as libc::pid_t, libc::SIGTERM) };
