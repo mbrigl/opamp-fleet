@@ -322,8 +322,7 @@ fn next_delay(backoff: &mut Backoff, lost: bool, retry_after: Option<Duration>) 
     if lost {
         return backoff.after_loss();
     }
-    let step = backoff.advance();
-    retry_after.map_or(step, |after| after.max(step))
+    backoff.at_least_a_step(retry_after.unwrap_or_default())
 }
 
 /// Why [`connect`] failed.
@@ -685,8 +684,8 @@ mod tests {
     use tokio_tungstenite::accept_async;
 
     /// A refused upgrade waits its `Retry-After` or the next exponential step, whichever is
-    /// longer, and one without the header waits the step; a connection that stood and was lost
-    /// draws its first reconnect over `[0, 30 s)`.
+    /// longer, and one of zero or without the header waits the step; a connection that stood and
+    /// was lost draws its first reconnect over `[0, 30 s)`.
     /// Verifies: ADR-0012
     #[test]
     fn a_refused_upgrade_waits_its_retry_after_or_the_next_step() {
@@ -706,6 +705,8 @@ mod tests {
         );
         let without = next_delay(&mut backoff, false, None);
         assert!(without >= Duration::from_secs(30), "{without:?}");
+        let zero = next_delay(&mut Backoff::new(), false, Some(Duration::ZERO));
+        assert!(zero >= Duration::from_millis(500), "a step: {zero:?}");
         let lost = next_delay(&mut backoff, true, Some(Duration::from_secs(90)));
         assert!(lost < Backoff::AFTER_LOSS, "{lost:?}");
     }

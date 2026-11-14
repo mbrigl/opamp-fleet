@@ -58,7 +58,7 @@ pub async fn run<S: Session, X: StopSignal>(
                 match exchange(client, endpoint, report, limit).await {
                     Ok(reply) => {
                         if let Some(named) = session.on_reply(&reply) {
-                            let delay = at_least_a_step(named, &mut refused);
+                            let delay = refused.at_least_a_step(named);
                             tokio::select! {
                                 () = tokio::time::sleep(delay) => {}
                                 () = stop.requested() => break 'poll,
@@ -71,7 +71,7 @@ pub async fn run<S: Session, X: StopSignal>(
                     // The Server is overloaded, not out of step: wait as it asked and come back
                     // with the same reports. Nothing was processed, so nothing has to be rebuilt.
                     Err(Exchange::Throttled { after, status }) => {
-                        let after = at_least_a_step(after, &mut refused);
+                        let after = refused.at_least_a_step(after);
                         warn!(%status, delay = ?after, "the server is throttling; waiting");
                         tokio::select! {
                             () = tokio::time::sleep(after) => {}
@@ -132,12 +132,6 @@ pub async fn run<S: Session, X: StopSignal>(
     }
     info!("disconnected");
     Ok(ended)
-}
-
-/// The wait after a refusal: what the Server named, or the next step of `refused` where that is
-/// longer, so a wait of zero, or one shorter than the step, still waits the step.
-fn at_least_a_step(named: Duration, refused: &mut Backoff) -> Duration {
-    named.max(refused.advance())
 }
 
 /// This transport's way of putting reports on the wire — one exchange each — for jobs that report
@@ -491,19 +485,6 @@ mod tests {
             let polls = polls_in_two_and_a_half_seconds(response).await;
             assert!((1..=3).contains(&polls), "{what}: {polls} polls in 2.5 s");
         }
-    }
-
-    /// A wait the Server names that is longer than the step is waited, and not more.
-    /// Verifies: ADR-0012
-    #[test]
-    fn a_named_wait_longer_than_the_step_is_waited_as_named() {
-        let mut refused = Backoff::new();
-        assert_eq!(
-            at_least_a_step(Duration::from_secs(30), &mut refused),
-            Duration::from_secs(30)
-        );
-        let step = at_least_a_step(Duration::ZERO, &mut Backoff::new());
-        assert!(step >= Duration::from_millis(500), "{step:?}");
     }
 
     /// Throttling on plain HTTP: a `503` with `Retry-After` is honoured as the Server asked, and
