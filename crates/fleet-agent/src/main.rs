@@ -498,6 +498,9 @@ fn install(
     // Fail on a broken configuration now, not at the service's first start. After the write, so
     // that a file just answered into existence is held to the same rule as any other.
     let mut config = ClientConfig::load_held(&config_path)?;
+    // A run that asked nothing reads the kept file's `[tls]` paths as the file's, not as the
+    // administrator's: the service's account may have written them (ADR-0021 clause 11).
+    written.offer_what_the_kept_file_names(&config);
     // An enrolment held to an endpoint the kept file does not name fails here, before anything is
     // stopped, and again where it would connect.
     if unasked.is_some() {

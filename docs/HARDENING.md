@@ -222,7 +222,9 @@ has:
   roots. `--endpoint` over a file the install keeps answers nothing, and the install refuses to
   enrol where the kept file names another endpoint, naming both. Residual: a run that answered
   nothing, such as an upgrade over an existing file, takes the endpoint and the CA from the file,
-  read once as above; under a matching `--endpoint`, the CA still comes from the file.
+  read once as above; under a matching `--endpoint`, the CA still comes from the file. A `[tls]`
+  path such a file names is the file's word, not the administrator's: it is read through no link
+  at its name, wherever it lies, as a default the questionnaire offers from the file is.
 - **No credential in `server.toml` authenticates on its own** (ADR-0040 clause 21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).

@@ -590,6 +590,48 @@ mod tests {
         );
     }
 
+    /// A run that asked nothing kept the file, so a link at the `[tls] ca_file` it names is
+    /// refused, outside the account's directories too; the same path on a run that answered
+    /// another CA is not read at all.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_a_kept_file_s_ca_file_is_refused_on_a_run_that_asked_nothing() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let (ca, _) = pair();
+        let target = elsewhere.path().join("their-ca.pem");
+        std::fs::write(&target, &ca).expect("ca");
+        let link = admin.path().join("ca.pem");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let kept = config(account.path(), &link);
+
+        let mut written = enrolling(bootstrap(admin.path()), Written::default());
+        written.offer_what_the_kept_file_names(&kept);
+        let refused = prepare_enrolling(&kept, &written, &[account.path()]).expect_err("a link");
+        assert!(refused.contains("is a link"), "{refused}");
+        assert!(refused.contains("ca.pem"), "{refused}");
+
+        let answered_ca = admin.path().join("answered.pem");
+        std::fs::write(&answered_ca, &ca).expect("answered");
+        let mut written = enrolling(
+            bootstrap(admin.path()),
+            Written {
+                answered: Some(Answered {
+                    endpoint: kept.endpoint.clone(),
+                    ca: Some((answered_ca, ca.clone().into_bytes())),
+                }),
+                ..Written::default()
+            },
+        );
+        written.offer_what_the_kept_file_names(&kept);
+        assert!(written.offered.naming(&link) == crate::nofollow::Named::ByAdministrator);
+        let prepared =
+            prepare_enrolling(&kept, &written, &[account.path()]).expect("the answered CA");
+        assert_eq!(prepared.ca_pem.as_deref(), Some(ca.as_bytes()));
+    }
+
     /// A state directory the account swapped for a link is not read through: a file named in it
     /// is refused, though the link leads to a plain directory (ADR-0021 clause 12).
     /// Verifies: ADR-0021
