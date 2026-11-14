@@ -195,7 +195,8 @@ no module.
   the release, the presence it writes, the re-keys whose answer was lost, the restarts kept for
   retry, the take-up of what other instances announced (a `TakeUp` names Agents or, after a missed
   notification, every Agent), and the per-Agent locks — is the core module `fleet::held`, behind the
-  same `AppState` entry points.
+  same `AppState` entry points. What it keeps of each Agent beside its record is one entry, `Kept`,
+  which a forget drops and a re-key moves as one.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the

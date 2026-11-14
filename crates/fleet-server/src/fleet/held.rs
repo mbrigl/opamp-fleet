@@ -279,6 +279,145 @@ impl PresenceWritten {
         self.before_lost.retain(|uid, _| fleet.contains_key(uid));
         self.generations.retain(|uid, _| fleet.contains_key(uid));
     }
+
+    /// Whether anything written of `uid` is kept. The generation is not: it outlives the Agent
+    /// until the next batch, so a batch in flight drops its answer for it.
+    #[cfg(test)]
+    fn keeps(&self, uid: &InstanceUid) -> bool {
+        let PresenceWritten {
+            holder: _,
+            agents,
+            takes,
+            unsure,
+            before_lost,
+            generations: _,
+            generation: _,
+        } = self;
+        agents.contains_key(uid)
+            || takes.contains_key(uid)
+            || unsure.contains(uid)
+            || before_lost.contains_key(uid)
+    }
+}
+
+/// What an instance keeps of each Agent beside its record and its group: one entry of four parts,
+/// each keyed by the Agent's `instance_uid`. A forget drops it ([`Kept::forget`]) and a re-key
+/// moves it ([`Kept::rekey`]) as one, each naming every part, so a part added later does not
+/// compile until both say what becomes of it. Each part keeps its own lock, every one taken
+/// strictly after `fleet`.
+pub(super) struct Kept {
+    /// Each persisted record's durable digest as last written — the dirty check that keeps a
+    /// heartbeat from reaching any storage backend (ADR-0030).
+    pub(super) written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
+    /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
+    /// batch writes only what moved since.
+    pub(super) presence_written: Mutex<PresenceWritten>,
+    /// The re-keys whose answer was lost and whose read back failed, by the old identity: the new
+    /// one each moved to, if it committed, which the Agent's next report reads back and assigns.
+    pub(super) unsure_rekeys: Mutex<HashMap<InstanceUid, PendingRekey>>,
+    /// The restarts whose command was not sent and whose put-back the store did not take, each
+    /// with when it is tried again ([`retry_restarts`](AppState::retry_restarts)).
+    pub(super) unput_restarts: Mutex<HashMap<InstanceUid, Backoff>>,
+}
+
+impl Kept {
+    /// Starts with `written`, the digests of the records restored, and nothing else.
+    pub(super) fn with_written(written: HashMap<InstanceUid, [u8; 32]>) -> Self {
+        Kept {
+            written: Mutex::new(written),
+            presence_written: Mutex::new(PresenceWritten::default()),
+            unsure_rekeys: Mutex::new(HashMap::new()),
+            unput_restarts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Drops everything kept of `uid`, which left what this instance holds. That includes each
+    /// pending re-key from `uid` and each pending re-key to `uid`.
+    pub(super) fn forget(&self, uid: &InstanceUid) {
+        let Kept {
+            written,
+            presence_written,
+            unsure_rekeys,
+            unput_restarts,
+        } = self;
+        written.lock().expect("written lock").remove(uid);
+        presence_written.lock().expect("presence lock").remove(uid);
+        unsure_rekeys
+            .lock()
+            .expect("rekeys lock")
+            .retain(|old, pending| old != uid && pending.new != *uid);
+        unput_restarts.lock().expect("restarts lock").remove(uid);
+    }
+
+    /// Moves what is kept of `old` to `new`, as a re-key moves the stored row whole: what was
+    /// written of its presence and a restart kept for retry move, so the retry queues the restart
+    /// on the new identity (ADR-0045 clause 8). The digest does not: the record is written whole
+    /// under `new` at the report's end. A pending re-key of `old` is the caller's, which knows
+    /// whether this re-key is the one it names: the report that made it drops it, and the read
+    /// back that found it moved marks it so.
+    pub(super) fn rekey(&self, old: &InstanceUid, new: InstanceUid) {
+        let Kept {
+            written,
+            presence_written,
+            unsure_rekeys: _,
+            unput_restarts,
+        } = self;
+        written.lock().expect("written lock").remove(old);
+        presence_written
+            .lock()
+            .expect("presence lock")
+            .rekey(old, new);
+        let mut kept = unput_restarts.lock().expect("restarts lock");
+        if let Some(backoff) = kept.remove(old) {
+            kept.insert(new, backoff);
+        }
+    }
+
+    /// Whether anything is kept of `uid`.
+    #[cfg(test)]
+    pub(super) fn keeps(&self, uid: &InstanceUid) -> bool {
+        !self.keeping(uid).is_empty()
+    }
+
+    /// The names of the parts that keep something of `uid`, so a test can show its setup reached
+    /// each part before it checks that none is left.
+    #[cfg(test)]
+    pub(super) fn keeping(&self, uid: &InstanceUid) -> Vec<&'static str> {
+        let Kept {
+            written,
+            presence_written,
+            unsure_rekeys,
+            unput_restarts,
+        } = self;
+        [
+            (
+                "written",
+                written.lock().expect("written lock").contains_key(uid),
+            ),
+            (
+                "presence_written",
+                presence_written.lock().expect("presence lock").keeps(uid),
+            ),
+            (
+                "unsure_rekeys",
+                unsure_rekeys
+                    .lock()
+                    .expect("rekeys lock")
+                    .iter()
+                    .any(|(old, pending)| old == uid || pending.new == *uid),
+            ),
+            (
+                "unput_restarts",
+                unput_restarts
+                    .lock()
+                    .expect("restarts lock")
+                    .contains_key(uid),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(part, keeps)| keeps.then_some(part))
+        .collect()
+    }
 }
 
 impl AppState {
@@ -373,7 +512,7 @@ impl AppState {
                 changed = true;
             }
             if changed {
-                self.written.lock().expect("written lock").remove(&uid);
+                self.kept.written.lock().expect("written lock").remove(&uid);
             }
             if record.labels != persisted.labels {
                 self.take_labels(&mut fleet, &uid, persisted.labels);
@@ -395,6 +534,22 @@ impl AppState {
             )),
             None => Ok(()),
         }
+    }
+
+    /// Whether this instance holds anything of `uid`: its record, a place in a group, or anything
+    /// [`Kept`] of it. What waits for a connection's loop to end its session is not counted, nor
+    /// the presence's generation, each of which outlives the Agent on purpose.
+    #[cfg(test)]
+    pub(super) fn holds_anything_of(&self, uid: &InstanceUid) -> bool {
+        let fleet = self.fleet.lock().expect("fleet lock");
+        fleet.contains_key(uid)
+            || self
+                .groups
+                .lock()
+                .expect("groups lock")
+                .values()
+                .any(|members| members.contains(uid))
+            || self.kept.keeps(uid)
     }
 
     /// Places again each group this instance holds members of whose Client Agent may be one of
@@ -473,7 +628,7 @@ impl AppState {
             }
             Ok(false) => Err((e, false)),
             Err(read) => {
-                self.unsure_rekeys.lock().expect("rekeys lock").insert(
+                self.kept.unsure_rekeys.lock().expect("rekeys lock").insert(
                     *old,
                     PendingRekey {
                         new: *new,
@@ -498,6 +653,7 @@ impl AppState {
     /// database's `lock_timeout` within the call's bound.
     pub(super) fn read_back_unsure_rekey(&self, old: &InstanceUid) -> UnsureRekey {
         let pending = self
+            .kept
             .unsure_rekeys
             .lock()
             .expect("rekeys lock")
@@ -507,12 +663,20 @@ impl AppState {
             return UnsureRekey::None;
         };
         if moved {
-            self.unsure_rekeys.lock().expect("rekeys lock").remove(old);
+            self.kept
+                .unsure_rekeys
+                .lock()
+                .expect("rekeys lock")
+                .remove(old);
             return UnsureRekey::Moved(new);
         }
         match self.agent_store.moved(old, &new) {
             Ok(moved) => {
-                self.unsure_rekeys.lock().expect("rekeys lock").remove(old);
+                self.kept
+                    .unsure_rekeys
+                    .lock()
+                    .expect("rekeys lock")
+                    .remove(old);
                 if moved {
                     info!(%old, %new, "a re-key whose answer was lost committed; assigning its identity");
                     UnsureRekey::Moved(new)
@@ -536,6 +700,7 @@ impl AppState {
         old: &InstanceUid,
     ) -> Option<(InstanceUid, Result<bool, String>)> {
         let pending = self
+            .kept
             .unsure_rekeys
             .lock()
             .expect("rekeys lock")
@@ -563,11 +728,13 @@ impl AppState {
         match moved {
             Ok(true) => {
                 self.rekey_held(fleet, old, new, elsewhere);
-                self.presence_written
+                self.kept
+                    .presence_written
                     .lock()
                     .expect("presence lock")
                     .moved_connected(new);
-                self.unsure_rekeys
+                self.kept
+                    .unsure_rekeys
                     .lock()
                     .expect("rekeys lock")
                     .insert(*old, PendingRekey { new, moved: true });
@@ -575,7 +742,11 @@ impl AppState {
                 Gone::Moved
             }
             Ok(false) => {
-                self.unsure_rekeys.lock().expect("rekeys lock").remove(old);
+                self.kept
+                    .unsure_rekeys
+                    .lock()
+                    .expect("rekeys lock")
+                    .remove(old);
                 Gone::Forgotten
             }
             Err(e) => {
@@ -602,24 +773,8 @@ impl AppState {
             let group = record.placement.group.take();
             fleet.insert(new, record);
             self.unplace(fleet, old, group, elsewhere);
-            self.written.lock().expect("written lock").remove(old);
-            self.presence_written
-                .lock()
-                .expect("presence lock")
-                .rekey(old, new);
-            let mut kept = self.unput_restarts.lock().expect("restarts lock");
-            if let Some(backoff) = kept.remove(old) {
-                kept.insert(new, backoff);
-            }
+            self.kept.rekey(old, new);
         }
-    }
-
-    /// Drops every pending re-key of `uid`, from it or to it: what an operator's forget does.
-    pub(super) fn drop_unsure_rekeys(&self, uid: &InstanceUid) {
-        self.unsure_rekeys
-            .lock()
-            .expect("rekeys lock")
-            .retain(|old, pending| old != uid && pending.new != *uid);
     }
 
     /// A message its connection did not take. A restart command among them is queued again, so
@@ -652,12 +807,16 @@ impl AppState {
         for uid in self.due_restarts() {
             self.put_back(&uid, true);
         }
-        self.unput_restarts.lock().expect("restarts lock").len()
+        self.kept
+            .unput_restarts
+            .lock()
+            .expect("restarts lock")
+            .len()
     }
 
     /// Counts each kept put-back down one call, and answers those whose try is due.
     pub(super) fn due_restarts(&self) -> Vec<InstanceUid> {
-        let mut kept = self.unput_restarts.lock().expect("restarts lock");
+        let mut kept = self.kept.unput_restarts.lock().expect("restarts lock");
         kept.iter_mut()
             .filter_map(|(uid, backoff)| backoff.tick().then_some(*uid))
             .collect()
@@ -680,6 +839,7 @@ impl AppState {
         let mut fleet = self.fleet.lock().expect("fleet lock");
         if retry
             && !self
+                .kept
                 .unput_restarts
                 .lock()
                 .expect("restarts lock")
@@ -692,12 +852,13 @@ impl AppState {
         // read back moves what is held, and this put-back with it, the put-back stays kept.
         let unsure = matches!(answered, Ok(None))
             && self
+                .kept
                 .unsure_rekeys
                 .lock()
                 .expect("rekeys lock")
                 .get(uid)
                 .is_some_and(|pending| !pending.moved);
-        let mut kept = self.unput_restarts.lock().expect("restarts lock");
+        let mut kept = self.kept.unput_restarts.lock().expect("restarts lock");
         match answered {
             Ok(None) if unsure => {
                 let backoff = kept.entry(*uid).or_insert_with(Backoff::first);
@@ -716,7 +877,7 @@ impl AppState {
                 }
                 if let Some(record) = fleet.get_mut(uid) {
                     record.restart_pending = true;
-                    self.written.lock().expect("written lock").remove(uid);
+                    self.kept.written.lock().expect("written lock").remove(uid);
                 }
                 drop(fleet);
                 self.push.send_modify(|rev| *rev += 1);
@@ -749,7 +910,7 @@ impl AppState {
         let uids = take_up.named();
         self.hold_restarts(uids)?;
         let _fleet = self.fleet.lock().expect("fleet lock");
-        let mut kept = self.unput_restarts.lock().expect("restarts lock");
+        let mut kept = self.kept.unput_restarts.lock().expect("restarts lock");
         match uids {
             Some(uids) => kept.retain(|uid, _| !uids.contains(uid)),
             None => {
@@ -816,7 +977,7 @@ impl AppState {
         for uid in queued {
             if let Some(record) = fleet.get_mut(&uid).filter(|record| !record.restart_pending) {
                 record.restart_pending = true;
-                self.written.lock().expect("written lock").remove(&uid);
+                self.kept.written.lock().expect("written lock").remove(&uid);
                 moved = true;
             }
         }
@@ -832,7 +993,8 @@ impl AppState {
     /// (ADR-0045
     /// clause 8).
     pub(super) fn drop_kept_restart(&self, uid: &InstanceUid) {
-        self.unput_restarts
+        self.kept
+            .unput_restarts
             .lock()
             .expect("restarts lock")
             .remove(uid);
@@ -886,7 +1048,8 @@ impl AppState {
     /// Drops an Agent another instance forgot from what this one holds, and ends its session. One
     /// whose row moved through a re-key of this instance's own whose answer was lost is read back
     /// first ([`read_unsure_rekey`](Self::read_unsure_rekey)), and kept where it moved or
-    /// where that is not known. A re-key pending to it is dropped with it.
+    /// where that is not known. A dropped Agent takes everything kept of it along
+    /// ([`Kept::forget`]), each pending re-key from it or to it included.
     pub(super) fn drop_forgotten(
         &self,
         fleet: &mut HashMap<InstanceUid, AgentRecord>,
@@ -918,16 +1081,7 @@ impl AppState {
             return Gone::Forgotten;
         };
         self.end_session(uid, &record);
-        self.drop_kept_restart(uid);
-        self.unsure_rekeys
-            .lock()
-            .expect("rekeys lock")
-            .retain(|_, pending| pending.new != *uid);
-        self.written.lock().expect("written lock").remove(uid);
-        self.presence_written
-            .lock()
-            .expect("presence lock")
-            .remove(uid);
+        self.kept.forget(uid);
         self.unplace(fleet, uid, record.placement.group.clone(), elsewhere);
         info!(agent = %uid, "dropped an agent forgotten through another instance");
         Gone::Forgotten
@@ -953,7 +1107,7 @@ impl AppState {
         type Entry = (InstanceUid, Presence, Option<u64>);
         let (mut batch, mut generations, unsure): (Vec<Entry>, HashMap<InstanceUid, u64>, Vec<_>) = {
             let fleet = self.fleet.lock().expect("fleet lock");
-            let mut written = self.presence_written.lock().expect("presence lock");
+            let mut written = self.kept.presence_written.lock().expect("presence lock");
             written.under(holder);
             written.retain(&fleet);
             let mut batch = Vec::new();
@@ -983,7 +1137,7 @@ impl AppState {
             let uids: Vec<InstanceUid> = unsure.iter().map(|(uid, _)| *uid).collect();
             let stored = self.agent_store.takes(&uids)?;
             let fleet = self.fleet.lock().expect("fleet lock");
-            let mut written = self.presence_written.lock().expect("presence lock");
+            let mut written = self.kept.presence_written.lock().expect("presence lock");
             for (uid, generation) in unsure {
                 let Some(presence) = fleet.get(&uid).map(AgentRecord::presence) else {
                     continue;
@@ -1011,7 +1165,7 @@ impl AppState {
         }
         batch.sort_by_key(|(uid, ..)| uid.0);
         let takes = self.agent_store.write_presence(holder, &batch)?;
-        let mut written = self.presence_written.lock().expect("presence lock");
+        let mut written = self.kept.presence_written.lock().expect("presence lock");
         // Under another holder since, the presence is written again anyway; the counts are kept,
         // since they outlive the holder they were answered under.
         let same_holder = written.holder.as_deref() == Some(holder);
@@ -1086,7 +1240,7 @@ impl AppState {
     /// disconnect is written only under the count read back then, and its record flushed at the
     /// shutdown only under the count answered before, 0 where `created` this record.
     pub(super) fn took(&self, uid: &InstanceUid, took: Took, presence: Presence, created: bool) {
-        let mut written = self.presence_written.lock().expect("presence lock");
+        let mut written = self.kept.presence_written.lock().expect("presence lock");
         match took {
             Took::Nothing => {}
             Took::Taken { holder, take } => {
@@ -1169,7 +1323,7 @@ impl AppState {
             return Ok(());
         }
         let mut fleet = self.fleet.lock().expect("fleet lock");
-        let mut written = self.presence_written.lock().expect("presence lock");
+        let mut written = self.kept.presence_written.lock().expect("presence lock");
         for uid in taken {
             let Some(record) = fleet.get_mut(&uid).filter(|record| record.connected) else {
                 continue;
