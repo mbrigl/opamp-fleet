@@ -871,14 +871,13 @@ mod sys {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     /// A link at the file's own name is refused for a path the account's file offered, and
     /// followed for the administrator's; a file over the bound is refused, naming the bound.
     /// Verifies: ADR-0021
-    #[cfg(unix)]
     #[test]
     fn a_privileged_read_holds_a_link_at_the_name_to_whose_word_the_path_is() {
         let dir = tempfile::tempdir().expect("tempdir");
