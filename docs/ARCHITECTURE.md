@@ -29,8 +29,9 @@ than anywhere else, and none beats one that has stopped being true.
    │                                                                 fleet state, register, audit
    │                                                                 record, artifacts by SHA-256
    ├── Supervisor Endpoint (loopback) ◀── a Collector's opampextension
-   ├── Managed Processes: Collector, any command — where a process account is registered, under
-   │     it, started by the second service over a Unix socket or named pipe
+   ├── Managed Processes: Collector, each wrapped kind's agent, any command — where a process
+   │     account is registered, under it, started by the second service over a Unix socket or
+   │     named pipe
    ├── package downloads: the Server's own origin, and no other
    ├── own-telemetry destinations: OTLP/HTTP, as the Server offers them
    └── service manager: systemd, launchd or the Windows SCM
@@ -98,7 +99,8 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   `x509-parser` by the adapter `x509::read`, with the random serial and the clock skew every issued
   certificate gets, the shape of a leaf by its role and the loading of a CA from its certificate
   and key file, by the Server's two CAs and the operator tool alike, in the adapter `x509::issue`;
-  the first certificate of a CA file is read by `opamp::tls::first_certificate` — and the
+  the first certificate of a CA file is read by `opamp::tls::first_certificate` — the links a kind's
+  tree package keeps, which `opamp-fleetctl` packs and the Client creates (`tree`) — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0027) — and, behind the feature `pkcs11` that
   only the Server and the operator tool turn on, what both do alike on a PKCS#11 token with

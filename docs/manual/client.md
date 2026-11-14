@@ -1811,15 +1811,13 @@ Each `[[supervisor]]` block runs one Supervisor managing one local process, and 
 Server as its own Agent. Without any block the Client presents itself as a single Agent and manages
 nothing.
 
-Two plugin types ship today.
+**`collector` and `command` know nothing about the agent they run**, so their blocks say
+everything: `collector` for an OpenTelemetry Collector, and `command` for any other process — a
+**Foreign Agent** that speaks no OpAMP.
 
-**Both know nothing about the agent they run**, so their blocks say everything: `collector` for an
-OpenTelemetry Collector, and `command` for any other process — a **Foreign Agent** that speaks no
-OpAMP.
-
-**A wrapper**, when a build carries one, knows one agent's program, its layout on each platform and
-its
-invocation, so its block says which host runs it and little else.
+**Every other kind is a wrapper**, knowing one agent's program, its layout on each platform and its
+invocation, so its block says which host runs it and little else. Each has a `type = "…"` section
+below.
 
 A new kind of process means a new plugin, not a change to the core.
 
@@ -1931,10 +1929,11 @@ set unless `server_manages_set = false`
   It still restarts on command and still takes signed packages. A configuration that arrives anyway
   is not stored, not written, not applied and not answered; the Client logs one warning per hash.
 - **What it runs on.** The files you place in `<supervisor_dir>/<name>/config/`, under the names its
-  kind reads: any unroled file for `collector`, and
-  for `command` whatever its `args` name. Roles go into `.supplementary`, one `<file> <role>` per
-  line. Nothing else writes into that directory while the switch is on. Without such a file a
-  `collector` waits and says so.
+  kind reads: any unroled file for `collector`, whatever its `args` name for `command`, and the
+  names its section below states for a wrapped kind. Roles go into `.supplementary`, one
+  `<file> <role>` per line. Nothing else writes into that directory while the switch is on.
+  Without such a file a `collector` waits and says so, and a wrapped kind does what its section
+  states.
 - **The block stays yours.** A delivered block for a listed Supervisor must repeat its running
   block exactly, every key included, whatever `delivered_args` and `delivered_env` allow. A
   delivered block that adds a listed Supervisor carries only `type`, `name` and the key naming its
@@ -1964,7 +1963,7 @@ false` as well to close that. A change to the list takes effect when the Client 
 
 | Key | Default | Meaning |
 |---|---|---|
-| `type` | — | `"collector"` or `"command"` — one section each below. Required. |
+| `type` | — | `"collector"`, `"command"`, or a wrapped kind's type — one section each below. Required. |
 | `name` | — | This Agent's `service.instance.name` — your name for it — and the directory name it owns. Required; 1–32 lowercase letters, digits, and `-`. Must be unique in the file. A Managed Process can never overwrite it. |
 | `service_name` | the program's file name | This Agent's `service.name`: the Agent **type** it presents. A Managed Process never overrides it: a type the process reports — a Collector with the `opampextension` states the `dist.name` it was built with — is dropped and named in a warning, so set this key to present that value as the type. Unlike `name` it may be a reverse FQDN, as the protocol recommends; only an empty value is refused. |
 | `endpoint_port` | `0` (ephemeral) | The port of the Supervisor Endpoint on `127.0.0.1`. The endpoint always comes up; pin the port when something is meant to connect to it. |
@@ -1976,7 +1975,7 @@ false` as well to close that. A change to the list takes effect when the Client 
 #### Wrapped and unwrapped kinds
 
 `collector` and `command` know nothing about the agent they run, so their blocks say everything.
-A **wrapper**, when a build carries one, knows its agent's program, its layout and
+Every other kind is a **wrapper**: it knows its agent's program, its layout and
 its invocation, so its block says which host runs it and little else — two lines.
 
 A key a wrapper supplies is **refused by name** rather than silently overridden, and the message
@@ -1987,8 +1986,7 @@ This Client reports the kinds it was compiled with as attributes of its own Agen
 kind, `supervisor.kind.collector = "true"` — so a Supervisor set can be aimed, by the Selector of
 the Deployment that holds it, at the Clients that can actually run it.
 
-The published build carries every kind. A wrapper, when the code base carries one, is a Cargo
-feature named after its `type`, so
+The published build carries every kind. Each wrapper is a Cargo feature named after its `type`, so
 a build for hosts that run only some of them leaves the others out:
 
 ```sh
@@ -2017,8 +2015,7 @@ apply_grace_secs = 3     # how long a restart must hold before an apply is ackno
 retain_previous_secs = 86400
 ```
 
-A **wrapped kind**, when a build carries one, **corrects them** where its agent's own behaviour
-demands it.
+A **wrapped kind corrects them** where its agent's own behaviour demands it.
 Only a block of an **unwrapped** kind may state its own, because there no kind
 exists to hold the value.
 
@@ -2201,10 +2198,13 @@ binary, whatever anyone forgot to aim. What then happens on the host:
 2. It is **verified** before anything is unpacked: the content hash, and the Ed25519 signature
    against `[packages] verification_key`, always. An offer without a signature is refused before
    anything is downloaded, and an invalid signature refuses the artifact.
-3. It is **unpacked** when it is a `.tar.gz`, a `.7z`, or a `.zip` — the member whose file name
-   matches the configured program, so an upstream release can be uploaded exactly as published. An
-   encrypted `.7z` opens with `[packages] archive_key`; an encrypted `.zip` is refused, because
-   encryption is what `.7z` is for. A bare program artifact is moved into place rather than copied.
+3. It is **unpacked** when it is a `.tar.gz`, a `.7z`, or a `.zip` — the one regular file whose
+   file name matches the configured program, or, for a kind that names where its archive holds
+   the program, the one at that place, so an upstream release can be uploaded exactly as
+   published. A directory, a link or a 7z anti-item of that name is never the member, and an
+   archive holding the program more than once is refused, naming each place. An encrypted `.7z`
+   opens with `[packages] archive_key`; an encrypted `.zip` is refused, because encryption is
+   what `.7z` is for. A bare program artifact is moved into place rather than copied.
 4. It is **swapped** over the program in `program/`, the process restarted, and the new version
    **health-gated** on `apply_grace_secs` — one that will not stay up is **rolled back**.
 5. Progress is reported throughout: `Downloading` (with percent and bytes per second, repeated every
@@ -2357,7 +2357,7 @@ whole archive:
 | Refused | Why |
 |---|---|
 | a member with `..` in its path, or an absolute path | It names somewhere outside the directory being unpacked into. |
-| a symbolic or hard link | What it points at is not where it sits, which is the one thing a path check cannot judge. |
+| a symbolic or hard link, except an absolute link the Supervisor's kind names by its exact path and target | What it points at is not where it sits, which is the one thing a path check cannot judge. A kind that names one keeps it in a `.tar.gz` tree only, and nothing may sit at or beneath it. |
 | more than 10 000 members, or more than 2 GiB unpacked | An archive that expands without end. |
 
 Members outside the program's own directory — a `LICENSE` beside the wrapper — are not written, and

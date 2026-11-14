@@ -444,9 +444,13 @@ async fn the_probe_reports_a_version_description() {
     probe_version(
         Spawner::Local,
         "test".to_string(),
-        stub_agent(),
-        vec!["--version".to_string()],
-        None,
+        VersionProbe {
+            program: stub_agent(),
+            args: vec!["--version".to_string()],
+            working_dir: None,
+            parse: None,
+            env: Vec::new(),
+        },
         EventSender::new(0, event_tx),
     )
     .await;
@@ -463,9 +467,13 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         Spawner::Local,
         "test".to_string(),
-        PathBuf::from("nonexistent-definitely-not-here"),
-        vec![],
-        None,
+        VersionProbe {
+            program: PathBuf::from("nonexistent-definitely-not-here"),
+            args: vec![],
+            working_dir: None,
+            parse: None,
+            env: Vec::new(),
+        },
         EventSender::new(0, event_tx.clone()),
     )
     .await;
@@ -474,9 +482,13 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         Spawner::Local,
         "test".to_string(),
-        stub_agent(),
-        vec!["--exit-code".to_string(), "0".to_string()],
-        None,
+        VersionProbe {
+            program: stub_agent(),
+            args: vec!["--exit-code".to_string(), "0".to_string()],
+            working_dir: None,
+            parse: None,
+            env: Vec::new(),
+        },
         EventSender::new(0, event_tx),
     )
     .await;
@@ -530,12 +542,14 @@ async fn a_swapped_binary_is_probed_again_for_its_version(via: Via) {
 
     let mut harness = runner(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         Some(VersionProbe {
             program: binary.clone(),
             args: vec!["--version".to_string()],
+            working_dir: None,
             parse: None,
+            env: Vec::new(),
         }),
         || None, // an unconfigured Collector: nothing runs, the version is still owed
     );
@@ -990,6 +1004,54 @@ async fn the_managed_process_is_handed_the_endpoint_token(via: Via) {
 }
 both!(the_managed_process_is_handed_the_endpoint_token);
 
+/// A Managed Process whose kind declares that it gets no Supervisor Endpoint token, because it never
+/// connects to the endpoint, finds none in its environment: its Runner holds an empty one, which is
+/// not set.
+/// Verifies: ADR-draft-client-modes-and-the-gateway
+async fn a_managed_process_whose_kind_declares_no_token_finds_none(via: Via) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("running");
+    let program = stub_agent();
+    let marker_arg = marker.display().to_string();
+    let (event_tx, _events) = mpsc::channel(64);
+    let (_commands, command_rx) = mpsc::channel(16);
+    let (_shutdown_tx, shutdown) = shutdown_channel();
+    let runner = Runner {
+        endpoint_token: zeroize::Zeroizing::default(),
+        name: "test".to_string(),
+        // timed: the bound a stop is given, not a wait
+        stop_timeout: Duration::from_secs(5),
+        apply_grace: Duration::ZERO,
+        retain_previous: Duration::ZERO,
+        install: None,
+        archive_key: None,
+        version_probe: None,
+        preflight: None,
+        reload_signal: None,
+        spawner: Spawner::Local,
+        process_account_group: None,
+        supervisor_dir: std::env::temp_dir(),
+        events: EventSender::new(0, event_tx),
+        commands: command_rx,
+        build: Box::new(move || {
+            Some(ProcessSpec {
+                program: program.clone(),
+                args: vec!["--touch".to_string(), marker_arg.clone()],
+                env: Vec::new(),
+                working_dir: None,
+                own_process_group: false,
+                ensure_dirs: Vec::new(),
+            })
+        }),
+    };
+    let (task, _service) = launch(via, runner, shutdown);
+    wait_until_started(&marker).await;
+    let text = std::fs::read_to_string(&marker).expect("marker");
+    assert!(!text.contains("token="), "{text}");
+    task.abort();
+}
+both!(a_managed_process_whose_kind_declares_no_token_finds_none);
+
 /// A kind that declared a reload applies a configuration in place (ADR-0046): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
@@ -1283,7 +1345,7 @@ fn binary_harness(via: Via, binary: &Path, apply_grace: Duration) -> Harness {
     let program = binary.to_path_buf();
     runner(
         via,
-        Some(InstallTarget::Binary(binary.to_path_buf())),
+        Some(InstallTarget::binary(binary.to_path_buf())),
         apply_grace,
         None,
         move || Some(spec(&program)),
@@ -1308,7 +1370,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs(vi
     let program = binary.clone();
     let mut harness = runner_full(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         Duration::ZERO,
         None,
@@ -1317,6 +1379,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs(vi
         Some(Preflight {
             args: vec!["--exit-code".to_string(), "1".to_string()],
             env: Vec::new(),
+            working_dir: None,
         }),
         None,
         move || {
@@ -1454,7 +1517,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds(via: V
     // No configuration yet, so the plugin has nothing to run.
     let mut harness = runner(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         None,
         || None,
@@ -1699,7 +1762,7 @@ async fn a_successful_update_keeps_the_previous_version_for_the_window(via: Via)
     let program = binary.clone();
     let mut harness = runner_retaining(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         Duration::from_secs(3600), // keep the predecessor an hour
         None,
@@ -1774,6 +1837,7 @@ fn tree_harness(via: Via, root: &Path) -> Harness {
         Some(InstallTarget::Tree {
             root: root.to_path_buf(),
             program_path: inside,
+            links: &[],
         }),
         GATE_GRACE,
         None,
@@ -2119,7 +2183,7 @@ mod an_apply_while_the_second_service_is_away {
         preflight: Option<Preflight>,
     ) -> Away {
         let binary = dir.path().join("agent");
-        let install = InstallTarget::Binary(binary.clone());
+        let install = InstallTarget::binary(binary.clone());
         on_target(
             dir,
             install,
@@ -2384,6 +2448,7 @@ mod an_apply_while_the_second_service_is_away {
         let install = InstallTarget::Tree {
             root: root.clone(),
             program_path: inside.clone(),
+            links: &[],
         };
         let mut away = on_target(
             dir,
@@ -2880,7 +2945,7 @@ mod an_apply_while_the_second_service_is_away {
             stop_timeout: Duration::from_secs(5),
             apply_grace: Duration::from_millis(500),
             retain_previous: Duration::ZERO,
-            install: Some(InstallTarget::Binary(binary.clone())),
+            install: Some(InstallTarget::binary(binary.clone())),
             archive_key: None,
             version_probe: None,
             preflight: None,
@@ -2942,6 +3007,7 @@ mod an_apply_while_the_second_service_is_away {
         let preflight = Preflight {
             args: vec!["--version".to_string()],
             env: Vec::new(),
+            working_dir: None,
         };
         let mut away = on_with(
             dir,
@@ -2977,6 +3043,7 @@ mod an_apply_while_the_second_service_is_away {
         let preflight = Preflight {
             args: vec!["--exit-code".to_string(), "3".to_string()],
             env: Vec::new(),
+            working_dir: None,
         };
         let mut away = on_with(
             dir,

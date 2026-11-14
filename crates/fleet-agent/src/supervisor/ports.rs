@@ -151,8 +151,18 @@ impl EventSender {
 /// installed and put back is the adapter's, in [`process`](super::process).
 #[derive(Debug, Clone)]
 pub enum InstallTarget {
-    /// One file: the artifact is the program, or holds it as its single named member.
-    Binary(PathBuf),
+    /// One file: the artifact is the program, or an archive holding it as one member.
+    Binary {
+        /// Where the program lives.
+        path: PathBuf,
+        /// Where its archive holds it, where its kind knows the place
+        /// (ADR-draft-packages-signatures-and-delivery clause 55): the one member whose trailing
+        /// path components are this, `/`-separated and without the archive's wrapping directory
+        /// (`usr/bin/agent`), so a release that carries further files of the program's name
+        /// installs the program and not one of those. `None` finds the member by the program's
+        /// file name.
+        member: Option<&'static str>,
+    },
     /// A whole directory tree, unpacked beside the running one and swapped by renaming
     /// directories — the same move the single-file case makes, one level up.
     Tree {
@@ -161,7 +171,18 @@ pub enum InstallTarget {
         root: PathBuf,
         /// Where the program sits inside the tree, as written in the configuration.
         program_path: PathBuf,
+        /// The absolute links the kind's tree keeps, the only links the install creates
+        /// (ADR-draft-packages-signatures-and-delivery clause 57).
+        links: &'static [fleet_core::tree::KeptLink],
     },
+}
+
+impl InstallTarget {
+    /// One file found in its archive by the program's file name.
+    #[must_use]
+    pub fn binary(path: PathBuf) -> Self {
+        Self::Binary { path, member: None }
+    }
 }
 
 /// The process account's primary group, where a process account is registered (ADR-0021 clause 21).
@@ -390,6 +411,16 @@ pub struct KindDefaults {
     /// Where the program sits inside an unpacked package tree (ADR-0034); `None` is a single-file
     /// package, or a kind that leaves the question to the block.
     pub program_path: Option<&'static str>,
+    /// Where a single-file package's archive holds the program, as trailing path components
+    /// (`usr/bin/agent`), for an archive that carries more than one file of the program's name.
+    /// `None` finds the member by its file name alone (ADR-draft-packages-signatures-and-delivery
+    /// clause 55).
+    pub member: Option<&'static str>,
+    /// The absolute links a tree package of this kind keeps as links, each by its exact path in
+    /// the tree and its exact target: the only links the tree's install creates, and the only
+    /// links leading out that `opamp-fleetctl` packs
+    /// (ADR-draft-packages-signatures-and-delivery clause 57). Empty for nearly every kind.
+    pub tree_links: &'static [fleet_core::tree::KeptLink],
     /// The Agent *type* this kind presents (ADR-0017). `None` falls back to the program's file
     /// name, which is what the block already said.
     pub service_name: Option<&'static str>,
@@ -428,6 +459,8 @@ impl KindDefaults {
         KindDefaults {
             program: None,
             program_path: None,
+            member: None,
+            tree_links: &[],
             service_name: None,
             timing: None,
             endpoint_port: false,
@@ -564,7 +597,7 @@ mod tests {
             config_dir: supervisor_dir.join("config"),
             supervisor_dir,
             program: PathBuf::from("/opt/fluent-bit/bin/fluent-bit"),
-            install: crate::supervisor::ports::InstallTarget::Binary(PathBuf::from(
+            install: crate::supervisor::ports::InstallTarget::binary(PathBuf::from(
                 "/opt/fluent-bit/bin/fluent-bit",
             )),
             stop_timeout: Duration::from_secs(1),

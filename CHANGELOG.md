@@ -25,12 +25,40 @@ once its tag exists.
   `r.10` orders above `r.9`. `--repack 1`, the default, is the version itself.
   **What to do:** nothing.
 
+- **An artifact document per wrapped agent**, under [`docs/artifacts/`](docs/artifacts/README.md):
+  what the artifact is, per platform — source, assets, integrity, repack, the delivered tree, and
+  what the Client derives from it. Each is pinned by two tests, one on the packing side and one in
+  the kind, so an upstream release that moves a path turns a test red instead of a rollout.
+  **What to do:** nothing.
+
 ### Changed
+
+- **A single-file package installs one regular file, never a directory, and an archive holding
+  its program twice is refused**
+  ([ADR-draft-packages-signatures-and-delivery](docs/adr/draft-packages-signatures-and-delivery.md)
+  clause 55). The Client took the first entry whose file name was the program's, so an archive
+  that also held a directory or another file of that name installed whichever came first. It now
+  takes only a regular file, never a directory, a link or a 7z anti-item, and refuses an archive in
+  which the program matches more than once, naming every place it found it, as `InstallFailed`. A
+  kind may name where its archive holds the program, matched by trailing path components as
+  `program_path` is. A `.tar.gz` is read to its end to find a second match, and what is read past
+  the program counts toward the 2 GiB the Client unpacks at most.
+  **What to do:** nothing, unless a package of yours holds its program twice: repack it to hold it
+  once.
 
 - **Every repack `opamp-fleetctl package fetch` makes stores normalized modes**
   ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
   clause 27): `0o755` for directories and executables and `0o644` for every other file, so no group
   or world write bit and no setuid bit upstream set reaches the signed artifact.
+  **What to do:** nothing.
+- **A tree package may keep the absolute links its Supervisor's kind names, and no other link**
+  ([ADR-draft-packages-signatures-and-delivery](docs/adr/draft-packages-signatures-and-delivery.md)
+  clause 57,
+  [ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
+  clause 27). A kind may name a link by its exact path in the tree and its exact absolute target;
+  `opamp-fleetctl package fetch` packs it as that link, and the Client creates it when it unpacks
+  a `.tar.gz` tree for that kind. Every other link still fails the repack, and still refuses the
+  archive on the Client, which now names the link and its target. No kind of the core names one.
   **What to do:** nothing.
 - **A Server with `[blobs] store = "s3"` refuses to start with `max_package_size_bytes` above
   5 GiB**

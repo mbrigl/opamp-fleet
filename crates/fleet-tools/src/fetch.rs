@@ -26,6 +26,7 @@
 use crate::package::sha256_file;
 use clap::ValueEnum;
 use dialoguer::{Confirm, Input, MultiSelect, Select};
+use fleet_core::tree::KeptLink;
 use std::path::{Path, PathBuf};
 
 /// How many release series the operator is offered. Enough to reach the release before last when
@@ -34,12 +35,9 @@ const SERIES_SHOWN: usize = 3;
 
 /// The member cap a tree package is held to (ADR-0034). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 const MAX_TREE_MEMBERS: usize = 10_000;
 
@@ -194,6 +192,15 @@ impl AgentKind {
             // this repository decides it should — and the column's question, "does it run on the
             // hosts I have", deserves the concrete answer where one can be given.
             AgentKind::Supervisor => group_platforms(SUPERVISOR_PLATFORMS.iter().copied()),
+        }
+    }
+
+    /// Whether the release's assets have to be listed to plan the fetch. An agent whose artifacts
+    /// are not assets of its GitHub release says no, sparing a request against a rate-limited
+    /// API.
+    fn needs_assets(self) -> bool {
+        match self {
+            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => true,
         }
     }
 
@@ -365,6 +372,36 @@ enum Action {
     AsPublished,
 }
 
+impl Action {
+    /// Whether the artifact is this tool's repack rather than what upstream published: every
+    /// action but [`AsPublished`](Self::AsPublished) is a kind's repack (ADR-0047).
+    fn repacks(&self) -> bool {
+        !matches!(self, Action::AsPublished)
+    }
+}
+
+/// What a kind's plans are made from: the release as upstream and this tool name it, its assets,
+/// and the command line, from which a kind reads what only it asks for.
+struct Release<'a> {
+    /// The version as upstream numbers it (`1.19`).
+    version: &'a str,
+    /// Upstream's tag of that version (`v0.158.0`).
+    #[allow(
+        dead_code,
+        reason = "a kind that builds its URLs from the tag reads it"
+    )]
+    tag: &'a str,
+    /// The Package version the artifacts are uploaded as, a later repack's included — what a
+    /// repacked artifact is named by (ADR-0035 clause 6).
+    #[allow(dead_code, reason = "a kind that repacks names its artifact by it")]
+    package_version: &'a str,
+    /// The release's assets as `(name, url)`, empty for an agent that does not need them.
+    assets: &'a [(String, String)],
+    /// The command line, for a flag only one kind takes.
+    #[allow(dead_code, reason = "a kind with a flag of its own reads it")]
+    args: &'a Args,
+}
+
 /// `package fetch`: which agent, which version, which platforms, and whether to upload — each
 /// asked for when its flag is missing.
 ///
@@ -389,8 +426,19 @@ pub async fn run(args: Args) -> Result<(), String> {
     let (tag, package_version) = agent.release_names(&version)?;
     let package_version = repack_version(agent, &package_version, args.repack)?;
 
-    let assets = release_assets(&source, &tag).await?;
-    let available = plans(agent, &version, &assets).await?;
+    let assets = if agent.needs_assets() {
+        release_assets(&source, &tag).await?
+    } else {
+        Vec::new()
+    };
+    let release = Release {
+        version: &version,
+        tag: &tag,
+        package_version: &package_version,
+        assets: &assets,
+        args: &args,
+    };
+    let available = plans(agent, &release).await?;
     if available.is_empty() {
         // For this project's own releases the likeliest reason is a known one, and saying it saves
         // the operator a trip to the release page: older releases carry another name and container,
@@ -583,8 +631,12 @@ fn select_platforms<'p>(available: &'p [Plan], wanted: &[String]) -> Result<Vec<
     }
     let labels: Vec<String> = available
         .iter()
-        .map(|p| match p.action {
-            Action::AsPublished => format!("{}/{}", p.os, p.arch),
+        .map(|p| {
+            if p.action.repacks() {
+                format!("{}/{} (repacked)", p.os, p.arch)
+            } else {
+                format!("{}/{}", p.os, p.arch)
+            }
         })
         .collect();
     let picked = MultiSelect::new()
@@ -707,16 +759,12 @@ async fn release_assets(source: &Source, tag: &str) -> Result<Vec<(String, Strin
 }
 
 /// What this release offers, one entry per platform this fleet can name.
-async fn plans(
-    agent: AgentKind,
-    version: &str,
-    assets: &[(String, String)],
-) -> Result<Vec<Plan>, String> {
+async fn plans(agent: AgentKind, release: &Release<'_>) -> Result<Vec<Plan>, String> {
     match agent {
         AgentKind::Otelcol | AgentKind::OtelcolContrib => {
-            Ok(collector_plans(agent, version, assets))
+            Ok(collector_plans(agent, release.version, release.assets))
         }
-        AgentKind::Supervisor => Ok(supervisor_plans(version, assets)),
+        AgentKind::Supervisor => Ok(supervisor_plans(release.version, release.assets)),
     }
 }
 
@@ -898,12 +946,26 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
         .cloned()
         .ok_or_else(|| "a plan with nothing to fetch".to_string())?;
 
-    match &plan.action {
-        Action::AsPublished => {
-            eprintln!("  as published — the fleet verifies upstream's own hash");
-            Ok(downloaded)
-        }
+    // A kind that repacks answers its step here; the rest of a repack is the same for every kind.
+    let artifact = out_dir.join(&plan.out_name);
+    let repacked: Option<Result<(), String>> = match &plan.action {
+        Action::AsPublished => None,
+    };
+    let Some(repacked) = repacked else {
+        eprintln!("  as published — the fleet verifies upstream's own hash");
+        return Ok(downloaded);
+    };
+    repacked?;
+    // What was downloaded was a means, not a result; leaving it beside the artifact invites
+    // uploading the wrong file.
+    for file in &fetched {
+        let _ = std::fs::remove_file(file);
     }
+    eprintln!(
+        "  repacked  sha256 {}",
+        hex::encode(sha256_file(&artifact)?)
+    );
+    Ok(artifact)
 }
 
 /// The SHA-256 upstream published for this artifact, from whichever form the source uses.
@@ -966,14 +1028,16 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 /// signs, and make its bytes depend on the host that packed it. So does anything that is neither a
 /// file nor a directory, which a pack could only hang on or read from outside the tree. A link
 /// pointing at nothing inside the tree is dropped.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+///
+/// The one exception is `kept`, the absolute links the kind names by their exact path in the tree
+/// and their exact target (ADR-draft-the-operator-program-opamp-fleetctl clause 27): each is packed
+/// as that link, read from the tree and never followed, and the Client creates exactly those. A
+/// link at a named path with another target leads out like any other.
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
-fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
+fn pack_tree(root: &Path, wrapper: &str, kept: &[KeptLink], out: &Path) -> Result<(), String> {
     let mut members = Vec::new();
     let mut refused = std::collections::BTreeMap::new();
     // The root is the first ancestor: a link back up to it is a cycle like any other.
@@ -981,6 +1045,7 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
         root,
         Path::new(""),
         Path::new(""),
+        kept,
         &mut members,
         &mut vec![PathBuf::new()],
         &mut refused,
@@ -1007,17 +1072,14 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 }
 
 /// Writes the members, in the order given, into `file` as a gzipped tar.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn write_members(
     root: &Path,
     wrapper: &str,
-    members: &[(PathBuf, PathBuf, bool)],
+    members: &[(PathBuf, Member)],
     file: std::fs::File,
     out: &Path,
 ) -> Result<(), String> {
@@ -1025,22 +1087,35 @@ fn write_members(
         file,
         flate2::Compression::default(),
     ));
-    for (name, real, is_dir) in members {
+    for (name, member) in members {
         let inside = Path::new(wrapper).join(name);
         let mut header = tar::Header::new_gnu();
         header.set_mtime(0);
         header.set_uid(0);
         header.set_gid(0);
-        if *is_dir {
-            header.set_entry_type(tar::EntryType::Directory);
-            header.set_size(0);
-            header.set_mode(0o755);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, &inside, std::io::empty())
-                .map_err(|e| format!("cannot pack {}: {e}", inside.display()))?;
-            continue;
-        }
+        let real = match member {
+            Member::Dir(_) => {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, &inside, std::io::empty())
+                    .map_err(|e| format!("cannot pack {}: {e}", inside.display()))?;
+                continue;
+            }
+            // A kept link is stored as the link it is, with the mode every link has.
+            Member::Link(target) => {
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                header.set_mode(0o777);
+                builder
+                    .append_link(&mut header, &inside, target)
+                    .map_err(|e| format!("cannot pack {}: {e}", inside.display()))?;
+                continue;
+            }
+            Member::File(real) => real,
+        };
         // `real` holds no link, so what is opened is the member the walk judged.
         let full = root.join(real);
         let source = std::fs::File::open(&full)
@@ -1064,12 +1139,25 @@ fn write_members(
     Ok(())
 }
 
+/// What one member of a repack is: a directory or a file, by the path inside the tree it is read
+/// from, which holds no link, or a link the kind keeps, by its target.
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
+)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Member {
+    Dir(PathBuf),
+    File(PathBuf),
+    Link(PathBuf),
+}
+
 /// Every member under the directory packed as `name` and read from `real` — directories included,
-/// because a tree keeps its shape. A member is its name in the artifact, the path inside the tree
-/// it is read from, which holds no link, and whether it is a directory; the two paths differ for
-/// everything reached through a linked directory. A link that leads out of the tree, and anything
-/// that is neither a file nor a directory, is no member but goes into `refused`, keyed by its own
-/// path in the tree and saying what it is. The member cap is checked as each member is found, so a
+/// because a tree keeps its shape. A member is its name in the artifact and what it is; the name
+/// and the path it is read from differ for everything reached through a linked directory. A link
+/// `kept` names is a member at its own path only, never reached through a linked directory. A link
+/// that leads out of the tree, and anything that is neither a file nor a directory, is no member
+/// but goes into `refused`, keyed by its own path in the tree and saying what it is. The member cap is checked as each member is found, so a
 /// tree whose links multiply its paths stops at the cap rather than after the whole walk.
 ///
 /// Links are followed, and that is the whole difficulty. A link to a *directory* has to be
@@ -1084,18 +1172,16 @@ fn write_members(
 /// directory is legitimate duplication and must be packed again. Deduplicating by real path
 /// instead would leave one of the two names empty — and which one, on directory-read order, which
 /// is nobody's guarantee.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn collect_members(
     root: &Path,
     name: &Path,
     real: &Path,
-    into: &mut Vec<(PathBuf, PathBuf, bool)>,
+    kept: &[KeptLink],
+    into: &mut Vec<(PathBuf, Member)>,
     ancestors: &mut Vec<PathBuf>,
     refused: &mut std::collections::BTreeMap<PathBuf, String>,
 ) -> Result<(), String> {
@@ -1106,6 +1192,20 @@ fn collect_members(
         let entry = entry.map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
         let member = name.join(entry.file_name());
         let own = real.join(entry.file_name());
+        if member == own && entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+            let target = std::fs::read_link(entry.path())
+                .map_err(|e| format!("cannot read {}: {e}", own.display()))?;
+            if fleet_core::tree::is_kept(kept, &own, &target) {
+                into.push((member, Member::Link(target)));
+                if into.len() > MAX_TREE_MEMBERS {
+                    return Err(format!(
+                        "the tree holds more than the {MAX_TREE_MEMBERS} members a package may \
+                         carry"
+                    ));
+                }
+                continue;
+            }
+        }
         // Resolving rather than reading the entry itself: what matters is what the member *is*
         // once the link is followed, because that is what gets packed.
         let (resolved, is_dir) = match resolve_inside(root, real, Path::new(&entry.file_name()))? {
@@ -1126,7 +1226,12 @@ fn collect_members(
                 continue;
             }
         };
-        into.push((member.clone(), resolved.clone(), is_dir));
+        let what = if is_dir {
+            Member::Dir(resolved.clone())
+        } else {
+            Member::File(resolved.clone())
+        };
+        into.push((member.clone(), what));
         if into.len() > MAX_TREE_MEMBERS {
             return Err(format!(
                 "the tree holds more than the {MAX_TREE_MEMBERS} members a package may carry"
@@ -1136,19 +1241,16 @@ fn collect_members(
             continue;
         }
         ancestors.push(resolved.clone());
-        collect_members(root, &member, &resolved, into, ancestors, refused)?;
+        collect_members(root, &member, &resolved, kept, into, ancestors, refused)?;
         ancestors.pop();
     }
     Ok(())
 }
 
 /// What a path of the tree is once every link on it is followed inside the tree.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 enum Resolution {
     /// A file or directory inside the tree, by its path relative to the root, which holds no link.
@@ -1164,12 +1266,9 @@ enum Resolution {
 
 /// How many links one resolution follows before it counts as a loop — the bound Linux puts on one
 /// path lookup.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 const MAX_LINK_HOPS: usize = 40;
 
@@ -1180,12 +1279,9 @@ const MAX_LINK_HOPS: usize = 40;
 /// A `..` above the root or an absolute target leads out, and so does a path that climbs above the
 /// root past a component that does not exist: whether a link leads out is the tree's to say, not
 /// the host's.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, String> {
     use std::path::Component;
@@ -1276,12 +1372,9 @@ fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, S
 /// the owner's and no setuid, setgid or sticky bit upstream set reaches the signed artifact. Off
 /// Unix it is a decision rather than a reading: a tar written on Windows has no mode to carry, and
 /// a tree whose programs arrive unexecutable is a tree that will not run.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn mode_of(meta: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
@@ -1938,12 +2031,12 @@ mod tests {
         std::os::unix::fs::symlink("nowhere", tree.join("lib/dangling")).expect("link to nothing");
 
         let artifact = dir.path().join("packed.tar.gz");
-        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+        pack_tree(&tree, "wrapper", &[], &artifact).expect("pack");
 
         let dest = dir.path().join("unpacked");
         std::fs::create_dir_all(&dest).expect("create");
         let summary =
-            fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &dest)
+            fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &[], &dest)
                 .expect("the packed tree is one a Client installs");
 
         assert_eq!(
@@ -1983,7 +2076,7 @@ mod tests {
             .expect("link the root the long way");
 
         let artifact = dir.path().join("packed.tar.gz");
-        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+        pack_tree(&tree, "wrapper", &[], &artifact).expect("pack");
 
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
             std::fs::File::open(&artifact).expect("open"),
@@ -2062,7 +2155,7 @@ mod tests {
             }
 
             let artifact = dir.path().join(format!("packed-{n}.tar.gz"));
-            let error = pack_tree(&tree, "wrapper", &artifact).expect_err(&format!(
+            let error = pack_tree(&tree, "wrapper", &[], &artifact).expect_err(&format!(
                 "a link out of the tree fails the repack: {links:?}"
             ));
 
@@ -2102,7 +2195,7 @@ mod tests {
         std::os::unix::fs::symlink("/etc/\x1b[2Jcerts", tree.join("in\x1b[1Avisible"))
             .expect("link out");
 
-        let error = pack_tree(&tree, "wrapper", &dir.path().join("packed.tar.gz"))
+        let error = pack_tree(&tree, "wrapper", &[], &dir.path().join("packed.tar.gz"))
             .expect_err("a link out of the tree fails the repack");
 
         assert!(
@@ -2135,7 +2228,7 @@ mod tests {
         std::os::unix::fs::symlink("run/pipe", tree.join("to-pipe")).expect("link the pipe");
 
         let artifact = dir.path().join("packed.tar.gz");
-        let error = pack_tree(&tree, "wrapper", &artifact)
+        let error = pack_tree(&tree, "wrapper", &[], &artifact)
             .expect_err("a pipe fails the repack instead of hanging it");
 
         for named in ["\"run/pipe\"", "\"to-pipe\""] {
@@ -2169,7 +2262,7 @@ mod tests {
         std::fs::write(tree.join(format!("d{LEVELS}/leaf")), b"a-leaf").expect("write");
 
         let artifact = dir.path().join("packed.tar.gz");
-        let error = pack_tree(&tree, "wrapper", &artifact).expect_err("past the cap");
+        let error = pack_tree(&tree, "wrapper", &[], &artifact).expect_err("past the cap");
 
         assert!(error.contains("10000 members"), "{error}");
         assert!(!artifact.exists(), "no artifact is left at the output path");
@@ -2197,7 +2290,7 @@ mod tests {
         }
 
         let artifact = dir.path().join("packed.tar.gz");
-        let error = pack_tree(&tree, "wrapper", &artifact).expect_err("an unreadable member");
+        let error = pack_tree(&tree, "wrapper", &[], &artifact).expect_err("an unreadable member");
 
         assert!(error.contains("locked"), "{error}");
         assert!(!artifact.exists(), "the half-written artifact is removed");
@@ -2225,11 +2318,11 @@ mod tests {
             .expect("link to nothing");
 
         let artifact = dir.path().join("packed.tar.gz");
-        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+        pack_tree(&tree, "wrapper", &[], &artifact).expect("pack");
 
         let dest = dir.path().join("unpacked");
         std::fs::create_dir_all(&dest).expect("create");
-        fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &dest)
+        fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &[], &dest)
             .expect("the packed tree is one a Client installs");
         assert_eq!(
             std::fs::read(dest.join("bin/agent")).expect("the linked file"),
@@ -2247,6 +2340,123 @@ mod tests {
             !dest.join("bin/dangling").exists(),
             "a link that names nothing inside the tree is not a member"
         );
+    }
+
+    #[cfg(unix)]
+    const LOADER: KeptLink = KeptLink {
+        path: "runtime/lib64/ld-linux-x86-64.so.2",
+        target: "/lib64/ld-linux-x86-64.so.2",
+    };
+
+    /// A tree with the entry point and the loader link the kind names.
+    #[cfg(unix)]
+    fn tree_with_a_loader_link(dir: &Path, target: &str) -> PathBuf {
+        let tree = dir.join("tree");
+        std::fs::create_dir_all(tree.join("runtime/lib64")).expect("create");
+        std::fs::write(tree.join("AppRun"), b"the-entry-point").expect("write");
+        std::os::unix::fs::symlink(target, tree.join("runtime/lib64/ld-linux-x86-64.so.2"))
+            .expect("the loader link");
+        tree
+    }
+
+    /// A link the kind names by its exact path and target is packed as that link, never followed,
+    /// and a Client installing the tree with the same kind creates it.
+    ///
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    #[cfg(unix)]
+    #[test]
+    fn a_link_the_kind_keeps_is_packed_as_that_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tree = tree_with_a_loader_link(dir.path(), "/lib64/ld-linux-x86-64.so.2");
+        let artifact = dir.path().join("packed.tar.gz");
+        pack_tree(&tree, "wrapper", &[LOADER], &artifact).expect("pack");
+
+        let file = std::fs::File::open(&artifact).expect("open");
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        let links: Vec<(String, String, u32, u64)> = archive
+            .entries()
+            .expect("entries")
+            .map(|entry| entry.expect("entry"))
+            .filter(|entry| entry.header().entry_type().is_symlink())
+            .map(|entry| {
+                (
+                    entry.path().expect("path").to_string_lossy().into_owned(),
+                    entry
+                        .link_name()
+                        .expect("target")
+                        .expect("a link has a target")
+                        .to_string_lossy()
+                        .into_owned(),
+                    entry.header().mode().expect("mode"),
+                    entry.header().mtime().expect("mtime"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [(
+                "wrapper/runtime/lib64/ld-linux-x86-64.so.2".to_string(),
+                "/lib64/ld-linux-x86-64.so.2".to_string(),
+                0o777,
+                0
+            )]
+        );
+
+        let dest = dir.path().join("unpacked");
+        std::fs::create_dir_all(&dest).expect("create");
+        fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &[LOADER], &dest)
+            .expect("the Client installs the tree with the kind's link");
+        assert_eq!(
+            std::fs::read_link(dest.join("runtime/lib64/ld-linux-x86-64.so.2")).expect("link"),
+            Path::new("/lib64/ld-linux-x86-64.so.2")
+        );
+    }
+
+    /// Every other link leading out still fails the repack, naming it: the named link without the
+    /// kind naming it, the named path with another target, an unnamed absolute link beside a kept
+    /// one, and the kept link reached through a linked directory under another name.
+    ///
+    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    #[cfg(unix)]
+    #[test]
+    fn a_link_the_kind_does_not_keep_still_fails_the_repack() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let refuse = |tree: &Path, kept: &[KeptLink], named: &str| {
+            let artifact = tree.with_extension("tar.gz");
+            let error = pack_tree(tree, "wrapper", kept, &artifact).expect_err(named);
+            assert!(error.contains(named), "{named}: {error}");
+            assert!(error.contains("leads out of the tree"), "{error}");
+            assert!(!artifact.exists(), "no artifact for {named}");
+        };
+
+        let unnamed =
+            tree_with_a_loader_link(&dir.path().join("unnamed"), "/lib64/ld-linux-x86-64.so.2");
+        refuse(
+            &unnamed,
+            &[],
+            r#""runtime/lib64/ld-linux-x86-64.so.2" -> "/lib64/ld-linux-x86-64.so.2""#,
+        );
+
+        let other = tree_with_a_loader_link(&dir.path().join("other"), "/etc/passwd");
+        refuse(
+            &other,
+            &[LOADER],
+            r#""runtime/lib64/ld-linux-x86-64.so.2" -> "/etc/passwd""#,
+        );
+
+        let beside =
+            tree_with_a_loader_link(&dir.path().join("beside"), "/lib64/ld-linux-x86-64.so.2");
+        std::os::unix::fs::symlink("/etc/passwd", beside.join("runtime/passwd")).expect("link");
+        refuse(&beside, &[LOADER], r#""runtime/passwd" -> "/etc/passwd""#);
+
+        let aliased =
+            tree_with_a_loader_link(&dir.path().join("aliased"), "/lib64/ld-linux-x86-64.so.2");
+        std::os::unix::fs::symlink("runtime", aliased.join("rt")).expect("link a directory");
+        let artifact = dir.path().join("aliased.tar.gz");
+        let error = pack_tree(&aliased, "wrapper", &[LOADER], &artifact)
+            .expect_err("the kept link under another name");
+        assert!(error.contains("leads out of the tree"), "{error}");
+        assert!(!artifact.exists());
     }
 
     /// A repack stores normalized modes: a file with any execute bit `0o755`, every other file
@@ -2276,7 +2486,7 @@ mod tests {
         mode(&tree.join("bin"), 0o1777);
 
         let artifact = dir.path().join("packed.tar.gz");
-        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+        pack_tree(&tree, "wrapper", &[], &artifact).expect("pack");
 
         let file = std::fs::File::open(&artifact).expect("open");
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
@@ -2326,7 +2536,7 @@ mod tests {
 
         let packed = |from: &Path, name: &str| {
             let artifact = dir.path().join(name);
-            pack_tree(from, "wrapper", &artifact).expect("pack");
+            pack_tree(from, "wrapper", &[], &artifact).expect("pack");
             std::fs::read(&artifact).expect("read")
         };
         let first = packed(&tree, "first.tar.gz");
