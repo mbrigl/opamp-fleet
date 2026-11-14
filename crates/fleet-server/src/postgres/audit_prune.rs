@@ -17,7 +17,7 @@ use std::time::Duration;
 use super::Cached as GenericClient;
 use serde_json::Value;
 
-use super::{client, sql, Database};
+use super::{sql, Database, SessionLock};
 use crate::audit::{Audit as _, Entry};
 use crate::audit_log::{line_hash, AuditLog};
 
@@ -34,6 +34,9 @@ const PRUNE_TIMEOUT: Duration = Duration::from_secs(300);
 /// hundred times that, a round takes 20 s, a fifteenth of [`PRUNE_TIMEOUT`], so a round fits
 /// with room for a database under load, and a backlog drains over as many rounds as it needs.
 pub(crate) const ROUND_ENTRIES: i64 = 100_000;
+
+/// How long a round waits for its session to answer whether it still holds the prune lock.
+const LOCK_ASKED_WITHIN: Duration = Duration::from_secs(10);
 
 /// How long the prune waits for its `audit.pruned` entries to be written.
 const WRITTEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -270,81 +273,53 @@ fn prune_round_of(
 ) -> Result<Pruned, String> {
     // At most 36 500 (`[audit] retain_days`), so the bits carry over unchanged.
     let days = super::signed(retain_days);
-    database.run_within(PRUNE_TIMEOUT, move |pool| async move {
-        // A connection of its own, taken from the pool, so that the session-level lock ends with
-        // it whatever happens to this call.
-        let mut lock = Unlocking(Some(deadpool_postgres::Object::take(client(&pool).await?)));
-        let pruned = round_on(lock.0.as_mut().expect("held"), audit, own, days, budget).await;
-        // Run to its end, the round let go of the lock itself: nothing is left to the drop.
-        drop(lock.0.take());
-        pruned
+    let (pg, tls) = (database.pg.clone(), database.tls.clone());
+    database.run_within(PRUNE_TIMEOUT, move |_pool| async move {
+        // A session of its own, so that the prune lock ends with it whatever happens to this
+        // call; a round cut off by its bound drops it before its own unlock ran, and the drop
+        // lets go of the lock.
+        let lock = SessionLock::open(&pg, &tls, PRUNE_LOCK, "", |_, _| {}).await?;
+        round_on(&lock, audit, own, days, budget).await
     })
 }
 
-/// The connection of a prune round. A round cut off by its bound drops it before its own unlock
-/// ran, so its drop lets go of the prune lock on it rather than leave the lock until the session
-/// ends; a round that runs to its end takes the connection out first.
-struct Unlocking(Option<deadpool_postgres::ClientWrapper>);
-
-impl Drop for Unlocking {
-    fn drop(&mut self) {
-        let (Some(client), Ok(runtime)) = (self.0.take(), tokio::runtime::Handle::try_current())
-        else {
-            return;
-        };
-        runtime.spawn(async move {
-            let _ = client
-                .execute(&format!("SELECT pg_advisory_unlock({PRUNE_LOCK})"), &[])
-                .await;
-        });
-    }
-}
-
-/// [`prune_round_of`] on the connection `lock`, which takes the prune lock when it is free and lets
-/// go of it before it answers. The session ends only some time after the connection is dropped,
-/// so a lock left to it could still be held when the next round of the same prune tries it, and
-/// that round would leave the closed chains as if another instance pruned them.
+/// [`prune_round_of`] on the session of `lock`, which takes the prune lock when it is free and
+/// lets go of it before it answers. The session ends only some time after it is dropped, so a lock
+/// left to it could still be held when the next round of the same prune tries it, and that round
+/// would leave the closed chains as if another instance pruned them.
 async fn round_on(
-    lock: &mut deadpool_postgres::ClientWrapper,
+    lock: &SessionLock,
     audit: Arc<AuditLog>,
     own: Option<String>,
     days: i64,
     budget: i64,
 ) -> Result<Pruned, String> {
-    let locked: bool = lock
-        .query_one(&format!("SELECT pg_try_advisory_lock({PRUNE_LOCK})"), &[])
-        .await
-        .map_err(sql)?
-        .get(0);
+    let locked = lock.try_lock().await?;
     let pruned = round_under(lock, locked, audit, own, days, budget).await;
-    if locked {
-        // Answered either way: what the round did stands, and the session's end lets go of the
-        // lock where this cannot.
-        if let Err(e) = lock
-            .execute(&format!("SELECT pg_advisory_unlock({PRUNE_LOCK})"), &[])
-            .await
-        {
-            tracing::warn!(
-                error = %sql(e),
-                "the audit prune lock was not let go; it goes when its session ends"
-            );
-        }
+    // Answered either way: what the round did stands, and the session's end lets go of the lock
+    // where this cannot.
+    if let Err(e) = lock.unlock().await {
+        tracing::warn!(
+            error = %e,
+            "the audit prune lock was not let go; it goes when its session ends"
+        );
     }
     pruned
 }
 
-/// The work of one round on `lock`, which holds the prune lock when `locked`.
+/// The work of one round on the session of `lock`, which holds the prune lock when `locked`.
 async fn round_under(
-    lock: &mut deadpool_postgres::ClientWrapper,
+    lock: &SessionLock,
     locked: bool,
     audit: Arc<AuditLog>,
     own: Option<String>,
     days: i64,
     budget: i64,
 ) -> Result<Pruned, String> {
+    let session = lock.client().as_ref();
     let mut chains: Vec<String> = Vec::new();
     if let Some(own) = &own {
-        if lock
+        if session
             .query_opt(
                 "SELECT 1 FROM audit_chains WHERE id = $1::text::uuid AND closed_hash IS NULL",
                 &[own],
@@ -357,7 +332,7 @@ async fn round_under(
         }
     }
     if locked {
-        for row in lock
+        for row in session
             .query(
                 "SELECT id::text FROM audit_chains WHERE closed_hash IS NOT NULL \
                  ORDER BY opened_at, id",
@@ -372,7 +347,7 @@ async fn round_under(
     // The own chain may have been closed by a takeover between the two reads.
     let mut seen = BTreeSet::new();
     chains.retain(|chain| seen.insert(chain.clone()));
-    let plan = plan(&**lock, &chains, days, budget).await?;
+    let plan = plan(session, &chains, days, budget).await?;
     let mut pruned = Pruned {
         closed_chains: locked,
         capped: plan.capped,
@@ -398,12 +373,28 @@ async fn round_under(
             "the audit.pruned entries could not be written, so nothing was pruned".to_string(),
         );
     }
+    // The wait for the entries may have outlasted the session, and the lock with it. The deletes
+    // run on that session, so they would fail on their own then; asking first only says why,
+    // rather than with the error of a closed connection.
+    if locked && !lock.holds(LOCK_ASKED_WITHIN).await {
+        return Err(
+            "the audit prune lock was lost with its session while the audit.pruned entries were \
+             written, so nothing was pruned"
+                .to_string(),
+        );
+    }
     // One transaction for every chain: the old link of a chain pruned further may sit in
     // another chain pruned here, so a prune that stopped between two deletes would leave a
     // chain linked by nothing.
-    let transaction = lock.transaction().await.map_err(sql)?;
-    delete(&transaction, &plan.chains).await?;
-    transaction.commit().await.map_err(sql)?;
+    session.batch_execute("BEGIN").await.map_err(sql)?;
+    let deleted = match delete(session, &plan.chains).await {
+        Ok(()) => session.batch_execute("COMMIT").await.map_err(sql),
+        Err(e) => Err(e),
+    };
+    if deleted.is_err() {
+        let _ = session.batch_execute("ROLLBACK").await;
+    }
+    deleted?;
     pruned.chains = plan.chains;
     pruned.carried = plan.carried;
     pruned.predecessor = plan.predecessor.is_some();
@@ -660,7 +651,7 @@ mod tests {
     use tokio::sync::watch;
 
     use super::super::testing::TestDatabase;
-    use super::super::Exclusive;
+    use super::super::{client, Exclusive};
     use super::*;
     use crate::audit_log::Limits;
     use crate::postgres::audit::{verify, PgAuditStore};
@@ -1294,12 +1285,13 @@ mod tests {
         let a = writing(&test, "host-a");
         age(&test, &closed.chain, "1, 2");
         let (audit, own) = (a.audit.clone(), a.chain.clone());
+        let (pg, tls) = (a.database.pg.clone(), a.database.tls.clone());
         let (pruned, free) = a
             .database
             .run_within(PRUNE_TIMEOUT, move |pool| async move {
-                let mut lock = deadpool_postgres::Object::take(client(&pool).await?);
+                let lock = SessionLock::open(&pg, &tls, PRUNE_LOCK, "", |_, _| {}).await?;
                 let days = super::super::signed(RETAIN);
-                let pruned = round_on(&mut lock, audit, Some(own), days, ROUND_ENTRIES).await?;
+                let pruned = round_on(&lock, audit, Some(own), days, ROUND_ENTRIES).await?;
                 let other = client(&pool).await?;
                 let free: bool = other
                     .query_one(&format!("SELECT pg_try_advisory_lock({PRUNE_LOCK})"), &[])
@@ -1320,6 +1312,54 @@ mod tests {
         assert_eq!(pruned.chains.len(), 1, "{pruned:?}");
         assert!(free, "the round's session still held the prune lock");
         held(&a.database);
+    }
+
+    /// A round whose session the database ends while it holds the prune lock learns that the lock
+    /// is gone before it deletes, and deletes nothing: another instance may prune the closed
+    /// chains by then. The session is ended while the round waits for its `audit.pruned` entries,
+    /// which a gate holds.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_round_whose_session_ends_while_it_holds_the_prune_lock_prunes_nothing_and_says_so() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        const KEY: i64 = 0x08_0001;
+        let closed = writing(&test, "host-x");
+        closed.decide(3);
+        assert!(closed.audit.close(Duration::from_secs(10)), "not closed");
+        let a = writing(&test, "host-a");
+        age(&test, &closed.chain, "1, 2");
+        let before = lines(&test, &closed.chain);
+        let gate = test.gate(KEY);
+        test.sql(&format!(
+            "CREATE FUNCTION fleet_test_hold_entries() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN PERFORM set_config('lock_timeout', '0', true); \
+                 PERFORM pg_advisory_lock_shared({KEY}); \
+                 PERFORM pg_advisory_unlock_shared({KEY}); RETURN NULL; END $$; \
+             CREATE TRIGGER fleet_test_hold_entries AFTER INSERT ON audit_entries \
+                 FOR EACH ROW EXECUTE FUNCTION fleet_test_hold_entries();"
+        ));
+        let round = std::thread::spawn({
+            let (database, audit, own) = (a.database.clone(), a.audit.clone(), a.chain.clone());
+            move || prune_round(&database, audit, Some(own), RETAIN)
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !test.waits_for(KEY) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the entries never waited"
+            );
+        }
+        test.end_the_holder_of(PRUNE_LOCK);
+        gate.open();
+        let err = round.join().expect("the round").expect_err("refused");
+        assert!(err.contains("prune lock was lost"), "{err}");
+        assert_eq!(
+            lines(&test, &closed.chain),
+            before,
+            "pruned without the lock"
+        );
     }
 
     /// A chain with an entry missing where a round's budget cuts it is left as it is, and the run

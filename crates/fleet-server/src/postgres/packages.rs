@@ -342,8 +342,8 @@ impl PackageBackend for PgPackageBackend {
 fn session_of(
     hold: &crate::blobs::BlobHold,
 ) -> Result<(Arc<tokio_postgres::Client>, String), String> {
-    match (hold.held::<super::LockHold>(), hold.sweep()) {
-        (Some(held), Some(sweep)) => Ok((held.client.clone(), sweep.to_string())),
+    match (hold.held::<super::SessionLock>(), hold.sweep()) {
+        (Some(held), Some(sweep)) => Ok((held.client().clone(), sweep.to_string())),
         _ => Err("a sweep on PostgreSQL holds the blob store's lock".to_string()),
     }
 }

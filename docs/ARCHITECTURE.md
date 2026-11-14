@@ -153,8 +153,11 @@ no module.
   be alone on the database, the blob lock a sweep, the staging cleanup and `server blobs-to-s3` hold
   alone and an upload holds shared (`hold_blobs`), the leases of `postgres::lease` and the
   notifications of `postgres::notify` — and applies the schema embedded in `postgres::schema` as
-  numbered migrations; `postgres::import` is `server migrate-to-postgres`, which copies a `data_dir`
-  into the database offline, and `server blobs-to-s3`, which copies the blob files into the bucket
+  numbered migrations. Every session-level advisory lock is a `postgres::SessionLock`: a session of
+  its own, a try and a wait, the unlock on drop, and the watch that says the session and the lock
+  are gone, which the exclusive lock, the blob lock, the prune lock and the signer's lock take.
+  `postgres::import` is `server migrate-to-postgres`, which copies a `data_dir` into the database
+  offline, and `server blobs-to-s3`, which copies the blob files into the bucket
   ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
   `config::read_secret_file` is the one reader of the password, PIN and secret files the PostgreSQL,
   S3 and PKCS#11 adapters name. The core's constructors take the ports — `AppState::with_stores`,

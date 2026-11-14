@@ -118,21 +118,17 @@ impl Exclusive {
 /// One database, reached through a pool.
 pub struct Database {
     pool: Pool,
-    /// The connection that holds the exclusive lock of an instance that must be alone, open for as
-    /// long as the instance runs; none for an instance that shares the database.
-    _lock: Option<tokio_postgres::Client>,
-    /// The server process of that connection, as `pg_stat_activity` names it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    lock_pid: Option<i32>,
+    /// The exclusive lock of an instance that must be alone, held for as long as the instance
+    /// runs; none for an instance that shares the database. Once its session has ended, another
+    /// Server may hold the database, and this one refuses every call
+    /// ([`run_within`](Self::run_within)).
+    lock: Option<SessionLock>,
     /// Whether this instance must be alone, and why.
     exclusive: Exclusive,
     /// The connection's settings and TLS, for the connection that listens for notifications.
     pg: tokio_postgres::Config,
     tls: Tls,
-    /// Set once the lock's connection has ended: from then on another Server may hold the
-    /// database, and this one refuses every call ([`run_within`](Self::run_within)).
-    lost: Arc<AtomicBool>,
-    /// Set while the database is dropped, so the lock's connection ending then is no loss.
+    /// Set while the database is dropped, so the connection that listens is not made again.
     closing: Arc<AtomicBool>,
     /// `database <dbname> on <host>:<port>`, what every error names.
     name: String,
@@ -301,34 +297,33 @@ impl Database {
         );
         pg.options(options);
         let bridge = Bridge::new("records-postgres")?;
-        let (lost, closing) = (
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-        );
-        let (lock, lock_pid) = match &exclusive {
-            Exclusive::Shared => (None, None),
+        let closing = Arc::new(AtomicBool::new(false));
+        let lock = match &exclusive {
+            Exclusive::Shared => None,
             Exclusive::Alone(because) => {
-                let (lock, held, pid) = bridge
+                let (lock, held) = bridge
                     .run({
-                        let (pg, tls) = (pg.clone(), tls.clone());
-                        let watch = LockWatch {
-                            name: name.clone(),
-                            lost: lost.clone(),
-                            closing: closing.clone(),
-                        };
+                        let (pg, tls, watched) = (pg.clone(), tls.clone(), name.clone());
                         bounded(bound, async move {
-                            let client = connect_watched(&pg, &tls, watch).await?;
-                            let row = client
-                                .query_one(
-                                    &format!(
-                                        "SELECT pg_try_advisory_lock({EXCLUSIVE_LOCK}), \
-                                         pg_backend_pid()"
-                                    ),
-                                    &[],
-                                )
-                                .await
-                                .map_err(sql)?;
-                            Ok::<_, String>((client, row.get::<_, bool>(0), row.get::<_, i32>(1)))
+                            let lock = SessionLock::open(
+                                &pg,
+                                &tls,
+                                EXCLUSIVE_LOCK,
+                                "",
+                                move |held, why| {
+                                    if held {
+                                        tracing::error!(
+                                            database = %watched,
+                                            error = %why,
+                                            "{}",
+                                            lost_lock(&watched)
+                                        );
+                                    }
+                                },
+                            )
+                            .await?;
+                            let held = lock.try_lock().await?;
+                            Ok::<_, String>((lock, held))
                         })
                     })
                     .map_err(|e| format!("cannot reach the {name}: {e}"))?;
@@ -339,7 +334,7 @@ impl Database {
                          blobs or its CA keys as files; stop the other one first"
                     ));
                 }
-                (Some(lock), Some(pid))
+                Some(lock)
             }
         };
         let manager = match tls.clone() {
@@ -368,12 +363,10 @@ impl Database {
             .map_err(|e| format!("cannot pool the connections to the {name}: {e}"))?;
         Ok(Database {
             pool,
-            _lock: lock,
-            lock_pid,
+            lock,
             exclusive,
             pg,
             tls,
-            lost,
             closing,
             name,
             origin,
@@ -460,7 +453,7 @@ impl Database {
     /// every call is refused. Never, for an instance that shares the database.
     #[must_use]
     pub fn lock_lost(&self) -> bool {
-        self.lost.load(Ordering::SeqCst)
+        self.lock.as_ref().is_some_and(SessionLock::lost)
     }
 
     /// Applies `migrations` in one transaction (ADR-0023 clause 22), once the schema and the
@@ -619,7 +612,7 @@ impl Database {
         F: Future<Output = Result<T, String>> + Send + 'static,
         T: Send + 'static,
     {
-        if self.lost.load(Ordering::SeqCst) {
+        if self.lock_lost() {
             return Err(lost_lock(&self.name));
         }
         // What the call announced is counted as it is sent: where its answer is lost, it may have
@@ -711,52 +704,54 @@ impl Database {
         wait: Duration,
     ) -> Result<crate::blobs::BlobHold, String> {
         let (pg, tls) = (self.pg.clone(), self.tls.clone());
-        let watch = Watch {
-            holding: Arc::new(AtomicBool::new(false)),
-            lost: Arc::new(AtomicBool::new(false)),
-            counted: self.holds_lost.clone(),
-            ended: self.holds_ended.clone(),
-        };
-        let (holding, lost) = (watch.holding.clone(), watch.lost.clone());
-        let held = self.run_within(self.bound().saturating_add(wait), move |_pool| async move {
-            let client = lock_session(&pg, &tls, wait, watch).await?;
-            client
-                .execute(&format!("SELECT pg_advisory_lock({BLOB_LOCK})"), &[])
-                .await
-                .map_err(blob_lock_refused)?;
-            // Held from here on: a session that ends now loses the lock, and is logged.
-            holding.store(true, Ordering::SeqCst);
-            #[cfg(test)]
-            let settings = {
-                let show = |name: &'static str| {
-                    let client = &client;
-                    async move {
-                        client
-                            .query_one(&format!("SHOW {name}"), &[])
-                            .await
-                            .map(|row| row.get::<_, String>(0))
-                            .map_err(sql)
-                    }
-                };
-                (
-                    show("statement_timeout").await?,
-                    show("lock_timeout").await?,
-                )
-            };
-            Ok(LockHold {
-                holding,
-                client: Arc::new(client),
-                runtime: tokio::runtime::Handle::current(),
-                #[cfg(test)]
-                settings,
+        let (counted, ended) = (self.holds_lost.clone(), self.holds_ended.clone());
+        // The session waits the whole of `wait` for the lock: its `lock_timeout` is `wait`, and its
+        // `statement_timeout`, which would end the wait at the pool's 10 seconds first, a little
+        // more.
+        let millis = wait.as_millis();
+        let setup = format!(
+            "SET lock_timeout = {millis}; SET statement_timeout = {}",
+            millis.saturating_add(5_000)
+        );
+        let lock = self.run_within(self.bound().saturating_add(wait), move |_pool| async move {
+            let lock = SessionLock::open(&pg, &tls, BLOB_LOCK, &setup, move |held, why| {
+                if held {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    tracing::warn!(
+                        error = %why,
+                        "the session that held {BLOB_LOCK_NAME} ended while it was held: the \
+                         lock is gone, and a sweep of another instance may run beside what \
+                         this one does"
+                    );
+                }
+                ended.fetch_add(1, Ordering::SeqCst);
             })
+            .await?;
+            lock.lock().await.map_err(blob_lock_refused)?;
+            Ok(lock)
         })?;
+        let lost = lock.lost_flag();
         #[cfg(test)]
-        let settings = held.settings.clone();
+        let session = lock.client().clone();
         let hold =
-            crate::blobs::BlobHold::of(Box::new(held), lost, Some(lease::new_instance_id()?));
+            crate::blobs::BlobHold::of(Box::new(lock), lost, Some(lease::new_instance_id()?));
         #[cfg(test)]
-        let hold = hold.with_settings(settings);
+        let hold = hold.with_settings(self.bridge.run(async move {
+            let show = |name: &'static str| {
+                let session = &session;
+                async move {
+                    session
+                        .query_one(&format!("SHOW {name}"), &[])
+                        .await
+                        .map(|row| row.get::<_, String>(0))
+                        .map_err(sql)
+                }
+            };
+            Ok::<_, String>((
+                show("statement_timeout").await?,
+                show("lock_timeout").await?,
+            ))
+        })?);
         Ok(hold)
     }
 }
@@ -770,103 +765,196 @@ pub(crate) fn blob_lock_refused(error: tokio_postgres::Error) -> String {
     )
 }
 
-/// A hold on the blob store's lock: its session, and whether it still holds the lock.
-pub(crate) struct LockHold {
+/// A session-level advisory lock on a connection of its own, outside the pool: the one way the
+/// Server holds such a lock. It is the exclusive lock of an instance that must be alone
+/// (ADR-0045 clause 2), the blob store's lock (ADR-0023 clause 14), the audit prune lock (ADR-0023
+/// clause 12), or the lock of the audit's signer (ADR-0041 clause 2).
+///
+/// The lock goes with its session, so the session's connection is watched: when it ends while the
+/// lock is held, the lock is gone, and [`lost`](Self::lost) says so from then on. A holder that
+/// lets go of the lock or drops it unlocks it on its session at once. The next holder then does not
+/// wait for the session to end, which a clone of its client can put off.
+struct SessionLock {
+    /// The key of the lock, as SQL.
+    key: &'static str,
+    /// The session: what a holder runs the statements on that must run only while it holds.
+    client: Arc<tokio_postgres::Client>,
+    /// Set while the session holds the lock.
     holding: Arc<AtomicBool>,
-    /// The session that holds the lock: what a sweep marks the blobs it deletes on, so that a mark
-    /// is written only while the lock holds (ADR-0023 clause 14).
-    pub(crate) client: Arc<tokio_postgres::Client>,
-    /// The runtime the session runs on, which the hold's drop lets go of the lock on.
+    /// Set once the session has ended while it held the lock.
+    lost: Arc<AtomicBool>,
+    /// The runtime the session runs on, which a drop lets go of the lock on.
     runtime: tokio::runtime::Handle,
-    /// The session's `statement_timeout` and `lock_timeout` once it had the lock.
-    #[cfg(test)]
-    settings: (String, String),
 }
 
-impl Drop for LockHold {
-    /// Lets go of the lock on its session at once, so the next holder does not wait for the
-    /// session to end, which a clone of its client can put off. The session's end that follows
-    /// loses nothing.
-    fn drop(&mut self) {
-        self.holding.store(false, Ordering::SeqCst);
-        let client = self.client.clone();
-        self.runtime.spawn(async move {
-            if let Err(e) = client
-                .execute(&format!("SELECT pg_advisory_unlock({BLOB_LOCK})"), &[])
+impl SessionLock {
+    /// Opens a session of its own for the lock `key`, holding nothing yet, and runs `setup` on it
+    /// first unless it is empty. `on_end` hears when the session ends, whether it held the lock
+    /// then, and why it ended. The session runs on the current runtime.
+    async fn open(
+        pg: &tokio_postgres::Config,
+        tls: &Tls,
+        key: &'static str,
+        setup: &str,
+        on_end: impl FnOnce(bool, String) + Send + 'static,
+    ) -> Result<Self, String> {
+        let (holding, lost) = (
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let ended = {
+            let (holding, lost) = (holding.clone(), lost.clone());
+            move |result: Result<(), tokio_postgres::Error>| {
+                let held = holding.swap(false, Ordering::SeqCst);
+                if held {
+                    lost.store(true, Ordering::SeqCst);
+                }
+                let why = result
+                    .err()
+                    .map_or_else(|| "it was closed".to_string(), sql);
+                on_end(held, why);
+            }
+        };
+        let client = match tls {
+            Tls::Rustls(tls) => {
+                let (client, connection) = pg.connect(tls.clone()).await.map_err(sql)?;
+                tokio::spawn(async move { ended(connection.await) });
+                client
+            }
+            Tls::Plain => {
+                let (client, connection) = pg.connect(NoTls).await.map_err(sql)?;
+                tokio::spawn(async move { ended(connection.await) });
+                client
+            }
+        };
+        if !setup.is_empty() {
+            client.batch_execute(setup).await.map_err(sql)?;
+        }
+        Ok(SessionLock {
+            key,
+            client: Arc::new(client),
+            holding,
+            lost,
+            runtime: tokio::runtime::Handle::current(),
+        })
+    }
+
+    /// Takes the lock where no other session holds it, and answers whether this one holds it.
+    async fn try_lock(&self) -> Result<bool, String> {
+        let held: bool = self
+            .client
+            .query_one(&format!("SELECT pg_try_advisory_lock({})", self.key), &[])
+            .await
+            .map_err(sql)?
+            .get(0);
+        self.holding.store(held, Ordering::SeqCst);
+        Ok(held)
+    }
+
+    /// Takes the lock, waiting for as long as the session's `lock_timeout` lets it.
+    async fn lock(&self) -> Result<(), tokio_postgres::Error> {
+        self.client
+            .execute(&format!("SELECT pg_advisory_lock({})", self.key), &[])
+            .await?;
+        self.holding.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Lets go of the lock on its session, which stays open; nothing where it holds none.
+    async fn unlock(&self) -> Result<(), String> {
+        if !self.holding.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
+        unlock(&self.client, self.key).await
+    }
+
+    /// Whether the session still holds the lock, asked of the database: not once the session has
+    /// ended or let go, nor where it does not answer within `bound`.
+    async fn holds(&self, bound: Duration) -> bool {
+        self.holding.load(Ordering::SeqCst)
+            && tokio::time::timeout(bound, self.client.simple_query("SELECT 1"))
                 .await
-            {
+                .is_ok_and(|answer| answer.is_ok())
+            && self.holding.load(Ordering::SeqCst)
+    }
+
+    /// Whether the session ended while it held the lock: the lock is gone.
+    fn lost(&self) -> bool {
+        self.lost.load(Ordering::SeqCst)
+    }
+
+    /// What [`lost`](Self::lost) reads, for a holder that outlives its borrow of the lock.
+    fn lost_flag(&self) -> Arc<AtomicBool> {
+        self.lost.clone()
+    }
+
+    /// The session the lock is held on.
+    fn client(&self) -> &Arc<tokio_postgres::Client> {
+        &self.client
+    }
+}
+
+impl Drop for SessionLock {
+    /// Lets go of a lock still held on its session, on its runtime, without waiting. The session
+    /// ends once that is done, unless a clone of its client keeps it open; its end loses nothing.
+    fn drop(&mut self) {
+        if !self.holding.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let (client, key) = (self.client.clone(), self.key);
+        self.runtime.spawn(async move {
+            if let Err(e) = unlock(&client, key).await {
                 tracing::warn!(
-                    error = %sql(e),
-                    "{BLOB_LOCK_NAME} was not let go; it goes when its session ends"
+                    error = %e,
+                    "an advisory lock ({key}) was not let go; it goes when its session ends"
                 );
             }
         });
     }
 }
 
-/// What watches the session of a hold on the blob store's lock.
-struct Watch {
-    /// Set once the session has the lock, and cleared when the hold lets it go.
-    holding: Arc<AtomicBool>,
-    /// Set when the session ends while it holds the lock.
-    lost: Arc<AtomicBool>,
-    /// The database's counts of holds lost and of sessions ended.
-    counted: Arc<std::sync::atomic::AtomicUsize>,
-    ended: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl Watch {
-    /// The session has ended: a loss when it held the lock, which is logged; nothing when it never
-    /// had it or let it go.
-    fn ended(&self, result: Result<(), tokio_postgres::Error>) {
-        if self.holding.load(Ordering::SeqCst) {
-            self.lost.store(true, Ordering::SeqCst);
-            self.counted.fetch_add(1, Ordering::SeqCst);
-            tracing::warn!(
-                error = ?result.err().map(sql),
-                "the session that held {BLOB_LOCK_NAME} ended while it was held: the lock is gone, \
-                 and a sweep of another instance may run beside what this one does"
-            );
-        }
-        self.ended.fetch_add(1, Ordering::SeqCst);
-    }
-}
-
-/// The session a sweep's hold on the blob store's lock is taken on, outside the pool. It waits the
-/// whole of `wait` for the lock: its `lock_timeout` is `wait`, and its `statement_timeout`, which
-/// would end the wait at the pool's 10 seconds first, a little more. `watch` learns when it ends.
-async fn lock_session(
-    pg: &tokio_postgres::Config,
-    tls: &Tls,
-    wait: Duration,
-    watch: Watch,
-) -> Result<tokio_postgres::Client, String> {
-    let client = match tls {
-        Tls::Rustls(tls) => {
-            let (client, connection) = pg.connect(tls.clone()).await.map_err(sql)?;
-            tokio::spawn(async move { watch.ended(connection.await) });
-            client
-        }
-        Tls::Plain => {
-            let (client, connection) = pg.connect(NoTls).await.map_err(sql)?;
-            tokio::spawn(async move { watch.ended(connection.await) });
-            client
-        }
-    };
-    let millis = wait.as_millis();
+/// Lets go of the lock `key` on `client`'s session.
+async fn unlock(client: &tokio_postgres::Client, key: &str) -> Result<(), String> {
     client
-        .batch_execute(&format!(
-            "SET lock_timeout = {millis}; SET statement_timeout = {}",
-            millis.saturating_add(5_000)
-        ))
+        .execute(&format!("SELECT pg_advisory_unlock({key})"), &[])
         .await
-        .map_err(sql)?;
-    Ok(client)
+        .map(drop)
+        .map_err(sql)
 }
+
+/// How long a dropped database waits for its exclusive lock to be let go before the runtime its
+/// session runs on is shut down, which ends the session and the lock with it.
+const RELEASE_WAIT: Duration = Duration::from_secs(2);
 
 impl Drop for Database {
+    /// Lets go of the exclusive lock before the database's runtime shuts down, so that the next
+    /// instance has it at once rather than once the database has ended the session.
     fn drop(&mut self) {
         self.closing.store(true, Ordering::SeqCst);
+        if let Some(lock) = self.lock.take() {
+            let (sent, released) = std::sync::mpsc::sync_channel(1);
+            self.bridge.spawn(async move {
+                let _ = sent.send(lock.unlock().await);
+            });
+            match released.recv_timeout(RELEASE_WAIT) {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(
+                    database = %self.name,
+                    error = %e,
+                    "the exclusive lock was not let go; it goes when its session ends"
+                ),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => tracing::warn!(
+                    database = %self.name,
+                    "the exclusive lock was not let go within {RELEASE_WAIT:?}; it goes when its \
+                     session ends"
+                ),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => tracing::warn!(
+                    database = %self.name,
+                    "the exclusive lock was not let go, as the database's runtime stopped first; \
+                     it goes when its session ends"
+                ),
+            }
+        }
     }
 }
 
@@ -906,13 +994,6 @@ fn lost_lock(name: &str) -> String {
         "this Server lost its lock on the {name} — another instance may hold it now (ADR-0023 \
          clause 23), so this one writes nothing more; restart it once the database answers"
     )
-}
-
-/// What watches the connection that holds the lock.
-struct LockWatch {
-    name: String,
-    lost: Arc<AtomicBool>,
-    closing: Arc<AtomicBool>,
 }
 
 /// `work`, or an error once `bound` has passed without its answer. What it left unfinished is
@@ -1203,44 +1284,6 @@ async fn connect(pg: &tokio_postgres::Config, tls: &Tls) -> Result<tokio_postgre
         Tls::Plain => {
             let (client, connection) = pg.connect(NoTls).await.map_err(sql)?;
             tokio::spawn(drive(connection));
-            Ok(client)
-        }
-    }
-}
-
-/// The connection that holds the lock, its task on the current runtime. When it ends while the
-/// Server runs — the database restarted, the session was ended, the host is gone and the
-/// keepalives noticed — the lock is gone with it: the Server refuses every call from then on and
-/// logs why, rather than writing on while a second Server may start.
-async fn connect_watched(
-    pg: &tokio_postgres::Config,
-    tls: &Tls,
-    watch: LockWatch,
-) -> Result<tokio_postgres::Client, String> {
-    let ended = move |result: Result<(), tokio_postgres::Error>| {
-        if watch.closing.load(Ordering::SeqCst) {
-            return;
-        }
-        watch.lost.store(true, Ordering::SeqCst);
-        let why = result
-            .err()
-            .map_or_else(|| "it was closed".to_string(), sql);
-        tracing::error!(
-            database = %watch.name,
-            error = %why,
-            "{}",
-            lost_lock(&watch.name)
-        );
-    };
-    match tls {
-        Tls::Rustls(tls) => {
-            let (client, connection) = pg.connect(tls.clone()).await.map_err(sql)?;
-            tokio::spawn(async move { ended(connection.await) });
-            Ok(client)
-        }
-        Tls::Plain => {
-            let (client, connection) = pg.connect(NoTls).await.map_err(sql)?;
-            tokio::spawn(async move { ended(connection.await) });
             Ok(client)
         }
     }
@@ -1555,9 +1598,9 @@ pub(crate) mod testing {
         }
 
         /// Returns once no session holds this schema's exclusive lock. A handle that must be alone
-        /// lets go of it only when the database has ended its session, which happens after the
-        /// handle is dropped, not with it: what a test waits for before an instance that shares
-        /// the database opens, which the held lock would refuse.
+        /// lets go of it as it is dropped, but one whose let-go the database did not answer in
+        /// time only when the database has ended its session: what a test waits for before an
+        /// instance that shares the database opens, which the held lock would refuse.
         pub(crate) fn wait_until_none_holds_it_alone(&self) {
             self.once(&format!(
                 "SELECT 'free' WHERE NOT EXISTS (SELECT 1 FROM pg_locks, (SELECT {} AS key) k \
@@ -1618,6 +1661,31 @@ pub(crate) mod testing {
                      AND objid = ({key}::bigint & 4294967295)::oid"
                 ))
                 .is_empty()
+        }
+
+        /// Whether another session can take the advisory lock `key`, SQL in this schema, at once:
+        /// the asking session takes it if it can, and lets go of it again.
+        pub(crate) fn lock_is_free(&self, key: &str) -> bool {
+            self.rows(&format!(
+                "SELECT CASE WHEN pg_try_advisory_lock({key}) THEN pg_advisory_unlock({key}) \
+                 ELSE false END"
+            ))[0][0]
+                .as_deref()
+                == Some("t")
+        }
+
+        /// Ends, from the database's side, the session that holds the advisory lock `key`, SQL in
+        /// this schema, as a restart or an operator would end it, and returns once it has ended.
+        pub(crate) fn end_the_holder_of(&self, key: &str) {
+            let ended = self.rows(&format!(
+                "SELECT pg_terminate_backend(pid, 10000) FROM pg_locks, (SELECT {key} AS key) k \
+                 WHERE locktype = 'advisory' AND granted \
+                 AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                 AND classid = ((k.key >> 32) & 4294967295)::oid \
+                 AND objid = (k.key & 4294967295)::oid AND objsubid = 1"
+            ));
+            assert_eq!(ended.len(), 1, "one session holds the lock: {ended:?}");
+            assert_eq!(ended[0][0].as_deref(), Some("t"), "the session ended");
         }
 
         /// How many sessions other than the asking one meet `condition`, a condition on
@@ -2078,15 +2146,32 @@ mod tests {
         let database = test.open();
         let hold = database.hold_blobs().expect("the lock");
         let session = hold
-            .held::<LockHold>()
+            .held::<SessionLock>()
             .expect("a hold on PostgreSQL")
-            .client
+            .client()
             .clone();
         drop(hold);
         let next =
             (0..50).find_map(|_| database.hold_blobs_within(Duration::from_millis(100)).ok());
         assert!(next.is_some(), "the lock stayed with the session");
         drop(session);
+    }
+
+    /// An instance that must be alone lets go of its exclusive lock as it is dropped, so the next
+    /// instance has it at once rather than once the database has ended the session.
+    /// Verifies: ADR-0045
+    #[test]
+    fn an_instance_that_must_be_alone_lets_go_of_its_lock_as_it_is_dropped() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        assert!(!test.lock_is_free(EXCLUSIVE_LOCK), "held while it runs");
+        drop(database);
+        assert!(
+            test.lock_is_free(EXCLUSIVE_LOCK),
+            "the lock stayed with the session"
+        );
     }
 
     /// A database that stops answering while the Server runs fails the one call that needs it
@@ -2270,14 +2355,9 @@ mod tests {
         let store = configs::PgConfigBackend::new(database.clone());
         crate::configs::ConfigBackend::remove(&store, "base").expect("writes while it holds it");
 
-        test.sql(&format!(
-            "SELECT pg_terminate_backend({})",
-            database
-                .lock_pid
-                .expect("an instance that must be alone holds the lock")
-        ));
+        test.end_the_holder_of(EXCLUSIVE_LOCK);
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !database.lost.load(Ordering::SeqCst) {
+        while !database.lock_lost() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the loss went unnoticed"
