@@ -6720,12 +6720,17 @@ struct Turn {
     inner: Option<fleet_server::postgres::checkpoint::Checkpoints>,
     signs: Arc<std::sync::Mutex<&'static str>>,
     me: &'static str,
+    /// Counts the rounds this source passed since it was not its turn, where a test names it.
+    passed: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl fleet_server::checkpoint::CheckpointSource for Turn {
     fn prepare(&mut self) -> Result<Option<fleet_server::checkpoint::Prepared>, String> {
         if *self.signs.lock().expect("turn") != self.me {
             self.inner = None;
+            if let Some(passed) = &self.passed {
+                passed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             return Ok(None);
         }
         let (database, held) = (self.database.clone(), self.held.clone());
@@ -6745,6 +6750,18 @@ fn turn(
     Arc<Database>,
     fleet_server::instance::Held,
 ) -> Box<dyn fleet_server::checkpoint::CheckpointSource> {
+    counted_turn(signs, me, None)
+}
+
+/// [`turn`], counting in `passed` the rounds it passes while it is not its turn.
+fn counted_turn(
+    signs: &Arc<std::sync::Mutex<&'static str>>,
+    me: &'static str,
+    passed: Option<Arc<std::sync::atomic::AtomicU64>>,
+) -> impl FnOnce(
+    Arc<Database>,
+    fleet_server::instance::Held,
+) -> Box<dyn fleet_server::checkpoint::CheckpointSource> {
     let signs = signs.clone();
     move |database, held| {
         Box::new(Turn {
@@ -6753,8 +6770,28 @@ fn turn(
             inner: None,
             signs,
             me,
+            passed,
         }) as Box<dyn fleet_server::checkpoint::CheckpointSource>
     }
+}
+
+/// Hands the signing to nobody and waits until the source counting in `passed` has passed a round
+/// since: its writer asks for the next round only once it has written the last one's checkpoint,
+/// so no round it began before is still to be written.
+async fn nobody_signs(
+    signs: &Arc<std::sync::Mutex<&'static str>>,
+    passed: &Arc<std::sync::atomic::AtomicU64>,
+) {
+    *signs.lock().expect("turn") = "nobody";
+    let before = passed.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        // timed: the waiter's own deadline, which only a defect reaches
+        eventually(Duration::from_secs(15), || {
+            passed.load(std::sync::atomic::Ordering::SeqCst) > before
+        })
+        .await,
+        "a round passed since nobody signs"
+    );
 }
 
 /// The record in `schema` checked against the checkpoints `key` signed.
@@ -7308,20 +7345,27 @@ async fn chains_cut_with_prunes_that_excuse_each_other_fail() {
     test.generate("audit");
     let key = test.open().key("[audit] key_label", "audit").expect("key");
     let signs = Arc::new(std::sync::Mutex::new("a"));
+    let a_passed = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let interval = Duration::from_millis(200);
-    let (a, _a_lease, _) = signing_record(&schema, &key, interval, turn(&signs, "a")).await;
+    let (a, _a_lease, _) = signing_record(
+        &schema,
+        &key,
+        interval,
+        counted_turn(&signs, "a", Some(a_passed.clone())),
+    )
+    .await;
     let (b, b_lease, _) = signing_record(&schema, &key, interval, turn(&signs, "b")).await;
     let (c, c_lease, _) = signing_record(&schema, &key, interval, turn(&signs, "c")).await;
     for _ in 0..3 {
         two_more_checkpoints(&schema, &[&a, &b, &c]).await;
     }
-    *signs.lock().expect("turn") = "nobody";
+    // Only A ever signs here, so once it has passed a round, no checkpoint is still to come.
+    nobody_signs(&signs, &a_passed).await;
     let b_chain = b_lease.held().borrow().clone().expect("b");
     let c_chain = c_lease.held().borrow().clone().expect("c");
     // Three entries on B and C while nobody signs, then a checkpoint by A that names each chain's
     // newest head: the first two of the three are named by no checkpoint, however the entries and
-    // checkpoints above fell on a loaded host. A round A prepared before nobody signed names no
-    // seq above the one read here, so it cannot stand in for that checkpoint.
+    // checkpoints above fell on a loaded host.
     let newest_seq = |chain: &str| last_entry(&schema, chain, None).0;
     let (b_from, c_from) = (newest_seq(&b_chain), newest_seq(&c_chain));
     {
@@ -7354,7 +7398,8 @@ async fn chains_cut_with_prunes_that_excuse_each_other_fail() {
         .await,
         "a checkpoint naming the three entries on B and C"
     );
-    *signs.lock().expect("turn") = "nobody";
+    // No round of A's may read the heads once the chains are cut and forged below.
+    nobody_signs(&signs, &a_passed).await;
     assert!(!verified_against(&schema, &key).await.failed);
     // Where each chain can be cut: two unnamed seqs below its newest named head.
     let cut_of = |chain: &str| {
