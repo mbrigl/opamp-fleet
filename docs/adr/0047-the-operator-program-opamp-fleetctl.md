@@ -1,4 +1,4 @@
-# ADR-draft-the-operator-program-opamp-fleetctl: The operator program `opamp-fleetctl`
+# ADR-0047: The operator program `opamp-fleetctl`
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-14
@@ -662,7 +662,7 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-draft-the-operator-program-opamp-fleetctl`:
+Tests that carry `Verifies: ADR-0047`:
 
 - `pki init` writes exactly the files of clause 7 into the two directories: the bootstrap CA's key
   into `--server-dir`, no server-CA key and no package signing key into it,
