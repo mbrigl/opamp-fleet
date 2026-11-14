@@ -63,6 +63,9 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // The bootstrap PKCS#12 file (ADR-0027): its rule, and its binding to `p12-keystore`.
             ("pkcs12", Core),
             ("pkcs12::file", Adapter),
+            // What the Server and the operator program do alike on a PKCS#11 token, with
+            // `cryptoki` (ADR-0043).
+            ("pkcs11", Adapter),
             ("platform", Core),
             ("rate", Core),
             ("renewal", Core),

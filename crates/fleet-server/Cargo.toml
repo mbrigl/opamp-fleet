@@ -14,7 +14,8 @@ path = "src/main.rs"
 
 [dependencies]
 opamp = { workspace = true, features = ["server"] }
-fleet-core.workspace = true
+# The PKCS#11 primitives the Server and the operator program share (ADR-0043).
+fleet-core = { workspace = true, features = ["pkcs11"] }
 # Streaming a stored package artifact into the response body (ADR-0034) — the same workspace
 # dependency the Client already builds on, promoted from dev-only.
 futures-util.workspace = true

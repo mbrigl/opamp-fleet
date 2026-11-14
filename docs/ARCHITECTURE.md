@@ -99,7 +99,11 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   and key file, by the Server's two CAs and the operator tool alike, in the adapter `x509::issue`;
   the first certificate of a CA file is read by `opamp::tls::first_certificate` — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
-  `p12-keystore` is the adapter `pkcs12::file` (ADR-0027).
+  `p12-keystore` is the adapter `pkcs12::file` (ADR-0027) — and, behind the feature `pkcs11` that
+  only the Server and the operator tool turn on, what both do alike on a PKCS#11 token with
+  `cryptoki` in the adapter `pkcs11`: the module's one context per process, the slot of a token by
+  its label, the login, the curve P-256, a key's point and the DER of a token's signature
+  ([ADR-0043](adr/0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)).
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the
   effective description Selectors match (`labels`), packages and Deployments, the Agent plane, and
   the Operator plane, whose credential check is `credentials`.

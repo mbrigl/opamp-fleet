@@ -2034,7 +2034,6 @@ mod tests {
     /// directory of its PIN file, and the test's turn on the module; `None`, said aloud, without
     /// one.
     fn fresh_token() -> Option<(crate::token::TokenOptions, (tempfile::TempDir, Turn))> {
-        use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
         use cryptoki::session::UserType;
         use cryptoki::types::AuthPin;
         let Some(module) = std::env::var_os("FLEET_TEST_PKCS11_MODULE").filter(|m| !m.is_empty())
@@ -2049,8 +2048,7 @@ mod tests {
         let turn = TURN
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let context = Pkcs11::new(&module).expect("module");
-        let _ = context.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK));
+        let context = fleet_core::pkcs11::context(std::path::Path::new(&module)).expect("module");
         let random = |n: usize| hex::encode(&nonce().expect("random")[..n]);
         let label = format!("fleetctl-{}", random(6));
         let (so_pin, user_pin) = (AuthPin::from(random(8).as_str()), random(8));
@@ -2067,16 +2065,8 @@ mod tests {
         context
             .init_token(free, &so_pin, &label)
             .expect("init token");
-        let slot = context
-            .get_slots_with_token()
-            .expect("slots")
-            .into_iter()
-            .find(|slot| {
-                context
-                    .get_token_info(*slot)
-                    .is_ok_and(|info| info.label() == label)
-            })
-            .expect("the token");
+        let slot =
+            fleet_core::pkcs11::slot_of(&context, &label, "--token-label").expect("the token");
         let session = context.open_rw_session(slot).expect("session");
         session.login(UserType::So, Some(&so_pin)).expect("SO");
         session
