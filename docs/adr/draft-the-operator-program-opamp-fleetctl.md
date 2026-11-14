@@ -1,10 +1,10 @@
 # ADR-draft-the-operator-program-opamp-fleetctl: The operator program `opamp-fleetctl`
 
 - **Status:** 🟡 proposed
-- **Date:** 2026-10-31
+- **Date:** 2026-11-14
 - **Deciders:** Markus Brigl
-- **Supersedes:** [ADR-0042](0042-the-operator-program-opamp-fleetctl.md)
 - **Applies to:** `crates/fleet-tools/` (the one program it builds, its `pki` commands in `src/pki.rs`, `pki token-init` among them, `p12-extract`, and the deterministic repack of `package fetch` in `src/fetch.rs`, `pack_tree` and `collect_members`), the dependencies of `crates/fleet-tools/Cargo.toml`, `cryptoki` among them, and their entries in `deny.toml`, the Server's `pki status` command in `crates/fleet-server/src/main.rs` and the module that carries it, the expiry warnings of the running Server, the leaf naming of host and bootstrap certificates in `crates/fleet-server/src/ca.rs` and its startup check, how the Server holds its CA keys, in a file or on a PKCS#11 token, the ending rule, the reading of a certificate's end with the line `pki status` prints for it, and the naming rule in `crates/fleet-core/`, the operator-tool build and its archives in `.github/workflows/release.yml`, the release notes, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), every kind whose upstream tree the repack packs, and every document that names an operator command, tells an operator how to make, inspect or convert a certificate, or says what a repacked package carries
+- **Supersedes:** [ADR-0042](0042-the-operator-program-opamp-fleetctl.md)
 
 ## Context
 
@@ -115,7 +115,13 @@ rather than in each program. The reason ADR-0042 gave against that, the internal
 `x509-parser` and `time` dependencies, has lapsed: `fleet-core` carries both, for `x509` and
 `csr`, and the reading and the line were written twice, verbatim, in `fleet-server` and
 `fleet-tools`. The file stays each program's to read, through `opamp::tls`, the one reader of a
-certificate's PEM (ADR-0008 clause 17).
+certificate's PEM (ADR-0008 clause 17). The core `ending` itself stays plain date arithmetic
+without a dependency, as ADR-0008 clause 17 describes it; the reading is its adapter
+`ending::read`. As in ADR-0042, clauses 5 to 8, 12, 13 and 16 to 18 and the out-of-scope list
+carry the decision of
+[ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md):
+`pki token-init`, `pki bootstrap-ca --pkcs11-module`, `pki init --ca-keys-on-token`, the flags of
+`token-init` and `cryptoki`.
 
 ## Decision
 
@@ -656,7 +662,7 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0042`:
+Tests that carry `Verifies: ADR-draft-the-operator-program-opamp-fleetctl`:
 
 - `pki init` writes exactly the files of clause 7 into the two directories: the bootstrap CA's key
   into `--server-dir`, no server-CA key and no package signing key into it,
@@ -687,6 +693,9 @@ Tests that carry `Verifies: ADR-0042`:
   startup, and one whose CA has ended records `pki.expired` and keeps serving (clause 21).
 - Both `pki status` commands, and the running Server, judge one certificate alike (clauses 6
   and 21).
+- A certificate's end, its days left and the line `pki status` prints for it are read by one
+  function in `fleet-core`, and both `pki status` commands print the same line for one
+  certificate (clause 6).
 - Each `pki status` lists each file with its serial and end, and exits `0`, `1` and `2` for a set
   with no, an ending and an ended certificate (clause 22).
 - `scripts/dev-pki.sh` runs with no `openssl` on `PATH` (clause 23).
