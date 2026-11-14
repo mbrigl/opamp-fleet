@@ -14,8 +14,9 @@ use tokio_postgres::error::Severity;
 
 use deadpool_postgres::Object;
 
-use super::notify::{notify, ENROLMENT, WINDOW};
+use super::notify::notify;
 use super::{client, signed, snapshot, sql, unsigned, Database};
+use crate::changed::Changed;
 use crate::enrolment::{
     Approval, Decided, Decision, DecisionError, EnrolmentStore, Persisted, PersistedRequest,
     Registrar, Signing, Took,
@@ -173,7 +174,7 @@ impl EnrolmentStore for PgEnrolmentStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             write(&transaction, &persisted).await?;
-            notify(&transaction, WINDOW, "").await?;
+            notify(&transaction, Changed::Window, "").await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -251,7 +252,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&transaction, ENROLMENT, &id).await?;
+            notify(&transaction, Changed::Enrolment, &id).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Took::Added)
         })
@@ -317,7 +318,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&transaction, ENROLMENT, &id).await?;
+            notify(&transaction, Changed::Enrolment, &id).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(decided)
         })
@@ -437,7 +438,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                             {
                                 return refused_by_the_server(e, At::Update);
                             }
-                            notify(&***held.client(), ENROLMENT, &id).await?;
+                            notify(&***held.client(), Changed::Enrolment, &id).await?;
                             if let Err(e) = held.client().batch_execute("COMMIT").await {
                                 return refused_by_the_server(e, At::Commit);
                             }
@@ -480,7 +481,7 @@ impl EnrolmentStore for PgEnrolmentStore {
         self.database.run(move |_| async move {
             let finished = async {
                 if finish == "COMMIT" {
-                    notify(&***held.client(), ENROLMENT, &id).await?;
+                    notify(&***held.client(), Changed::Enrolment, &id).await?;
                 }
                 held.client().batch_execute(finish).await.map_err(sql)
             }
@@ -535,7 +536,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
                 .map_err(sql)?;
             if taken > 0 {
-                notify(&transaction, ENROLMENT, &id).await?;
+                notify(&transaction, Changed::Enrolment, &id).await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -557,7 +558,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
                 .map_err(sql)?;
             if withdrawn > 0 {
-                notify(&transaction, ENROLMENT, &serial).await?;
+                notify(&transaction, Changed::Enrolment, &serial).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(usize::try_from(withdrawn).unwrap_or(usize::MAX))
@@ -578,7 +579,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .await
                 .map_err(sql)?;
             if withdrawn > 0 {
-                notify(&transaction, ENROLMENT, "").await?;
+                notify(&transaction, Changed::Enrolment, "").await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -596,7 +597,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&transaction, WINDOW, "").await?;
+            notify(&transaction, Changed::Window, "").await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -617,7 +618,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                 .execute("DELETE FROM enrolment_requests", &[])
                 .await
                 .map_err(sql)?;
-            notify(&transaction, WINDOW, "").await?;
+            notify(&transaction, Changed::Window, "").await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -638,7 +639,7 @@ impl EnrolmentStore for PgEnrolmentStore {
                     .execute("DELETE FROM enrolment_requests", &[])
                     .await
                     .map_err(sql)?;
-                notify(&transaction, WINDOW, "").await?;
+                notify(&transaction, Changed::Window, "").await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(ended > 0)
@@ -1277,7 +1278,10 @@ mod tests {
         );
         assert_eq!(
             handing.recv_timeout(std::time::Duration::from_secs(30)),
-            Ok(crate::postgres::notify::Notice::new(ENROLMENT, "a")),
+            Ok(crate::postgres::notify::Notice::new(
+                Changed::Enrolment,
+                "a"
+            )),
             "handed on at once"
         );
         gate.open();

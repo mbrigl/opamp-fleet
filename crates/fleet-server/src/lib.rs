@@ -15,6 +15,7 @@ pub mod blobs;
 pub mod bootstrap;
 pub mod bridge;
 pub mod ca;
+pub mod changed;
 pub mod checkpoint;
 pub mod clock;
 pub mod config;

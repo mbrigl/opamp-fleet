@@ -26,13 +26,11 @@ use rustls::ServerConfig;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
+use crate::changed::Changed;
 use crate::clock::Elapsed;
 use crate::config::LeaseTimes;
 use crate::fleet::AppState;
-use crate::postgres::notify::{
-    Heard, Notice, ARRIVED, ASSIGNMENT, CERTIFICATE, CONFIGURATION, DEPLOYMENT, ENROLMENT, FLOOR,
-    FORGOTTEN, HOST, LABELS, PACKAGE, RESTART, REVOCATION, TAKEN, WINDOW,
-};
+use crate::postgres::notify::{Heard, Notice};
 use crate::postgres::Database;
 
 /// How long an instance waits before it tries again to take a lease, or to bind a listener, after
@@ -604,7 +602,7 @@ pub fn follow(
                 // The ledger at every renewal: the Hosts and their bindings carry no version, and
                 // their notice after a commit may never have been sent.
                 if heard
-                    .send(Heard::Notified(Notice::new(REVOCATION, "")))
+                    .send(Heard::Notified(Notice::new(Changed::Revocation, "")))
                     .is_err()
                 {
                     return;
@@ -903,61 +901,60 @@ impl Due {
             .any(|agents| *agents == Agents::All)
     }
 
-    /// What `what` calls for.
+    /// What `what` calls for: every kind of change is mapped here, and only here.
     fn of(what: &Heard) -> Due {
         let Heard::Notified(notice) = what else {
             return Due::EVERYTHING;
         };
-        match notice.kind.as_str() {
+        match notice.change {
             // A notice of a binding names the Host whose binding changed. One that names none, of
             // a Host row written or forgotten, places no group again.
-            HOST => Due {
+            Changed::Host => Due {
                 ledger: true,
                 hosts: Self::host(&notice.id),
                 ..Due::default()
             },
-            REVOCATION | CERTIFICATE => Due {
+            Changed::Revocation | Changed::Certificate => Due {
                 ledger: true,
                 ..Due::default()
             },
-            ARRIVED => Due {
+            Changed::Arrived => Due {
                 hosts: Self::host(&notice.id),
                 ..Due::default()
             },
-            FLOOR => Due {
+            Changed::Floor => Due {
                 floors: true,
                 ..Due::default()
             },
-            ENROLMENT | WINDOW => Due {
+            Changed::Enrolment | Changed::Window => Due {
                 enrolment: true,
                 ..Due::default()
             },
-            CONFIGURATION => Due {
+            Changed::Configuration => Due {
                 configurations: true,
                 ..Due::default()
             },
-            DEPLOYMENT => Due {
+            Changed::Deployment => Due {
                 deployments: true,
                 ..Due::default()
             },
-            PACKAGE => Due {
+            Changed::Package => Due {
                 packages: true,
                 ..Due::default()
             },
-            RESTART => Due {
+            Changed::Restart => Due {
                 agents: Agents::of(&notice.id),
                 restarts: Agents::of(&notice.id),
                 ..Due::default()
             },
-            ASSIGNMENT | LABELS | FORGOTTEN => Due {
+            Changed::Assignment | Changed::Labels | Changed::Forgotten => Due {
                 agents: Agents::of(&notice.id),
                 ..Due::default()
             },
-            TAKEN => Due {
+            Changed::Taken => Due {
                 holders: Agents::of(&notice.id),
                 ..Due::default()
             },
-            _ => Due::EVERYTHING,
         }
     }
 
@@ -1297,6 +1294,7 @@ mod tests {
     use opamp::uid::InstanceUid;
 
     use super::{gated, take_up, Agents, Due, Heard, LoggedId, NamesInstance, Proof, NO_LEASE};
+    use crate::changed::Changed;
     use crate::postgres::notify::Notice;
 
     /// A request is served while the lease is held by its clock, and answered `503` once the clock
@@ -1721,8 +1719,8 @@ mod tests {
         reads
     }
 
-    fn notified(kind: &str) -> Heard {
-        Heard::Notified(Notice::new(kind, "id"))
+    fn notified(change: Changed) -> Heard {
+        Heard::Notified(Notice::new(change, "id"))
     }
 
     /// What is heard before a read starts is answered by one read, and each kind has what it
@@ -1734,9 +1732,9 @@ mod tests {
     async fn what_is_heard_at_once_is_answered_by_one_read_of_what_it_concerns() {
         assert_eq!(
             reads_for(vec![
-                notified("host"),
-                notified("certificate"),
-                notified("revocation")
+                notified(Changed::Host),
+                notified(Changed::Certificate),
+                notified(Changed::Revocation)
             ])
             .await,
             vec![Due {
@@ -1748,9 +1746,9 @@ mod tests {
         );
         assert_eq!(
             reads_for(vec![
-                Heard::Notified(Notice::new("host", "")),
-                Heard::Notified(Notice::new("arrived", "g1")),
-                Heard::Notified(Notice::new("arrived", "g2")),
+                Heard::Notified(Notice::new(Changed::Host, "")),
+                Heard::Notified(Notice::new(Changed::Arrived, "g1")),
+                Heard::Notified(Notice::new(Changed::Arrived, "g2")),
             ])
             .await,
             vec![Due {
@@ -1762,7 +1760,7 @@ mod tests {
              the Gateway's groups again and reads no ledger"
         );
         assert_eq!(
-            reads_for(vec![notified("floor")]).await,
+            reads_for(vec![notified(Changed::Floor)]).await,
             vec![Due {
                 floors: true,
                 ..Due::default()
@@ -1770,7 +1768,11 @@ mod tests {
             "a floor calls for no read of the ledger"
         );
         assert_eq!(
-            reads_for(vec![notified("enrolment"), notified("window")]).await,
+            reads_for(vec![
+                notified(Changed::Enrolment),
+                notified(Changed::Window)
+            ])
+            .await,
             vec![Due {
                 enrolment: true,
                 ..Due::default()
@@ -1779,10 +1781,10 @@ mod tests {
         let (one, two) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
         assert_eq!(
             reads_for(vec![
-                Heard::Notified(Notice::new("configuration", "collector")),
-                Heard::Notified(Notice::new("assignment", &one.to_string())),
-                Heard::Notified(Notice::new("assignment", &two.to_string())),
-                Heard::Notified(Notice::new("deployment", "stable")),
+                Heard::Notified(Notice::new(Changed::Configuration, "collector")),
+                Heard::Notified(Notice::new(Changed::Assignment, &one.to_string())),
+                Heard::Notified(Notice::new(Changed::Assignment, &two.to_string())),
+                Heard::Notified(Notice::new(Changed::Deployment, "stable")),
             ])
             .await,
             vec![Due {
@@ -1795,8 +1797,8 @@ mod tests {
         );
         assert_eq!(
             reads_for(vec![
-                Heard::Notified(Notice::new("assignment", &one.to_string())),
-                Heard::Notified(Notice::new("assignment", "not an instance_uid")),
+                Heard::Notified(Notice::new(Changed::Assignment, &one.to_string())),
+                Heard::Notified(Notice::new(Changed::Assignment, "not an instance_uid")),
             ])
             .await,
             vec![Due {
@@ -1807,8 +1809,8 @@ mod tests {
         );
         assert_eq!(
             reads_for(vec![
-                Heard::Notified(Notice::new("taken", &one.to_string())),
-                Heard::Notified(Notice::new("labels", &two.to_string())),
+                Heard::Notified(Notice::new(Changed::Taken, &one.to_string())),
+                Heard::Notified(Notice::new(Changed::Labels, &two.to_string())),
             ])
             .await,
             vec![Due {
@@ -1820,8 +1822,8 @@ mod tests {
         );
         assert_eq!(
             reads_for(vec![
-                Heard::Notified(Notice::new("restart", &one.to_string())),
-                Heard::Notified(Notice::new("labels", &two.to_string())),
+                Heard::Notified(Notice::new(Changed::Restart, &one.to_string())),
+                Heard::Notified(Notice::new(Changed::Labels, &two.to_string())),
             ])
             .await,
             vec![Due {
@@ -1832,7 +1834,11 @@ mod tests {
             "a restart has the record read again, and a put-back kept of it dropped"
         );
         assert_eq!(
-            reads_for(vec![notified("floor"), notified("revocation")]).await,
+            reads_for(vec![
+                notified(Changed::Floor),
+                notified(Changed::Revocation)
+            ])
+            .await,
             vec![Due {
                 ledger: true,
                 floors: true,
@@ -1852,11 +1858,7 @@ mod tests {
             reads_for(vec![Heard::Listening]).await,
             vec![Due::EVERYTHING]
         );
-        assert_eq!(
-            reads_for(vec![notified("from-a-newer-version")]).await,
-            vec![Due::EVERYTHING]
-        );
-        assert_eq!(reads_for(vec![notified("")]).await, vec![Due::EVERYTHING]);
+        assert_eq!(reads_for(vec![Heard::Unknown]).await, vec![Due::EVERYTHING]);
     }
 
     /// A read that fails is tried again, each wait longer, until one holds, together with what was
@@ -1865,7 +1867,7 @@ mod tests {
     #[tokio::test]
     async fn a_read_that_fails_is_tried_again_until_one_holds() {
         let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();
-        heard.send(notified("host")).expect("send");
+        heard.send(notified(Changed::Host)).expect("send");
         let (reads, read) = reader(3);
         let started = tokio::time::Instant::now();
         let taking = tokio::spawn(take_up(
@@ -1874,7 +1876,7 @@ mod tests {
             Duration::from_millis(10),
             Duration::from_millis(25),
         ));
-        heard.send(notified("floor")).expect("send");
+        heard.send(notified(Changed::Floor)).expect("send");
         drop(heard);
         taking.await.expect("take up");
         let reads = reads.lock().expect("reads").clone();

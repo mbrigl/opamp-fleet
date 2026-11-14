@@ -38,6 +38,7 @@ use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::{AsyncMessage, NoTls, Socket};
 
 use super::{sql, Database, Tls};
+use crate::changed::Changed;
 
 /// The channel every instance on a schema listens on, as SQL: its name and the schema's.
 const CHANNEL: &str = "'opamp_fleet:' || coalesce(current_schema(), '')";
@@ -45,58 +46,36 @@ const CHANNEL: &str = "'opamp_fleet:' || coalesce(current_schema(), '')";
 /// The session setting every connection of an instance carries its origin in.
 pub(crate) const ORIGIN_SETTING: &str = "opamp_fleet.origin";
 
-/// The kind a revocation added or lifted is announced as.
-pub const REVOCATION: &str = "revocation";
+/// The name a kind of change travels under. A version that runs beside this one reads the same
+/// names (ADR-0045
+/// clause 16), so a name, once sent, does not change.
+fn kind(change: Changed) -> &'static str {
+    match change {
+        Changed::Revocation => "revocation",
+        Changed::Floor => "floor",
+        Changed::Certificate => "certificate",
+        Changed::Host => "host",
+        Changed::Enrolment => "enrolment",
+        Changed::Window => "window",
+        Changed::Configuration => "configuration",
+        Changed::Deployment => "deployment",
+        Changed::Package => "package",
+        Changed::Assignment => "assignment",
+        Changed::Labels => "labels",
+        Changed::Restart => "restart",
+        Changed::Forgotten => "forgotten",
+        Changed::Taken => "taken",
+        Changed::Arrived => "arrived",
+    }
+}
 
-/// The kind a package floor set or removed is announced as.
-pub const FLOOR: &str = "floor";
-
-/// The kind a register entry written or removed is announced as.
-pub const CERTIFICATE: &str = "certificate";
-
-/// The kind a Host written or removed, or an `instance_uid` bound or released, is announced as.
-pub const HOST: &str = "host";
-
-/// The kind an enrolment request queued, decided or withdrawn is announced as.
-pub const ENROLMENT: &str = "enrolment";
-
-/// The kind the enrolment window opened, moved, closed or ended is announced as.
-pub const WINDOW: &str = "window";
-
-/// The kind a Configuration saved, collected or deleted is announced as, by its name.
-pub const CONFIGURATION: &str = "configuration";
-
-/// The kind a Deployment written or deleted, or a member of it added or removed, is announced as,
-/// by its name.
-pub const DEPLOYMENT: &str = "deployment";
-
-/// The kind a Package created or deleted, or an entry or a signature of it written or removed,
-/// is announced as, by its `<agent type>@<version>`.
-pub const PACKAGE: &str = "package";
-
-/// The kind an Agent's assignment changed by a rollout is announced as, by its `instance_uid`.
-pub const ASSIGNMENT: &str = "assignment";
-
-/// The kind an Agent's labels set is announced as, by its `instance_uid`.
-pub const LABELS: &str = "labels";
-
-/// The kind a restart requested for an Agent is announced as, by its `instance_uid`.
-pub const RESTART: &str = "restart";
-
-/// The kind an Agent forgotten is announced as, by its `instance_uid`.
-pub const FORGOTTEN: &str = "forgotten";
-
-/// The kind an Agent taken from another instance with a live lease is announced as, by its
-/// `instance_uid`: the instance it was taken from reads its holder again and stops carrying it
-/// (ADR-0045
-/// clause 8).
-pub const TAKEN: &str = "taken";
-
-/// The kind a Client Agent first arrived over a Gateway's Host is announced as, by that Host: the
-/// other instances place the Gateway's groups again, so a fellow Agent they hold finds it
-/// (ADR-0045
-/// clause 8).
-pub const ARRIVED: &str = "arrived";
+/// The kind of change `name` travels for, `None` for one this version does not know.
+fn change_of(name: &str) -> Option<Changed> {
+    Changed::ALL
+        .iter()
+        .copied()
+        .find(|change| kind(*change) == name)
+}
 
 /// How long a listener waits before it connects again after its connection ended.
 const RECONNECT: Duration = Duration::from_secs(1);
@@ -120,16 +99,16 @@ struct Payload {
 /// kind names none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notice {
-    pub kind: String,
+    pub change: Changed,
     pub id: String,
 }
 
 impl Notice {
-    /// A notice of `kind` concerning `id`.
+    /// A notice of `change` concerning `id`.
     #[must_use]
-    pub fn new(kind: &str, id: &str) -> Self {
+    pub fn new(change: Changed, id: &str) -> Self {
         Notice {
-            kind: kind.to_string(),
+            change,
             id: id.to_string(),
         }
     }
@@ -138,9 +117,13 @@ impl Notice {
 /// What a listener hears.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
-    /// Another instance committed a change of this kind. A payload that does not read is heard as
-    /// a notice of a kind no instance knows.
+    /// Another instance committed a change of this kind.
     Notified(Notice),
+    /// Another instance committed a change of a kind this version does not know, as a newer
+    /// version sends while two run side by side, or sent a payload that does not read: it counts
+    /// as a missed notification (ADR-0045
+    /// clause 10).
+    Unknown,
     /// The listening connection was made, the first time or again after it ended: whatever was
     /// committed in between was not heard.
     Listening,
@@ -334,15 +317,15 @@ impl Afterwards {
     }
 }
 
-/// Counts a notice of `kind` concerning `id` to follow the commit of the call it runs in, which
+/// Counts a notice of `change` concerning `id` to follow the commit of the call it runs in, which
 /// [`follow_commit`] sends once the call committed. Counted before the commit, so a call whose
 /// answer is lost has its instance read again what it names ([`Unsure::reread`]).
-pub(crate) fn will_follow(kind: &str, id: &str) {
+pub(crate) fn will_follow(change: Changed, id: &str) {
     let _ = CALL.try_with(|call| {
         call.following
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(Notice::new(kind, id));
+            .push(Notice::new(change, id));
     });
 }
 
@@ -413,7 +396,7 @@ async fn send_following(
                 .await
                 .map_err(sql)?;
             for notice in &notices {
-                announce(&transaction, &notice.kind, &notice.id, Some(&mark)).await?;
+                announce(&transaction, notice.change, &notice.id, Some(&mark)).await?;
             }
             transaction.commit().await.map_err(sql)
         };
@@ -440,7 +423,7 @@ async fn send_following(
     }
 }
 
-/// Announces a change of `kind` concerning `id` to every other instance, in the transaction
+/// Announces a change of kind `change` concerning `id` to every other instance, in the transaction
 /// `client` is in, so it is heard once the change is committed and never when it is not. It names
 /// the origin the connection carries and the mark of the call it runs in, which counts it as sent
 /// before it is sent ([`sending`]).
@@ -449,7 +432,7 @@ async fn send_following(
 /// Returns the database's error.
 pub(crate) async fn notify(
     client: &impl GenericClient,
-    kind: &str,
+    change: Changed,
     id: &str,
 ) -> Result<(), String> {
     let call = CALL
@@ -457,21 +440,22 @@ pub(crate) async fn notify(
             call.sent
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .push(Notice::new(kind, id));
+                .push(Notice::new(change, id));
             call.mark.clone()
         })
         .ok();
-    announce(client, kind, id, call.as_deref()).await
+    announce(client, change, id, call.as_deref()).await
 }
 
-/// Sends one `NOTIFY` of `kind` concerning `id` in the transaction `client` is in, naming the
+/// Sends one `NOTIFY` of `change` concerning `id` in the transaction `client` is in, naming the
 /// origin the connection carries and the mark `call`.
 async fn announce(
     client: &impl GenericClient,
-    kind: &str,
+    change: Changed,
     id: &str,
     call: Option<&str>,
 ) -> Result<(), String> {
+    let kind = kind(change);
     client
         .execute(
             &format!(
@@ -486,27 +470,30 @@ async fn announce(
 }
 
 /// What `payload` says, unless `origin` sent it and `unsure` awaits it no more: a payload that does
-/// not read is a notice of a kind nobody knows, which counts as every notification.
-fn heard(payload: &str, origin: &str, unsure: &Unsure) -> Option<Notice> {
-    match serde_json::from_str::<Payload>(payload) {
-        Ok(payload) => {
-            let notice = Notice {
-                kind: payload.kind,
-                id: payload.id,
-            };
-            // Only this instance's own notification is matched: another's call marks count apart.
-            if payload.from.as_deref() == Some(origin)
-                && !payload
-                    .call
-                    .as_deref()
-                    .is_some_and(|call| unsure.awaits(&notice, call))
-            {
-                return None;
-            }
-            Some(notice)
-        }
-        Err(_) => Some(Notice::new("", "")),
+/// not read, or names a kind this version does not know, is [`Heard::Unknown`], which counts as
+/// every notification.
+fn heard(payload: &str, origin: &str, unsure: &Unsure) -> Option<Heard> {
+    let Ok(payload) = serde_json::from_str::<Payload>(payload) else {
+        return Some(Heard::Unknown);
+    };
+    let own = payload.from.as_deref() == Some(origin);
+    let Some(change) = change_of(&payload.kind) else {
+        return (!own).then_some(Heard::Unknown);
+    };
+    let notice = Notice {
+        change,
+        id: payload.id,
+    };
+    // Only this instance's own notification is matched: another's call marks count apart.
+    if own
+        && !payload
+            .call
+            .as_deref()
+            .is_some_and(|call| unsure.awaits(&notice, call))
+    {
+        return None;
     }
+    Some(Heard::Notified(notice))
 }
 
 impl Database {
@@ -589,8 +576,8 @@ where
     }
     on(Heard::Listening);
     while let Some(payload) = hearing.recv().await {
-        if let Some(notice) = heard(&payload, origin, unsure) {
-            on(Heard::Notified(notice));
+        if let Some(heard) = heard(&payload, origin, unsure) {
+            on(heard);
         }
     }
     driven
@@ -635,14 +622,14 @@ mod tests {
         .expect("another schema")
         .run(|pool| async move {
             let client = client(&pool).await?;
-            notify(&**client, "elsewhere", "").await
+            notify(&**client, Changed::Labels, "elsewhere").await
         })
         .expect("notify in another schema");
-        let announce = |on: &Database, kind: &'static str, commit: bool| {
+        let announce = |on: &Database, id: &'static str, commit: bool| {
             on.run(move |pool| async move {
                 let mut client = client(&pool).await?;
                 let transaction = client.transaction().await.map_err(sql)?;
-                notify(&*transaction, kind, "the-id").await?;
+                notify(&*transaction, Changed::Labels, id).await?;
                 if commit {
                     transaction.commit().await.map_err(sql)?;
                 }
@@ -655,12 +642,48 @@ mod tests {
         announce(&a, "kept", true);
         assert_eq!(
             hearing.recv_timeout(Duration::from_secs(10)),
-            Ok(Heard::Notified(Notice::new("kept", "the-id")))
+            Ok(Heard::Notified(Notice::new(Changed::Labels, "kept")))
         );
     }
 
+    /// Every kind of change travels under the name the versions before sent it as, and that name
+    /// reads back as the kind (clause 16).
+    /// Verifies: ADR-0045
+    #[test]
+    fn every_kind_travels_under_its_name_and_reads_back() {
+        let named = [
+            (Changed::Assignment, "assignment"),
+            (Changed::Configuration, "configuration"),
+            (Changed::Deployment, "deployment"),
+            (Changed::Package, "package"),
+            (Changed::Restart, "restart"),
+            (Changed::Revocation, "revocation"),
+            (Changed::Certificate, "certificate"),
+            (Changed::Host, "host"),
+            (Changed::Enrolment, "enrolment"),
+            (Changed::Window, "window"),
+            (Changed::Floor, "floor"),
+            (Changed::Labels, "labels"),
+            (Changed::Forgotten, "forgotten"),
+            (Changed::Taken, "taken"),
+            (Changed::Arrived, "arrived"),
+        ];
+        for (change, name) in named {
+            assert_eq!(kind(change), name, "{change:?} travels under its name");
+            assert_eq!(change_of(name), Some(change), "{name} reads back");
+        }
+        // Every kind is named above, whatever the order of their declaration.
+        for change in Changed::ALL {
+            assert!(
+                named.iter().any(|(named, _)| named == change),
+                "{change:?} has its name pinned"
+            );
+        }
+        assert_eq!(change_of(""), None);
+    }
+
     /// A payload names its sender; one this instance sent is not handed on, and one that does not
-    /// read is a notice of a kind nobody knows.
+    /// read, or names a kind this version does not know, is unknown.
     /// Verifies: ADR-0045
     #[test]
     fn a_notice_from_this_instance_is_passed_over_and_an_unreadable_one_is_unknown() {
@@ -669,13 +692,15 @@ mod tests {
         assert_eq!(heard(sent, "a", &none), None);
         assert_eq!(
             heard(sent, "b", &none),
-            Some(Notice::new("floor", "otelcol"))
+            Some(Heard::Notified(Notice::new(Changed::Floor, "otelcol")))
         );
         assert_eq!(
             heard(r#"{"kind":"floor","id":"otelcol","from":null}"#, "a", &none),
-            Some(Notice::new("floor", "otelcol"))
+            Some(Heard::Notified(Notice::new(Changed::Floor, "otelcol")))
         );
-        assert_eq!(heard("floor", "a", &none), Some(Notice::new("", "")));
+        assert_eq!(heard("floor", "a", &none), Some(Heard::Unknown));
+        let newer = r#"{"kind":"newer","id":"x","from":"b"}"#;
+        assert_eq!(heard(newer, "a", &none), Some(Heard::Unknown));
     }
 
     /// The notifications of a call whose answer was lost are handed on at once, each once, and this
@@ -695,12 +720,15 @@ mod tests {
         let own = r#"{"kind":"labels","id":"x","from":"a","call":"2"}"#;
         assert_eq!(heard(own, "a", &unsure), None, "a call that answered");
         unsure.lost(
-            vec![Notice::new("labels", "x"), Notice::new("labels", "x")],
+            vec![
+                Notice::new(Changed::Labels, "x"),
+                Notice::new(Changed::Labels, "x"),
+            ],
             "2",
         );
         assert_eq!(
             *handed.lock().expect("handed"),
-            [Heard::Notified(Notice::new("labels", "x"))],
+            [Heard::Notified(Notice::new(Changed::Labels, "x"))],
             "handed on at once, once"
         );
         let other = r#"{"kind":"floor","id":"x","from":"a","call":"2"}"#;
@@ -712,17 +740,17 @@ mod tests {
         let elsewhere = r#"{"kind":"labels","id":"x","from":"b","call":"2"}"#;
         assert_eq!(
             heard(elsewhere, "a", &unsure),
-            Some(Notice::new("labels", "x")),
+            Some(Heard::Notified(Notice::new(Changed::Labels, "x"))),
             "another instance's is heard as ever"
         );
         assert_eq!(
             heard(own, "a", &unsure),
-            Some(Notice::new("labels", "x")),
+            Some(Heard::Notified(Notice::new(Changed::Labels, "x"))),
             "and does not use up this one's: heard once more"
         );
         assert_eq!(heard(own, "a", &unsure), None, "and once only");
         for _ in 0..=AWAITED_AT_MOST {
-            unsure.lost(vec![Notice::new("floor", "y")], "3");
+            unsure.lost(vec![Notice::new(Changed::Floor, "y")], "3");
         }
         let awaited = unsure.state.lock().expect("state").awaited.len();
         assert_eq!(awaited, AWAITED_AT_MOST, "bounded");
@@ -740,10 +768,13 @@ mod tests {
             let handed = handed.clone();
             Arc::new(move |what| handed.lock().expect("handed").push(what))
         });
-        unsure.reread(vec![Notice::new(HOST, "h"), Notice::new(HOST, "h")]);
+        unsure.reread(vec![
+            Notice::new(Changed::Host, "h"),
+            Notice::new(Changed::Host, "h"),
+        ]);
         assert_eq!(
             *handed.lock().expect("handed"),
-            [Heard::Notified(Notice::new(HOST, "h"))],
+            [Heard::Notified(Notice::new(Changed::Host, "h"))],
             "handed on at once, once"
         );
         assert!(
@@ -775,14 +806,14 @@ mod tests {
         let failed = database.run(|pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
-            will_follow(HOST, "h");
+            will_follow(Changed::Host, "h");
             transaction.commit().await.map_err(sql)?;
             Err::<(), String>("the answer was lost".to_string())
         });
         assert!(failed.is_err());
         assert_eq!(
             hearing.recv_timeout(Duration::from_secs(1)),
-            Ok(Heard::Notified(Notice::new(HOST, "h")))
+            Ok(Heard::Notified(Notice::new(Changed::Host, "h")))
         );
         assert!(
             database

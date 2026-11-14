@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use super::Cached as GenericClient;
 
-use super::notify::{follow_commit, notify, will_follow, CERTIFICATE, HOST};
+use super::notify::{follow_commit, notify, will_follow};
 use super::{client, signed, snapshot, sql, unsigned, Database};
+use crate::changed::Changed;
 use crate::revocation::{
     register_full, Added, Bound, CertId, Facts, Host, HostAct, Issued, Ledger, LedgerStore,
     RegisterBounds, Registered, Revocation, CHAIN_FULL,
@@ -94,7 +95,7 @@ impl LedgerStore for PgLedgerStore {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             write_issued(&transaction, &issued).await?;
-            notify(&transaction, CERTIFICATE, &issued.facts.id.serial).await?;
+            notify(&transaction, Changed::Certificate, &issued.facts.id.serial).await?;
             let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(version)
@@ -140,7 +141,7 @@ impl LedgerStore for PgLedgerStore {
             if removed == 0 {
                 return Ok(None);
             }
-            notify(&transaction, CERTIFICATE, &id.serial).await?;
+            notify(&transaction, Changed::Certificate, &id.serial).await?;
             let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Some(version))
@@ -240,7 +241,7 @@ impl LedgerStore for PgLedgerStore {
                     )
                     .await
                     .map_err(sql)?;
-                super::notify::notify(&transaction, super::notify::REVOCATION, &wider.id).await?;
+                super::notify::notify(&transaction, Changed::Revocation, &wider.id).await?;
                 let version = bump_list_version(&transaction).await?;
                 transaction.commit().await.map_err(sql)?;
                 return Ok((Added::Widened(wider), Some(version)));
@@ -258,7 +259,7 @@ impl LedgerStore for PgLedgerStore {
             let position = last.map_or(0, |last| last + 1);
             let id = entry.id.clone();
             write_revocations(&transaction, &[(position, entry)]).await?;
-            super::notify::notify(&transaction, super::notify::REVOCATION, &id).await?;
+            super::notify::notify(&transaction, Changed::Revocation, &id).await?;
             let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok((Added::Added, Some(version)))
@@ -279,7 +280,7 @@ impl LedgerStore for PgLedgerStore {
             if removed == 0 {
                 return Ok(None);
             }
-            super::notify::notify(&transaction, super::notify::REVOCATION, &id).await?;
+            super::notify::notify(&transaction, Changed::Revocation, &id).await?;
             let version = bump_list_version(&transaction).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Some(version))
@@ -374,7 +375,7 @@ impl LedgerStore for PgLedgerStore {
             }
             let announced = made || inserted > 0;
             if announced {
-                will_follow(HOST, &host);
+                will_follow(Changed::Host, &host);
             }
             transaction.commit().await.map_err(sql)?;
             if announced {
@@ -391,7 +392,12 @@ impl LedgerStore for PgLedgerStore {
             let transaction = client.transaction().await.map_err(sql)?;
             let host = unbind_in(&transaction, &instance_uid).await?;
             if host.is_some() {
-                notify(&transaction, HOST, host.as_deref().unwrap_or_default()).await?;
+                notify(
+                    &transaction,
+                    Changed::Host,
+                    host.as_deref().unwrap_or_default(),
+                )
+                .await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(host)
@@ -424,7 +430,7 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?
                 .get(0);
-            notify(&transaction, HOST, &host).await?;
+            notify(&transaction, Changed::Host, &host).await?;
             transaction.commit().await.map_err(sql)?;
             let bound = if holder == host {
                 Bound::Bound
@@ -445,7 +451,7 @@ impl LedgerStore for PgLedgerStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&transaction, HOST, &host).await?;
+                notify(&transaction, Changed::Host, &host).await?;
             }
             transaction.commit().await.map_err(sql)
         })
@@ -553,9 +559,9 @@ impl LedgerStore for PgLedgerStore {
             let follows = matches!(act, HostAct::Seen { .. } | HostAct::Extended(_));
             if changed {
                 if follows {
-                    will_follow(HOST, "");
+                    will_follow(Changed::Host, "");
                 } else {
-                    notify(&transaction, HOST, "").await?;
+                    notify(&transaction, Changed::Host, "").await?;
                 }
             }
             transaction.commit().await.map_err(sql)?;
@@ -598,7 +604,7 @@ impl LedgerStore for PgLedgerStore {
             for (host, entry) in &changed {
                 write_host(&transaction, host, entry).await?;
             }
-            notify(&transaction, HOST, "").await?;
+            notify(&transaction, Changed::Host, "").await?;
             transaction.commit().await.map_err(sql)
         })?;
         hosts.clone_into(&mut written);
@@ -979,11 +985,11 @@ pub(crate) async fn register_in(
         }
     }
     write_issued(transaction, issued).await?;
-    notify(transaction, CERTIFICATE, &issued.facts.id.serial).await?;
+    notify(transaction, Changed::Certificate, &issued.facts.id.serial).await?;
     bump_list_version(transaction).await?;
     if let Some((host, entry)) = mint {
         if write_seen(transaction, host, entry).await? {
-            notify(transaction, HOST, host).await?;
+            notify(transaction, Changed::Host, host).await?;
         }
     }
     Ok(Registered::Registered)

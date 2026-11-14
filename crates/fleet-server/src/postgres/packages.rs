@@ -9,9 +9,10 @@ use std::sync::Arc;
 
 use super::Cached as GenericClient;
 
-use super::notify::{notify, PACKAGE};
+use super::notify::notify;
 use super::{blob_lock_refused, BLOB_LOCK};
 use super::{client, signed, snapshot, sql, unsigned, Database};
+use crate::changed::Changed;
 use crate::packages::{
     assigned, no_set, pinned, removed_while_uploaded, Entry, Package, PackageBackend, PackageError,
     PackageId, Platform, Signed, Stored, ED25519_SIGNATURE_LEN,
@@ -58,7 +59,7 @@ impl PackageBackend for PgPackageBackend {
                 .await
                 .map_err(sql)?;
             if created > 0 {
-                notify(&transaction, PACKAGE, &id.to_string()).await?;
+                notify(&transaction, Changed::Package, &id.to_string()).await?;
             }
             transaction.commit().await.map_err(sql)
         })?)
@@ -133,7 +134,7 @@ impl PackageBackend for PgPackageBackend {
                 )
                 .await
                 .map_err(sql)?;
-            notify(&transaction, PACKAGE, &id.to_string()).await?;
+            notify(&transaction, Changed::Package, &id.to_string()).await?;
             transaction.commit().await.map_err(sql).map(Ok)
         });
         let put = put.map_err(|e| {
@@ -184,7 +185,7 @@ impl PackageBackend for PgPackageBackend {
                 .await
                 .map_err(sql)?;
             let signed = if updated == 1 {
-                notify(&transaction, PACKAGE, &id.to_string()).await?;
+                notify(&transaction, Changed::Package, &id.to_string()).await?;
                 Signed::Written
             } else {
                 let stored = transaction
@@ -222,7 +223,7 @@ impl PackageBackend for PgPackageBackend {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&transaction, PACKAGE, &id.to_string()).await?;
+                notify(&transaction, Changed::Package, &id.to_string()).await?;
             }
             transaction.commit().await.map_err(sql).map(Ok)
         })?
@@ -254,7 +255,7 @@ impl PackageBackend for PgPackageBackend {
                 &crate::deployments::Member::Package(id.clone()),
             )
             .await?;
-            notify(&transaction, PACKAGE, &id.to_string()).await?;
+            notify(&transaction, Changed::Package, &id.to_string()).await?;
             transaction.commit().await.map_err(sql).map(Ok)
         })?
     }

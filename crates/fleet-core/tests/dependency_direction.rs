@@ -87,6 +87,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("audit", Core),
             ("blobs", Core),
             ("bootstrap", Core),
+            ("changed", Core),
             ("configs", Core),
             ("deployments", Core),
             ("enrolment", Core),

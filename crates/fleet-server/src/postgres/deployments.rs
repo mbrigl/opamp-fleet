@@ -10,6 +10,7 @@ use std::sync::Arc;
 use super::Cached as GenericClient;
 
 use super::{client, snapshot, sql, Database};
+use crate::changed::Changed;
 use crate::configs::validate_name;
 use crate::deployments::{
     check_selector, no_configuration, no_package, not_held, Change, Deployment, DeploymentBackend,
@@ -65,7 +66,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                 .await
                 .map_err(sql)?;
             let deployment = one(&transaction, &name).await?;
-            super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
+            super::notify::notify(&transaction, Changed::Deployment, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(deployment)
         })
@@ -81,7 +82,7 @@ impl DeploymentBackend for PgDeploymentBackend {
             let decided = change_rows(&transaction, &name, &change).await?;
             let decided = match decided {
                 Ok(()) => {
-                    super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
+                    super::notify::notify(&transaction, Changed::Deployment, &name).await?;
                     Ok(one(&transaction, &name).await?)
                 }
                 Err(refused) => Err(refused),
@@ -136,7 +137,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                     Member::Package(id) => Change::RemovePackage(id.clone()),
                 };
                 if change_rows(&transaction, name, &removed).await?.is_ok() {
-                    super::notify::notify(&transaction, super::notify::DEPLOYMENT, name).await?;
+                    super::notify::notify(&transaction, Changed::Deployment, name).await?;
                     changed.push(one(&transaction, name).await?);
                 }
             }
@@ -184,7 +185,7 @@ impl DeploymentBackend for PgDeploymentBackend {
                 .execute("DELETE FROM deployments WHERE name = $1", &[&name])
                 .await
                 .map_err(sql)?;
-            super::notify::notify(&transaction, super::notify::DEPLOYMENT, &name).await?;
+            super::notify::notify(&transaction, Changed::Deployment, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Ok(()))
         });
@@ -225,7 +226,7 @@ pub(super) async fn drop_member_rows(
     .map_err(sql)?;
     let left: BTreeSet<String> = rows.iter().map(|row| row.get(0)).collect();
     for name in &left {
-        super::notify::notify(client, super::notify::DEPLOYMENT, name).await?;
+        super::notify::notify(client, Changed::Deployment, name).await?;
     }
     Ok(())
 }

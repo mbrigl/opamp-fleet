@@ -12,15 +12,13 @@ use super::Cached as GenericClient;
 use opamp::uid::InstanceUid;
 use prost::Message;
 
-use super::notify::{
-    follow_commit, notify, will_follow, ARRIVED, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS,
-    RESTART, TAKEN,
-};
+use super::notify::{follow_commit, notify, will_follow};
 use super::{client, creating_client, signed, snapshot, sql, unsigned, Database};
 use crate::agent_store::{
     AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, Silenced,
     StoredAgent, Taken,
 };
+use crate::changed::Changed;
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
@@ -384,7 +382,10 @@ impl AgentStore for PgAgentStore {
             // One another instance created in between the two is written to again, the columns a
             // report decides alone.
             let created = loop {
-                if write_reported(&transaction, &uid, &record, None).await? {
+                if write_reported(&transaction, &uid, &record, None)
+                    .await?
+                    .is_some()
+                {
                     break false;
                 }
                 if insert(&transaction, &uid, &record, "DO NOTHING").await? {
@@ -400,29 +401,29 @@ impl AgentStore for PgAgentStore {
         Ok(())
     }
 
-    /// The columns a report decides, of a row that is there; nothing where none is. A Client Agent
-    /// first arriving over a Gateway's Host is announced right after the commit, named by the Host
-    /// ([`follow_commit`]).
-    fn write_report(
-        &self,
-        uid: &InstanceUid,
-        record: &PersistedAgent,
-        arrived: Option<&str>,
-    ) -> Result<bool, String> {
+    /// The columns a report decides, of a row that is there; nothing where none is. A write that
+    /// makes the row a Client Agent behind a Gateway's Host, which the stored row was not, is
+    /// announced right after the commit, named by the Host ([`follow_commit`]).
+    fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
         let (uid, record) = (*uid, record.clone());
-        let arrived = arrived.map(str::to_string);
+        // The Host a Client Agent that reports its machine arrives over: what the write may find
+        // to be a Gateway's it newly arrived behind.
+        let over = record.host.clone().filter(|_| {
+            crate::labels::is_client_agent(record.description.as_ref())
+                && crate::labels::machine(record.description.as_ref()).is_some()
+        });
         self.database.run(move |pool| async move {
             let client = client(&pool).await?;
             // Counted before the write commits, so a write whose answer is lost has its instance
-            // read again what the notice names.
-            if let Some(host) = &arrived {
-                will_follow(ARRIVED, host);
+            // read again what the notice names, whether or not the write was an arrival.
+            if let Some(host) = &over {
+                will_follow(Changed::Arrived, host);
             }
             let written = write_reported(&client, &uid, &record, None).await?;
-            if written && arrived.is_some() {
+            if written == Some(true) {
                 follow_commit(client, &pool);
             }
-            Ok(written)
+            Ok(written.is_some())
         })
     }
 
@@ -450,6 +451,7 @@ impl AgentStore for PgAgentStore {
                 }),
             )
             .await
+            .map(|written| written.is_some())
         })
     }
 
@@ -526,7 +528,7 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?
                 > 0;
             if set {
-                notify(&transaction, LABELS, &key).await?;
+                notify(&transaction, Changed::Labels, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(set)
@@ -565,7 +567,7 @@ impl AgentStore for PgAgentStore {
                     .map_err(sql)?;
             }
             if pending {
-                notify(&transaction, RESTART, &key).await?;
+                notify(&transaction, Changed::Restart, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Some(was))
@@ -584,7 +586,7 @@ impl AgentStore for PgAgentStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&transaction, FORGOTTEN, &uid.to_string()).await?;
+                notify(&transaction, Changed::Forgotten, &uid.to_string()).await?;
             }
             transaction.commit().await.map_err(sql)
         })?;
@@ -724,7 +726,7 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?
                 .get(0);
             if changed {
-                notify(&transaction, TAKEN, &key).await?;
+                notify(&transaction, Changed::Taken, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Some(Taken {
@@ -834,7 +836,7 @@ impl AgentStore for PgAgentStore {
                 .execute("DELETE FROM agents WHERE instance_uid = $1", &[&key])
                 .await
                 .map_err(sql)?;
-            notify(&transaction, FORGOTTEN, &key).await?;
+            notify(&transaction, Changed::Forgotten, &key).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Some(Silenced::Forgotten(configurations)))
         })?;
@@ -920,7 +922,7 @@ impl AgentStore for PgAgentStore {
                     .execute("DELETE FROM agents WHERE instance_uid = $1", &[&old])
                     .await
                     .map_err(sql)?;
-                notify(&transaction, FORGOTTEN, &old).await?;
+                notify(&transaction, Changed::Forgotten, &old).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(moved)
@@ -980,12 +982,12 @@ impl AgentStore for PgAgentStore {
                     .map(|pinned| pinned.configuration.as_str())
                     .collect();
                 for configuration in pinned {
-                    notify(&transaction, CONFIGURATION, configuration).await?;
+                    notify(&transaction, Changed::Configuration, configuration).await?;
                 }
                 let mut wrote = BTreeSet::new();
                 for (key, assignment) in records {
                     if write_assignment(&transaction, &key, assignment.as_ref()).await? {
-                        notify(&transaction, ASSIGNMENT, &key).await?;
+                        notify(&transaction, Changed::Assignment, &key).await?;
                         wrote.insert(key);
                     }
                 }
@@ -1308,13 +1310,17 @@ struct Held<'a> {
 /// Writes the columns a report decides of one Agent record, inside the caller's transaction,
 /// `last_seen_ms` only forward. Where `unless_held_elsewhere` is given, only of a row whose holder
 /// is the one it names, or of one no instance holds whose count of takes is the one it names, and
-/// whose sequence number is not higher than the record's. Answers whether it wrote a record.
+/// whose sequence number is not higher than the record's. Answers `None` where it wrote no record,
+/// and otherwise whether the write made the row a Client Agent that reports its machine behind a
+/// Gateway's Host, which the row it replaced was not: over another Host, not a Client Agent, or
+/// of another machine (ADR-0045
+/// clause 9).
 async fn write_reported(
     client: &impl GenericClient,
     uid: &InstanceUid,
     record: &PersistedAgent,
     unless_held_elsewhere: Option<Held<'_>>,
-) -> Result<bool, String> {
+) -> Result<Option<bool>, String> {
     let key = uid.to_string();
     // `last_seen_ms` never moves back, as a presence batch writes it.
     let sets = REPORTED
@@ -1365,7 +1371,19 @@ async fn write_reported(
             .to_string(),
         )
     });
-    let update = format!("UPDATE agents SET {sets}, {derived_sets} WHERE instance_uid = $1{held}");
+    // The row as it was, locked first, so the write compares its new values with those it replaces.
+    // `FOR NO KEY UPDATE` is the lock the UPDATE takes anyway, as it changes no key: a stronger
+    // one would also wait for the `FOR KEY SHARE` of the foreign-key checks on the row.
+    let update = format!(
+        "UPDATE agents SET {sets}, {derived_sets} \
+         FROM (SELECT host AS was_host, client_agent AS was_client, machine AS was_machine \
+               FROM agents WHERE instance_uid = $1 FOR NO KEY UPDATE) AS was \
+         WHERE instance_uid = $1{held} \
+         RETURNING agents.client_agent AND agents.machine <> '' \
+             AND (was_host IS DISTINCT FROM agents.host OR NOT was_client \
+                  OR was_machine <> agents.machine) \
+             AND EXISTS (SELECT 1 FROM hosts WHERE hosts.host = agents.host AND hosts.gateway)"
+    );
     let (sequence_num, capabilities, last_seen_ms) = (
         signed(record.sequence_num),
         signed(record.capabilities),
@@ -1411,7 +1429,11 @@ async fn write_reported(
             .iter()
             .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)),
     );
-    Ok(client.execute(&update, &params).await.map_err(sql)? > 0)
+    Ok(client
+        .query_opt(&update, &params)
+        .await
+        .map_err(sql)?
+        .map(|row| row.get(0)))
 }
 
 /// The values of the columns the list of Agents reads, derived from `record`, which every write
@@ -1917,7 +1939,7 @@ mod tests {
         report.restart_pending = false;
         report.health = None;
         report.last_seen_ms += 30_000;
-        assert_eq!(a.write_report(&uid, &report, None), Ok(true));
+        assert_eq!(a.write_report(&uid, &report), Ok(true));
         let stored = a.get(&uid).expect("get").expect("stored");
         assert_eq!(stored.labels, labels, "the labels stay as B set them");
         assert!(stored.restart_pending, "the restart stays queued");
@@ -1927,7 +1949,7 @@ mod tests {
 
         // A record forgotten meanwhile is not written again.
         b.remove(&uid).expect("forget");
-        assert_eq!(a.write_report(&uid, &report, None), Ok(false));
+        assert_eq!(a.write_report(&uid, &report), Ok(false));
         assert_eq!(a.get(&uid), Ok(None), "nothing created");
     }
 
@@ -2335,7 +2357,7 @@ mod tests {
                 .expect("take");
             let mut reported = bare.clone();
             reported.sequence_num = 9;
-            store.write_report(uid, &reported, None).expect("write");
+            store.write_report(uid, &reported).expect("write");
         }
         let seen = |statement: &str| -> Vec<String> {
             let mut settings: Vec<String> = test
@@ -2918,9 +2940,7 @@ mod tests {
         let mut reported = full.clone();
         reported.health = None;
         reported.capabilities ^= 1;
-        assert!(store
-            .write_report(&created, &reported, None)
-            .expect("report"));
+        assert!(store.write_report(&created, &reported).expect("report"));
         assert_eq!(stale(), "0", "reported");
         let import = |uid: InstanceUid, record: PersistedAgent| {
             database
@@ -3537,10 +3557,11 @@ mod tests {
         assert_eq!(presence(one), [[Some(format!("none false {}", back + 1))]]);
     }
 
-    /// A report's write that records a Client Agent first arriving over a Gateway's Host announces
-    /// it, named by the Host, after the write commits: where that notice is lost, as when the
-    /// instance ends between the commit and the `NOTIFY`, another instance hears nothing, and a
-    /// write that names no arrival announces nothing.
+    /// A report's write that makes a record a Client Agent behind a Gateway's Host, which the
+    /// stored record was not, announces it, named by the Host, after the write commits: where that
+    /// notice is lost, as when the instance ends between the commit and the `NOTIFY`, another
+    /// instance hears nothing, and a write that changes nothing of it, or puts the Client Agent
+    /// behind a Host no Gateway's, announces nothing.
     /// Verifies: ADR-0045
     #[test]
     fn a_client_agent_arriving_over_a_gateway_is_announced_after_its_commit() {
@@ -3563,27 +3584,59 @@ mod tests {
         });
         let within = std::time::Duration::from_secs(10);
         assert_eq!(hearing.recv_timeout(within), Ok(Heard::Listening));
+        test.sql(
+            "INSERT INTO hosts (host, gateway, instance_uids, subject) \
+             VALUES ('g', true, '{}', '{}'), ('h', false, '{}', '{}')",
+        );
         let store = PgAgentStore::new(database.clone());
         let uid = InstanceUid([0x5a; 16]);
         store.put(&uid, &record()).expect("put");
+        let client_over = |host: &str| {
+            let mut client = record();
+            client.host = Some(host.to_string());
+            client
+                .description
+                .get_or_insert_with(Default::default)
+                .non_identifying_attributes
+                .extend([
+                    opamp::attributes::string_attr("supervisor.kind.collector", "1"),
+                    opamp::attributes::string_attr("host.id", "m1"),
+                ]);
+            client
+        };
+
+        // Each step is followed by a wait in which nothing more may arrive, so a notice a step
+        // should not have sent is not taken for the one a later step sends.
+        let quiet = |step: &str| {
+            assert_eq!(
+                hearing.recv_timeout(std::time::Duration::from_secs(1)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+                "{step}: nothing (more) is announced"
+            );
+        };
+        let arrives = |step: &str| {
+            assert_eq!(
+                hearing.recv_timeout(within),
+                Ok(Heard::Notified(Notice::new(Changed::Arrived, "g"))),
+                "{step}: the arrival is announced after its commit"
+            );
+            quiet(step);
+        };
 
         database.afterwards().drop_all(true);
-        assert_eq!(store.write_report(&uid, &record(), Some("g")), Ok(true));
-        assert_eq!(store.write_report(&uid, &record(), None), Ok(true));
-        assert!(
-            hearing
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .is_err(),
-            "nothing is announced in the write's commit"
-        );
+        assert_eq!(store.write_report(&uid, &client_over("g")), Ok(true));
+        quiet("an arrival whose notice is lost");
         database.afterwards().drop_all(false);
-        assert_eq!(store.write_report(&uid, &record(), None), Ok(true));
-        assert_eq!(store.write_report(&uid, &record(), Some("g")), Ok(true));
-        assert_eq!(
-            hearing.recv_timeout(within),
-            Ok(Heard::Notified(Notice::new(ARRIVED, "g"))),
-            "the arrival is announced after its commit, and nothing before it"
-        );
+        assert_eq!(store.write_report(&uid, &client_over("g")), Ok(true));
+        quiet("a write that changes nothing of the Client Agent");
+        assert_eq!(store.write_report(&uid, &client_over("h")), Ok(true));
+        quiet("a Client Agent behind a Host no Gateway's");
+        assert_eq!(store.write_report(&uid, &client_over("g")), Ok(true));
+        arrives("back behind the Gateway's Host");
+        assert_eq!(store.write_report(&uid, &record()), Ok(true));
+        quiet("no longer a Client Agent");
+        assert_eq!(store.write_report(&uid, &client_over("g")), Ok(true));
+        arrives("an Agent that becomes a Client Agent over the same Host");
     }
 
     /// A take that replaces another holder is announced, whether or not that holder's lease is
@@ -3628,7 +3681,7 @@ mod tests {
         assert_eq!(
             hearing.recv_timeout(within),
             Ok(super::super::notify::Heard::Notified(
-                super::super::notify::Notice::new(TAKEN, &two.to_string())
+                super::super::notify::Notice::new(Changed::Taken, &two.to_string())
             )),
             "the take from A, and before it nothing"
         );

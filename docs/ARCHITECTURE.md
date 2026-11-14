@@ -181,9 +181,12 @@ no module.
   versions run side by side. A change that concerns a live session is one `NOTIFY` of
   `postgres::notify`, sent in the transaction that commits it, or right after the commit for a
   binding and a Host row that widen trust and for a Client Agent first arrived over a Gateway's
-  Host; each instance listens on a connection of its own, reads
-  its caches again rather than patching them, and counts a missed notification as every
-  notification. `instance::follow` maps each kind of notice to what it reads again (`Due`), answers
+  Host, which the write of its record finds against the row it replaces; each instance listens on a
+  connection of its own, reads its caches again rather than patching them, and counts a missed
+  notification, or one of a kind it does not know, as every notification. The kinds are one type of
+  the core, `changed::Changed`: `postgres::notify` names the one the wire carries, and
+  `instance::follow` maps each to what it reads again (`Due`), both by a `match` that does not
+  compile without every kind; `follow` answers
   what it heard meanwhile with one read, tries a failed read again with back-off, and at every
   renewal reads the ledger again where the revocation list's version moved; a call whose answer was
   lost has its notifications heard once more (`postgres::notify::Unsure`). `instance` also runs the

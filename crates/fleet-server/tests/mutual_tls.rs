@@ -6710,7 +6710,6 @@ impl fleet_server::agent_store::AgentStore for HeldWrite {
         &self,
         uid: &InstanceUid,
         record: &fleet_server::agent_store::PersistedAgent,
-        arrived: Option<&str>,
     ) -> Result<bool, String> {
         if *uid == self.held {
             let _ = self.entered.lock().expect("hook lock").send(());
@@ -6720,7 +6719,7 @@ impl fleet_server::agent_store::AgentStore for HeldWrite {
                 .expect("hook lock")
                 .recv_timeout(std::time::Duration::from_secs(30));
         }
-        self.inner.write_report(uid, record, arrived)
+        self.inner.write_report(uid, record)
     }
     fn set_labels(
         &self,

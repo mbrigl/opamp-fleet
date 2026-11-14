@@ -852,11 +852,6 @@ struct Ending {
     superseded: bool,
     identification: Option<AgentIdentification>,
     reply_flags: u64,
-    /// The Gateway's Host the Agent first arrived over as a Client Agent with this report, which
-    /// the write of its record announces
-    /// (ADR-0045
-    /// clause 9).
-    arrived: Option<String>,
 }
 
 /// Where a report's end stands once its record is taken into memory.
@@ -2709,13 +2704,8 @@ impl AppState {
     /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
     /// one that refuses reports. Answers whether the record is still stored: on a shared store
     /// one forgotten through another instance is not, and is not written again.
-    fn persist_if_dirty(
-        &self,
-        uid: &InstanceUid,
-        persisted: &PersistedAgent,
-        arrived: Option<&str>,
-    ) -> bool {
-        match self.persist(uid, persisted, arrived) {
+    fn persist_if_dirty(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> bool {
+        match self.persist(uid, persisted) {
             Ok(stored) => stored,
             Err(e) => {
                 warn!(agent = %uid, error = %e, "cannot persist the agent record");
@@ -2744,17 +2734,7 @@ impl AppState {
     /// answered, a report that changes nothing durable writes nothing again
     /// (ADR-0045
     /// clause 8).
-    ///
-    /// `arrived` names the Gateway's Host the Agent first arrived over as a Client Agent with this
-    /// record, which the store announces once the record is written
-    /// (ADR-0045
-    /// clause 9). Such a record differs from the one written before, so it is written.
-    fn persist(
-        &self,
-        uid: &InstanceUid,
-        persisted: &PersistedAgent,
-        arrived: Option<&str>,
-    ) -> Result<bool, String> {
+    fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
         let digest = persisted.durable_digest();
         let counted = !self.agent_store.is_shared()
             || self
@@ -2766,7 +2746,7 @@ impl AppState {
         if counted && self.kept.written.lock().expect("written lock").get(uid) == Some(&digest) {
             return Ok(true);
         }
-        if !self.agent_store.write_report(uid, persisted, arrived)? {
+        if !self.agent_store.write_report(uid, persisted)? {
             return Ok(false);
         }
         if !counted {
@@ -3354,12 +3334,6 @@ impl AppState {
             reply_flags |= ServerToAgentFlags::ReportFullState as u64;
         }
 
-        // Whether this report may make it a Client Agent behind a Gateway that it was not: what a
-        // shared store announces, so the other instances place the Gateway's groups again.
-        let arrives = self.agent_store.is_shared()
-            && (msg.agent_description.is_some() || record.host != arrived_over);
-        let behind = arrives.then(|| self.client_behind(record)).flatten();
-
         // The Host it arrived over (ADR-0030 clause 16) — none without a host register.
         let moved = record.host != arrived_over;
         record.host = arrived_over;
@@ -3421,14 +3395,6 @@ impl AppState {
             }
         }
 
-        let arrived = arrives
-            .then(|| self.client_behind(record))
-            .flatten()
-            .filter(|now| Some(now) != behind.as_ref())
-            .and_then(|now| match now {
-                Group::Behind { gateway, .. } => Some(gateway),
-                Group::Host(_) => None,
-            });
         if !known || moved || described || rekeyed.is_some() || loaded {
             self.place(&mut fleet, &uid, &mut elsewhere);
         }
@@ -3449,7 +3415,6 @@ impl AppState {
             superseded,
             identification,
             reply_flags,
-            arrived,
         };
         let pending = match request {
             None => Pending::Settled(self.settle(record, &mut ending, None)),
@@ -3691,7 +3656,7 @@ impl AppState {
                 }
             }
         };
-        if !self.persist_if_dirty(&ending.uid, &persisted, ending.arrived.as_deref()) {
+        if !self.persist_if_dirty(&ending.uid, &persisted) {
             return self.forgotten_elsewhere(&ending.uid, &ending.reported);
         }
         processed
@@ -3763,7 +3728,7 @@ impl AppState {
         };
         // The report's updates are already in the record, so they are persisted even though no
         // certificate is issued (ADR-0030).
-        if !self.persist_if_dirty(&uid, persisted, ending.arrived.as_deref()) {
+        if !self.persist_if_dirty(&uid, persisted) {
             return Err(Box::new(self.forgotten_elsewhere(&uid, &ending.reported)));
         }
         Err(Box::new(Processed {
@@ -3826,15 +3791,6 @@ impl AppState {
         if let Elsewhere::Read { missed, .. } = elsewhere {
             self.place_groups_again(missed);
         }
-    }
-
-    /// The group behind a Gateway `record` is the Client Agent of, if it is one.
-    fn client_behind(&self, record: &AgentRecord) -> Option<Group> {
-        if !crate::labels::is_client_agent(record.description.as_ref()) {
-            return None;
-        }
-        self.group_of(record.host.as_deref(), record.description.as_ref())
-            .filter(|group| matches!(group, Group::Behind { .. }))
     }
 
     /// The group an Agent arriving over `host` and described by `description` is placed in, as
@@ -6597,7 +6553,8 @@ mod tests {
     /// Verifies: ADR-0045
     #[test]
     fn a_request_announced_with_a_missed_notification_drops_a_put_back_its_delivery_left() {
-        use crate::postgres::notify::{Heard, Notice, RESTART, TAKEN};
+        use crate::changed::Changed;
+        use crate::postgres::notify::{Heard, Notice};
         let (state, failing, stored, _dir) = with_failing_restarts();
         let uid = InstanceUid([0x3a; 16]);
         kept_put_back(&state, &failing, &uid);
@@ -6612,8 +6569,8 @@ mod tests {
         crate::instance::take_up_held_for(
             &state,
             &[
-                Heard::Notified(Notice::new(TAKEN, "")),
-                Heard::Notified(Notice::new(RESTART, &uid.to_string())),
+                Heard::Notified(Notice::new(Changed::Taken, "")),
+                Heard::Notified(Notice::new(Changed::Restart, &uid.to_string())),
             ],
         )
         .expect("taken up");
@@ -9559,14 +9516,9 @@ mod tests {
         fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
             self.inner.put(uid, record)
         }
-        fn write_report(
-            &self,
-            uid: &InstanceUid,
-            record: &PersistedAgent,
-            arrived: Option<&str>,
-        ) -> Result<bool, String> {
+        fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
             probed(&self.probe, "write_report", Some(uid));
-            self.inner.write_report(uid, record, arrived)
+            self.inner.write_report(uid, record)
         }
         fn write_report_unless_held_elsewhere(
             &self,

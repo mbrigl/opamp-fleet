@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use super::Cached as GenericClient;
 
-use super::notify::{notify, CONFIGURATION};
+use super::notify::notify;
 use super::{client, snapshot, sql, Database};
+use crate::changed::Changed;
 use crate::configs::{
     check_type, validate_name, ConfigBackend, Configuration, Pinned, Removal, Revision,
 };
@@ -50,7 +51,7 @@ impl ConfigBackend for PgConfigBackend {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             save(&transaction, &name, &saved).await?;
-            notify(&transaction, CONFIGURATION, &name).await?;
+            notify(&transaction, Changed::Configuration, &name).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -91,7 +92,7 @@ impl ConfigBackend for PgConfigBackend {
                 .await
                 .map_err(sql)?;
             if collected > 0 {
-                notify(&transaction, CONFIGURATION, &name).await?;
+                notify(&transaction, Changed::Configuration, &name).await?;
             }
             let mut kept = BTreeMap::new();
             for row in transaction
@@ -161,7 +162,7 @@ impl ConfigBackend for PgConfigBackend {
                 &crate::deployments::Member::Configuration(name.clone()),
             )
             .await?;
-            notify(&transaction, CONFIGURATION, &name).await?;
+            notify(&transaction, Changed::Configuration, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Removal::Removed)
         })
