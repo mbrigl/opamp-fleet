@@ -35,7 +35,10 @@ use crate::packages::{
 use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor, SubjectValues};
 
 mod held;
+pub(crate) mod placement;
 use held::{Carried, Kept, PendingRekey, Settled, Taking, Took, UnsureRekey, AGENT_LOCKS};
+use placement::{Elsewhere, Groups};
+pub use placement::{Group, Placement};
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
 /// binary is (see `server.toml`, `max_package_size_bytes`).
@@ -204,33 +207,6 @@ impl Assignment {
 
 /// The configuration map of an Agent nothing was rolled out to.
 static NO_CONFIGURATIONS: BTreeMap<String, String> = BTreeMap::new();
-
-/// The Agents one Client presents (ADR-0030 clause 19), as far as the Server can tell them apart.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Group {
-    /// On a direct connection: the Agents arriving over the same Host.
-    Host(String),
-    /// Behind a Gateway: the Agents arriving over the same Gateway Host that report the same
-    /// machine — `host.id`, else `host.name` ([`crate::labels::machine`]).
-    Behind { gateway: String, machine: String },
-}
-
-/// What the Host an Agent arrived over and its Client Agent add to its effective description
-/// (ADR-0030 clauses 18 and 19). Derived from the records and the host register whenever either
-/// changes; never persisted.
-#[derive(Clone, Debug, Default)]
-pub struct Placement {
-    /// The `fleet.host.*` values of the Host it arrived over directly; empty behind a Gateway.
-    pub host_values: BTreeMap<String, String>,
-    /// The Client it belongs to, when the Server can tell.
-    pub group: Option<Group>,
-    /// Its Client Agent — itself, for the Client Agent — when its group holds exactly one.
-    pub client_agent: Option<InstanceUid>,
-    /// The labels of its Client Agent; empty for the Client Agent itself.
-    pub inherited: BTreeMap<String, String>,
-    /// Its group holds more than one Client Agent, so nothing is inherited.
-    pub ambiguous: bool,
-}
 
 impl AgentRecord {
     /// What a Selector is matched against (ADR-0030 clause 18): the Host's values, what the Agent
@@ -662,9 +638,8 @@ pub struct AppState {
     /// and moved by a re-key as one entry. Its parts are locked strictly after `fleet`.
     kept: Kept,
     configs: ConfigStore,
-    /// Which Agents each [`Group`] holds (ADR-0030 clause 19), so placing one Agent touches its
-    /// group alone. Locked strictly after `fleet`, and only while it is held.
-    groups: Mutex<HashMap<Group, HashSet<InstanceUid>>>,
+    /// Which Agents each [`Group`] holds, owned by [`placement`].
+    groups: Groups,
     push: watch::Sender<u64>,
     /// Hands every WebSocket connection its identity for the duplicate detection.
     next_conn: AtomicU64,
@@ -862,24 +837,6 @@ enum Pending {
     Issue(Box<PersistedAgent>, Vec<u8>),
 }
 
-/// The Client Agents of groups another instance carries, with their labels, by group.
-type ClientsByGroup = HashMap<Group, Vec<(InstanceUid, BTreeMap<String, String>)>>;
-
-/// How a placement reads the Client Agents of a group that this instance does not hold
-/// (ADR-0030 clause 19,
-/// ADR-0045
-/// clause 8).
-enum Elsewhere {
-    /// From the store as the group is placed, under the fleet lock.
-    Now,
-    /// Read before the fleet lock was taken, by group, not yet sifted of what is held; a group
-    /// placed that was not read is noted in `missed` and placed again once the lock is let go.
-    Read {
-        read: ClientsByGroup,
-        missed: Vec<Group>,
-    },
-}
-
 impl AppState {
     /// Builds the state on any backend for the Agent records, their labels included (ADR-0030), and
     /// the Configurations (ADR-0033). The ports are the only thing the fleet logic knows about that
@@ -936,7 +893,7 @@ impl AppState {
             agent_store,
             kept: Kept::with_written(written),
             configs,
-            groups: Mutex::new(HashMap::new()),
+            groups: Groups::default(),
             push: watch::channel(0).0,
             next_conn: AtomicU64::new(1),
             connection_offer: None,
@@ -1189,247 +1146,6 @@ impl AppState {
         Ok(known)
     }
 
-    /// Where the Host an Agent arrived over places it (ADR-0030 clauses 18 and 19): the
-    /// `fleet.host.*` values of a Host it arrived over directly, and the group its Client is
-    /// recognised in. Nothing without a host register, and nothing for an Agent that names no
-    /// Host.
-    fn locate(&self, record: &AgentRecord) -> (BTreeMap<String, String>, Option<Group>) {
-        let (Some(host), Some(revocations)) = (&record.host, &self.revocations) else {
-            return (BTreeMap::new(), None);
-        };
-        let (gateway, subject) = revocations.placement(host);
-        if gateway {
-            let group =
-                crate::labels::machine(record.description.as_ref()).map(|machine| Group::Behind {
-                    gateway: host.clone(),
-                    machine,
-                });
-            return (BTreeMap::new(), group);
-        }
-        let values = subject
-            .attributes()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect();
-        (values, Some(Group::Host(host.clone())))
-    }
-
-    /// Places every Agent again — at startup, once the host register is known, and when a Gateway
-    /// mark changes.
-    fn place_all(&self) {
-        let mut fleet = self.fleet.lock().expect("fleet lock");
-        let mut groups = self.groups.lock().expect("groups lock");
-        groups.clear();
-        self.locate_all(&mut fleet, &mut groups);
-        for group in groups.keys() {
-            self.inherit_held(&mut fleet, &groups, group, &mut Elsewhere::Now);
-        }
-    }
-
-    /// Locates every Agent of `fleet` and indexes it in its group, so its Client Agent can be
-    /// found next.
-    fn locate_all(
-        &self,
-        fleet: &mut HashMap<InstanceUid, AgentRecord>,
-        groups: &mut HashMap<Group, HashSet<InstanceUid>>,
-    ) {
-        for (uid, record) in fleet.iter_mut() {
-            let (host_values, group) = self.locate(record);
-            record.placement = Placement {
-                host_values,
-                group: group.clone(),
-                ..Placement::default()
-            };
-            if let Some(group) = group {
-                groups.entry(group).or_default().insert(*uid);
-            }
-        }
-    }
-
-    /// Places the members of `group` this Server holds under their Client Agent, as [`inherit`]
-    /// does. On a shared store the Client Agent of a Host may be carried by another instance, so
-    /// the Agents the host register binds to the Host that this instance does not hold are read
-    /// from the store, and a Client Agent among them counts as one of the group
-    /// (ADR-0045
-    /// clause 8). Behind a Gateway, where the register binds no Agent, the Agents that arrived
-    /// over the Gateway's Host are read instead ([`arrived_over`](Self::arrived_over)).
-    ///
-    /// What is read of a group's Client Agents held elsewhere is read as `elsewhere` says: at once,
-    /// under the fleet lock, or before it was taken, as a report places its Agent.
-    fn inherit_held(
-        &self,
-        fleet: &mut HashMap<InstanceUid, AgentRecord>,
-        groups: &HashMap<Group, HashSet<InstanceUid>>,
-        group: &Group,
-        elsewhere: &mut Elsewhere,
-    ) {
-        let outside = match elsewhere {
-            Elsewhere::Now => self.client_agents_elsewhere(fleet, group),
-            Elsewhere::Read { read, missed } => match read.get(group) {
-                Some(found) => {
-                    let mut outside: Vec<(InstanceUid, BTreeMap<String, String>)> = found
-                        .iter()
-                        .filter(|(uid, _)| !fleet.contains_key(uid))
-                        .cloned()
-                        .collect();
-                    outside.sort_by_key(|(uid, _)| uid.0);
-                    outside
-                }
-                None => {
-                    if !missed.contains(group) {
-                        missed.push(group.clone());
-                    }
-                    Vec::new()
-                }
-            },
-        };
-        inherit(fleet, groups, group, &outside);
-    }
-
-    /// Reads, before the fleet lock is taken, the Client Agents of each of `wanted` that this
-    /// instance does not hold, as [`client_agents_elsewhere`](Self::client_agents_elsewhere) reads
-    /// them under it: what a report's placement inherits from, so the lock waits for no read. What
-    /// this instance comes to hold meanwhile is sifted out when the group is placed.
-    /// The Agents that arrived over a Gateway's Host are read once for all its groups.
-    fn read_elsewhere(&self, wanted: &[Group]) -> ClientsByGroup {
-        let held = |uid: &InstanceUid| self.fleet.lock().expect("fleet lock").contains_key(uid);
-        let mut read = HashMap::new();
-        let mut behind: HashMap<&str, Result<HashMap<InstanceUid, AgentRecord>, String>> =
-            HashMap::new();
-        for group in wanted {
-            if read.contains_key(group) {
-                continue;
-            }
-            let found = match group {
-                Group::Behind { gateway, machine } if self.agent_store.is_shared() => {
-                    let arrived = behind
-                        .entry(gateway.as_str())
-                        .or_insert_with(|| self.arrived_over(gateway));
-                    clients_behind(gateway, machine, arrived.as_ref(), &held)
-                }
-                _ => self.clients_elsewhere(group, &held),
-            };
-            read.insert(group.clone(), found);
-        }
-        read
-    }
-
-    /// Places again each group of `missed` that a report's placement found unread: read first,
-    /// then placed under the fleet lock.
-    fn place_groups_again(&self, missed: Vec<Group>) {
-        if missed.is_empty() {
-            return;
-        }
-        let mut elsewhere = Elsewhere::Read {
-            read: self.read_elsewhere(&missed),
-            missed: Vec::new(),
-        };
-        let mut fleet = self.fleet.lock().expect("fleet lock");
-        let groups = self.groups.lock().expect("groups lock");
-        for group in &missed {
-            self.inherit_held(&mut fleet, &groups, group, &mut elsewhere);
-        }
-    }
-
-    /// Places again every group of each of `hosts` that this instance holds members of: of a Host,
-    /// the group under the Host, and of a Gateway's Host, every group behind it. What a notice that
-    /// a binding of the Host changed, or that a Client Agent first arrived over it, calls for
-    /// (ADR-0045
-    /// clause 8). Nothing on a store this Server alone writes, whose own acts place what they
-    /// change.
-    pub fn place_hosts_again(&self, hosts: &BTreeSet<String>) {
-        if hosts.is_empty() || !self.agent_store.is_shared() {
-            return;
-        }
-        let due: Vec<Group> = self
-            .groups
-            .lock()
-            .expect("groups lock")
-            .keys()
-            .filter(|group| match group {
-                Group::Host(host) => hosts.contains(host),
-                Group::Behind { gateway, .. } => hosts.contains(gateway),
-            })
-            .cloned()
-            .collect();
-        self.place_groups_again(due);
-    }
-
-    /// The Client Agents of a group that this instance does not hold, with their labels, as
-    /// stored; none on a store this Server alone writes. Of a Host, those the host register binds
-    /// to it; behind a Gateway, which the register binds none to, those that arrived over the
-    /// Gateway's Host and report the group's machine, read through the port's `query_page`
-    /// (ADR-0045
-    /// clause 8). One that cannot be read is logged, and the group is placed from what this
-    /// instance holds.
-    fn client_agents_elsewhere(
-        &self,
-        fleet: &HashMap<InstanceUid, AgentRecord>,
-        group: &Group,
-    ) -> Vec<(InstanceUid, BTreeMap<String, String>)> {
-        self.clients_elsewhere(group, &|uid| fleet.contains_key(uid))
-    }
-
-    /// The Client Agents of `group` read from the store, of those `held` says this instance does
-    /// not hold, as [`client_agents_elsewhere`](Self::client_agents_elsewhere) answers them.
-    fn clients_elsewhere(
-        &self,
-        group: &Group,
-        held: &dyn Fn(&InstanceUid) -> bool,
-    ) -> Vec<(InstanceUid, BTreeMap<String, String>)> {
-        if !self.agent_store.is_shared() {
-            return Vec::new();
-        }
-        if let Group::Behind { gateway, machine } = group {
-            return clients_behind(gateway, machine, self.arrived_over(gateway).as_ref(), held);
-        }
-        let Group::Host(host) = group else {
-            return Vec::new();
-        };
-        let elsewhere: Vec<InstanceUid> = self
-            .bound_to(host)
-            .into_iter()
-            .filter(|uid| !held(uid))
-            .collect();
-        if elsewhere.is_empty() {
-            return Vec::new();
-        }
-        match self.agent_store.get_many(&elsewhere) {
-            Ok(found) => clients_of_host(host, found.iter()),
-            Err(e) => {
-                warn!(host = %host, error = %e, "cannot read the agents of the host that another instance carries");
-                Vec::new()
-            }
-        }
-    }
-
-    /// The Agents the host register binds to `host`, none where it binds every one or there is no
-    /// register.
-    fn bound_to(&self, host: &str) -> Vec<InstanceUid> {
-        let Some(revocations) = &self.revocations else {
-            return Vec::new();
-        };
-        match revocations.speaks_for(host) {
-            SpeaksFor::Agents(bound) => bound.iter().filter_map(|uid| parse_hex_uid(uid)).collect(),
-            SpeaksFor::Any => Vec::new(),
-        }
-    }
-
-    /// Records read from the store, each placed among the others, as [`place_all`](Self::place_all)
-    /// places what this Server holds: what the Operator plane shows of them where the fleet is not
-    /// in memory.
-    fn placed(
-        &self,
-        records: HashMap<InstanceUid, AgentRecord>,
-    ) -> HashMap<InstanceUid, AgentRecord> {
-        let mut fleet = records;
-        let mut groups = HashMap::new();
-        self.locate_all(&mut fleet, &mut groups);
-        for group in groups.keys() {
-            inherit(&mut fleet, &groups, group, &[]);
-        }
-        fleet
-    }
-
     /// The fleet as the Operator plane reads it
     /// (ADR-0023 clause 3): on a shared store every record as
     /// stored, connected as its stored presence says, placed among the others, and nothing of what
@@ -1507,57 +1223,6 @@ impl AppState {
     fn stored_fleet(&self) -> Result<HashMap<InstanceUid, AgentRecord>, String> {
         let records = self.records_of(self.agent_store.query(None)?);
         Ok(self.placed(records))
-    }
-
-    /// Places one Agent again after what places it may have changed — its Host, its report, or
-    /// its identity — and the groups it left and joined with it.
-    fn place(
-        &self,
-        fleet: &mut HashMap<InstanceUid, AgentRecord>,
-        uid: &InstanceUid,
-        elsewhere: &mut Elsewhere,
-    ) {
-        let Some(record) = fleet.get_mut(uid) else {
-            return;
-        };
-        let (host_values, group) = self.locate(record);
-        record.placement.host_values = host_values;
-        let left = std::mem::replace(&mut record.placement.group, group.clone());
-        if group.is_none() {
-            record.placement.client_agent = None;
-            record.placement.inherited.clear();
-            record.placement.ambiguous = false;
-        }
-        let mut groups = self.groups.lock().expect("groups lock");
-        if left != group {
-            if let Some(left) = &left {
-                unindex(&mut groups, left, uid);
-            }
-        }
-        if let Some(joined) = &group {
-            groups.entry(joined.clone()).or_default().insert(*uid);
-            self.inherit_held(fleet, &groups, joined, elsewhere);
-        }
-        if let Some(left) = left.filter(|left| Some(left) != group.as_ref()) {
-            self.inherit_held(fleet, &groups, &left, elsewhere);
-        }
-    }
-
-    /// Takes an Agent that left the fleet, or its old identity, out of its group, and places what
-    /// is left of the group again.
-    fn unplace(
-        &self,
-        fleet: &mut HashMap<InstanceUid, AgentRecord>,
-        uid: &InstanceUid,
-        group: Option<Group>,
-        elsewhere: &mut Elsewhere,
-    ) {
-        let Some(group) = group else {
-            return;
-        };
-        let mut groups = self.groups.lock().expect("groups lock");
-        unindex(&mut groups, &group, uid);
-        self.inherit_held(fleet, &groups, &group, elsewhere);
     }
 
     /// The register and the revocation list.
@@ -2352,8 +2017,7 @@ impl AppState {
         record.labels = labels;
         self.kept.written.lock().expect("written lock").remove(uid);
         if let Some(group) = record.placement.group.clone() {
-            let groups = self.groups.lock().expect("groups lock");
-            self.inherit_held(fleet, &groups, &group, &mut Elsewhere::Now);
+            self.place_group_now(fleet, &group);
         }
     }
 
@@ -3773,45 +3437,6 @@ impl AppState {
         }
     }
 
-    /// How a report's placement reads the Client Agents of `groups` held elsewhere: read now,
-    /// before the fleet lock is taken, on a shared store; on a store this Server alone writes
-    /// there is nothing to read.
-    fn elsewhere_of(&self, groups: &[Group]) -> Elsewhere {
-        if !self.agent_store.is_shared() {
-            return Elsewhere::Now;
-        }
-        Elsewhere::Read {
-            read: self.read_elsewhere(groups),
-            missed: Vec::new(),
-        }
-    }
-
-    /// Places again what a placement from `elsewhere` found unread; called with no lock held.
-    fn place_again(&self, elsewhere: Elsewhere) {
-        if let Elsewhere::Read { missed, .. } = elsewhere {
-            self.place_groups_again(missed);
-        }
-    }
-
-    /// The group an Agent arriving over `host` and described by `description` is placed in, as
-    /// [`locate`](Self::locate) places it.
-    fn group_of(
-        &self,
-        host: Option<&str>,
-        description: Option<&AgentDescription>,
-    ) -> Option<Group> {
-        let (Some(host), Some(revocations)) = (host, &self.revocations) else {
-            return None;
-        };
-        if revocations.placement(host).0 {
-            return crate::labels::machine(description).map(|machine| Group::Behind {
-                gateway: host.to_string(),
-                machine,
-            });
-        }
-        Some(Group::Host(host.to_string()))
-    }
-
     /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
     /// at an Agent's first report here: another instance may have written it, and its labels, its
     /// assignment and its queued restart are what this report goes on from
@@ -4547,33 +4172,6 @@ impl AppState {
         record
     }
 
-    /// The records of the Agents that last arrived over `host`, as stored, through
-    /// [`AgentStore::query_page`] filtered on that Host
-    /// (ADR-0031
-    /// clause 9): the Agents behind a Gateway, whichever instance carries them.
-    fn arrived_over(&self, host: &str) -> Result<HashMap<InstanceUid, AgentRecord>, String> {
-        let filter = crate::listing::AgentFilter {
-            arrived_over: Some(host.to_string()),
-            ..crate::listing::AgentFilter::default()
-        };
-        let page = self
-            .agent_store
-            .query_page(&crate::agent_store::PageQuery {
-                filter: &filter,
-                sort: crate::listing::AgentSort::Seq,
-                descending: false,
-                after: None,
-                limit: self.max_agents,
-                seen_before_ms: 0,
-            })?;
-        Ok(self.records_of(
-            page.agents
-                .into_iter()
-                .map(|found| (found.uid, found.stored))
-                .collect(),
-        ))
-    }
-
     /// The view of each Agent of `fleet`, in the order of its `instance_uid`.
     fn views(&self, fleet: &HashMap<InstanceUid, AgentRecord>) -> Vec<AgentView> {
         // One copy of the Deployments for the whole view, rather than one per Agent.
@@ -4643,97 +4241,6 @@ fn parse_hex_uid(uid: &str) -> Option<InstanceUid> {
     Some(InstanceUid(
         <[u8; 16]>::try_from(hex::decode(uid).ok()?).ok()?,
     ))
-}
-
-/// Takes `uid` out of `group`, and the group out of the index once it holds nobody.
-fn unindex(groups: &mut HashMap<Group, HashSet<InstanceUid>>, group: &Group, uid: &InstanceUid) {
-    if let Some(members) = groups.get_mut(group) {
-        members.remove(uid);
-        if members.is_empty() {
-            groups.remove(group);
-        }
-    }
-}
-
-/// The Client Agents behind `gateway` that report `machine` and that `held` says this instance does
-/// not hold, with their labels, of the Agents `arrived` read as arrived over the Gateway's Host. A
-/// read that failed is logged, and none is answered.
-fn clients_behind(
-    gateway: &str,
-    machine: &str,
-    arrived: Result<&HashMap<InstanceUid, AgentRecord>, &String>,
-    held: &dyn Fn(&InstanceUid) -> bool,
-) -> Vec<(InstanceUid, BTreeMap<String, String>)> {
-    match arrived {
-        Ok(found) => {
-            let mut clients: Vec<(InstanceUid, BTreeMap<String, String>)> = found
-                .iter()
-                .filter(|(uid, record)| {
-                    crate::labels::is_client_agent(record.description.as_ref())
-                        && crate::labels::machine(record.description.as_ref()).as_deref()
-                            == Some(machine)
-                        && !held(uid)
-                })
-                .map(|(uid, record)| (*uid, record.labels.clone()))
-                .collect();
-            clients.sort_by_key(|(uid, _)| uid.0);
-            clients
-        }
-        Err(e) => {
-            warn!(gateway = %gateway, error = %e, "cannot read the agents behind the gateway that another instance carries");
-            Vec::new()
-        }
-    }
-}
-
-/// The Client Agents among `found` that arrived over `host`, with their labels, in the order of
-/// their `instance_uid`: of a Host's group, those of the Agents the host register binds to it.
-fn clients_of_host<'a>(
-    host: &str,
-    found: impl IntoIterator<Item = (&'a InstanceUid, &'a PersistedAgent)>,
-) -> Vec<(InstanceUid, BTreeMap<String, String>)> {
-    let mut clients: Vec<(InstanceUid, BTreeMap<String, String>)> = found
-        .into_iter()
-        .filter(|(_, record)| {
-            record.host.as_deref() == Some(host)
-                && crate::labels::is_client_agent(record.description.as_ref())
-        })
-        .map(|(uid, record)| (*uid, record.labels.clone()))
-        .collect();
-    clients.sort_by_key(|(uid, _)| uid.0);
-    clients
-}
-
-/// Places the members of one group under their Client Agent (ADR-0030 clause 19): with exactly
-/// one, the others inherit its labels; with more than one, nobody inherits and every member is
-/// marked ambiguous; with none, nobody inherits. `elsewhere` are the group's Client Agents that
-/// `fleet` does not hold, with their labels.
-fn inherit(
-    fleet: &mut HashMap<InstanceUid, AgentRecord>,
-    groups: &HashMap<Group, HashSet<InstanceUid>>,
-    group: &Group,
-    elsewhere: &[(InstanceUid, BTreeMap<String, String>)],
-) {
-    let Some(members) = groups.get(group) else {
-        return;
-    };
-    let mut clients: Vec<(InstanceUid, &BTreeMap<String, String>)> = members
-        .iter()
-        .filter_map(|uid| {
-            let record = fleet.get(uid)?;
-            crate::labels::is_client_agent(record.description.as_ref())
-                .then_some((*uid, &record.labels))
-        })
-        .collect();
-    clients.extend(elsewhere.iter().map(|(uid, labels)| (*uid, labels)));
-    let placed = crate::listing::place_group(members.iter().copied(), &clients);
-    for (uid, (client_agent, ambiguous, inherited)) in placed {
-        if let Some(record) = fleet.get_mut(&uid) {
-            record.placement.client_agent = client_agent;
-            record.placement.inherited = inherited;
-            record.placement.ambiguous = ambiguous;
-        }
-    }
 }
 
 /// What waits for one Agent's next press — every part in which what the claiming Deployment

@@ -577,7 +577,7 @@ fn arrived_over(
             },
         ));
     }
-    let placed = crate::listing::place_on_host(
+    let placed = crate::fleet::placement::place_on_host(
         gateway,
         &found
             .iter()

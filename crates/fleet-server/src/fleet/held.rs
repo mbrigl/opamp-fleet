@@ -571,28 +571,11 @@ impl AppState {
         };
         // The Client Agents behind each Gateway, read before the fleet lock, as a report's
         // placement reads them, and sifted of what is held as each group is placed.
-        let mut behind: ClientsByGroup = HashMap::new();
-        if shared {
-            let gateways: Vec<Group> = self
-                .groups
-                .lock()
-                .expect("groups lock")
-                .keys()
-                .filter(|group| matches!(group, Group::Behind { .. }))
-                .cloned()
-                .collect();
-            let mut arrived = HashMap::new();
-            for group in gateways {
-                let Group::Behind { gateway, machine } = &group else {
-                    continue;
-                };
-                let arrived = arrived
-                    .entry(gateway.clone())
-                    .or_insert_with(|| self.arrived_over(gateway));
-                let found = clients_behind(gateway, machine, arrived.as_ref(), &|_| false);
-                behind.insert(group, found);
-            }
-        }
+        let behind = if shared {
+            self.read_behind_gateways()
+        } else {
+            HashMap::new()
+        };
 
         let mut fleet = self.fleet.lock().expect("fleet lock");
         // Only the Agents whose own locks are held: one that arrived since was read at its report.
@@ -600,24 +583,11 @@ impl AppState {
             .into_iter()
             .filter(|uid| fleet.contains_key(uid))
             .collect();
-        let groups: Vec<Group> = if shared {
-            self.groups
-                .lock()
-                .expect("groups lock")
-                .keys()
-                .cloned()
-                .collect()
+        let bound = if shared {
+            self.bound_to_hosts()
         } else {
-            Vec::new()
+            HashMap::new()
         };
-        let bound: HashMap<&str, Vec<InstanceUid>> = groups
-            .iter()
-            .filter_map(|group| match group {
-                Group::Host(host) => Some(host.as_str()),
-                Group::Behind { .. } => None,
-            })
-            .map(|host| (host, self.bound_to(host)))
-            .collect();
         let mut wanted: HashSet<InstanceUid> = held.iter().copied().collect();
         wanted.extend(
             self.kept
@@ -637,20 +607,7 @@ impl AppState {
 
         // What every group's Client Agents held elsewhere are, sifted of what is held as each group
         // is placed. A Gateway's group not read before the lock is placed once it is let go.
-        let mut read = behind;
-        for host in bound.keys() {
-            let found = clients_of_host(
-                host,
-                bound[host]
-                    .iter()
-                    .filter_map(|uid| stored.get(uid).map(|record| (uid, record))),
-            );
-            read.insert(Group::Host((*host).to_string()), found);
-        }
-        let mut elsewhere = Elsewhere::Read {
-            read,
-            missed: Vec::new(),
-        };
+        let mut elsewhere = placement::elsewhere_from(behind, &bound, &stored);
 
         let mut moved = 0usize;
         self.kept
@@ -699,11 +656,7 @@ impl AppState {
             self.stop_carrying(&mut fleet, holder, taken);
         }
         if shared {
-            let groups = self.groups.lock().expect("groups lock");
-            let placed: Vec<Group> = groups.keys().cloned().collect();
-            for group in &placed {
-                self.inherit_held(&mut fleet, &groups, group, &mut elsewhere);
-            }
+            self.place_every_group(&mut fleet, &mut elsewhere);
         }
         drop(fleet);
         drop(agents);
@@ -730,64 +683,7 @@ impl AppState {
     #[cfg(test)]
     pub(super) fn holds_anything_of(&self, uid: &InstanceUid) -> bool {
         let fleet = self.fleet.lock().expect("fleet lock");
-        fleet.contains_key(uid)
-            || self
-                .groups
-                .lock()
-                .expect("groups lock")
-                .values()
-                .any(|members| members.contains(uid))
-            || self.kept.keeps(uid)
-    }
-
-    /// Places again each group this instance holds members of whose Client Agent may be one of
-    /// `uids` that it does not hold — the group's Client Agent now, or, of a Host, an Agent the
-    /// host register binds to it. Behind a Gateway a Client Agent another instance carries that
-    /// the group was not placed under yet is not found here: the notice of its arrival places the
-    /// group again ([`place_hosts_again`](AppState::place_hosts_again)), and so does a catch-up
-    /// ([`catch_up`](AppState::catch_up)).
-    pub(super) fn place_again_for(&self, uids: &HashSet<InstanceUid>) {
-        let Some(revocations) = &self.revocations else {
-            return;
-        };
-        let mut fleet = self.fleet.lock().expect("fleet lock");
-        // The notified Agents this instance does not hold.
-        let elsewhere: Vec<InstanceUid> = uids
-            .iter()
-            .filter(|uid| !fleet.contains_key(uid))
-            .copied()
-            .collect();
-        if elsewhere.is_empty() {
-            return;
-        }
-        let groups = self.groups.lock().expect("groups lock");
-        let due: Vec<Group> = groups
-            .iter()
-            .filter(|(group, members)| {
-                // Behind a Gateway the register binds no Agent; the group's Client Agent is the
-                // one it was placed under.
-                let bound = match group {
-                    Group::Host(host) => match revocations.speaks_for(host) {
-                        SpeaksFor::Agents(bound) => bound,
-                        SpeaksFor::Any => BTreeSet::new(),
-                    },
-                    Group::Behind { .. } => BTreeSet::new(),
-                };
-                elsewhere.iter().any(|uid| {
-                    bound.contains(&hex::encode(uid.as_bytes()))
-                        || members.iter().any(|member| {
-                            fleet
-                                .get(member)
-                                .and_then(|record| record.placement.client_agent)
-                                == Some(*uid)
-                        })
-                })
-            })
-            .map(|(group, _)| group.clone())
-            .collect();
-        for group in &due {
-            self.inherit_held(&mut fleet, &groups, group, &mut Elsewhere::Now);
-        }
+        fleet.contains_key(uid) || self.groups.hold(uid) || self.kept.keeps(uid)
     }
 
     /// Re-keys the stored record of `old` to `new`. Where the store answers an error, the move may

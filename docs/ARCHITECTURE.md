@@ -201,7 +201,13 @@ no module.
   Agent held, from which each kind of kept state and every group is taken up), and the per-Agent
   locks — is the core module `fleet::held`, behind the same `AppState` entry points. What it keeps
   of each Agent beside its record is one entry, `Kept`, which a forget drops and a re-key moves as
-  one.
+  one. How the Agents of one Client are placed under its Client Agent
+  ([ADR-0030](adr/0030-the-fleet-record-of-agents-and-hosts.md) clause 19) is the core module
+  `fleet::placement`, behind the same `AppState` entry points: the rule for one group, which the
+  fleet in memory and a page `postgres::agent_page` reads share; the index of the groups this
+  instance holds members of; whether the Client Agents of a group another instance carries are read
+  under the fleet lock or before it (`Elsewhere`); and the placing again after a notice or a
+  catch-up.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
