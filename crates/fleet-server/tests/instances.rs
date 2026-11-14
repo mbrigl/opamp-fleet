@@ -7319,6 +7319,50 @@ async fn chains_cut_with_prunes_that_excuse_each_other_fail() {
     tokio::time::sleep(Duration::from_millis(600)).await;
     let b_chain = b_lease.held().borrow().clone().expect("b");
     let c_chain = c_lease.held().borrow().clone().expect("c");
+    // Three entries on B and C while nobody signs, then one checkpoint by A, which names each
+    // chain's newest head: the first two of the three are named by no checkpoint, however the
+    // entries and checkpoints above fell on a loaded host.
+    let newest_seq = |chain: &str| {
+        schema
+            .query(&format!(
+                "SELECT max(seq)::text FROM audit_entries WHERE chain = '{chain}'::uuid"
+            ))
+            .pop()
+            .and_then(|seq| seq.parse::<u64>().ok())
+            .expect("a seq")
+    };
+    let (b_from, c_from) = (newest_seq(&b_chain), newest_seq(&c_chain));
+    {
+        use fleet_server::audit::Audit as _;
+        for audit in [&b, &c] {
+            for _ in 0..3 {
+                let _ = audit.record(fleet_server::audit::Entry::new("host.admitted", "admitted"));
+            }
+        }
+    }
+    assert!(
+        // timed: the waiter's own deadline, which only a defect reaches
+        eventually(Duration::from_secs(15), || {
+            newest_seq(&b_chain) >= b_from + 3 && newest_seq(&c_chain) >= c_from + 3
+        })
+        .await,
+        "the three entries on B and C written"
+    );
+    let from = checkpoints_in(&schema)
+        .last()
+        .map_or(0, |(_, parsed)| parsed.checkpoint_seq);
+    *signs.lock().expect("turn") = "a";
+    assert!(
+        // timed: the waiter's own deadline, which only a defect reaches
+        eventually(Duration::from_secs(15), || {
+            checkpoints_in(&schema)
+                .last()
+                .is_some_and(|(_, parsed)| parsed.checkpoint_seq > from)
+        })
+        .await,
+        "one more checkpoint after {from}"
+    );
+    *signs.lock().expect("turn") = "nobody";
     assert!(!verified_against(&schema, &key).await.failed);
     // Where each chain can be cut: two unnamed seqs below its newest named head.
     let cut_of = |chain: &str| {
