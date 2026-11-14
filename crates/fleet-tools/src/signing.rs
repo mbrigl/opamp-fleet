@@ -7,7 +7,7 @@
 //!
 //! What it does **not** do is check a hash against anything: the hashes are the Server's, and
 //! comparing them with upstream's checksums or with the files is the operator's duty (ADR-0034
-//! point 4). The tool prints each one as it signs it so the comparison has something to look at.
+//! clause 23). The tool prints each one as it signs it so the comparison has something to look at.
 
 use ring::signature::Ed25519KeyPair;
 use serde::{Deserialize, Serialize};

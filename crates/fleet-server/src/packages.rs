@@ -1346,7 +1346,8 @@ impl PackageStore {
         }
         if !upgrades(set, installed, description) {
             // *Which* of the two versions decided is the operator's first question here (ADR-0033
-            // point 8): the running one wherever it can be ordered, the claim only where it cannot.
+            // clause 19): the running one wherever it can be ordered, the claim only where it
+            // cannot.
             // A refusal naming a number without saying which of the two it was would read like the
             // wrong rule applied — and where both are reported and they disagree, saying that the
             // claim was not consulted is the whole explanation.

@@ -902,7 +902,7 @@ async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
     );
 }
 
-/// ADR-0030, points 11 and 11: forgetting drops the record and reaches no host, so a Client that is
+/// ADR-0030 clauses 10 and 11: forgetting drops the record and reaches no host, so a Client that is
 /// still running simply comes back — and the Server, which now knows nothing about it, asks for
 /// full state exactly as it does for any Agent it has never seen.
 // Verifies: ADR-0030
