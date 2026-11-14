@@ -6,7 +6,7 @@
 //! (ADR-0016 clauses 18, 20 and 21), what a package signature and a floor signature cover
 //! (ADR-0034, ADR-0035), the token buckets a sender is counted in (ADR-0012, ADR-0022), what a
 //! client certificate is known by and every issued certificate gets (`x509`), and the links a
-//! kind's tree package keeps (ADR-draft-packages-signatures-and-delivery clause 57).
+//! kind's tree package keeps (ADR-0050 clause 57).
 //! The protocol and its transport, TLS included, are in the `opamp` crate (ADR-0008).
 
 #![forbid(unsafe_code)]

@@ -109,7 +109,7 @@ fn kinds() -> Vec<Box<dyn Plugin>> {
 /// there would tell the fleet something it could not act on.
 ///
 /// The keys are the build's statement alone: `[attributes]` refuses every `supervisor.*` key
-/// (ADR-draft-what-an-agent-reports-about-itself clause 10), and a value under one of them is
+/// (ADR-0054 clause 10), and a value under one of them is
 /// replaced by what this build carries.
 fn kind_attributes(mut attributes: BTreeMap<String, String>) -> BTreeMap<String, String> {
     for plugin in kinds() {
@@ -572,7 +572,7 @@ fn forward_shutdown(mut global: Shutdown, stop_tx: watch::Sender<bool>) {
 /// What a package replaces: one file, or — when the block says where the program sits inside the
 /// package — the whole tree under this Supervisor's `program/` (ADR-0034). A single file is found
 /// by its name, or at the place in the archive its kind knows
-/// (ADR-draft-packages-signatures-and-delivery clause 55).
+/// (ADR-0050 clause 55).
 fn install_target(
     program_path: Option<std::path::PathBuf>,
     member: Option<&'static str>,
@@ -646,7 +646,7 @@ mod tests {
     /// Which keys those are is `a_build_carries_exactly_the_wrapped_kinds_its_features_name`'s;
     /// this is what the key does to a value already under it: the build's statement replaces it,
     /// and the operator's other attributes pass.
-    // Verifies: ADR-draft-supervisor-mode-and-its-kinds
+    // Verifies: ADR-0051
     #[test]
     fn a_client_reports_the_kinds_it_was_compiled_with() {
         let stated = kind_attributes(
@@ -1683,8 +1683,8 @@ mod tests {
     }
 
     /// The place a kind names for its member reaches the install, and a `program_path` still makes
-    /// it a tree (ADR-draft-packages-signatures-and-delivery clause 55).
-    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    /// it a tree (ADR-0050 clause 55).
+    /// Verifies: ADR-0050
     #[test]
     fn a_kinds_member_reaches_the_single_file_install() {
         use crate::supervisor::ports::InstallTarget;

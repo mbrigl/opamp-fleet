@@ -1,6 +1,6 @@
 //! The links a kind's tree package keeps as links
-//! (ADR-draft-the-operator-program-opamp-fleetctl clause 27,
-//! ADR-draft-packages-signatures-and-delivery clause 57).
+//! (ADR-0053 clause 27,
+//! ADR-0050 clause 57).
 //!
 //! A tree package carries no link, with one exception a kind decides: an absolute link it names
 //! by its exact path in the tree and its exact target, such as a program loader an upstream tree
@@ -56,7 +56,7 @@ mod tests {
 
     /// Only the named path with the named target is kept: another path, another target, a
     /// relative target and a kind's malformed entry keep nothing.
-    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    /// Verifies: ADR-0050
     #[test]
     fn only_the_named_path_with_the_named_target_is_kept() {
         let target = Path::new("/lib64/ld-linux-x86-64.so.2");

@@ -1615,7 +1615,7 @@ impl Offerable {
 pub type InstalledVersions = BTreeMap<String, String>;
 
 /// The fourth matching test: a Package reaches an Agent only as an **upgrade** (ADR-0033 clauses 14
-/// to 16, ADR-draft-deployments-and-rollouts clauses 14 and 25).
+/// to 16, ADR-0049 clauses 14 and 25).
 ///
 /// An Agent reports up to three versions, and they can contradict each other. **What it runs
 /// decides** — the version of the Package its Supervisor installed, where the Supervisor reports
@@ -1667,7 +1667,7 @@ fn upgrades(
 }
 
 /// The version of the Package an Agent's Supervisor reports it installed, as the non-identifying
-/// `supervisor.package.version` (ADR-draft-deployments-and-rollouts clause 25), where it can be
+/// `supervisor.package.version` (ADR-0049 clause 25), where it can be
 /// ordered. One that cannot says nothing, as an unorderable `service.version` says nothing.
 fn installed_package_version(description: Option<&AgentDescription>) -> Option<&str> {
     opamp::attributes::string_value(
@@ -2534,13 +2534,13 @@ mod tests {
         );
     }
 
-    /// ADR-draft-deployments-and-rollouts clauses 14 and 25: where a Supervisor reports the version
+    /// ADR-0049 clauses 14 and 25: where a Supervisor reports the version
     /// of the Package it installed, a Package is held against that, and the program's own number
     /// and the claim are not read. A repack's Package carries a version its program does not
     /// report — the second repack of 2.14.3 is `2.14.4-0.r.2`, and the program it installs still
     /// says `2.14.3` — so held against the program, a host that installed it stays a candidate on
     /// every press.
-    // Verifies: ADR-draft-deployments-and-rollouts
+    // Verifies: ADR-0049
     #[test]
     fn the_installed_package_version_decides_over_the_program_version() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -4564,7 +4564,7 @@ pub struct AgentView {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed_labels: Vec<String>,
     /// Labels stored with a key in `fleet.` or `supervisor.`, which no label may speak in
-    /// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 20): ignored by every Selector and by
+    /// (ADR-0052 clause 20): ignored by every Selector and by
     /// package matching, and inherited by no Agent. Listed rather than dropped in silence; the next
     /// label set put without them removes them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -8492,7 +8492,7 @@ mod tests {
     /// refused one — is ignored after a restart: no Selector matches it on the Agent or on its
     /// Client's other Agents, it is not inherited, the fleet row lists it as ignored, and the next
     /// label set put without it removes it.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0052
     #[test]
     fn a_stored_label_in_the_supervisors_space_matches_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -143,7 +143,7 @@ impl Local {
             }
         }
         // The version of the Package this Supervisor installed, from the record of its last
-        // install (ADR-draft-deployments-and-rollouts clause 25). It is the Package's version, not
+        // install (ADR-0049 clause 25). It is the Package's version, not
         // the program's: a repack is a Package its program does not report, and the Server holds
         // the next Package against this one. The Client Agent reports none, since its
         // `service.version` is what it runs.

@@ -73,7 +73,7 @@ pub struct Args {
     /// Which repack of this version it is, for an agent whose artifact this tool repacks: 1, the
     /// default, for the first, 2 and on for a later one of the same version. The second repack of
     /// 2.14.3 is uploaded as Package `2.14.4-0.r.2`, above the first and below upstream's next
-    /// release (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
+    /// release (ADR-0053 clause 28).
     #[arg(long, value_name = "N", default_value_t = 1)]
     repack: u32,
 }
@@ -165,7 +165,7 @@ impl AgentKind {
 
     /// Whether this tool repacks the agent's artifact, rather than uploading it as upstream
     /// publishes it: only then can one version have a later repack
-    /// (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
+    /// (ADR-0053 clause 28).
     fn repacked(self) -> bool {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
@@ -260,7 +260,7 @@ fn package_version(upstream: &str) -> Result<String, String> {
 }
 
 /// The Package version of the `repack`-th repack of one upstream version, whose Package version
-/// is `version` (ADR-draft-the-operator-program-opamp-fleetctl clause 28). The first is the version
+/// is `version` (ADR-0053 clause 28). The first is the version
 /// itself. A later one is `<major>.<minor>.<patch+1>-0.r.<n>`: a pre-release of the next patch, so
 /// it orders above the first repack and below upstream's next release, and its repack number is a
 /// numeric identifier, compared as a number. Build metadata would not do, since two versions that
@@ -1030,7 +1030,7 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 /// pointing at nothing inside the tree is dropped.
 ///
 /// The one exception is `kept`, the absolute links the kind names by their exact path in the tree
-/// and their exact target (ADR-draft-the-operator-program-opamp-fleetctl clause 27): each is packed
+/// and their exact target (ADR-0053 clause 27): each is packed
 /// as that link, read from the tree and never followed, and the Client creates exactly those. A
 /// link at a named path with another target leads out like any other.
 #[allow(
@@ -1367,7 +1367,7 @@ fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, S
     })
 }
 
-/// The mode to store, normalized (ADR-draft-the-operator-program-opamp-fleetctl clause 27):
+/// The mode to store, normalized (ADR-0053 clause 27):
 /// `0o755` for a file any execute bit is set on, `0o644` for every other, so no write bit beyond
 /// the owner's and no setuid, setgid or sticky bit upstream set reaches the signed artifact. Off
 /// Unix it is a decision rather than a reading: a tar written on Windows has no mode to carry, and
@@ -1703,8 +1703,8 @@ mod tests {
     /// A later repack of one version is numbered as a pre-release of the next patch, so it orders
     /// above the first repack and below upstream's next release, its repack number compared as a
     /// number; the first keeps the version
-    /// (ADR-draft-the-operator-program-opamp-fleetctl clause 28).
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    /// (ADR-0053 clause 28).
+    /// Verifies: ADR-0053
     #[test]
     fn a_later_repack_orders_between_the_version_and_the_next_release() {
         use std::cmp::Ordering;
@@ -2362,7 +2362,7 @@ mod tests {
     /// A link the kind names by its exact path and target is packed as that link, never followed,
     /// and a Client installing the tree with the same kind creates it.
     ///
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_link_the_kind_keeps_is_packed_as_that_link() {
@@ -2416,7 +2416,7 @@ mod tests {
     /// kind naming it, the named path with another target, an unnamed absolute link beside a kept
     /// one, and the kept link reached through a linked directory under another name.
     ///
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_link_the_kind_does_not_keep_still_fails_the_repack() {
@@ -2462,7 +2462,7 @@ mod tests {
     /// A repack stores normalized modes: a file with any execute bit `0o755`, every other file
     /// `0o644`, a directory `0o755` — whatever write, setuid, setgid or sticky bits upstream set.
     ///
-    /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_repack_stores_normalized_modes() {

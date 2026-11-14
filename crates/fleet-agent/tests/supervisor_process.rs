@@ -1007,7 +1007,7 @@ both!(the_managed_process_is_handed_the_endpoint_token);
 /// A Managed Process whose kind declares that it gets no Supervisor Endpoint token, because it never
 /// connects to the endpoint, finds none in its environment: its Runner holds an empty one, which is
 /// not set.
-/// Verifies: ADR-draft-client-modes-and-the-gateway
+/// Verifies: ADR-0048
 async fn a_managed_process_whose_kind_declares_no_token_finds_none(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("running");

@@ -18,8 +18,8 @@
 //! can speak in the Server's name**: `fleet.*` is the Server's own, filled from the Host's
 //! certificate (ADR-0030 clauses 18 and 20). **Nor can a label speak in a Supervisor's**:
 //! `supervisor.*` is what a Supervisor states about its Client and the Package it installed
-//! (ADR-draft-what-an-agent-reports-about-itself clause 10), and a label is refused there as in
-//! `fleet.*` (ADR-draft-the-fleet-record-of-agents-and-hosts clause 20). A label already stored
+//! (ADR-0054 clause 10), and a label is refused there as in
+//! `fleet.*` (ADR-0052 clause 20). A label already stored
 //! with a key in either space is ignored: it enters no effective description and nothing inherits
 //! it, and the fleet row lists it as ignored.
 
@@ -35,7 +35,7 @@ pub const RESERVED_PREFIX: &str = "fleet.";
 pub const CLIENT_KIND_PREFIX: &str = "supervisor.kind.";
 
 /// Whether a label key is in a space no label may speak in: the Server's `fleet.` or a Supervisor's
-/// `supervisor.` (ADR-draft-the-fleet-record-of-agents-and-hosts clause 20).
+/// `supervisor.` (ADR-0052 clause 20).
 pub fn is_reserved_label(key: &str) -> bool {
     key.starts_with(RESERVED_PREFIX) || key.starts_with(opamp::attributes::SUPERVISOR_PREFIX)
 }
@@ -67,7 +67,7 @@ pub enum LabelError {
 
 /// Whether a label set can be applied: an empty key or value can match no Selector and is far more
 /// likely a mistake than an intent, a `fleet.` key is the Server's own, and a `supervisor.` key a
-/// Supervisor's (ADR-draft-the-fleet-record-of-agents-and-hosts clause 20).
+/// Supervisor's (ADR-0052 clause 20).
 pub fn check_pairs(set: &BTreeMap<String, String>) -> Result<(), String> {
     for (key, value) in set {
         if key.contains('\0') || value.contains('\0') {
@@ -222,7 +222,7 @@ pub fn ignored(description: Option<&AgentDescription>) -> Vec<String> {
         .collect()
 }
 
-/// The labels this Agent has in a reserved space (ADR-draft-the-fleet-record-of-agents-and-hosts
+/// The labels this Agent has in a reserved space (ADR-0052
 /// clause 20) — stored, and matching nothing. Listed on the fleet row, as a shadowed label is,
 /// rather than dropped in silence.
 pub fn ignored_labels(labels: &BTreeMap<String, String>) -> Vec<String> {
@@ -352,7 +352,7 @@ mod tests {
 
     /// An empty key or value is refused, and so is a key in the Server's `fleet.` space or the
     /// Supervisor's `supervisor.` space, each naming the key and its space.
-    /// Verifies: ADR-0030, ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0030, ADR-0052
     #[test]
     fn empty_keys_and_values_and_fleet_keys_are_refused() {
         assert!(check_pairs(&labels(&[("rollout", "canary")])).is_ok());
@@ -379,7 +379,7 @@ mod tests {
     /// ignored: whether the Agent's own or its Client Agent's, it never reaches the effective
     /// description, so no Selector matches it and package matching never reads it as the version a
     /// Supervisor installed; the label beside it still matches, and the fleet row lists it.
-    /// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+    /// Verifies: ADR-0052
     #[test]
     fn a_stored_label_in_the_supervisors_space_is_ignored() {
         let described = described(&[("os.type", "linux")]);

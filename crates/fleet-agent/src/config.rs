@@ -596,7 +596,7 @@ fn secret<'de, D: serde::Deserializer<'de>>(
 }
 
 /// `[attributes]`, each value a string, with every key of the `supervisor.` namespace refused by
-/// name (ADR-draft-what-an-agent-reports-about-itself clause 10). The namespace is refused however
+/// name (ADR-0054 clause 10). The namespace is refused however
 /// TOML spells the key: quoted (`"supervisor.kind.x"`), dotted (`supervisor.kind.x`), or as the
 /// sub-table `[attributes.supervisor]`. The last two reach here as a table under `supervisor`,
 /// which a map of strings would refuse only as a type error that names neither the key nor the
@@ -2287,7 +2287,7 @@ mod tests {
     /// Client Agent, or choose the version a Package is held against: the file is refused,
     /// naming the key and the rule, whichever key of the namespace it is and however TOML spells
     /// it — quoted, dotted, or as the sub-table `[attributes.supervisor]`.
-    /// Verifies: ADR-draft-what-an-agent-reports-about-itself
+    /// Verifies: ADR-0054
     #[test]
     fn an_attribute_in_the_supervisors_namespace_is_refused_by_name() {
         let dir = tempfile::tempdir().expect("tempdir");

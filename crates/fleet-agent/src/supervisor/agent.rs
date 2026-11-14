@@ -2194,8 +2194,8 @@ mod tests {
     /// A Supervisor reports the version of the Package it installed as its own attribute, on the
     /// next report after the install, and keeps it across a rollback, which leaves the predecessor
     /// running; it reports none before its first install. The Client Agent reports none, and a
-    /// Managed Process cannot state it (ADR-draft-deployments-and-rollouts clause 25).
-    /// Verifies: ADR-draft-deployments-and-rollouts
+    /// Managed Process cannot state it (ADR-0049 clause 25).
+    /// Verifies: ADR-0049
     #[test]
     fn a_supervisor_reports_the_version_of_the_package_it_installed() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -182,7 +182,7 @@ impl AgentState {
                 local.installed_package = Some(installed);
                 local.package_error.clear();
                 // The description states the installed Package's version
-                // (ADR-draft-deployments-and-rollouts clause 25), and only a full report carries
+                // (ADR-0049 clause 25), and only a full report carries
                 // the description.
                 self.protocol.force_full();
             }

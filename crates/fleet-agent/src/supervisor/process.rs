@@ -689,7 +689,7 @@ pub struct Staged {
 /// of the environment, in the working directory — so a tree carrying its own libraries, or a
 /// program that is handed paths into its own tree, is checked against **those** rather than
 /// against the ones the running version happens to leave behind
-/// (ADR-draft-supervisor-mode-and-its-kinds clause 57).
+/// (ADR-0051 clause 57).
 pub struct Preflight {
     pub args: Vec<String>,
     /// Environment for the check.
@@ -715,7 +715,7 @@ pub struct VersionProbe {
     pub args: Vec<String>,
     /// Where the probe starts; `None` inherits. A kind whose program needs its tree root to run at
     /// all names it here as it does for the start, or the probe asks a program that is not the
-    /// one the Supervisor runs (ADR-draft-supervisor-mode-and-its-kinds clause 57).
+    /// one the Supervisor runs (ADR-0051 clause 57).
     pub working_dir: Option<PathBuf>,
     /// How to read a version out of what the program printed. `None` is [`find_semver`], the strict
     /// Semantic Versioning read. A program whose version banner is not SemVer, such as
@@ -725,7 +725,7 @@ pub struct VersionProbe {
     /// Environment for the probe, empty by default. A kind whose start hands its program an
     /// environment it needs to run at all — a tree's own library path — hands the probe the same,
     /// or the probe asks a program that cannot start
-    /// (ADR-draft-supervisor-mode-and-its-kinds clause 57).
+    /// (ADR-0051 clause 57).
     pub env: Vec<(String, String)>,
 }
 
@@ -741,7 +741,7 @@ pub struct Runner {
     /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0016); wiped when it is
     /// dropped (ADR-0014). Empty where the kind declares that its program gets no token, because
     /// it never connects to the Supervisor Endpoint, and an empty one is not set
-    /// (ADR-draft-client-modes-and-the-gateway clause 28).
+    /// (ADR-0048 clause 28).
     pub endpoint_token: zeroize::Zeroizing<String>,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
@@ -2092,7 +2092,7 @@ enum GraceOutcome {
 ///
 /// The artifact may be the program or an archive holding it (ADR-0034). An archive is opened here,
 /// where the binary's name is known, and the member of that name — or at the place `member` names,
-/// where the kind knows it (ADR-draft-packages-signatures-and-delivery clause 55) — is what gets
+/// where the kind knows it (ADR-0050 clause 55) — is what gets
 /// installed — nothing
 /// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
 /// its author published. Unpacking always writes; only the raw case can be a move.
@@ -3199,8 +3199,8 @@ mod tests {
     /// A single file whose kind names its place is installed from that place, past a directory and
     /// another file of the program's name ahead of it; without the place the same archive holds
     /// the program twice and is refused, and nothing staged is left behind
-    /// (ADR-draft-packages-signatures-and-delivery clause 55).
-    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    /// (ADR-0050 clause 55).
+    /// Verifies: ADR-0050
     #[test]
     fn a_member_target_installs_the_file_at_its_kinds_place() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3413,8 +3413,8 @@ mod tests {
     /// the Client — the program it names is not even on this host — in the working directory and
     /// with the environment its kind names, and what the service relays of its output is what the
     /// version is read from
-    /// (ADR-0021 clause 18, ADR-draft-supervisor-mode-and-its-kinds clause 57).
-    /// Verifies: ADR-0021, ADR-draft-supervisor-mode-and-its-kinds
+    /// (ADR-0021 clause 18, ADR-0051 clause 57).
+    /// Verifies: ADR-0021, ADR-0051
     #[cfg(unix)]
     #[tokio::test]
     async fn the_version_probe_runs_through_the_second_service() {
@@ -3464,8 +3464,8 @@ mod tests {
     /// With a process account registered, the preflight of a staged package is run by the second
     /// service, with `${staged}` resolved in its arguments, its environment and its working
     /// directory, and what the program said through the service is the reason it is refused
-    /// (ADR-0021 clause 18, ADR-draft-supervisor-mode-and-its-kinds clause 57).
-    /// Verifies: ADR-0021, ADR-draft-supervisor-mode-and-its-kinds
+    /// (ADR-0021 clause 18, ADR-0051 clause 57).
+    /// Verifies: ADR-0021, ADR-0051
     #[cfg(unix)]
     #[tokio::test]
     async fn the_preflight_runs_through_the_second_service() {
@@ -3529,7 +3529,7 @@ mod tests {
     /// the block's `env` and the Supervisor Endpoint's token, last, and nothing else — the program
     /// takes the rest from the second service (ADR-0021 clause 22). A Runner holding no token sets
     /// none.
-    /// Verifies: ADR-0021, ADR-draft-client-modes-and-the-gateway
+    /// Verifies: ADR-0021, ADR-0048
     #[cfg(unix)]
     #[tokio::test]
     async fn a_start_through_the_second_service_carries_only_the_blocks_env_and_the_token() {
@@ -3569,7 +3569,7 @@ mod tests {
         );
 
         // A Runner holding no token, as a kind whose program never connects to the Supervisor
-        // Endpoint builds it, sets none (ADR-draft-client-modes-and-the-gateway clause 28).
+        // Endpoint builds it, sets none (ADR-0048 clause 28).
         let (peer, mut asked) = answering(Stream::Stdout, "", 0).await;
         runner.endpoint_token = zeroize::Zeroizing::default();
         runner.spawner = Spawner::Channel(peer.channel.clone());

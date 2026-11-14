@@ -186,7 +186,7 @@ pub(super) fn derive_missing(database: &Database) -> Result<(), String> {
 /// Every row of `agents` with what is joined at read time: whether a connection carries it, its
 /// holder under a live lease, its Host, and the Client Agent of its group with the labels it passes
 /// on (ADR-0030 clause 19), none in the `fleet.` or `supervisor.` space, which nothing inherits
-/// (ADR-draft-the-fleet-record-of-agents-and-hosts clause 20). A group is a Host the Agent arrived
+/// (ADR-0052 clause 20). A group is a Host the Agent arrived
 /// over directly, or a Gateway's Host and the machine the Agent reports.
 const PLACED: &str = r#"
 WITH g AS (
@@ -317,7 +317,7 @@ fn conditions(query: &PageQuery<'_>) -> Conditions {
         }
         let k = c.bind(key.clone());
         // A label in the Supervisor's space matches nothing, so only what is reported can
-        // (ADR-draft-the-fleet-record-of-agents-and-hosts clause 20).
+        // (ADR-0052 clause 20).
         if key.starts_with(opamp::attributes::SUPERVISOR_PREFIX) {
             c.clauses
                 .push(format!("coalesce(v.reported ->> {k} = {v}, false)"));

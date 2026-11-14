@@ -795,7 +795,7 @@
         // which is what makes a rollout channel a Server-side decision instead of an edit on the host.
         for (const [key, value] of Object.entries(a.labels || {})) {
           // A stored label in fleet. or supervisor. matches nothing
-          // (ADR-draft-the-fleet-record-of-agents-and-hosts clause 20): shown as ignored, and left
+          // (ADR-0052 clause 20): shown as ignored, and left
           // out of the label editor, so the next set put removes it.
           if ((a.ignored_labels || []).includes(key)) {
             chips.push(`<span class="pill amber" title="a label in fleet. or supervisor. — no label may speak there, so selectors and package matching ignore it and nothing inherits it; setting this Agent's labels removes it">⚠ ignored ${esc(key)}=${esc(value)}</span>`);

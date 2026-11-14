@@ -16,7 +16,7 @@
 //!   paths — so every path is validated by [`safe_member_path`] *before a byte is written*, and one
 //!   member this Client will not write refuses the whole archive. A `.tar.gz` tree may hold the
 //!   absolute links its kind names by exact path and target, and nothing beneath them; every
-//!   other link refuses it (ADR-draft-packages-signatures-and-delivery clause 57).
+//!   other link refuses it (ADR-0050 clause 57).
 //! - **The output is bounded.** Extraction stops at [`MAX_UNPACKED_BYTES`] — for a tree, across all
 //!   its members, and at [`MAX_TREE_MEMBERS`] members — so an archive that expands without end
 //!   fills a temporary file up to that limit and then fails, rather than a disk. A `.tar.gz` is
@@ -208,7 +208,7 @@ fn locate_program(
 /// Whether an archive entry at `path` is a single-file package's `member`: its trailing path
 /// components are the member's, `/`-separated. A bare name is one component, so it matches the
 /// entry's file name wherever the archive keeps it; a longer one says where
-/// (ADR-draft-packages-signatures-and-delivery clause 55). The path is only compared, never written
+/// (ADR-0050 clause 55). The path is only compared, never written
 /// to, so what it climbs to does not matter.
 fn is_member(path: &Path, member: &str) -> bool {
     ends_with_components(path, Path::new(member))
@@ -229,7 +229,7 @@ fn no_member_named(member: &str, seen: &[String]) -> String {
 
 /// The error for a single-file package whose member the archive holds more than once. Which one
 /// would be installed is the archive's order, which nobody chose, so none is
-/// (ADR-draft-packages-signatures-and-delivery clause 55).
+/// (ADR-0050 clause 55).
 fn several_members_named(member: &str, matched: &[String]) -> String {
     format!(
         "{member:?} matches {} members of the archive ({}) — refusing to choose between them",
@@ -396,7 +396,7 @@ fn extract_7z_within(
 /// difference between how one project and the next lays out a release — and `usr/bin/agent` finds
 /// the one file of that name a kind means among several. Only files are members. An archive
 /// holding the member more than once is refused rather than left to its order
-/// (ADR-draft-packages-signatures-and-delivery clause 55).
+/// (ADR-0050 clause 55).
 ///
 /// # Errors
 /// Returns an error when the archive cannot be read, holds no such member, or the member exceeds
@@ -421,7 +421,7 @@ fn extract_tar_gz_within(
     let mut seen: Vec<String> = Vec::new();
     // Every entry that is the member. The archive is read to its end even after the first, because
     // a second one means the archive's order would be choosing the program
-    // (ADR-draft-packages-signatures-and-delivery clause 55).
+    // (ADR-0050 clause 55).
     let mut matched: Vec<String> = Vec::new();
     let mut written: u64 = 0;
     let mut decompressed: u64 = 0;
@@ -495,7 +495,7 @@ fn skipped(member: &Path, summary: &mut TreeSummary) {
 /// Every member is validated before anything is written; one that cannot be written safely refuses
 /// the whole archive. A symbolic link is created only where `kept` names its path in the tree and
 /// its target exactly, and nothing else may sit at or beneath it, so no member is written through
-/// it (ADR-draft-packages-signatures-and-delivery clause 57); any other link refuses the archive.
+/// it (ADR-0050 clause 57); any other link refuses the archive.
 ///
 /// # Errors
 /// Returns an error when the archive cannot be read, holds no or several members matching
@@ -863,7 +863,7 @@ fn is_7z_link(entry: &sevenz_rust2::ArchiveEntry) -> bool {
 }
 
 /// Whether a `.7z` entry is a regular file, the only kind of entry that can be a single-file
-/// package's member (ADR-draft-packages-signatures-and-delivery clause 55): not a directory, not
+/// package's member (ADR-0050 clause 55): not a directory, not
 /// a link, and not an anti-item, which deletes rather than installs.
 fn is_7z_file(entry: &sevenz_rust2::ArchiveEntry) -> bool {
     !entry.is_directory && !entry.is_anti_item && !is_7z_link(entry)
@@ -924,7 +924,7 @@ fn extract_zip_within(
 
     // Find the member by metadata alone — `by_index_raw` reads the central directory and
     // decompresses nothing — and every entry of it, so one held twice is refused
-    // (ADR-draft-packages-signatures-and-delivery clause 55).
+    // (ADR-0050 clause 55).
     let mut found: Vec<(usize, String)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for index in 0..zip.len() {
@@ -1207,8 +1207,8 @@ mod tests {
     /// A member given as a path is the one file whose trailing components are that path, wherever
     /// the archive puts it in its order: a directory of the program's name and another file of it
     /// ahead of the program change nothing
-    /// (ADR-draft-packages-signatures-and-delivery clause 55).
-    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    /// (ADR-0050 clause 55).
+    /// Verifies: ADR-0050
     #[test]
     fn a_member_path_picks_its_file_among_others_of_the_same_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1228,8 +1228,8 @@ mod tests {
 
     /// A member the archive holds more than once is refused, naming every place it holds it,
     /// in each container — and a directory of that name is not one of them
-    /// (ADR-draft-packages-signatures-and-delivery clause 55).
-    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    /// (ADR-0050 clause 55).
+    /// Verifies: ADR-0050
     #[test]
     fn a_member_held_twice_refuses_the_archive_in_every_container() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1270,8 +1270,8 @@ mod tests {
     /// Only a regular file is a member in a `.zip` and a `.7z` too: a link or an anti-item of the
     /// program's name, ahead of the program, is no candidate, so it neither installs its target
     /// text nor makes the archive ambiguous; and an archive holding only such an entry has no
-    /// member (ADR-draft-packages-signatures-and-delivery clause 55).
-    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    /// member (ADR-0050 clause 55).
+    /// Verifies: ADR-0050
     #[test]
     fn a_link_or_an_anti_item_is_no_member_in_a_zip_or_a_7z() {
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -1856,7 +1856,7 @@ mod tests {
 
     /// A link the kind names by its exact path in the tree and its exact target is created as
     /// that link; the program and the files beside it land as ever.
-    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    /// Verifies: ADR-0050
     #[cfg(unix)]
     #[test]
     fn a_link_the_kind_keeps_is_created_as_that_link() {
@@ -1895,7 +1895,7 @@ mod tests {
     /// not name, a named path with another target, the named target at another path, a relative
     /// link, one outside the program's directory, and a member at or beneath a kept link, which
     /// would be written through it.
-    /// Verifies: ADR-draft-packages-signatures-and-delivery
+    /// Verifies: ADR-0050
     #[test]
     fn a_link_the_kind_does_not_keep_refuses_the_archive() {
         let cases: [(&str, &str, Vec<Entry<'_>>, &str); 7] = [

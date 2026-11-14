@@ -33,7 +33,7 @@ pub const SERVICE_VERSION: &str = "service.version";
 pub const SUPERVISOR_PREFIX: &str = "supervisor.";
 /// The version of the Package a Supervisor installed for its Managed Process — the Supervisor's
 /// statement, never the process's (ADR-0017 clause 8) — and what a Package is held against
-/// where it is reported (ADR-draft-deployments-and-rollouts clauses 14 and 25).
+/// where it is reported (ADR-0049 clauses 14 and 25).
 pub const SUPERVISOR_PACKAGE_VERSION: &str = "supervisor.package.version";
 /// The operating system in the semantic-convention spelling (`linux`, `darwin`, `windows`) — half
 /// of the platform a package artifact is chosen by (ADR-0034).

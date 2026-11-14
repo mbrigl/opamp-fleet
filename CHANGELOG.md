@@ -19,7 +19,7 @@ once its tag exists.
 ### Added
 
 - **`opamp-fleetctl package fetch --repack <n>` numbers a later repack of one version**
-  ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
+  ([ADR-0053](docs/adr/0053-the-operator-program-opamp-fleetctl.md)
   clause 28), for an agent whose artifact the tool repacks; an agent the tool uploads as upstream
   publishes it refuses a number above 1. The second repack of `2.14.3` is
   uploaded as Package `2.14.4-0.r.2`, above every earlier repack and below the next release, and
@@ -36,7 +36,7 @@ once its tag exists.
 
 - **A Supervisor reports the version of the Package it installed, and the Server holds the next
   Package against it**
-  ([ADR-draft-deployments-and-rollouts](docs/adr/draft-deployments-and-rollouts.md) clauses 14 and
+  ([ADR-0049](docs/adr/0049-deployments-and-rollouts.md) clauses 14 and
   25). A Supervisor-backed Agent reports `supervisor.package.version` once its Supervisor has
   installed a Package, and the Server's candidate, reach count, fleet view and rollout act compare
   a Package with it, falling back to `service.version` where it is not reported. A host that
@@ -47,7 +47,7 @@ once its tag exists.
 
 - **A single-file package installs one regular file, never a directory, and an archive holding
   its program twice is refused**
-  ([ADR-draft-packages-signatures-and-delivery](docs/adr/draft-packages-signatures-and-delivery.md)
+  ([ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md)
   clause 55). The Client took the first entry whose file name was the program's, so an archive
   that also held a directory or another file of that name installed whichever came first. It now
   takes only a regular file, never a directory, a link or a 7z anti-item, and refuses an archive in
@@ -59,13 +59,13 @@ once its tag exists.
   once.
 
 - **Every repack `opamp-fleetctl package fetch` makes stores normalized modes**
-  ([ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
+  ([ADR-0053](docs/adr/0053-the-operator-program-opamp-fleetctl.md)
   clause 27): `0o755` for directories and executables and `0o644` for every other file, so no group
   or world write bit and no setuid bit upstream set reaches the signed artifact.
   **What to do:** nothing.
 
 - **Breaking: the Client refuses an `[attributes]` key in the `supervisor.` namespace**
-  ([ADR-draft-what-an-agent-reports-about-itself](docs/adr/draft-what-an-agent-reports-about-itself.md)
+  ([ADR-0054](docs/adr/0054-what-an-agent-reports-about-itself.md)
   clause 10). The namespace is
   the Supervisor's own statement. A `supervisor.kind.*` entry made every Agent of the host look
   like a Client's own Agent to the Server. A `supervisor.package.version` entry chose the version
@@ -77,7 +77,7 @@ once its tag exists.
   `supervisor.toml` before upgrading, or the Client does not start.
 
 - **The Server refuses a label in the `supervisor.` namespace**
-  ([ADR-draft-the-fleet-record-of-agents-and-hosts](docs/adr/draft-the-fleet-record-of-agents-and-hosts.md)
+  ([ADR-0052](docs/adr/0052-the-fleet-record-of-agents-and-hosts.md)
   clause 20).
   `PUT /api/v1/agents/{uid}/labels`, which the UI's label editor uses, answers `400` naming the
   key, as it does for `fleet.`: a Selector would otherwise match such a label as if a Supervisor
@@ -87,9 +87,9 @@ once its tag exists.
   nothing.
 
 - **A tree package may keep the absolute links its Supervisor's kind names, and no other link**
-  ([ADR-draft-packages-signatures-and-delivery](docs/adr/draft-packages-signatures-and-delivery.md)
+  ([ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md)
   clause 57,
-  [ADR-draft-the-operator-program-opamp-fleetctl](docs/adr/draft-the-operator-program-opamp-fleetctl.md)
+  [ADR-0053](docs/adr/0053-the-operator-program-opamp-fleetctl.md)
   clause 27). A kind may name a link by its exact path in the tree and its exact absolute target;
   `opamp-fleetctl package fetch` packs it as that link, and the Client creates it when it unpacks
   a `.tar.gz` tree for that kind. Every other link still fails the repack, and still refuses the

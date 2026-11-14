@@ -5768,7 +5768,7 @@ async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_
 /// A label in the Supervisor's space the database already holds matches nothing in the list read
 /// from it: a Selector on it admits no Agent, an Agent placed under the Client Agent that holds it
 /// does not inherit it, and the label beside it still matches and is inherited.
-/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts, ADR-0031
+/// Verifies: ADR-0052, ADR-0031
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stored_label_in_the_supervisors_space_matches_nothing_in_the_list() {
     let Some(schema) = Schema::named() else {

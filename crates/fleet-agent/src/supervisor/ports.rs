@@ -156,7 +156,7 @@ pub enum InstallTarget {
         /// Where the program lives.
         path: PathBuf,
         /// Where its archive holds it, where its kind knows the place
-        /// (ADR-draft-packages-signatures-and-delivery clause 55): the one member whose trailing
+        /// (ADR-0050 clause 55): the one member whose trailing
         /// path components are this, `/`-separated and without the archive's wrapping directory
         /// (`usr/bin/agent`), so a release that carries further files of the program's name
         /// installs the program and not one of those. `None` finds the member by the program's
@@ -172,7 +172,7 @@ pub enum InstallTarget {
         /// Where the program sits inside the tree, as written in the configuration.
         program_path: PathBuf,
         /// The absolute links the kind's tree keeps, the only links the install creates
-        /// (ADR-draft-packages-signatures-and-delivery clause 57).
+        /// (ADR-0050 clause 57).
         links: &'static [fleet_core::tree::KeptLink],
     },
 }
@@ -413,13 +413,13 @@ pub struct KindDefaults {
     pub program_path: Option<&'static str>,
     /// Where a single-file package's archive holds the program, as trailing path components
     /// (`usr/bin/agent`), for an archive that carries more than one file of the program's name.
-    /// `None` finds the member by its file name alone (ADR-draft-packages-signatures-and-delivery
+    /// `None` finds the member by its file name alone (ADR-0050
     /// clause 55).
     pub member: Option<&'static str>,
     /// The absolute links a tree package of this kind keeps as links, each by its exact path in
     /// the tree and its exact target: the only links the tree's install creates, and the only
     /// links leading out that `opamp-fleetctl` packs
-    /// (ADR-draft-packages-signatures-and-delivery clause 57). Empty for nearly every kind.
+    /// (ADR-0050 clause 57). Empty for nearly every kind.
     pub tree_links: &'static [fleet_core::tree::KeptLink],
     /// The Agent *type* this kind presents (ADR-0017). `None` falls back to the program's file
     /// name, which is what the block already said.

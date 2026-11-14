@@ -1746,7 +1746,7 @@ async fn a_label_in_the_fleet_space_is_refused() {
 /// `supervisor.*` is a Supervisor's own statement: a label in it is refused `400` as one in
 /// `fleet.*` is, naming the key, and nothing is stored — so no label makes an Agent look as if
 /// its Client carried a kind, or had installed a Package.
-/// Verifies: ADR-draft-the-fleet-record-of-agents-and-hosts
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn a_label_in_the_supervisors_space_is_refused() {
     let server = spawn().await;
