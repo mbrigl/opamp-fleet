@@ -127,6 +127,23 @@
 #      file name after a path other than '../', such as 'docs/README.md'; and a section named
 #      by what it says instead of by its heading, such as 'the manual checklist in README.md'.
 #      Superseded and rejected ADRs are not read.
+#  18. Clause citations: a citation of an ADR's clause names a numbered clause of that ADR's
+#      Decision, of an ADR in force: a normalization moves clause citations by its map, and a
+#      citation that names no clause, or a clause of a dead ADR, is stale. The forms read are
+#      'ADR-NNNN clause N' and 'clauses N, M and K' or 'N to M' after it, the identifier perhaps a
+#      Markdown link, followed by a comma or an opening parenthesis, and 'clause N of ADR-NNNN',
+#      the word capitalized or not; a draft identifier counts as a number does. Numbers are joined
+#      by a comma, 'and', 'or', 'to' or an en dash, never by space alone, and a number the text
+#      goes on from, as a date does, is not one. A citation wrapped over two lines is joined, the
+#      comment marker of the second line and a backslash ending the first dropped. Each number,
+#      both ends of a range included, lies between 1 and the count of the Decision's numbered
+#      items ('N. ' at the start of a line). A citation of a superseded or rejected ADR fails
+#      outside docs/adr/, whose ADRs keep the past they were written against, and outside
+#      CHANGELOG.md, which records what held when each entry was written. So does a citation of a
+#      place instead of a clause, which a normalization's map cannot follow: 'point', 'paragraph',
+#      'line', 'rule', 'item', 'bullet', 'step', 'section' or the section sign before a number,
+#      after an identifier. An identifier that names no ADR is check 5's. Superseded and rejected
+#      ADRs are not read, nor is the template.
 #
 # Checks 5 and 6 read every text file of the repository, not a list of documentation extensions:
 # docs/adr/README.md states that code may reference an ADR number, so a verifier restricted to
@@ -1384,6 +1401,129 @@ check_named_sections() {
   ' "${files[@]}")
 }
 
+# Check 18 (see the header). DECISION_CLAUSES holds, for each ADR's key, the count of its
+# Decision's numbered items, read once. One awk pass over every file that names an ADR prints each
+# citation as file, line, the key, the word cited by ('clause' or a place), and its numbers, a
+# range as 'N-M'; a line is read joined to the next, as in check 17.
+declare -A DECISION_CLAUSES=()
+check_clause_citations() {
+  local files=() f
+  for f in "${TEXT_FILES[@]}"; do
+    [[ "$f" == "$ADR_DIR/template.md" ]] && continue
+    is_inactive_adr "$f" || files+=("$f")
+  done
+  ((${#files[@]})) || return 0
+  mapfile -t files < <(grep -l -- 'ADR-' "${files[@]}" 2>/dev/null)
+  ((${#files[@]})) || return 0
+  if ((${#ADR_LIST[@]})); then
+    while IFS=$'\x1f' read -r f n; do
+      adr_key_of "$f"
+      DECISION_CLAUSES["$ADR_KEY"]="$n"
+    done < <(awk '
+      FNR == 1 { if (NR > 1) printf "%s\037%d\n", file, n; file = FILENAME; n = 0; d = 0 }
+      /^## / { d = ($0 ~ /^## Decision[[:space:]]*$/); next }
+      d && /^[0-9]+\. / { n++ }
+      END { if (NR) printf "%s\037%d\n", file, n }
+    ' "${ADR_LIST[@]}")
+  fi
+  local file lineno key word numbers rel target n cited end low high
+  while IFS=$'\x1f' read -r file lineno key word numbers; do
+    rel="${file#"$ROOT"/}"
+    target="${ADR_BY_KEY["$key"]-}"
+    [[ -n "$target" ]] || continue
+    if [[ "$word" != clause ]]; then
+      [[ "$rel" == CHANGELOG.md ]] \
+        || add_error "$rel:$lineno: ADR-$key is cited by $word, a place a normalization cannot follow — cite its clause"
+      continue
+    fi
+    if is_inactive_adr "$target" && [[ "$file" != "$ADR_DIR"/* && "$rel" != CHANGELOG.md ]]; then
+      add_error "$rel:$lineno: ADR-$key is no longer in force — cite the clause of the ADR that is"
+      continue
+    fi
+    n="${DECISION_CLAUSES["$key"]-0}"
+    for cited in $numbers; do
+      low="${cited%-*}" high="${cited#*-}"
+      for end in "$low" "$high"; do
+        if ((end < 1 || end > n)); then
+          if ((n == 0)); then
+            add_error "$rel:$lineno: ADR-$key clause $end is cited, and its Decision numbers no clauses"
+          else
+            add_error "$rel:$lineno: ADR-$key clause $end is cited, and its Decision has $n"
+          fi
+          [[ "$low" == "$high" ]] && break
+        fi
+      done
+    done
+  done < <(awk '
+    BEGIN {
+      key = "ADR-([0-9][0-9][0-9][0-9]|draft-[a-z0-9]+(-[a-z0-9]+)*)"
+      # A separator is spelled out, never bare space, and no starred term stands inside a repeated
+      # group: mawk then matches nothing.
+      sep = "(,[[:space:]]|,[[:space:]]and[[:space:]]|,[[:space:]]or[[:space:]]|[[:space:]]and[[:space:]]"
+      sep = sep "|[[:space:]]or[[:space:]]|[[:space:]]to[[:space:]]|[[:space:]]?\342\200\223[[:space:]]?)"
+      list = "[0-9]+(" sep "[0-9]+)*"
+      # The word a citation names a clause or a place by; the section sign is a place.
+      word = "([Cc]lauses?|[Pp]oints?|[Pp]aragraphs?|[Ll]ines?|[Rr]ules?|[Ii]tems?|[Bb]ullets?"
+      word = word "|[Ss]teps?|[Ss]ections?|\302\247)"
+      after = key "(\\]\\([^)]+\\))?,?[[:space:]]+\\(?" word "[[:space:]]?" list
+      before = "[Cc]lauses?[[:space:]]+" list "[[:space:]]+of[[:space:]]+\\[?" key
+    }
+    # numbers <text> — the numbers of a list, each range as N-M, joined by spaces.
+    function numbers(text,   out) {
+      gsub(/[[:space:]]*(to|\342\200\223)[[:space:]]*/, "-", text)
+      gsub(/,|and|or/, " ", text)
+      out = ""
+      while (match(text, /[0-9]+(-[0-9]+)?/)) {
+        out = out (out == "" ? "" : " ") substr(text, RSTART, RLENGTH)
+        text = substr(text, RSTART + RLENGTH)
+      }
+      return out
+    }
+    function emit(id, w, list) {
+      sub(/^ADR-/, "", id)
+      printf "%s\037%s\037%s\037%s\037%s\n", file, n, id, w, numbers(list)
+    }
+    # whole <list> <rest> — the list without its last number where the text goes on as a number
+    # does, as a date after a comma would: "clause 2, 2026-11-14" cites clause 2.
+    function whole(list, rest) {
+      if (rest ~ /^[-\/0-9]/) sub(/[^0-9]+[0-9]+$/, "", list)
+      return list
+    }
+    function cites(line, joined,   rest, off, m, id, w, list) {
+      rest = joined; off = 0
+      while (match(rest, after)) {
+        if (off + RSTART > length(line)) break
+        m = substr(rest, RSTART, RLENGTH)
+        off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
+        match(m, key); id = substr(m, RSTART, RLENGTH)
+        # The word and the list follow the identifier, its link and its comma.
+        w = m; sub(/^ADR-[^[:space:]]*[[:space:]]+\(?/, "", w)
+        list = w; sub(/^[^0-9]+/, "", list)
+        sub(/[[:space:]0-9].*$/, "", w); w = tolower(w); sub(/s$/, "", w)
+        emit(id, w, whole(list, rest))
+      }
+      rest = joined; off = 0
+      while (match(rest, before)) {
+        if (off + RSTART > length(line)) break
+        m = substr(rest, RSTART, RLENGTH)
+        off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
+        match(m, key); id = substr(m, RSTART, RLENGTH)
+        list = m; sub(/^[Cc]lauses?[[:space:]]+/, "", list); sub(/[[:space:]]+of[[:space:]].*$/, "", list)
+        emit(id, "clause", list)
+      }
+    }
+    # A line ending in a backslash, as a Rust string continues, joins as any other.
+    function scan(line, following) {
+      sub(/[[:space:]]*\\?[[:space:]]*$/, "", line)
+      sub(/^[[:space:]]*(\/\/[\/!]?|#+|--|\*+|>+)?[[:space:]]*/, "", following)
+      cites(line, line " " following)
+    }
+    FNR == 1 && NR > 1 { scan(prev, "") }
+    { if (FNR > 1) scan(prev, $0); prev = $0; file = FILENAME; n = FNR }
+    END { if (NR) scan(prev, "") }
+  ' "${files[@]}")
+}
+
 collect_text_files
 read_adr_headers
 scan_markdown
@@ -1404,6 +1544,7 @@ check_template_identity
 check_template_release
 check_prose_width
 check_named_sections
+check_clause_citations
 
 if ((${#errors[@]} > 0)); then
   echo "Documentation checks FAILED:"

@@ -18,9 +18,8 @@ skimmed. The design revision drops what prevented nothing
 - **A self-test asserts what it builds** — it takes its fixtures from the tree it copies or writes
   them itself, never from the template's own ADRs, scripts, or numbers, so it holds in a derived
   project and after a normalization.
-- **Code cites a clause, never a place in a document** — a comment that relies on a decision
-  names the ADR and its clause (`ADR-0021 clause 25`), never "point N", a paragraph, or a line.
-  A normalization remaps clauses by their map; a place in a document it cannot follow.
+- **A comment that relies on a decision names its clause** — `ADR-0021 clause 25`, not the ADR
+  alone, so that a normalization's map can move it.
 - **A test waits for its event, never for a time** — a test waits for what it needs to see, under a
   deadline only a defect reaches. A sleep or a timed budget that holds on an idle host fails on a
   loaded one, and a race the test meant to provoke goes unprovoked on a fast one. A wait that

@@ -1346,10 +1346,10 @@ impl PackageStore {
         }
         if !upgrades(set, installed, description) {
             // *Which* of the two versions decided is the operator's first question here (ADR-0033
-            // point 8): the running one wherever it can be ordered, the claim only where it cannot.
-            // A refusal naming a number without saying which of the two it was would read like the
-            // wrong rule applied — and where both are reported and they disagree, saying that the
-            // claim was not consulted is the whole explanation.
+            // clause 19): the running one wherever it can be ordered, the claim only where it
+            // cannot. A refusal naming a number without saying which of the two it was would read
+            // like the wrong rule applied — and where both are reported and they disagree, saying
+            // that the claim was not consulted is the whole explanation.
             let running = reported_service_version(description)
                 .filter(|version| fleet_core::version::parse(version).is_some());
             return Err(match (running, claimed_version(set, installed)) {

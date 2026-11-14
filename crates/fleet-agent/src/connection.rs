@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(merged.hash, b"t1");
     }
 
-    /// ADR-0017 rule 17: an offer that names any telemetry destination states all three. The
+    /// ADR-0017 clause 28: an offer that names any telemetry destination states all three. The
     /// traces endpoint in force is *stopped* by a metrics-only offer, not carried forward — which
     /// is the whole difference between a fleet that can turn a signal off and one that cannot.
     /// Verifies: ADR-0017
