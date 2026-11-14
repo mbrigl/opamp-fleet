@@ -186,7 +186,16 @@ fn prepare(
         take_answered(&mut config, answered);
     }
     holds_to_named(&config, written)?;
-    read_once(&mut config, bootstrap, roots, &written.offered)?;
+    // A run that answered nothing kept the file, and each `[tls]` path in it is the file's word,
+    // which the service's account may have written, not the administrator's (ADR-0021 clause 11).
+    let kept;
+    let offered = if written.answered.is_none() {
+        kept = Offered::of(&config);
+        &kept
+    } else {
+        &written.offered
+    };
+    read_once(&mut config, bootstrap, roots, offered)?;
     Ok(Some(config))
 }
 
@@ -553,10 +562,15 @@ mod tests {
             cert: cert_link.clone(),
             key: key_link.clone(),
         };
+        // A run of the questionnaire, which always answers; here no CA, so the built-in roots.
         let prepared = |offered: Offered, bootstrap: &Bootstrap| {
             let written = enrolling(
                 bootstrap.clone(),
                 Written {
+                    answered: Some(Answered {
+                        endpoint: config(account.path(), &ca_path).endpoint,
+                        ca: None,
+                    }),
                     offered,
                     ..Written::default()
                 },
@@ -607,29 +621,28 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
         let kept = config(account.path(), &link);
 
-        let mut written = enrolling(bootstrap(admin.path()), Written::default());
-        written.offer_what_the_kept_file_names(&kept);
+        let written = enrolling(bootstrap(admin.path()), Written::default());
         let refused = prepare_enrolling(&kept, &written, &[account.path()]).expect_err("a link");
         assert!(refused.contains("is a link"), "{refused}");
         assert!(refused.contains("ca.pem"), "{refused}");
 
+        // Another CA than the link leads to, so the CA taken tells which was read.
+        let (answered, _) = pair();
         let answered_ca = admin.path().join("answered.pem");
-        std::fs::write(&answered_ca, &ca).expect("answered");
-        let mut written = enrolling(
+        std::fs::write(&answered_ca, &answered).expect("answered");
+        let written = enrolling(
             bootstrap(admin.path()),
             Written {
                 answered: Some(Answered {
                     endpoint: kept.endpoint.clone(),
-                    ca: Some((answered_ca, ca.clone().into_bytes())),
+                    ca: Some((answered_ca, answered.clone().into_bytes())),
                 }),
                 ..Written::default()
             },
         );
-        written.offer_what_the_kept_file_names(&kept);
-        assert!(written.offered.naming(&link) == crate::nofollow::Named::ByAdministrator);
         let prepared =
             prepare_enrolling(&kept, &written, &[account.path()]).expect("the answered CA");
-        assert_eq!(prepared.ca_pem.as_deref(), Some(ca.as_bytes()));
+        assert_eq!(prepared.ca_pem.as_deref(), Some(answered.as_bytes()));
     }
 
     /// A state directory the account swapped for a link is not read through: a file named in it

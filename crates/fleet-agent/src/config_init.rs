@@ -288,16 +288,6 @@ impl Written {
         let (copy, _) = self.answered.as_ref()?.ca.as_ref()?;
         Some(copy)
     }
-
-    /// Where this run answered nothing it kept the file `kept`, and each `[tls]` path that file
-    /// names is the file's word, as a default the questionnaire offers is: the enrolment reads it
-    /// through no link at its name (ADR-0021 clause 11). A run that answered keeps what its
-    /// questions offered.
-    pub fn offer_what_the_kept_file_names(&mut self, kept: &ClientConfig) {
-        if self.answered.is_none() {
-            self.offered = Offered::of(kept);
-        }
-    }
 }
 
 /// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
