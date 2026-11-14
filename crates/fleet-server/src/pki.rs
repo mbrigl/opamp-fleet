@@ -1,48 +1,21 @@
-//! When the Server's certificates end (ADR-0042).
+//! When the Server's certificates end (ADR-0047).
 //!
 //! `server pki status` says when each certificate the Server host depends on ends, and the running
 //! Server reads the same ends and warns before one of them does. The Server makes no certificate
 //! authority, no server certificate and no bootstrap certificate: those are made by the operator
-//! tool's `pki` commands, on the operator's machine (ADR-0042). When a certificate counts as ending
-//! is [`fleet_core::ending`], so both programs judge alike.
+//! tool's `pki` commands, on the operator's machine (ADR-0047). When a certificate counts as ending,
+//! and how its end is read and said, is [`fleet_core::ending`], so both programs judge alike.
 
 use std::path::{Path, PathBuf};
 
 use fleet_core::ending::Standing;
 use time::OffsetDateTime;
-use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::config::ServerConfig;
 
-/// When one certificate ends, as `server pki status` lists it and the running Server watches it.
-#[derive(Debug, Clone)]
-pub struct Ending {
-    pub file: PathBuf,
-    pub subject: String,
-    pub serial: String,
-    pub not_before: OffsetDateTime,
-    pub not_after: OffsetDateTime,
-}
+pub use fleet_core::ending::read::Ending;
 
-impl Ending {
-    /// Where this end stands at `now`.
-    #[must_use]
-    pub fn standing(&self, now: OffsetDateTime) -> Standing {
-        fleet_core::ending::standing(
-            self.not_before.unix_timestamp(),
-            self.not_after.unix_timestamp(),
-            now.unix_timestamp(),
-        )
-    }
-
-    /// Whole days left at `now`, negative once ended.
-    #[must_use]
-    pub fn days_left(&self, now: OffsetDateTime) -> i64 {
-        (self.not_after - now).whole_days()
-    }
-}
-
-/// Reads the first certificate of a PEM file.
+/// Reads the end of the first certificate of a PEM file.
 ///
 /// # Errors
 /// Returns the message to print when the file cannot be read or holds no certificate.
@@ -50,18 +23,10 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
     let pem = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
     let der = opamp::tls::first_certificate(&pem)
         .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    let (_, cert) = X509Certificate::from_der(der.as_ref())
-        .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-    Ok(Ending {
-        file: file.to_path_buf(),
-        subject: cert.subject().to_string(),
-        serial: hex::encode(cert.raw_serial()),
-        not_before: cert.validity().not_before.to_datetime(),
-        not_after: cert.validity().not_after.to_datetime(),
-    })
+    Ending::read(file, der.as_ref())
 }
 
-/// The certificates a running Server depends on (ADR-0042 clause 21): its own on each plane
+/// The certificates a running Server depends on (ADR-0047 clause 21): its own on each plane
 /// (ADR-0012), the client CA as both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each
 /// file once.
 #[must_use]
@@ -85,7 +50,7 @@ pub fn depended_on(config: &ServerConfig) -> Vec<PathBuf> {
     files
 }
 
-/// `server pki status` (ADR-0042 clause 22): every certificate the configuration depends on, with
+/// `server pki status` (ADR-0047 clause 22): every certificate the configuration depends on, with
 /// its end.
 ///
 /// # Errors
@@ -142,7 +107,7 @@ pub fn loaded(files: &[PathBuf]) -> Vec<Ending> {
         .collect()
 }
 
-/// The running Server's look at what it depends on (ADR-0042 clause 21): a certificate that is
+/// The running Server's look at what it depends on (ADR-0047 clause 21): a certificate that is
 /// ending is a warning and `pki.expiring`, one that has ended an error and `pki.expired`.
 /// Nothing stops: the hosts decide for themselves.
 ///
@@ -248,7 +213,7 @@ mod tests {
         }
     }
 
-    // Verifies: ADR-0042
+    // Verifies: ADR-0047
     #[test]
     fn the_server_records_what_is_ending_and_what_has_ended() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -285,8 +250,8 @@ mod tests {
 
     /// The running Server judges the certificate it serves, read at startup, not whatever the
     /// file holds a day later: a file replaced without a restart neither silences the warning
-    /// for the certificate still served nor goes unsaid (ADR-0042 clause 21).
-    /// Verifies: ADR-0042
+    /// for the certificate still served nor goes unsaid (ADR-0047 clause 21).
+    /// Verifies: ADR-0047
     #[test]
     fn a_file_replaced_without_a_restart_neither_silences_the_warning_nor_goes_unsaid() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -334,7 +299,7 @@ mod tests {
         assert_eq!(depended_on(&config), [PathBuf::from("server.pem")]);
     }
 
-    // Verifies: ADR-0042
+    // Verifies: ADR-0047
     #[test]
     fn status_exits_by_the_worst_end() {
         let now = OffsetDateTime::now_utc();

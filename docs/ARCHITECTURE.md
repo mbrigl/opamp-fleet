@@ -89,9 +89,10 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   version, the platform aliases, the statements a package signature and a floor cover
   ([ADR-0035](adr/0035-package-versions-high-water-mark-and-floor.md)), the
   renewal proof (`renewal`) and the bootstrap proof (`bootstrap_proof`) a CSR carries — read from
-  a CSR by the adapter `csr` — the host a
-  certificate that names none is taken for, when a certificate counts as ending, what a
-  certificate is called, the token buckets the Server and a Gateway count a sender in (`rate`),
+  a CSR by the adapter `csr` — the host a certificate that names none is taken for, when a
+  certificate counts as ending, with its end read and put in the line `pki status` prints by the
+  adapter `ending::read`, for both programs and the running Server, what a certificate is called,
+  the token buckets the Server and a Gateway count a sender in (`rate`),
   what a client certificate is known by on the Server and on a Gateway alike — its host, its issuer
   and serial, and the 20-octet bound on its serial — whose rule is the core `x509`, read with
   `x509-parser` by the adapter `x509::read`, with the random serial and the clock skew every issued
@@ -113,7 +114,7 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   fetch (`fetch`), pack, hash and sign package artifacts — or sign a Package's signing file from
   the UI (`signing`, ADR-0034) — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
-  of a PKCS#12 file (ADR-0042).
+  of a PKCS#12 file (ADR-0047).
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
@@ -223,7 +224,7 @@ no module.
   from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)). `pki` is `server pki status`
-  and the running Server's warnings before a certificate it depends on ends (ADR-0042).
+  and the running Server's warnings before a certificate it depends on ends (ADR-0047).
 - **Server admission** — `transport::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Behind

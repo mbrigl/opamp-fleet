@@ -2919,7 +2919,7 @@ struct PendingEnrolment {
 }
 
 /// What an operator asks a bootstrap certificate for (ADR-0027 clauses 1 and 3 and
-/// ADR-0042 clause 14).
+/// ADR-0047 clause 14).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct IssueBootstrapRequest {

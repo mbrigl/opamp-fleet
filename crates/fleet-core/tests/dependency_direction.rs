@@ -57,6 +57,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // Reading what a CSR asks for, with `x509-parser`.
             ("csr", Adapter),
             ("ending", Core),
+            // A certificate's end read with `x509-parser` and `time`.
+            ("ending::read", Adapter),
             ("host", Core),
             ("naming", Core),
             ("package", Core),
@@ -229,7 +231,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     (
         "fleet-tools",
         &[
-            // One command-line program and no library (ADR-0042): nothing here is core, and a
+            // One command-line program and no library (ADR-0047): nothing here is core, and a
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),
