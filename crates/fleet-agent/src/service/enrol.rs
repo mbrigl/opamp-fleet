@@ -186,7 +186,13 @@ fn prepare(
         take_answered(&mut config, answered);
     }
     holds_to_named(&config, written)?;
-    read_once(&mut config, bootstrap, roots, &written.offered)?;
+    // A run that answered nothing kept the file, and each `[tls]` path in it is the file's word,
+    // which the service's account may have written, not the administrator's (ADR-0021 clause 11).
+    let offered = match &written.answered {
+        None => Offered::of(&config),
+        Some(_) => written.offered.clone(),
+    };
+    read_once(&mut config, bootstrap, roots, &offered)?;
     Ok(Some(config))
 }
 
@@ -325,12 +331,15 @@ mod tests {
         prepare(config, written, roots).map(|config| config.expect("a run that enrols"))
     }
 
-    /// `run`'s error, which must come before anything connects: a run still going after ten
-    /// seconds read something it should have refused.
-    fn refusal(config: ClientConfig, bootstrap: Bootstrap, account: PathBuf) -> String {
+    /// [`read_once`]'s error for paths that are all the administrator's, the rules of the
+    /// account's directories alone deciding: a read still going after ten seconds read something
+    /// it should have refused. A kept file's paths are the file's, which
+    /// `a_link_at_a_kept_file_s_ca_file_is_refused_on_a_run_that_asked_nothing` covers.
+    fn refusal(mut config: ClientConfig, bootstrap: Bootstrap, account: PathBuf) -> String {
         let (done, wait) = std::sync::mpsc::channel();
-        let written = enrolling(bootstrap, Written::default());
-        std::thread::spawn(move || done.send(run(&config, &written, &[&account]).err()));
+        std::thread::spawn(move || {
+            done.send(read_once(&mut config, &bootstrap, &[&account], &Offered::default()).err())
+        });
         wait.recv_timeout(std::time::Duration::from_secs(10))
             .expect("the enrolment read what it should have refused")
             .expect("refused")
@@ -553,10 +562,15 @@ mod tests {
             cert: cert_link.clone(),
             key: key_link.clone(),
         };
+        // A run of the questionnaire, which always answers; here no CA, so the built-in roots.
         let prepared = |offered: Offered, bootstrap: &Bootstrap| {
             let written = enrolling(
                 bootstrap.clone(),
                 Written {
+                    answered: Some(Answered {
+                        endpoint: config(account.path(), &ca_path).endpoint,
+                        ca: None,
+                    }),
                     offered,
                     ..Written::default()
                 },
@@ -588,6 +602,47 @@ mod tests {
             std::fs::read(&cert).expect("cert"),
             "read through the link"
         );
+    }
+
+    /// A run that asked nothing kept the file, so a link at the `[tls] ca_file` it names is
+    /// refused, outside the account's directories too; the same path on a run that answered
+    /// another CA is not read at all.
+    /// Verifies: ADR-0021
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_a_kept_file_s_ca_file_is_refused_on_a_run_that_asked_nothing() {
+        let account = tempfile::tempdir().expect("account");
+        let admin = tempfile::tempdir().expect("admin");
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let (ca, _) = pair();
+        let target = elsewhere.path().join("their-ca.pem");
+        std::fs::write(&target, &ca).expect("ca");
+        let link = admin.path().join("ca.pem");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let kept = config(account.path(), &link);
+
+        let written = enrolling(bootstrap(admin.path()), Written::default());
+        let refused = prepare_enrolling(&kept, &written, &[account.path()]).expect_err("a link");
+        assert!(refused.contains("is a link"), "{refused}");
+        assert!(refused.contains("ca.pem"), "{refused}");
+
+        // Another CA than the link leads to, so the CA taken tells which was read.
+        let (answered, _) = pair();
+        let answered_ca = admin.path().join("answered.pem");
+        std::fs::write(&answered_ca, &answered).expect("answered");
+        let written = enrolling(
+            bootstrap(admin.path()),
+            Written {
+                answered: Some(Answered {
+                    endpoint: kept.endpoint.clone(),
+                    ca: Some((answered_ca, answered.clone().into_bytes())),
+                }),
+                ..Written::default()
+            },
+        );
+        let prepared =
+            prepare_enrolling(&kept, &written, &[account.path()]).expect("the answered CA");
+        assert_eq!(prepared.ca_pem.as_deref(), Some(answered.as_bytes()));
     }
 
     /// A state directory the account swapped for a link is not read through: a file named in it

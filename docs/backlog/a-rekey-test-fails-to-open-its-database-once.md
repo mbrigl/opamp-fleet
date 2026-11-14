@@ -11,7 +11,18 @@ test passed in three runs on its own and in a full rerun on the same code. Nothi
 whether the open hit the support's bound under load, as the PostgreSQL timeouts of check-all did
 before the store steps ran last, or hit something of its own.
 
-**Idea.** Run the test in a loop under load. Note which error the open met and which bound it
-ran into. Then either have the support wait for its database within that bound, or file the cause.
+**Not reproduced (2026-11-14).** Against the development stack's PostgreSQL 18.6
+(`max_connections` 100), the test passed 150 times in a row: 60 runs beside two runs of the whole
+library's tests on the same database, then 90 beside three runs of the library's and the
+`instances` integration tests at once. Every one of those suites passed too. Ruled out by
+reading: a collision of the exclusive lock, whose key comes from the test's random schema
+(`EXCLUSIVE_LOCK`), and a wait for a free test schema, which fails with its own message naming
+`SCHEMAS_AT_ONCE`. Left: the connection itself, refused or cut (the database out of connections,
+or the network to it), or the open's bound under a heavier load than this. The failure ran
+against a PostgreSQL 15, not this one, and its error text was not kept.
+
+**Idea.** On the next failure, keep the whole panic message: `open` names the error it met. Then
+either have the support wait for its database within that bound, or file the cause. Until then
+there is nothing to fix.
 
 **From.** The implementation of revision-2026-11-12 on feat/bugfixes (2026-11-14).
