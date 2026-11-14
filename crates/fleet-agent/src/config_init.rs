@@ -276,7 +276,8 @@ pub struct Written {
     /// (ADR-0044).
     pub named_over_kept: Option<String>,
     /// The paths this run's questions offered from the file, which the enrolment reads through no
-    /// link at their name where an answer kept one.
+    /// link at their name where an answer kept one. A run that answered nothing kept the file,
+    /// and the enrolment takes all of its `[tls]` paths as offered instead.
     pub offered: Offered,
 }
 

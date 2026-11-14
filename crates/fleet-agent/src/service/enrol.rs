@@ -188,14 +188,11 @@ fn prepare(
     holds_to_named(&config, written)?;
     // A run that answered nothing kept the file, and each `[tls]` path in it is the file's word,
     // which the service's account may have written, not the administrator's (ADR-0021 clause 11).
-    let kept;
-    let offered = if written.answered.is_none() {
-        kept = Offered::of(&config);
-        &kept
-    } else {
-        &written.offered
+    let offered = match &written.answered {
+        None => Offered::of(&config),
+        Some(_) => written.offered.clone(),
     };
-    read_once(&mut config, bootstrap, roots, offered)?;
+    read_once(&mut config, bootstrap, roots, &offered)?;
     Ok(Some(config))
 }
 
@@ -334,12 +331,15 @@ mod tests {
         prepare(config, written, roots).map(|config| config.expect("a run that enrols"))
     }
 
-    /// `run`'s error, which must come before anything connects: a run still going after ten
-    /// seconds read something it should have refused.
-    fn refusal(config: ClientConfig, bootstrap: Bootstrap, account: PathBuf) -> String {
+    /// [`read_once`]'s error for paths that are all the administrator's, the rules of the
+    /// account's directories alone deciding: a read still going after ten seconds read something
+    /// it should have refused. A kept file's paths are the file's, which
+    /// `a_link_at_a_kept_file_s_ca_file_is_refused_on_a_run_that_asked_nothing` covers.
+    fn refusal(mut config: ClientConfig, bootstrap: Bootstrap, account: PathBuf) -> String {
         let (done, wait) = std::sync::mpsc::channel();
-        let written = enrolling(bootstrap, Written::default());
-        std::thread::spawn(move || done.send(run(&config, &written, &[&account]).err()));
+        std::thread::spawn(move || {
+            done.send(read_once(&mut config, &bootstrap, &[&account], &Offered::default()).err())
+        });
         wait.recv_timeout(std::time::Duration::from_secs(10))
             .expect("the enrolment read what it should have refused")
             .expect("refused")
