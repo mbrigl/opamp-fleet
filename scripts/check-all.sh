@@ -263,9 +263,9 @@ run "Build, test and lint" scripts/check-rust.sh
 # On instruction: scripts/seed_test_configs.sh
 # On instruction: scripts/vendor-shiki.sh
 # The gates the other workflows run: each says so and skips where this machine lacks what it
-# needs — Windows or macOS, a store named in the environment, cargo-deny, cargo-fuzz, Go, a
-# throwaway machine, the G-20 stack — and fails instead in a CI run, where a skip would read as a
-# pass.
+# needs — Windows, macOS or cargo-xwin, a store named in the environment, cargo-deny, cargo-fuzz,
+# Go, a throwaway machine, the G-20 stack — and fails instead in a CI run, where a skip would read
+# as a pass.
 run "Client on its platform" scripts/check-client-platform.sh
 run "Release build of the Client" scripts/check-release-build.sh fleet-agent
 run "Release build of the Server" scripts/check-release-build.sh fleet-server
