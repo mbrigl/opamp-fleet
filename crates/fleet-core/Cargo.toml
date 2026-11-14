@@ -16,7 +16,8 @@ git2.workspace = true
 [dependencies]
 # The bootstrap certificate as a password-protected PKCS#12 file, written by the Server and read by
 # the Client (ADR-0027): `pkcs12`, `pkcs5` and `der` read which schemes a file uses; `rcgen` and
-# `x509-parser` tell whether the key and the certificate belong together.
+# `x509-parser` tell whether the key and the certificate belong together. `x509-parser` also reads a
+# certificate's end for `pki status` and the running Server (`ending::read`).
 p12-keystore.workspace = true
 pkcs12.workspace = true
 pkcs5.workspace = true
@@ -29,8 +30,8 @@ sha2.workspace = true
 hex.workspace = true
 # A client certificate as the Server and a Gateway read it, and the serial and start every
 # certificate this project makes gets (`x509`): `verify` checks a CA's signature, `ring` draws the
-# serial and `time` is the date type rcgen speaks and a certificate's end is read in
-# (`ending::read`) — all three already linked by both ends.
+# serial and `time` is the date type rcgen speaks, which `ending::read` gives a certificate's end
+# in — all three already linked by both ends.
 ring.workspace = true
 time.workspace = true
 # The key a `bootstrap.p12` opens to is held in a buffer wiped on drop (ADR-0014). No TLS or

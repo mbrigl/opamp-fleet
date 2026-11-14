@@ -88,7 +88,7 @@ pub fn audit_key(config: &ServerConfig) -> Result<Option<(String, String, String
 /// when something has ended.
 #[must_use]
 pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> i32 {
-    fleet_core::ending::read::exit_code(endings, now)
+    fleet_core::ending::exit_code(endings.iter().map(|ending| ending.standing(now)))
 }
 
 /// The certificates a running Server depends on as it read them at startup, which is what it

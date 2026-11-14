@@ -73,13 +73,6 @@ impl Ending {
     }
 }
 
-/// The exit code of a `pki status` command over `endings` at `now`, by
-/// [`exit_code`](super::exit_code).
-#[must_use]
-pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> i32 {
-    super::exit_code(endings.iter().map(|ending| ending.standing(now)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,17 +89,20 @@ mod tests {
     }
 
     /// One reading of a certificate's end, and one line for it: what both `pki status` commands
-    /// print over the same certificate.
+    /// print over the same certificate. `now` is a whole second, as a certificate's times are,
+    /// so the days left are the days the certificate was made to have.
     /// Verifies: ADR-draft-the-operator-program-opamp-fleetctl
     #[test]
     fn a_certificate_s_end_is_read_and_put_in_one_line() {
-        let now = OffsetDateTime::now_utc();
+        let now = OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .expect("a whole second");
         let file = Path::new("/etc/fleet/ca.pem");
         let fine = Ending::read(file, &certificate(now, 1, 400)).expect("read");
         assert_eq!(fine.subject, "CN=fleet");
-        assert_eq!(fine.days_left(now), 399);
+        assert_eq!(fine.days_left(now), 400);
         let line = fine.line(now);
-        assert!(line.starts_with("ok        399 days  "), "{line}");
+        assert!(line.starts_with("ok        400 days  "), "{line}");
         assert!(
             line.ends_with(&format!("  CN=fleet  ({})", file.display())),
             "{line}"
@@ -115,7 +111,7 @@ mod tests {
 
         let ending = Ending::read(file, &certificate(now, 380, 20)).expect("read");
         assert!(
-            ending.line(now).starts_with("ENDS SOON 19 days  "),
+            ending.line(now).starts_with("ENDS SOON 20 days  "),
             "{}",
             ending.line(now)
         );
@@ -125,8 +121,11 @@ mod tests {
             "{}",
             ended.line(now)
         );
-        assert_eq!(exit_code(&[fine.clone(), ending], now), 1);
-        assert_eq!(exit_code(&[fine, ended], now), 2);
+        let exit = |endings: &[&Ending]| {
+            super::super::exit_code(endings.iter().map(|ending| ending.standing(now)))
+        };
+        assert_eq!(exit(&[&fine, &ending]), 1);
+        assert_eq!(exit(&[&fine, &ended]), 2);
 
         let error = Ending::read(file, b"not a certificate").expect_err("refused");
         assert!(

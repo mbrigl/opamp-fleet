@@ -898,7 +898,7 @@ pub fn status(offline_dir: &Path) -> Result<Vec<Ending>, String> {
 /// something has ended.
 #[must_use]
 pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> u8 {
-    match fleet_core::ending::read::exit_code(endings, now) {
+    match fleet_core::ending::exit_code(endings.iter().map(|ending| ending.standing(now))) {
         0 => 0,
         1 => 1,
         _ => 2,
@@ -1799,7 +1799,10 @@ mod tests {
         let key = KeyPair::generate().expect("key");
         let mut params = CertificateParams::default();
         params.distinguished_name.push(DnType::CommonName, "fleet");
-        let now = OffsetDateTime::now_utc();
+        // A whole second, as a certificate's times are, so the days left are the 20 it was made with.
+        let now = OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .expect("a whole second");
         params.not_before = now - Duration::days(380);
         params.not_after = now + Duration::days(20);
         std::fs::write(&file, params.self_signed(&key).expect("sign").pem()).expect("write");
@@ -1809,7 +1812,7 @@ mod tests {
             .expect("server")
             .line(now);
         assert_eq!(tool, server);
-        assert!(tool.starts_with("ENDS SOON 19 days  "), "{tool}");
+        assert!(tool.starts_with("ENDS SOON 20 days  "), "{tool}");
     }
 
     /// A `bootstrap.p12` under `password`, of a fresh key and a certificate for it, in `dir`.
