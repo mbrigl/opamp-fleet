@@ -1027,6 +1027,71 @@ echo "The successor's $(adr_id 3) clause 9." >> "$d/docs/adr/0001-decision.md"
 layout "$d" "CHANGELOG.md"
 expect pass "a superseded ADR cited by the record and the changelog; a superseded ADR not read" "$d"
 
+d="$(repo clause-forms-beyond)"
+clauses "$d" 1 2
+mkdir -p "$d/src"
+{
+  echo "// $(adr_id 1) (clause 3)."
+  echo "// [$(adr_id 1)](docs/adr/0001-decision.md) clause 4."
+  echo "// Clause 5 of $(adr_id 1)."
+  echo "// $(adr_id 1) clauses 1, 2, and 6."
+  echo "// $(adr_id 1)"
+  echo "// clause 7."
+  echo "let s = \"per $(adr_id 1) \\"
+  echo "    clause 8\";"
+} > "$d/src/lib.rs"
+layout "$d" "src/"
+for want in "src/lib.rs:1: $(adr_id 1) clause 3 " "src/lib.rs:2: $(adr_id 1) clause 4 " \
+  "src/lib.rs:3: $(adr_id 1) clause 5 " "src/lib.rs:4: $(adr_id 1) clause 6 " \
+  "src/lib.rs:5: $(adr_id 1) clause 7 " "src/lib.rs:7: $(adr_id 1) clause 8 "; do
+  expect fail "each form a citation takes is read: ${want%% *}" "$d" "$want"
+done
+
+d="$(repo clause-zero)"
+clauses "$d" 1 3
+echo "Decided by $(adr_id 1) clause 0." >> "$d/README.md"
+expect fail "clause 0, below the Decision's first" "$d" \
+  "README.md:6: $(adr_id 1) clause 0 is cited, and its Decision has 3"
+
+d="$(repo clause-separators)"
+clauses "$d" 1 3
+mkdir -p "$d/src"
+{
+  echo "// $(adr_id 1) clause 2"
+  echo "// 404 answers it."
+  echo "// $(adr_id 1) clause 3, 2026-11-14 was the day."
+} > "$d/src/lib.rs"
+layout "$d" "src/"
+expect pass "a number after bare space or one a date goes on from is no clause" "$d"
+
+for place in "paragraph 2" "line 2" "rule 2" "item 2" "step 2" "section 2" "$(printf '\302\2472')"; do
+  d="$(repo "clause-place-${place%% *}")"
+  clauses "$d" 1 3
+  echo "Decided by $(adr_id 1) $place." >> "$d/README.md"
+  word="${place% 2}"; [[ "$place" == *' '* ]] || word="${place%2}"
+  expect fail "a place cited instead of a clause: $word" "$d" \
+    "README.md:6: $(adr_id 1) is cited by $word, a place"
+done
+
+d="$(repo clause-rejected)"
+adr "$d" 1 "🔴 rejected"
+clauses "$d" 1 3
+{
+  echo "# Architecture Decision Records"
+  echo
+  echo "### Superseded and rejected"
+  echo
+  echo "| ADR | Title | Applies to | Status |"
+  echo "|-----|-------|------------|--------|"
+  index_row 1 "🔴 rejected"
+} > "$d/docs/adr/README.md"
+echo "Decided by $(adr_id 1) clause 2." >> "$d/README.md"
+expect fail "a clause of a rejected ADR" "$d" "README.md:6: $(adr_id 1) is no longer in force"
+
+d="$(repo clause-template)"
+echo "As $(adr_id 1) clause 9 says." >> "$d/docs/adr/template.md"
+expect pass "the template is not read" "$d"
+
 # --- cases: drafts (checks 1, 2, 5, 6, 8, and 16) ---------------------------------------
 
 # Verifies: ADR-0002
@@ -1092,6 +1157,13 @@ d="$(repo draft-link)"
 drafted "$d"
 echo "See [$(draft_id next)](docs/adr/0001-decision.md)." >> "$d/README.md"
 GITHUB_BASE_REF="" expect fail "a link that cites a draft and points at another ADR" "$d" "cites $(draft_id next) but points at '0001-decision.md'"
+
+d="$(repo draft-clause)"
+drafted "$d"
+printf '\n1. **One.** We will.\n\n2. **Two.** We will.\n' >> "$d/docs/adr/$DRAFT-next.md"
+echo "Held by $(draft_id next) clause 3." >> "$d/README.md"
+GITHUB_BASE_REF="" expect fail "a clause beyond a draft's Decision" "$d" \
+  "$(draft_id next) clause 3 is cited, and its Decision has 2"
 
 # --- summary -------------------------------------------------------------------------------
 

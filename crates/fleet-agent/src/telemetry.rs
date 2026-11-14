@@ -907,7 +907,7 @@ mod tests {
         telemetry.shutdown();
     }
 
-    /// A destination offered with an empty endpoint is a withdrawal (ADR-0017 rule 18): the
+    /// A destination offered with an empty endpoint is a withdrawal (ADR-0017 clause 29): the
     /// exporter is shut down and **nothing is refused**. Reporting it back as a malformed URL
     /// would answer "stop" with `FAILED`, which is the one answer the Server cannot act on.
     /// Verifies: ADR-0017

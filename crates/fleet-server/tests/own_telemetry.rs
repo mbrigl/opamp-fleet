@@ -73,7 +73,7 @@ async fn every_declared_signal_is_offered_a_destination() {
     assert!(settings.opamp.is_none());
 }
 
-/// A withdrawal reaches the Agent (ADR-0017 rule 18): an endpoint configured empty is sent as an
+/// A withdrawal reaches the Agent (ADR-0017 clause 29): an endpoint configured empty is sent as an
 /// empty `destination_endpoint`, which is what stops that signal. It travels without the backend's
 /// credential — nobody is going to open that connection — and the offer is still an offer, so the
 /// Server declares `OffersConnectionSettings` and the hash gate closes on the acknowledgement like
