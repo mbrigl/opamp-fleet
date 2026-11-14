@@ -37,6 +37,18 @@ impl Held {
     fn let_go(mut self) -> Object {
         self.0.take().expect("held until let go")
     }
+
+    /// Rolls the transaction back and waits for the database's answer before the call answers
+    /// `answer`, as [`rolled_back`] does, and lets the connection go back to the pool. Closed
+    /// instead, the connection keeps the request's row until the database has noticed: a
+    /// rejection made right after would find it held and be answered [`Decided::Deciding`]. A
+    /// rollback that fails closes the connection; the answer stands.
+    async fn rolled_back<T>(self, answer: T) -> T {
+        if self.client().batch_execute("ROLLBACK").await.is_ok() {
+            drop(self.let_go());
+        }
+        answer
+    }
 }
 
 impl Drop for Held {
@@ -82,7 +94,8 @@ enum Ended {
     /// Committed, leaving the revocation list's version where the register entry written with
     /// it moved it, if one was.
     Committed(Option<u64>),
-    /// The register refused the entry; the transaction was rolled back.
+    /// The register refused the entry; the transaction was rolled back, or ends as its connection
+    /// is closed where the rollback fails.
     Refused(String),
     /// The database server answered an error at the commit or at the statement before it: the
     /// transaction was rolled back, for certain.
@@ -332,50 +345,57 @@ impl EnrolmentStore for PgEnrolmentStore {
         let bootstrap = bootstrap.clone();
         let (held, found) = self.database.run(move |pool| async move {
             let held = Held(Some(client(&pool).await?));
-            held.client().batch_execute("BEGIN").await.map_err(sql)?;
-            let row = match held
-                .client()
-                .query_opt(
-                    "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE",
-                    &[&request_id],
-                )
-                .await
-            {
-                Ok(row) => row,
-                Err(e) if held_elsewhere(&e) => return Ok((held, Found::Deciding)),
-                Err(e) => return Err(sql(e)),
-            };
-            let rejected = held
-                .client()
-                .query_opt(
-                    "SELECT 1 FROM enrolment_rejected WHERE key = $1",
-                    &[&request_id],
-                )
-                .await
-                .map_err(sql)?
-                .is_some();
-            let found = match row.map(|row| row.get::<_, Value>(0)) {
-                // A rejected key is never signed, though an instance of 0.8.0 queued it.
-                _ if rejected => Found::NotWaiting,
-                Some(request) if request.get("decision").is_none_or(Value::is_null) => {
-                    if super::ledger::names(&***held.client(), &bootstrap).await? {
-                        held.client()
-                            .execute(
-                                "DELETE FROM enrolment_requests WHERE id = $1",
-                                &[&request_id],
-                            )
-                            .await
-                            .map_err(sql)?;
-                        // Announced by the call that commits it, below, so a commit whose answer
-                        // is lost is read again.
-                        Found::Revoked
-                    } else {
-                        Found::Waiting(request)
+            let found = async {
+                held.client().batch_execute("BEGIN").await.map_err(sql)?;
+                let row = match held
+                    .client()
+                    .query_opt(
+                        "SELECT request FROM enrolment_requests WHERE id = $1 FOR UPDATE",
+                        &[&request_id],
+                    )
+                    .await
+                {
+                    Ok(row) => row,
+                    Err(e) if held_elsewhere(&e) => return Ok(Found::Deciding),
+                    Err(e) => return Err(sql(e)),
+                };
+                let rejected = held
+                    .client()
+                    .query_opt(
+                        "SELECT 1 FROM enrolment_rejected WHERE key = $1",
+                        &[&request_id],
+                    )
+                    .await
+                    .map_err(sql)?
+                    .is_some();
+                let found = match row.map(|row| row.get::<_, Value>(0)) {
+                    // A rejected key is never signed, though an instance of 0.8.0 queued it.
+                    _ if rejected => Found::NotWaiting,
+                    Some(request) if request.get("decision").is_none_or(Value::is_null) => {
+                        if super::ledger::names(&***held.client(), &bootstrap).await? {
+                            held.client()
+                                .execute(
+                                    "DELETE FROM enrolment_requests WHERE id = $1",
+                                    &[&request_id],
+                                )
+                                .await
+                                .map_err(sql)?;
+                            // Announced by the call that commits it, below, so a commit whose
+                            // answer is lost is read again.
+                            Found::Revoked
+                        } else {
+                            Found::Waiting(request)
+                        }
                     }
-                }
-                _ => Found::NotWaiting,
-            };
-            Ok((held, found))
+                    _ => Found::NotWaiting,
+                };
+                Ok(found)
+            }
+            .await;
+            match found {
+                Ok(found) => Ok((held, found)),
+                Err(e) => Err(held.rolled_back(e).await),
+            }
         })?;
         let (finish, answer) = match found {
             Found::NotWaiting => ("ROLLBACK", Ok(Approval::NotWaiting)),
@@ -389,40 +409,50 @@ impl EnrolmentStore for PgEnrolmentStore {
                     let id = id.to_string();
                     let registering = approved.clone();
                     let ended = self.database.run(move |_| async move {
-                        let mut version = None;
-                        if let Some(approved) = &registering {
-                            let registered = super::ledger::register_in(
-                                &***held.client(),
-                                approved.issued(),
-                                &approved.bounds,
-                                approved.mint(),
-                                Some(&approved.bootstrap),
-                            )
-                            .await?;
-                            if let Err(refused) = crate::revocation::refusal(registered) {
-                                held.client().batch_execute("ROLLBACK").await.map_err(sql)?;
-                                drop(held.let_go());
-                                return Ok(Ended::Refused(refused));
+                        let ended = async {
+                            let mut version = None;
+                            if let Some(approved) = &registering {
+                                let registered = super::ledger::register_in(
+                                    &***held.client(),
+                                    approved.issued(),
+                                    &approved.bounds,
+                                    approved.mint(),
+                                    Some(&approved.bootstrap),
+                                )
+                                .await?;
+                                if let Err(refused) = crate::revocation::refusal(registered) {
+                                    return Ok(Ended::Refused(refused));
+                                }
+                                version = Some(
+                                    super::ledger::read_list_version(&***held.client()).await?,
+                                );
                             }
-                            version =
-                                Some(super::ledger::read_list_version(&***held.client()).await?);
+                            if let Err(e) = held
+                                .client()
+                                .execute(
+                                    "UPDATE enrolment_requests SET request = $2 WHERE id = $1",
+                                    &[&id, &request],
+                                )
+                                .await
+                            {
+                                return refused_by_the_server(e, At::Update);
+                            }
+                            notify(&***held.client(), ENROLMENT, &id).await?;
+                            if let Err(e) = held.client().batch_execute("COMMIT").await {
+                                return refused_by_the_server(e, At::Commit);
+                            }
+                            Ok(Ended::Committed(version))
                         }
-                        if let Err(e) = held
-                            .client()
-                            .execute(
-                                "UPDATE enrolment_requests SET request = $2 WHERE id = $1",
-                                &[&id, &request],
-                            )
-                            .await
-                        {
-                            return refused_by_the_server(e, At::Update);
+                        .await;
+                        match ended {
+                            Ok(Ended::Committed(version)) => {
+                                drop(held.let_go());
+                                Ok(Ended::Committed(version))
+                            }
+                            // A refusal and an error end the transaction before they are answered;
+                            // after a commit the database answered, the rollback finds none.
+                            ended => held.rolled_back(ended).await,
                         }
-                        notify(&***held.client(), ENROLMENT, &id).await?;
-                        if let Err(e) = held.client().batch_execute("COMMIT").await {
-                            return refused_by_the_server(e, At::Commit);
-                        }
-                        drop(held.let_go());
-                        Ok(Ended::Committed(version))
                     })?;
                     let written = match ended {
                         Ended::Committed(written) => written,
@@ -448,12 +478,20 @@ impl EnrolmentStore for PgEnrolmentStore {
         };
         let id = id.to_string();
         self.database.run(move |_| async move {
-            if finish == "COMMIT" {
-                notify(&***held.client(), ENROLMENT, &id).await?;
+            let finished = async {
+                if finish == "COMMIT" {
+                    notify(&***held.client(), ENROLMENT, &id).await?;
+                }
+                held.client().batch_execute(finish).await.map_err(sql)
             }
-            held.client().batch_execute(finish).await.map_err(sql)?;
-            drop(held.let_go());
-            answer
+            .await;
+            match finished {
+                Ok(()) => {
+                    drop(held.let_go());
+                    answer
+                }
+                Err(e) => Err(held.rolled_back(e).await),
+            }
         })
     }
 
@@ -1632,6 +1670,107 @@ mod tests {
             Ok(Decided::NotWaiting),
             "the approval stands"
         );
+    }
+
+    /// A proxy on loopback to `target` that keeps the database's end of each connection open after
+    /// its client closed it: the client's `Terminate` is not passed on, so the database ends the
+    /// session's transaction only once the proxy is dropped, not as soon as the client is gone.
+    /// Each database end is kept from the moment it is connected, so the drop shuts every one.
+    struct Lingering {
+        port: u16,
+        kept: Arc<std::sync::Mutex<Vec<std::net::TcpStream>>>,
+    }
+
+    impl Lingering {
+        fn to(target: (String, u16)) -> Self {
+            use std::io::{Read as _, Write as _};
+            const TERMINATE: [u8; 5] = [b'X', 0, 0, 0, 4];
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let port = listener.local_addr().expect("addr").port();
+            let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let keeping = kept.clone();
+            std::thread::spawn(move || {
+                for client in listener.incoming().flatten() {
+                    let server =
+                        std::net::TcpStream::connect((target.0.as_str(), target.1)).expect("db");
+                    keeping
+                        .lock()
+                        .expect("kept")
+                        .push(server.try_clone().expect("clone"));
+                    let (mut from_server, mut to_client) = (
+                        server.try_clone().expect("clone"),
+                        client.try_clone().expect("clone"),
+                    );
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut from_server, &mut to_client);
+                        let _ = to_client.shutdown(std::net::Shutdown::Both);
+                    });
+                    let (mut from_client, mut to_server) = (client, server);
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 16 * 1024];
+                        loop {
+                            let n = match from_client.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => n,
+                            };
+                            let passed = buf[..n].strip_suffix(&TERMINATE).unwrap_or(&buf[..n]);
+                            if to_server.write_all(passed).is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            Lingering { port, kept }
+        }
+    }
+
+    impl Drop for Lingering {
+        fn drop(&mut self) {
+            for server in self.kept.lock().expect("kept").drain(..) {
+                let _ = server.shutdown(std::net::Shutdown::Both);
+            }
+        }
+    }
+
+    /// An approval that fails once it holds the request ends its transaction before it answers:
+    /// a rejection made right after, which takes the row without a wait, finds the request waiting
+    /// and rejects it, rather than answer that another instance is deciding it. The approval fails
+    /// on the client while the database's transaction lives: the list's version has no row, so
+    /// the register's write gets no row back where it moves the version. The database is reached
+    /// through a proxy that keeps a closed connection's session open, so an approval that let its
+    /// connection close instead would leave the request held.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_rejection_after_a_failed_approval_finds_the_request_waiting() {
+        use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
+        use crate::enrolment::{Rejection, Submitted};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        test.open();
+        let proxy = Lingering::to((test.config.host.clone(), test.config.port));
+        let mut through = test.config();
+        through.port = proxy.port;
+        let database = Arc::new(Database::connect(&through, Some(&test.schema)).expect("connect"));
+        let register = register_on(&database);
+        let enrolment = enrolment_on(&database);
+        enrolment.open(600).expect("window");
+        assert_eq!(
+            enrolment.submit(submitted("k"), requester()),
+            Submitted::Waiting
+        );
+        test.sql("DELETE FROM revocation_list_version");
+        enrolment
+            .approve(
+                "k",
+                &Counting::default(),
+                "host-1",
+                &Registering::on(&register),
+                &|_| false,
+            )
+            .expect_err("the list's version cannot be moved");
+        assert_eq!(enrolment.reject("k"), Ok(Rejection::Queued));
     }
 
     /// A rejection of a request another instance holds while it signs it answers at once that the
