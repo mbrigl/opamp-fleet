@@ -14,7 +14,7 @@ use super::Cached as GenericClient;
 use opamp::uid::InstanceUid;
 use tokio_postgres::types::ToSql;
 
-use super::{client, signed, sql, unsigned, Database};
+use super::{client, signed, snapshot, sql, unsigned, Database};
 use crate::agent_store::{AgentPage, Holder, PageQuery, PagedAgent, StoredAgent};
 use crate::listing::{AgentFilter, AgentSort, Derived, HolderFilter, Key, Position};
 
@@ -438,13 +438,7 @@ pub(super) fn query_page(database: &Database, query: &PageQuery<'_>) -> Result<A
     let params = c.params;
     let (total, rows, records) = database.run(move |pool| async move {
         let mut client = client(&pool).await?;
-        let transaction = client
-            .build_transaction()
-            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-            .read_only(true)
-            .start()
-            .await
-            .map_err(sql)?;
+        let transaction = snapshot(&mut client).await?;
         let refs: Vec<&(dyn ToSql + Sync)> = params
             .iter()
             .map(|p| p.as_ref() as &(dyn ToSql + Sync))
@@ -538,13 +532,7 @@ fn arrived_over(
     let host = host.to_string();
     let (records, presence, gateway) = database.run(move |pool| async move {
         let mut client = client(&pool).await?;
-        let transaction = client
-            .build_transaction()
-            .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-            .read_only(true)
-            .start()
-            .await
-            .map_err(sql)?;
+        let transaction = snapshot(&mut client).await?;
         let presence: Vec<(String, bool, Option<String>, Option<String>)> = transaction
             .query(
                 "SELECT a.instance_uid, a.connected AND l.instance_id IS NOT NULL, \
@@ -589,7 +577,7 @@ fn arrived_over(
             },
         ));
     }
-    let placed = crate::listing::place_on_host(
+    let placed = crate::fleet::placement::place_on_host(
         gateway,
         &found
             .iter()

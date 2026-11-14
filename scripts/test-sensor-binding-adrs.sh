@@ -304,6 +304,23 @@ base "$d"
 expect_with 0 "--sections prints prose before a list longer than a pipe holds" "$d" \
   "- $(adr_id 7): every document" --sections --path README.md
 
+# The Binding table grouped under subheadings: the rows under each are read, up to the next heading
+# of the index's own level.
+d="$(repo sections-grouped)"
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+{
+  printf '# ADRs\n\n## Index\n\n### Binding\n\nThe decisions in force.\n\n#### Template\n\n'
+  printf '| ADR | Title | Applies to | Status |\n|-----|-------|-----|-----|\n'
+  printf '| [0001](0001-fixture.md) | Fixture | the plan under `docs/plan/` and `README.md` | 🟢 |\n'
+  printf '\n#### Code\n\n| ADR | Title | Applies to | Status |\n|-----|-------|-----|-----|\n'
+  printf '| [0003](0003-fixture.md) | Code | the code under `src/`, and the `pull request` template | 🟡 |\n'
+  printf '\n### Superseded and rejected\n\n| [0002](0002-fixture.md) | Old | prose too | ⚪ |\n'
+} > "$d/docs/adr/README.md"
+base "$d"
+expect_with 0 "--sections reads the rows of every group under Binding" "$d" \
+  "- $(adr_id 3): the code under" --sections --path README.md
+lacks_with "--sections reads no row past Binding" "$d" "- $(adr_id 2):" --sections --path README.md
+
 # The banner of an ADR's sections names the sections ADR_RULE_SECTIONS lists, as a copy of the
 # sensor whose library lists three of them prints.
 d="$(repo sections-named)"

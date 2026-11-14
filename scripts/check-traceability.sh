@@ -12,6 +12,10 @@
 #      followed by a reason is exempt.
 #   3. Citations: every marker names an identifier that exists, and no ADR that is ⚪ superseded
 #      or 🔴 rejected.
+#   4. Named tests: every name an accepted ADR's '## Enforcement' section gives in backticks that
+#      reads as a test's, lower case words joined by at least three underscores, is defined at the
+#      start of a line of a file that is not Markdown, as a function ('fn <name>') or a field
+#      ('<name>:'); a comment defines nothing. A shorter name is not read.
 #
 # A criterion that no marker cites is pending work: the check lists it in its closing line and
 # does not fail — nothing in the specification marks the state, so meeting a goal touches the
@@ -90,6 +94,7 @@ known_adrs=()
 accepted=()
 inactive=()
 exempt=()
+named_tests=()   # "<test> <ADR file>" for each test name an accepted ADR's Enforcement gives
 
 while IFS= read -r f; do
   name="$(basename "$f")"
@@ -100,6 +105,9 @@ while IFS= read -r f; do
     *🟢*)
       accepted+=("$id")
       enforcement="$(sed -n '/^## Enforcement/,$p' "$f")"
+      while IFS= read -r test; do
+        named_tests+=("$test $ADR_DIR/$name")
+      done < <(grep -oE "\`[a-z][a-z0-9]*(_[a-z0-9]+){3,}\`" <<< "$enforcement" | tr -d '`' | sort -u)
       if grep -qE '^\*\*Not mechanically decidable:\*\*' <<< "$enforcement"; then
         if grep -qE '^\*\*Not mechanically decidable:\*\*[[:space:]]*[^[:space:]]' <<< "$enforcement"; then
           exempt+=("$id")
@@ -147,7 +155,23 @@ while IFS= read -r -d '' rel; do
 done < <(git -C "$ROOT" ls-files --cached --others --exclude-standard -z)
 
 # ---------------------------------------------------------------------------------------------
-# 4. Coverage: every accepted ADR is cited; criteria without a citation are listed.
+# 4. Named tests: each defined in a file that is not Markdown.
+
+if ((${#named_tests[@]})); then
+  defined="$(git -C "$ROOT" ls-files --cached --others --exclude-standard -z \
+    | (cd "$ROOT" && grep -zv '\.md$' | xargs -0 -r grep -IhoE \
+         '^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?(((async|const|unsafe)[[:space:]]+)*fn[[:space:]]+)?[a-z][a-z0-9_]*[[:space:]]*[(:<]' \
+         2>/dev/null) \
+    | sed -E 's/^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?(((async|const|unsafe)[[:space:]]+)*fn[[:space:]]+)?//; s/[[:space:]]*[(:<]$//' \
+    | sort -u)"
+  for entry in "${named_tests[@]}"; do
+    grep -qxF "${entry%% *}" <<< "$defined" \
+      || add_error "${entry#* }: its Enforcement names '${entry%% *}', which no file defines — name the test there is"
+  done
+fi
+
+# ---------------------------------------------------------------------------------------------
+# 5. Coverage: every accepted ADR is cited; criteria without a citation are listed.
 
 for id in "${accepted[@]}"; do
   _contains "$id" "${exempt[@]}" && continue

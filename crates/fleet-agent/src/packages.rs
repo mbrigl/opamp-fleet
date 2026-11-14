@@ -70,7 +70,7 @@ fn ensure_safe_package_name(name: &str) -> Result<(), String> {
 /// The artifact is a program — tens or hundreds of megabytes — so it is streamed to `staging_dir`
 /// and hashed as it arrives, never assembled in memory or read back: the signature covers the
 /// Agent type, the version and that hash, not the bytes themselves. `staging_dir` is the
-/// receiving Agent's own (ADR-0018), so the install that follows is a rename inside one
+/// receiving Agent's own (ADR-0046), so the install that follows is a rename inside one
 /// filesystem.
 /// Verifies: ADR-0034
 pub async fn download_and_verify(
@@ -192,14 +192,11 @@ const MAX_REDIRECTS: usize = 5;
 /// (`send_download`) — and per-operation timeouts rather than one for the whole transfer, since a
 /// large artifact over a modest link legitimately takes minutes.
 pub(crate) fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder()
-        .use_rustls_tls()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .read_timeout(std::time::Duration::from_secs(60));
-    tls.apply(builder)?
-        .build()
-        .map_err(|e| format!("cannot build the download client: {e}"))
+    tls.https_client(opamp::client::Timeouts::PerOperation {
+        connect: std::time::Duration::from_secs(30),
+        read: std::time::Duration::from_secs(60),
+    })
+    .map_err(|e| format!("the download client: {e}"))
 }
 
 /// Where a download may go (ADR-0034 clause 51): this Client's own Server origin — the scheme, host
@@ -356,17 +353,16 @@ impl Waits {
     }
 }
 
-/// A `Retry-After` in seconds; an HTTP date is not used, and neither is anything unreadable.
+/// A `Retry-After` in seconds, read as the drivers read it; an HTTP date is not used, and neither
+/// is anything unreadable.
 fn retry_after(response: &reqwest::Response) -> Option<std::time::Duration> {
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(std::time::Duration::from_secs)
+    opamp::client::retry_after_seconds(
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)?
+            .to_str()
+            .ok()?,
+    )
 }
 
 /// Attaches the offered headers to a request.
@@ -693,7 +689,7 @@ mod tests {
     }
 
     /// A `Retry-After: 0` does not make the download ask in a tight loop for ever: the asking ends
-    /// at the deadline, after a bounded number of requests.
+    /// at the deadline, after a bounded number of requests, and each wait is at least a second.
     /// Verifies: ADR-0034
     #[tokio::test]
     async fn a_retry_after_of_zero_does_not_loop_without_bound() {
@@ -715,6 +711,18 @@ mod tests {
         assert!(err.contains("longer than this Client waits"), "{err}");
         let requests = count.load(Ordering::SeqCst);
         assert!((1..=11).contains(&requests), "{requests} requests");
+
+        // Under the clause's own cap of 60 s, a `Retry-After: 0` is waited as one second.
+        let (server, _) = answering(vec![(503, Some("0"))]).await;
+        let (origin, client) = origin_for(&format!("ws://{server}/v1/opamp"));
+        let url = format!("http://{server}/file");
+        let response = send_download(&origin, &client, &url, &[])
+            .await
+            .expect("a response");
+        let wait = Waits::new(Patience::default())
+            .asked(&url, &response)
+            .expect("within the bound");
+        assert_eq!(wait, Some(std::time::Duration::from_secs(1)));
     }
 
     /// The time the requests take counts against the bound, not only the waits: a slow origin

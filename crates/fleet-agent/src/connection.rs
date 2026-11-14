@@ -28,7 +28,7 @@ pub const SETTINGS_FILE: &str = "connection-settings.pb";
 /// once; a failed rewrite is warned about and never fails the load.
 pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
     let path = state_dir.join(SETTINGS_FILE);
-    let bytes = crate::nofollow::read(&path).ok()?;
+    let bytes = crate::nofollow::read(&path, crate::nofollow::MAX_READ_BYTES).ok()?;
     match ConnectionSettingsOffers::decode(bytes.as_slice()) {
         Ok(mut stored) => {
             if let Some(headers) = stored.opamp.as_mut().and_then(|s| s.headers.take()) {

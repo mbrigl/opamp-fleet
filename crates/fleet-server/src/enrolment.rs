@@ -320,7 +320,7 @@ pub enum Took {
 /// filesystem adapter ([`FsEnrolmentStore`](crate::fs::FsEnrolmentStore)) keeps them in
 /// `enrolment.json`. Each act is one write that decides from what is stored, so the queue's bounds
 /// hold for every instance on one database
-/// (ADR-0025
+/// (ADR-0045
 /// clause 19). The acts' bodies here read and write the whole, for a store that is its only
 /// writer; a store that is shared answers each in one transaction of its own.
 pub trait EnrolmentStore: Send + Sync {
@@ -380,26 +380,6 @@ pub trait EnrolmentStore: Send + Sync {
         Ok(Took::Added)
     }
 
-    /// Decides the waiting request `id`, and answers whether it was decided now: a request the
-    /// store does not hold, or holds decided already, is left as it is, and so is one another
-    /// instance holds while it decides it.
-    ///
-    /// # Errors
-    /// Returns an error when the store cannot be read or written; nothing is then decided.
-    fn decide(&self, id: &str, decision: &Decision) -> Result<Decided, String> {
-        let mut persisted = self.load()?.unwrap_or_default();
-        let Some(request) = persisted
-            .requests
-            .iter_mut()
-            .find(|r| r.id == id && r.decision.is_none())
-        else {
-            return Ok(Decided::NotWaiting);
-        };
-        request.decision = Some(decision.clone());
-        self.save(&persisted)?;
-        Ok(Decided::Written)
-    }
-
     /// Rejects the key `id` at `rejected_ms`, kept beyond the window, and decides its request
     /// while it waits: [`Decided::Written`]. A request the store holds decided is left as it is,
     /// its key not rejected: [`Decided::NotWaiting`]. A key the queue does not hold is rejected
@@ -432,7 +412,7 @@ pub trait EnrolmentStore: Send + Sync {
     /// prepared (ADR-0023 clause 9). A request the store holds no longer waiting, or whose key it
     /// holds rejected, is answered [`Approval::NotWaiting`] before anything is signed, so of two
     /// instances approving one request one signs and records it and the other nothing
-    /// (ADR-0025
+    /// (ADR-0045
     /// clause 19). A store other instances share also refuses a request whose bootstrap
     /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
     /// leaves that to the list in memory. Such a store answers [`Approval::Deciding`] for a
@@ -1276,7 +1256,7 @@ impl Enrolment {
     }
 
     /// Reads the window and its queue again from the store, as another instance changed them
-    /// (ADR-0025
+    /// (ADR-0045
     /// clauses 9 and 10), and wakes every connection waiting on them, so a request another instance
     /// approved is handed to the connection that asked. It reads under the lock, so no act of this
     /// instance's own lands between the read and the swap; the queue is bounded, so the read is
@@ -1586,7 +1566,7 @@ pub(crate) mod tests {
     /// Two instances on one store answer a request as the store holds it: one the other approved
     /// is handed out with its certificate, and one the other decided or withdrew is not found,
     /// however the first held it, and signs nothing.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn two_instances_on_one_store_answer_a_request_as_the_store_holds_it() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1806,7 +1786,7 @@ pub(crate) mod tests {
 
     /// A decision on a request another instance is deciding at this moment is answered so, and
     /// decides nothing: the request still waits here, to be decided once asked again.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_decision_on_a_request_another_instance_is_deciding_is_answered_so() {
         #[derive(Clone, Default)]
@@ -2165,9 +2145,9 @@ pub(crate) mod tests {
         fn approve(
             &self,
             id: &str,
-            _: &CertId,
+            bootstrap: &CertId,
             sign: &mut dyn FnMut() -> Result<Signing, DecisionError>,
-            _: &dyn Registrar,
+            registrar: &dyn Registrar,
         ) -> Result<Approval, String> {
             let (decision, _) = match sign() {
                 Ok(signing) => signing,
@@ -2175,13 +2155,29 @@ pub(crate) mod tests {
             };
             match self.1 {
                 Commit::Landed => {
-                    assert_eq!(self.0.decide(id, &decision), Ok(Decided::Written));
+                    assert_eq!(
+                        self.0.approve(
+                            id,
+                            bootstrap,
+                            &mut || Ok((decision.clone(), None)),
+                            registrar
+                        ),
+                        Ok(Approval::Approved(decision))
+                    );
                     Err("the commit's answer was lost".to_string())
                 }
                 Commit::Lost | Commit::Unreadable => Err("the commit failed".to_string()),
                 Commit::Foreign => {
                     let theirs = Decision::Approved("another instance's certificate".to_string());
-                    assert_eq!(self.0.decide(id, &theirs), Ok(Decided::Written));
+                    assert_eq!(
+                        self.0.approve(
+                            id,
+                            bootstrap,
+                            &mut || Ok((theirs.clone(), None)),
+                            registrar
+                        ),
+                        Ok(Approval::Approved(theirs))
+                    );
                     Err("the commit's answer was lost".to_string())
                 }
                 Commit::NotCommitted => {

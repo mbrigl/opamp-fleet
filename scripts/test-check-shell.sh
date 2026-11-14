@@ -11,7 +11,8 @@
 # here-string, a comment, grep -c, and grep -q after '||' pass; the forms that read the input
 # whole report the match of a producer that writes on after it, where the pipe reads none. Where
 # ShellCheck is not on PATH the lint skips ShellCheck, and so does this test with the cases that
-# need it.
+# need it. A script under scripts/ committed with mode 100644 fails and is named, while one of
+# 100755 and a library under scripts/lib/ of 100644 pass.
 #
 # Verifies: ADR-0002
 # Inputs: scripts/check-shell.sh scripts/lib/
@@ -183,5 +184,25 @@ else
   echo "FAIL: the pipe into grep -q reads the match, so the producer does not test the forms" >&2
   printf '    %s\n' "$out" >&2
 fi
+
+# A script directly under scripts/ is committed executable; a library under scripts/lib/ is not.
+PLAIN=$'#!/usr/bin/env bash\necho ok\n'
+d="$(repo modes)"
+mkdir -p "$d/scripts/lib"
+printf '%s' "$PLAIN" > "$d/scripts/run.sh"
+printf '%s' "$PLAIN" > "$d/scripts/lib/shared.sh"
+git -C "${d:?}" add scripts
+git -C "${d:?}" update-index --chmod=-x scripts/run.sh scripts/lib/shared.sh
+expect 1 "a script under scripts/ committed with mode 100644 fails" "$d"
+out="$(bash "$CHECK" "$d" 2>&1)"
+if [[ "$out" == *"scripts/run.sh: committed with mode 100644"* && "$out" != *"shared.sh: committed"* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1))
+  echo "FAIL: the finding names the script, and not the library under scripts/lib/" >&2
+  printf '    %s\n' "$out" >&2
+fi
+git -C "${d:?}" update-index --chmod=+x scripts/run.sh
+expect 0 "a script under scripts/ committed with mode 100755 passes, its library 100644" "$d"
 
 summary "Shell lint self-test"

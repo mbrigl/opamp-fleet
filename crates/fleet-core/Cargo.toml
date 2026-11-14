@@ -35,3 +35,13 @@ time.workspace = true
 # The key a `bootstrap.p12` opens to is held in a buffer wiped on drop (ADR-0014). No TLS or
 # crypto backend comes with zeroize itself (ADR-0012).
 zeroize.workspace = true
+# What the Server and the operator program do alike on a PKCS#11 token (ADR-0043, ADR-0042 clause
+# 5), behind the `pkcs11` feature: only those two turn it on, so the Client does not build it.
+cryptoki = { workspace = true, optional = true }
+
+[features]
+pkcs11 = ["dep:cryptoki"]
+
+[dev-dependencies]
+# A CA's files written for the test that loads them.
+tempfile = "3"

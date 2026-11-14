@@ -67,7 +67,7 @@
   // Runs inside the container on every start, so the settings are set again should a session
   // have changed them: the repository's git hooks under .githooks/ and the merge settings they
   // rely on. What each refuses, and the same commands for a clone outside the container, are under
-  // "Git hooks" in CONTRIBUTING.md. The development observability stack runs on the host,
+  // CONTRIBUTING.md → "Git hooks". The development observability stack runs on the host,
   // apart from this container (observability/compose.yaml); this puts its Collector on the
   // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
   // plaintext to a loopback IP literal alone (ADR-0017), the stack's rustfs on :9100, the S3

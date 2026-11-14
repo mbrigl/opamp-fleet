@@ -113,7 +113,7 @@ impl AgentState {
 
     /// Whether this Agent takes Server-offered packages (ADR-0034) — the self-Agent unless
     /// `[packages] self_update = false` withdraws the consent (ADR-0019), and every Supervisor, since every Managed
-    /// Process is one this Client installs (ADR-0018). Read without side effects, so a startup
+    /// Process is one this Client installs (ADR-0046). Read without side effects, so a startup
     /// check can ask it before anything is polled.
     pub fn accepts_packages(&self) -> bool {
         self.protocol.declares(AgentCapabilities::AcceptsPackages)

@@ -1,8 +1,8 @@
-//! The remote configuration channel (ADR-0018): a received configuration applied or handed to
+//! The remote configuration channel (ADR-0046): a received configuration applied or handed to
 //! the process adapter, and its outcome reported.
 
 use opamp::proto::{AgentRemoteConfig, RemoteConfigStatus, RemoteConfigStatuses};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::AgentState;
 
@@ -13,11 +13,20 @@ impl AgentState {
     }
 
     /// The verdict on an apply — the process adapter's for a Supervisor-backed Agent, the
-    /// Engine's Supervisor-set apply for the self-Agent (ADR-0018): closes the `APPLYING` →
+    /// Engine's Supervisor-set apply for the self-Agent (ADR-0046): closes the `APPLYING` →
     /// `APPLIED`/`FAILED` lifecycle (goal 4, end to end).
+    ///
+    /// A verdict on a hash other than the one the status holds is on an offer the status has
+    /// moved past, to one applying or one that failed before its hand-over: it leaves the status
+    /// as it is, so the Server's offer of the held hash again stays a repeat (ADR-0046, clause 56).
     pub fn config_applied(&mut self, hash: Vec<u8>, result: Result<(), String>) {
+        let held = self.protocol.remote_config_status();
+        if held.is_some_and(|held| held.last_remote_config_hash != hash) {
+            debug!(hash = %hex::encode(&hash), "verdict on a hash no longer applying; status kept");
+            return;
+        }
         // The self-Agent's offer is persisted only now, on success: its hash is what a restarted
-        // Client reports as applied, and that must never get ahead of the file (ADR-0018).
+        // Client reports as applied, and that must never get ahead of the file (ADR-0046).
         if let Some(applying) = self.applying.take() {
             if result.is_ok() && applying.config_hash == hash {
                 match self.storage.store_remote_config(&applying) {
@@ -50,13 +59,33 @@ impl AgentState {
         ));
     }
 
+    /// An offer of the hash this Agent is applying or has applied is a report, not an apply
+    /// (ADR-0046, clause 56):
+    /// the status it holds is owed again and nothing is stored, handed over or restarted. A Server answers a heartbeat that crossed its push with the offer again, so
+    /// one offer arriving twice is the normal case. A hash whose apply `FAILED` is not held this
+    /// way and is applied again. Returns whether `hash` was such a repeat.
+    pub(super) fn report_a_repeated_offer(&mut self, hash: &[u8]) -> bool {
+        let Some(held) = self.protocol.remote_config_status() else {
+            return false;
+        };
+        let applying_or_applied = held.status == RemoteConfigStatuses::Applying as i32
+            || held.status == RemoteConfigStatuses::Applied as i32;
+        if !applying_or_applied || held.last_remote_config_hash != hash {
+            return false;
+        }
+        debug!(hash = %hex::encode(hash), "remote configuration offered again; reporting its status");
+        let held = held.clone();
+        self.protocol.set_remote_config_status(held);
+        true
+    }
+
     /// Takes an offered configuration in and reports `APPLYING`; the outcome closes the
     /// lifecycle through [`config_applied`](Self::config_applied). Success and failure alike
     /// carry the hash the status refers to (a rejected configuration is a report, not a silence).
     ///
     /// For a Supervisor-backed Agent the entry files are stored now — the process adapter is
     /// pointed at them — and the apply is handed over as pending. The self-Agent's configuration
-    /// is its Supervisor set (ADR-0018): it is left pending for the Engine's apply and stored
+    /// is its Supervisor set (ADR-0046): it is left pending for the Engine's apply and stored
     /// only once that succeeded, so a restart mid-apply reports nothing as applied and the
     /// Server offers again.
     pub(super) fn apply(&mut self, config: &AgentRemoteConfig) {

@@ -150,17 +150,6 @@ fn uid_hex(uid: &str) -> String {
     uid.trim().replace('-', "").to_ascii_lowercase()
 }
 
-async fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-    let deadline = Instant::now() + TIMEOUT;
-    while Instant::now() < deadline {
-        if let Some(value) = probe() {
-            return value;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("timed out waiting for {what}");
-}
-
 /// Our Server in-process, plaintext on the loopback with an open admission, as the rest of the
 /// suite runs it.
 struct OurServer {
@@ -258,7 +247,7 @@ async fn go_client_against_our_server(scheme: &str) {
 
     // Connect and report: the Agent appears with its description and exactly the capabilities
     // it declared.
-    let view = wait_until("the Go Client's Agent to appear described", || {
+    let view = common::wait_until("the Go Client's Agent to appear described", || {
         server
             .agent(&uid)
             .filter(|a| a.service_name == GO_AGENT_TYPE)
@@ -285,7 +274,7 @@ async fn go_client_against_our_server(scheme: &str) {
     // sequence_num advances under heartbeats; that it advances without a gap is what the
     // ReportFullState steps below decide, through a gap our Server must notice.
     let first = view.sequence_num;
-    wait_until("three more reports", || {
+    common::wait_until("three more reports", || {
         server.agent(&uid).filter(|a| a.sequence_num >= first + 3)
     })
     .await;
@@ -304,7 +293,7 @@ async fn go_client_against_our_server(scheme: &str) {
     // Remote config: offered, acknowledged as APPLIED with its hash, and not offered again.
     common::save(&server.state, "interop", "interop: true\n", GO_AGENT_TYPE);
     common::release_to_every_agent(&server.state, &["interop"]);
-    wait_until("the Configuration to be assigned to the Go Client", || {
+    common::wait_until("the Configuration to be assigned to the Go Client", || {
         server
             .agent(&uid)
             .filter(|a| a.assigned_configurations.iter().any(|c| c == "interop"))
@@ -314,14 +303,14 @@ async fn go_client_against_our_server(scheme: &str) {
         e.get("remote_config_hash").is_some()
     });
     assert_eq!(offer["remote_config_names"], json!(["interop"]));
-    wait_until("the Server to see the offer APPLIED and in sync", || {
+    common::wait_until("the Server to see the offer APPLIED and in sync", || {
         server
             .agent(&uid)
             .filter(|a| a.remote_config_status == "APPLIED" && a.in_sync)
     })
     .await;
     let settled = server.agent(&uid).unwrap().sequence_num;
-    wait_until("three reports after the acknowledgement", || {
+    common::wait_until("three reports after the acknowledgement", || {
         server.agent(&uid).filter(|a| a.sequence_num >= settled + 3)
     })
     .await;
@@ -346,7 +335,7 @@ async fn go_client_against_our_server(scheme: &str) {
     // gets the description back.
     let other = OurServer::start().await;
     relay.switch_to(other.addr);
-    wait_until("the second Server to recover the full state", || {
+    common::wait_until("the second Server to recover the full state", || {
         other
             .agent(&uid)
             .filter(|a| a.service_name == GO_AGENT_TYPE)
@@ -370,12 +359,12 @@ async fn go_client_against_our_server(scheme: &str) {
             .map(String::as_str)
             == Some("after-the-gap")
     };
-    wait_until("the second Server to see the changed description", || {
+    common::wait_until("the second Server to see the changed description", || {
         other.agent(&uid).filter(|a| marked(a))
     })
     .await;
     relay.switch_to(server.addr);
-    wait_until(
+    common::wait_until(
         "the first Server to recover the change after the gap",
         || server.agent(&uid).filter(|a| marked(a)),
     )
@@ -409,7 +398,7 @@ async fn go_client_takes_an_assigned_identity(scheme: &str) {
         .unwrap()
         .to_string();
     assert_ne!(uid_hex(&own), uid_hex(&assigned));
-    wait_until("the Agent to report under the assigned identity", || {
+    common::wait_until("the Agent to report under the assigned identity", || {
         server
             .agent(&assigned)
             .filter(|a| a.service_name == GO_AGENT_TYPE)
@@ -837,13 +826,13 @@ async fn go_client_against_our_tls_server(scheme: &str) {
         .as_str()
         .unwrap()
         .to_string();
-    wait_until("the admitted Go Client to report its description", || {
+    common::wait_until("the admitted Go Client to report its description", || {
         agent(&uid).filter(|a| a.service_name == GO_AGENT_TYPE)
     })
     .await;
     common::save(&state, "interop-tls", "interop: tls\n", GO_AGENT_TYPE);
     common::release_to_every_agent(&state, &["interop-tls"]);
-    wait_until("the configuration APPLIED over TLS", || {
+    common::wait_until("the configuration APPLIED over TLS", || {
         agent(&uid).filter(|a| a.remote_config_status == "APPLIED" && a.in_sync)
     })
     .await;

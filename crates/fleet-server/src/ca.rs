@@ -10,11 +10,9 @@
 //! CA is a renewal and is signed at once; a CSR on an enrolment connection waits until an operator
 //! approves it ([`crate::enrolment`], ADR-0040).
 
-use fleet_core::x509::issue::{random_serial, CLOCK_SKEW};
-use rcgen::{
-    CertificateSigningRequestParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, SanType,
-};
+use fleet_core::csr::Proof;
+use fleet_core::x509::issue::{self, Role, CLOCK_SKEW};
+use rcgen::{CertificateSigningRequestParams, Issuer, KeyPair, SanType};
 use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
 
@@ -97,20 +95,13 @@ impl ClientCa {
         config: &ClientCaConfig,
         token: Option<&std::sync::Arc<crate::pkcs11::Token>>,
     ) -> Result<Self, String> {
-        let cert_pem = std::fs::read_to_string(&config.cert_file)
-            .map_err(|e| format!("cannot read {}: {e}", config.cert_file.display()))?;
+        let ca_der = first_certificate(&config.cert_file)?;
         let key = CaKey::load(
             ("[client_ca] key_file", config.key_file.as_deref()),
             ("[client_ca] key_label", config.key_label.as_deref()),
             token,
         )?;
-        let issuer = Issuer::from_ca_cert_pem(&cert_pem, key)
-            .map_err(|e| format!("cannot use {} as a CA: {e}", config.cert_file.display()))?;
-        let ca_der = opamp::tls::certificates(cert_pem.as_bytes())
-            .map_err(|e| format!("cannot read {}: {e}", config.cert_file.display()))?
-            .first()
-            .map(|der| der.as_ref().to_vec())
-            .ok_or_else(|| format!("{} holds no certificate", config.cert_file.display()))?;
+        let issuer = issue::authority(&config.cert_file, &ca_der, key)?;
         let leaf_name = leaf_name(&config.cert_file, &ca_der)?;
         Ok(ClientCa {
             issuer,
@@ -174,10 +165,10 @@ impl ClientCa {
         request.params.distinguished_name = distinguished_name(
             &crate::bootstrap::carried_attributes(subject, &self.leaf_name),
         )?;
-        // Never trust the request for the certificate's powers: force a client-auth leaf.
-        request.params.is_ca = IsCa::ExplicitNoCa;
-        request.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        request.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        // Never trust the request for the certificate's powers: force a client-auth leaf, with a
+        // serial of its own, so two certificates from one key are two revocable things (ADR-0040
+        // clause 26). rcgen would derive the serial from the key.
+        issue::leaf(&mut request.params, Role::Client)?;
         // None of the request's names — one could name another host. The one name this Server
         // puts in is the host the certificate is issued to (ADR-0027 clause 11), which a renewal
         // carries on.
@@ -187,9 +178,6 @@ impl ClientCa {
                 .try_into()
                 .map_err(|e| format!("cannot name the host {host:?}: {e}"))?,
         ));
-        // A serial of its own for every certificate, so two certificates from one key are two
-        // revocable things (ADR-0040 clause 26). rcgen would derive it from the key.
-        request.params.serial_number = Some(random_serial()?);
         // A token key signs only with a place for its entry held in the record
         // (ADR-0043
         // clause 6).
@@ -253,25 +241,11 @@ impl ClientCa {
         use sha2::{Digest, Sha256};
         // The proof and the key it covers come from the one request this CSR is (ADR-0016
         // clause 18), and so does the key `sign` certifies.
-        let (csr_der, request) = read(csr_pem)?;
-        let Some(encoded) = request
-            .params
-            .subject_alt_names
-            .iter()
-            .find_map(|san| match san {
-                SanType::URI(uri) => uri.as_str().strip_prefix(fleet_core::renewal::URI_PREFIX),
-                _ => None,
-            })
-        else {
+        let (csr_der, _) = read(csr_pem)?;
+        // Neither proof stands beside the other (ADR-0016 clause 21).
+        let Some(encoded) = fleet_core::csr::proof(&csr_der, Proof::Renewal)? else {
             return Ok(None);
         };
-        // Neither proof stands beside the other (ADR-0016 clause 21).
-        if request.params.subject_alt_names.iter().any(|san| {
-            matches!(san, SanType::URI(uri)
-                if uri.as_str().starts_with(fleet_core::bootstrap_proof::URI_PREFIX))
-        }) {
-            return Err(BOTH_PROOFS.to_string());
-        }
         let refused = |why: &str| format!("the renewal proof does not hold: {why}");
         let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(encoded)
@@ -320,14 +294,9 @@ pub fn bootstrap_proof(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
     use base64::Engine as _;
     use sha2::{Digest, Sha256};
     let csr_der = fleet_core::csr::der(csr_pem.as_bytes())?;
-    let Some(encoded) =
-        fleet_core::csr::requested_uri(&csr_der, fleet_core::bootstrap_proof::URI_PREFIX)?
-    else {
+    let Some(encoded) = fleet_core::csr::proof(&csr_der, Proof::Bootstrap)? else {
         return Ok(None);
     };
-    if fleet_core::csr::requested_uri(&csr_der, fleet_core::renewal::URI_PREFIX)?.is_some() {
-        return Err(BOTH_PROOFS.to_string());
-    }
     let refused = |why: &str| format!("the bootstrap proof does not hold: {why}");
     let content = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded)
@@ -350,14 +319,12 @@ pub fn bootstrap_proof(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
 /// `Ok(None)` for a request without a proof.
 ///
 /// # Errors
-/// Returns the `BadRequest` text for a request that is not one PEM block, or a proof that does not
-/// parse.
+/// Returns the `BadRequest` text for a request that is not one PEM block, a proof that does not
+/// parse, or a request that carries a renewal proof beside it.
 pub fn bootstrap_proof_certificate(csr_pem: &str) -> Result<Option<Vec<u8>>, String> {
     use base64::Engine as _;
     let csr_der = fleet_core::csr::der(csr_pem.as_bytes())?;
-    let Some(encoded) =
-        fleet_core::csr::requested_uri(&csr_der, fleet_core::bootstrap_proof::URI_PREFIX)?
-    else {
+    let Some(encoded) = fleet_core::csr::proof(&csr_der, Proof::Bootstrap)? else {
         return Ok(None);
     };
     let unparsed = || "the bootstrap proof does not hold: it does not parse".to_string();
@@ -376,10 +343,6 @@ pub fn cert_id(der: &[u8]) -> Option<CertId> {
     let (issuer, serial) = fleet_core::x509::read::id(&certificate);
     Some(CertId { issuer, serial })
 }
-
-/// What a CSR carrying both proofs is answered (ADR-0016 clause 21).
-pub const BOTH_PROOFS: &str =
-    "the certificate signing request carries both a renewal proof and a bootstrap proof";
 
 /// What a certificate (DER) says about itself: issuer and serial, subject, the SHA-256 of its
 /// public key, and when it expires — for the register, and for a peer's certificate at admission.
@@ -800,8 +763,7 @@ impl BootstrapCa {
             (None, Some(label)) => format!("[enrolment] bootstrap_ca_key_label {label:?}"),
             (None, None) => return Ok(None),
         };
-        let cert_pem = std::fs::read_to_string(&enrolment.bootstrap_ca_file)
-            .map_err(|e| format!("cannot read {}: {e}", enrolment.bootstrap_ca_file.display()))?;
+        let der = first_certificate(&enrolment.bootstrap_ca_file)?;
         let key = CaKey::load(
             (
                 "[enrolment] bootstrap_ca_key_file",
@@ -813,7 +775,6 @@ impl BootstrapCa {
             ),
             token,
         )?;
-        let der = first_certificate(&enrolment.bootstrap_ca_file, &cert_pem)?;
         let (_, cert) = X509Certificate::from_der(&der)
             .map_err(|e| format!("cannot read {}: {e}", enrolment.bootstrap_ca_file.display()))?;
         if cert.public_key().raw != key.subject_public_key_info().as_slice() {
@@ -842,12 +803,7 @@ impl BootstrapCa {
         let not_after_ms = u64::try_from(cert.validity().not_after.timestamp())
             .unwrap_or(0)
             .saturating_mul(1000);
-        let issuer = Issuer::from_ca_cert_pem(&cert_pem, key).map_err(|e| {
-            format!(
-                "cannot use {} as a CA: {e}",
-                enrolment.bootstrap_ca_file.display()
-            )
-        })?;
+        let issuer = issue::authority(&enrolment.bootstrap_ca_file, &der, key)?;
         Ok(Some(BootstrapCa {
             issuer,
             leaf_name,
@@ -882,10 +838,7 @@ impl crate::bootstrap::BootstrapSigner for BootstrapCa {
         let mut params = rcgen::CertificateParams::default();
         params.distinguished_name = distinguished_name(subject)?;
         // A client-authentication leaf and nothing more (ADR-0027 clause 3).
-        params.is_ca = IsCa::ExplicitNoCa;
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
-        params.serial_number = Some(random_serial()?);
+        issue::leaf(&mut params, Role::Client)?;
         params.not_before = at_ms(now_ms)? - CLOCK_SKEW;
         params.not_after = at_ms(not_after_ms)?;
         let permit = self.issuer.key().reserve()?;
@@ -941,16 +894,7 @@ impl CaKey {
         token: Option<&std::sync::Arc<crate::pkcs11::Token>>,
     ) -> Result<Self, String> {
         match (file, label) {
-            (Some(file), _) => {
-                // Wiped when it is dropped; what `rcgen` and `ring` keep of it is theirs
-                // (ADR-0014).
-                let pem = std::fs::read_to_string(file)
-                    .map(Zeroizing::new)
-                    .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-                KeyPair::from_pem(&pem)
-                    .map(|key| CaKey::File(Box::new(key)))
-                    .map_err(|e| format!("cannot read {}: {e}", file.display()))
-            }
+            (Some(file), _) => issue::read_key(file).map(|key| CaKey::File(Box::new(key))),
             (None, Some(label)) => token
                 .ok_or_else(|| {
                     format!("{label_key} {label:?} names a key on a token, and [pkcs11] is not set")
@@ -1049,13 +993,12 @@ fn leaf_name(path: &std::path::Path, ca_der: &[u8]) -> Result<String, String> {
     Ok(name)
 }
 
-/// The first certificate of a PEM file, DER.
-fn first_certificate(path: &std::path::Path, pem: &str) -> Result<Vec<u8>, String> {
-    opamp::tls::certificates(pem.as_bytes())
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?
-        .first()
+/// The first certificate of the CA file at `path`, DER, by the reader the operator tool uses.
+fn first_certificate(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let pem = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    opamp::tls::first_certificate(&pem)
         .map(|der| der.as_ref().to_vec())
-        .ok_or_else(|| format!("{} holds no certificate", path.display()))
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
 /// Milliseconds since the epoch, in the time type rcgen speaks.
@@ -1067,6 +1010,7 @@ fn at_ms(ms: u64) -> Result<time::OffsetDateTime, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{ExtendedKeyUsagePurpose, KeyUsagePurpose};
 
     /// A CA and a Client, end to end: the Client's key never leaves it, and what comes back is a
     /// certificate the CA signed over the public half it was sent.
@@ -1594,6 +1538,11 @@ mod tests {
     /// A CSR made with the key of a certificate this CA issued
     /// proves which certificate it renews.
     fn renewing(old_cert_pem: &str, old_key: &KeyPair) -> String {
+        renewing_beside(old_cert_pem, old_key, &[])
+    }
+
+    /// [`renewing`], its SANs asking for `uris` after the proof.
+    fn renewing_beside(old_cert_pem: &str, old_key: &KeyPair, uris: &[String]) -> String {
         use base64::Engine as _;
         use rcgen::{PublicKeyData as _, SigningKey as _};
         use sha2::{Digest, Sha256};
@@ -1611,14 +1560,56 @@ mod tests {
                 .encode(fleet_core::renewal::encode(&old_der, &signature))
         );
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
-        params
-            .subject_alt_names
-            .push(SanType::URI(proof.try_into().expect("uri")));
+        for uri in std::iter::once(&proof).chain(uris) {
+            params
+                .subject_alt_names
+                .push(SanType::URI(uri.clone().try_into().expect("uri")));
+        }
         params
             .serialize_request(&new_key)
             .expect("csr")
             .pem()
             .expect("pem")
+    }
+
+    /// A request that carries a bootstrap proof beside a renewal proof is refused by every reader
+    /// of a proof, the renewal's, the enrolment's and the Gateway route's, though the renewal
+    /// proof alone holds (ADR-0016 clause 21).
+    /// Verifies: ADR-0016
+    #[test]
+    fn a_request_with_both_proofs_is_refused_by_every_reader() {
+        use base64::Engine as _;
+        let ca = client_ca(30);
+        let old_key = KeyPair::generate().expect("old key");
+        let old = ca
+            .sign(
+                &rcgen::CertificateParams::new(Vec::<String>::new())
+                    .expect("params")
+                    .serialize_request(&old_key)
+                    .expect("csr")
+                    .pem()
+                    .expect("pem"),
+                "host-7",
+                &SubjectValues::default(),
+                UseCase::MemberCsr,
+            )
+            .expect("sign");
+        assert!(ca
+            .renewal_proof(&renewing(&old.pem, &old_key))
+            .expect("the renewal proof alone holds")
+            .is_some());
+        let bootstrap = format!(
+            "{}{}",
+            fleet_core::bootstrap_proof::URI_PREFIX,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                fleet_core::bootstrap_proof::encode(&cert_der(&old.pem), b"sig")
+            )
+        );
+        let both = renewing_beside(&old.pem, &old_key, &[bootstrap]);
+        let refused = Err(fleet_core::csr::BOTH_PROOFS.to_string());
+        assert_eq!(ca.renewal_proof(&both).map(|_| ()), refused);
+        assert_eq!(bootstrap_proof(&both).map(|_| ()), refused);
+        assert_eq!(bootstrap_proof_certificate(&both).map(|_| ()), refused);
     }
 
     /// A renewal proof names the certificate it renews and its host; a proof signed with another

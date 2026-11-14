@@ -61,6 +61,14 @@ impl Backoff {
         let half = ceiling / 2;
         half + Duration::from_nanos(crate::random::below(half.as_nanos() as u64))
     }
+
+    /// The wait after a refusal that named one — a `Retry-After`, or the wait an `Unavailable`
+    /// names: what the Server named, or the next step where that is longer, so a wait of zero, or
+    /// one shorter than the step, still waits the step (ADR-0012 clause 4). It takes the step, so
+    /// refusals in a row grow along the backoff.
+    pub(crate) fn at_least_a_step(&mut self, named: Duration) -> Duration {
+        named.max(self.advance())
+    }
 }
 
 #[cfg(test)]
@@ -122,6 +130,26 @@ mod tests {
             next >= Duration::from_millis(500) && next < Duration::from_secs(1),
             "{next:?}"
         );
+    }
+
+    /// A wait the Server names is waited as named where it is longer than the next step, and the
+    /// step is waited where it is longer, so a `Retry-After` of zero still waits a step; each call
+    /// takes a step, so refusals in a row grow along the backoff.
+    /// Verifies: ADR-0012
+    #[test]
+    fn a_named_wait_is_floored_at_the_next_step() {
+        let mut backoff = Backoff::new();
+        assert_eq!(
+            backoff.at_least_a_step(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+        let second = backoff.at_least_a_step(Duration::ZERO);
+        assert!(
+            second >= Duration::from_secs(1) && second < Duration::from_secs(2),
+            "{second:?}"
+        );
+        let zero = Backoff::new().at_least_a_step(Duration::ZERO);
+        assert!(zero >= Duration::from_millis(500), "{zero:?}");
     }
 
     /// The whole point of the jitter: two Clients failing at the same instant do not come back on

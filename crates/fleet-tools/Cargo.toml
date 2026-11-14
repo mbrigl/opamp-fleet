@@ -22,7 +22,8 @@ opamp = { workspace = true, features = ["client"] }
 # code that will install it is the property worth asserting, and it is why these tools live in the
 # same workspace as the Client rather than beside it.
 fleet-agent = { path = "../fleet-agent" }
-fleet-core.workspace = true
+# The PKCS#11 primitives the Server and the operator program share (ADR-0043).
+fleet-core = { workspace = true, features = ["pkcs11"] }
 # ADR-0034: `pack` writes the containers a Client can open, so it needs the *writers* — `compress`
 # for 7z, and the gzip/tar pair for `.tar.gz` and for the tree `opamp-fleetctl package fetch`
 # repacks.

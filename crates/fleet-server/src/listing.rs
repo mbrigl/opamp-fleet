@@ -472,63 +472,6 @@ impl AgentFilter {
     }
 }
 
-/// Where an Agent's group places it: its Client Agent, whether the group is ambiguous, and the
-/// labels it inherits.
-pub type Placed = (Option<InstanceUid>, bool, BTreeMap<String, String>);
-
-/// Where the Agents that arrived over one Host place each other (ADR-0030 clause 19): on a direct
-/// connection they are one group, behind a Gateway one group per machine they report. A group with
-/// exactly one Client Agent places the others under it, and they inherit its labels; one with more
-/// places nobody and marks every member ambiguous. Answers, per Agent of a group, its Client Agent,
-/// whether it is ambiguous, and the labels it inherits.
-#[must_use]
-pub fn place_on_host(
-    gateway: bool,
-    agents: &[(
-        InstanceUid,
-        Option<&AgentDescription>,
-        &BTreeMap<String, String>,
-    )],
-) -> std::collections::HashMap<InstanceUid, Placed> {
-    let group_of = |description: Option<&AgentDescription>| {
-        if gateway {
-            crate::labels::machine(description)
-        } else {
-            Some(String::new())
-        }
-    };
-    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    for (i, (_, description, _)) in agents.iter().enumerate() {
-        if let Some(group) = group_of(*description) {
-            groups.entry(group).or_default().push(i);
-        }
-    }
-    let mut placed = std::collections::HashMap::new();
-    for members in groups.values() {
-        let clients: Vec<usize> = members
-            .iter()
-            .copied()
-            .filter(|i| crate::labels::is_client_agent(agents[*i].1))
-            .collect();
-        let client = match clients.as_slice() {
-            [one] => Some(*one),
-            _ => None,
-        };
-        for i in members {
-            let (uid, _, _) = agents[*i];
-            let inherited = match client {
-                Some(c) if c != *i => agents[c].2.clone(),
-                _ => BTreeMap::new(),
-            };
-            placed.insert(
-                uid,
-                (client.map(|c| agents[c].0), clients.len() > 1, inherited),
-            );
-        }
-    }
-    placed
-}
-
 /// The Selector of a `selector` parameter: `key=value` pairs separated by commas, `None` when a
 /// pair is not one, as a Deployment's Selector is written.
 #[must_use]
@@ -593,51 +536,6 @@ mod tests {
         let last = page(four(), false, Some(&next), 2);
         assert_eq!(last.entries, [2, 3]);
         assert_eq!(last.next, None, "a full last page names no next one");
-    }
-
-    /// On a direct connection the Agents of a Host are one group, behind a Gateway one per
-    /// machine; one Client Agent places the others, two place nobody.
-    /// Verifies: ADR-0030
-    #[test]
-    fn the_agents_of_one_host_are_placed_by_their_group() {
-        use opamp::attributes::string_attr;
-        let described = |pairs: &[(&str, &str)]| AgentDescription {
-            identifying_attributes: Vec::new(),
-            non_identifying_attributes: pairs.iter().map(|(k, v)| string_attr(k, v)).collect(),
-        };
-        let (client, fellow, other, second) = (
-            InstanceUid([1; 16]),
-            InstanceUid([2; 16]),
-            InstanceUid([3; 16]),
-            InstanceUid([4; 16]),
-        );
-        let ring = BTreeMap::from([("ring".to_string(), "early".to_string())]);
-        let none = BTreeMap::new();
-        let c = described(&[("supervisor.kind.x", "true"), ("host.name", "m1")]);
-        let f = described(&[("host.name", "m1")]);
-        let o = described(&[("host.name", "m2")]);
-        let agents = [
-            (client, Some(&c), &ring),
-            (fellow, Some(&f), &none),
-            (other, Some(&o), &none),
-        ];
-        let behind = place_on_host(true, &agents);
-        assert_eq!(behind[&fellow], (Some(client), false, ring.clone()));
-        assert_eq!(behind[&client], (Some(client), false, BTreeMap::new()));
-        assert_eq!(
-            behind[&other],
-            (None, false, BTreeMap::new()),
-            "another machine"
-        );
-        let direct = place_on_host(false, &agents);
-        assert_eq!(
-            direct[&other],
-            (Some(client), false, ring.clone()),
-            "one group"
-        );
-        let s = described(&[("supervisor.kind.y", "true"), ("host.name", "m1")]);
-        let two = place_on_host(true, &[agents[0], agents[1], (second, Some(&s), &none)]);
-        assert_eq!(two[&fellow], (None, true, BTreeMap::new()), "ambiguous");
     }
 
     /// A Selector parameter is written as a Deployment's Selector is.

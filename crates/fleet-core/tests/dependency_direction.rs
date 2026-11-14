@@ -63,6 +63,9 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // The bootstrap PKCS#12 file (ADR-0027): its rule, and its binding to `p12-keystore`.
             ("pkcs12", Core),
             ("pkcs12::file", Adapter),
+            // What the Server and the operator program do alike on a PKCS#11 token, with
+            // `cryptoki` (ADR-0043).
+            ("pkcs11", Adapter),
             ("platform", Core),
             ("rate", Core),
             ("renewal", Core),
@@ -87,10 +90,13 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("audit", Core),
             ("blobs", Core),
             ("bootstrap", Core),
+            ("changed", Core),
             ("configs", Core),
             ("deployments", Core),
             ("enrolment", Core),
             ("fleet", Core),
+            ("fleet::held", Core),
+            ("fleet::placement", Core),
             ("floors", Core),
             ("labels", Core),
             ("listing", Core),
@@ -243,10 +249,10 @@ const CORE_CRATES: &[&str] = &[
 ];
 
 /// What the core may name of a technology, by path prefix. `tokio::sync` is channels, which need
-/// no runtime and do no I/O — and ADR-0018 makes a Port a message pair over them; `tokio::select`
+/// no runtime and do no I/O — and ADR-0046 makes a Port a message pair over them; `tokio::select`
 /// and `tokio::pin` are how the core waits on several of them, control flow over futures that
 /// starts no task and touches nothing outside the process. `toml::Table` and
-/// `toml::Value` are the configuration's values (ADR-0024 clause 1), which ADR-0018 hands a
+/// `toml::Value` are the configuration's values (ADR-0024 clause 1), which ADR-0046 hands a
 /// Plugin as its block; reading and parsing the file stays at the edge. An address is a value, and
 /// `env::consts` is fixed at compile time.
 const CORE_PREFIXES: &[&[&str]] = &[
@@ -287,18 +293,8 @@ fn roles_of(krate: &str) -> &'static [(&'static str, Role)] {
 /// that is not core — an adapter, or a composition root — is outside it. A path
 /// that matches no module names an item of the crate root, which is the crate's own vocabulary.
 fn leaves_the_core(krate: &str, segments: &[String]) -> bool {
-    let depth = |module: &str| module.split("::").filter(|s| !s.is_empty()).count();
-    let mut best = ("", Root);
-    for &(module, role) in roles_of(krate) {
-        let parts: Vec<&str> = module.split("::").filter(|s| !s.is_empty()).collect();
-        if parts.len() > depth(best.0)
-            && segments.len() >= parts.len()
-            && parts.iter().zip(segments).all(|(a, b)| a == b)
-        {
-            best = (module, role);
-        }
-    }
-    !best.0.is_empty() && best.1 != Core
+    let (module, role) = module_of(krate, segments);
+    !module.is_empty() && role != Core
 }
 
 fn module_path(src: &Path, file: &Path) -> String {
@@ -1007,4 +1003,70 @@ fn a_reexport_is_judged_by_where_the_item_is() {
         "opamp::client::Session"
     )
     .is_none());
+}
+
+/// Composition roots no adapter may name, by crate and module, and why: an adapter that calls one
+/// runs what the root wires, and the root is no longer the outermost ring.
+const ROOTS_NO_ADAPTER_NAMES: &[(&str, &str, &str)] = &[(
+    "fleet-agent",
+    "service::enrol",
+    "the privileged enrolment; the walk a privileged read takes lives in the adapter `nofollow`",
+)];
+
+/// The longest module of `krate` that `segments` lies in, and its role.
+fn module_of(krate: &str, segments: &[String]) -> (&'static str, Role) {
+    let depth = |module: &str| module.split("::").filter(|s| !s.is_empty()).count();
+    let mut best = ("", Root);
+    for &(module, role) in roles_of(krate) {
+        let parts: Vec<&str> = module.split("::").filter(|s| !s.is_empty()).collect();
+        if parts.len() > depth(best.0)
+            && segments.len() >= parts.len()
+            && parts.iter().zip(segments).all(|(a, b)| a == b)
+        {
+            best = (module, role);
+        }
+    }
+    best
+}
+
+/// Verifies: ADR-0009
+#[test]
+fn no_adapter_names_the_composition_roots_kept_from_adapters() {
+    let mut found = Vec::new();
+    for &(krate, roles) in ROLES {
+        let src = crates_dir().join(krate).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        files.sort();
+        for file in files {
+            let module = module_path(&src, &file);
+            if !roles
+                .iter()
+                .any(|&(m, role)| m == module && role == Adapter)
+            {
+                continue;
+            }
+            let tokens = without_test_code(tokenize(&fs::read_to_string(&file).unwrap()));
+            let (own, _) = split_reexports(tokens);
+            for Named { segments, line, .. } in paths(&own) {
+                let Target::Internal(target, segments) = resolve(krate, &module, &segments) else {
+                    continue;
+                };
+                let (root, _) = module_of(target, &segments);
+                if let Some((_, _, why)) = ROOTS_NO_ADAPTER_NAMES
+                    .iter()
+                    .find(|(k, m, _)| *k == target && *m == root)
+                {
+                    found.push(format!(
+                        "{}:{line}: names {target}::{root} ({why})",
+                        file.strip_prefix(crates_dir()).unwrap().display()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "an adapter names a composition root: {found:#?}"
+    );
 }

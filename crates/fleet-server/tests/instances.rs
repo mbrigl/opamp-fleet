@@ -1,5 +1,5 @@
 //! Several Server instances on one PostgreSQL database, each through its real listeners
-//! (ADR-0025):
+//! (ADR-0045):
 //! both hold a lease and serve, a revocation committed on one ends the session it concerns on the
 //! other, and an instance whose database stops answering closes its listeners until it holds a new
 //! lease.
@@ -18,7 +18,7 @@ use fleet_server::config::{LeaseTimes, PostgresConfig};
 use fleet_server::enrolment::Enrolment;
 use fleet_server::floors::PackageFloors;
 use fleet_server::postgres::schema::{Migration, MIGRATIONS};
-use fleet_server::postgres::{Database, Exclusive};
+use fleet_server::postgres::{Database, Opening};
 use fleet_server::revocation::{CertId, Revocations};
 use fleet_server::Records;
 use opamp::proto::{AgentCapabilities, AgentToServer};
@@ -58,15 +58,39 @@ struct Slot;
 static SLOTS: (std::sync::Mutex<usize>, std::sync::Condvar) =
     (std::sync::Mutex::new(0), std::sync::Condvar::new());
 
+/// How long a test waits for a place before it fails: far past the longest a test of this file
+/// holds one, so only a wait that cannot end reaches it.
+const SLOT_WAIT: Duration = Duration::from_secs(300);
+
 impl Slot {
-    /// Waits until fewer than [`SCHEMAS_AT_ONCE`] tests work in a schema, and takes a place.
+    /// Waits until fewer than [`SCHEMAS_AT_ONCE`] tests work in a schema, and takes a place. A
+    /// thread a test spawned, which the harness does not name, is refused at once: it would wait
+    /// for a place beside the one its test holds, for ever once every place is taken.
     fn take() -> Slot {
+        assert!(
+            std::thread::current().name().is_some(),
+            "a test schema is opened on a thread the test spawned: it takes one of the \
+             SCHEMAS_AT_ONCE ({SCHEMAS_AT_ONCE}) places beside any its test holds and can \
+             wait for it for ever — open it on the test's own thread"
+        );
         let (taken, freed) = &SLOTS;
-        let mut taken = freed
-            .wait_while(taken.lock().expect("slots"), |taken| {
-                *taken >= SCHEMAS_AT_ONCE
-            })
-            .expect("slots");
+        let (mut taken, waited) = freed
+            .wait_timeout_while(
+                taken
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                SLOT_WAIT,
+                |taken| *taken >= SCHEMAS_AT_ONCE,
+            )
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if waited.timed_out() {
+            // Released first, so the failure poisons no lock the next test takes.
+            drop(taken);
+            panic!(
+            "no place among the SCHEMAS_AT_ONCE ({SCHEMAS_AT_ONCE}) test schemas came free within \
+             {SLOT_WAIT:?}"
+            );
+        }
         *taken += 1;
         Slot
     }
@@ -366,6 +390,11 @@ struct Instance {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     /// Every entry the instance's signatures with a token key wrote, where it signs with one.
     audit: Option<Arc<token::Recorded>>,
+    /// The database the instance listens through, where it is not [`database`](Self::database).
+    listening: Option<Arc<Database>>,
+    /// How many times a takeover of the lease ran the cleanup the binary deletes the staging
+    /// objects of the removed leases with.
+    cleanups: Arc<AtomicU64>,
     _dir: tempfile::TempDir,
 }
 
@@ -378,7 +407,10 @@ impl Instance {
     /// [`start`](Self::start), taking up nothing another instance commits until
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
-        Self::start_with(pki, schema, config, true, false, None, None, None, None).await
+        Self::start_with(
+            pki, schema, config, true, false, None, None, None, None, None,
+        )
+        .await
     }
 
     /// [`start`](Self::start), its client CA's key on the token `signing` names, opened by this
@@ -399,6 +431,7 @@ impl Instance {
             None,
             None,
             Some(signing),
+            None,
         )
         .await
     }
@@ -421,6 +454,25 @@ impl Instance {
             None,
             None,
             None,
+            None,
+        )
+        .await
+    }
+
+    /// [`start`](Self::start), its client CA the signer `gated`, so an approval through its
+    /// Operator plane signs, or waits while the gate is shut.
+    async fn start_gated(pki: &Pki, schema: &Schema, config: PostgresConfig, gated: Gated) -> Self {
+        Self::start_with(
+            pki,
+            schema,
+            config,
+            true,
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some(gated),
         )
         .await
     }
@@ -428,6 +480,29 @@ impl Instance {
     /// Starts taking up what other instances commit, for an instance started deaf.
     fn follow(&mut self) {
         self.following = fleet_server::instance::follow(&self.database, self.state.clone(), None);
+    }
+
+    /// [`follow`](Self::follow), listening through a connection of its own on `config`: what
+    /// happens to that connection, such as a cut, leaves the lease and every other connection of
+    /// the instance as they are. Unlike the Server, the listener is not the database the instance
+    /// writes through: it hears the instance's own commits as another's, and not the notices of
+    /// commits that database could not confirm. Without the renewals' comparison.
+    async fn follow_through(&mut self, schema: &Schema, config: PostgresConfig) {
+        let name = schema.name.clone();
+        let listening = tokio::task::spawn_blocking(move || {
+            Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    ..Opening::default()
+                },
+            )
+        })
+        .await
+        .expect("open")
+        .expect("open the listening connection's database");
+        self.following = fleet_server::instance::follow(&listening, self.state.clone(), None);
+        self.listening = Some(listening);
     }
 
     /// [`start`](Self::start), its lease renewals compared with the list's version only where
@@ -439,7 +514,10 @@ impl Instance {
         config: PostgresConfig,
         renewals: bool,
     ) -> Self {
-        Self::start_with(pki, schema, config, renewals, true, None, None, None, None).await
+        Self::start_with(
+            pki, schema, config, renewals, true, None, None, None, None, None,
+        )
+        .await
     }
 
     /// [`start`](Self::start), its package blobs on the filesystem in `blobs`, which other
@@ -458,6 +536,7 @@ impl Instance {
             true,
             None,
             Some(blobs),
+            None,
             None,
             None,
         )
@@ -483,6 +562,7 @@ impl Instance {
             None,
             Some((release, migrations)),
             None,
+            None,
         )
         .await
     }
@@ -490,7 +570,8 @@ impl Instance {
     /// [`start_following`](Self::start_following), following other instances where `follows`
     /// says so, its admission throttled where `throttle` names limits, its package blobs in
     /// `blobs` where it names a directory, as the release and schema `version` names, or this
-    /// build's, and with its client CA's key on a token where `signing` names one.
+    /// build's, and with its client CA's key on a token where `signing` names one, or with the
+    /// signer `gated` as its client CA where it names one.
     #[allow(clippy::too_many_arguments)]
     async fn start_with(
         pki: &Pki,
@@ -502,15 +583,28 @@ impl Instance {
         blobs: Option<&std::path::Path>,
         version: Option<(&'static str, &'static [Migration])>,
         signing: Option<&Signing<'_>>,
+        gated: Option<Gated>,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let name = schema.name.clone();
         let database = tokio::task::spawn_blocking(move || match version {
-            Some((release, migrations)) => {
-                Database::open_as(&config, Exclusive::Shared, Some(&name), release, migrations)
-            }
-            None => Database::open_in(&config, Exclusive::Shared, Some(&name)),
+            Some((release, migrations)) => Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    release,
+                    migrations: Some(migrations),
+                    ..Opening::default()
+                },
+            ),
+            None => Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    ..Opening::default()
+                },
+            ),
         })
         .await
         .expect("open")
@@ -580,23 +674,23 @@ impl Instance {
             fleet_server::clock::Elapsed::monotonic(),
         )
         .expect("packages");
-        let state = Arc::new(
-            fleet_server::fleet::AppState::on(&records)
-                .expect("state")
-                .with_packages(Some(
-                    fleet_server::fleet::PackageOffering::on(&records, packages)
-                        .expect("deployments"),
-                ))
-                .with_revocations(Some(revocations.clone()))
-                .with_floors(Some(floors.clone()))
-                .with_enrolment(Some(enrolment.clone()))
-                .with_client_ca(client_ca)
-                .with_audit(
-                    audit
-                        .clone()
-                        .map(|audit| audit as Arc<dyn fleet_server::audit::Audit>),
-                ),
-        );
+        let state = fleet_server::fleet::AppState::on(&records)
+            .expect("state")
+            .with_packages(Some(
+                fleet_server::fleet::PackageOffering::on(&records, packages).expect("deployments"),
+            ))
+            .with_revocations(Some(revocations.clone()))
+            .with_floors(Some(floors.clone()))
+            .with_enrolment(Some(enrolment.clone()))
+            .with_audit(
+                audit
+                    .clone()
+                    .map(|audit| audit as Arc<dyn fleet_server::audit::Audit>),
+            );
+        let state = Arc::new(match gated {
+            Some(gated) => state.with_client_ca(Some(gated)),
+            None => state.with_client_ca(client_ca),
+        });
         let (server_cert, server_key) = pki.issue("localhost");
         for (file, pem) in [
             ("server-cert.pem", &server_cert),
@@ -640,9 +734,19 @@ impl Instance {
                 "test-host",
                 fleet_server::postgres::lease::new_instance_id().expect("id"),
                 clock,
+                fleet_server::postgres::lease::Terms::default(),
             )
             .expect("lease")
         };
+        // As the binary wires its cleanup of the bucket's staging objects: counted here.
+        let cleanups = Arc::new(AtomicU64::new(0));
+        lease.on_each_takeover({
+            let cleanups = cleanups.clone();
+            move || {
+                cleanups.fetch_add(1, Ordering::SeqCst);
+                Ok(0)
+            }
+        });
         state.serve_under(lease.held());
         let proof = lease.proof();
         state.answer_while(move || proof.holds());
@@ -699,6 +803,8 @@ impl Instance {
             suspended,
             stop: Some(stop),
             audit,
+            listening: None,
+            cleanups,
             _dir: dir,
         }
     }
@@ -819,6 +925,44 @@ fn cert_id(pem: &str) -> CertId {
     fleet_server::ca::facts(der[0].as_ref()).expect("facts").id
 }
 
+/// A client of an instance's Operator plane, which this harness serves without authentication.
+fn operator_client(pki: &Pki) -> reqwest::Client {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .tls_certs_only([reqwest::Certificate::from_pem(pki.ca_pem.as_bytes()).expect("ca")])
+        .resolve(
+            "localhost",
+            "127.0.0.1:0".parse::<SocketAddr>().expect("address"),
+        )
+        .build()
+        .expect("client")
+}
+
+/// `path` on `instance`'s Operator plane.
+fn operator_url(instance: &Instance, path: &str) -> String {
+    format!("https://localhost:{}{path}", instance.operator.port())
+}
+
+/// Revokes the certificate `pem` of the client CA through `instance`'s Operator plane, as an
+/// operator does, and waits for its `201`.
+async fn revoke_through(instance: &Instance, pki: &Pki, pem: &str) {
+    let response = operator_client(pki)
+        .post(operator_url(instance, "/api/v1/revocations"))
+        .json(&serde_json::json!({
+            "certificate": { "authority": "client", "serial": cert_id(pem).serial }
+        }))
+        .send()
+        .await
+        .expect("send the revocation");
+    let status = response.status();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::CREATED,
+        "the revocation: {}",
+        response.text().await.unwrap_or_default()
+    );
+}
+
 /// Waits up to `within` for `condition`.
 async fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
     let deadline = tokio::time::Instant::now() + within;
@@ -832,9 +976,11 @@ async fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
 }
 
 /// Two instances on one database both hold a live lease and both answer the probe on the Agent
-/// plane; a revocation committed on A ends the session of that certificate on B within one
-/// renewal interval, and no other session.
-/// Verifies: ADR-0025, ADR-0040
+/// plane; a revocation made through A's Operator plane ends the session of that certificate on B,
+/// by its notification or at the latest by the next renewal, and no other session. The wait is
+/// bounded at three renewal intervals, as for a notification missed, leaving a loaded host its
+/// delays.
+/// Verifies: ADR-0045, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
     let Some(schema) = Schema::named() else {
@@ -857,16 +1003,11 @@ async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
     exchange(&mut revoked).await;
     exchange(&mut kept).await;
 
-    let serial = cert_id(&revoked_cert).serial;
-    let on_a = a.revocations.clone();
-    tokio::task::spawn_blocking(move || on_a.revoke_certificate("client", &serial))
-        .await
-        .expect("revoke")
-        .expect("revoke on A");
+    revoke_through(&a, &pki, &revoked_cert).await;
     assert_eq!(
-        closed_within(&mut revoked, TIMES.renew).await,
+        closed_within(&mut revoked, TIMES.renew * 3).await,
         Some((1008, "revoked".to_string())),
-        "B did not end the revoked session within one renewal interval"
+        "B did not end the revoked session within three renewal intervals"
     );
     assert_eq!(
         closed_within(&mut kept, Duration::from_millis(300)).await,
@@ -922,7 +1063,7 @@ fn freezable_proxy(target: SocketAddr) -> (u16, Arc<AtomicBool>) {
 /// An instance whose database stops answering past its lease closes both listeners, so the probe
 /// fails; once the database answers again it takes a new lease under a new instance id and opens
 /// them again.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_one() {
     let Some(schema) = Schema::named() else {
@@ -967,11 +1108,76 @@ async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_o
     );
 }
 
+/// An instance that lost its lease takes a new one, and that take removes its lapsed lease: the
+/// take has the cleanup of the staging objects run, as the binary wires it to the lease, though no
+/// renewal took over a lease.
+/// Verifies: ADR-0045, ADR-0023
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_lease_whose_take_removes_a_lapsed_one_runs_the_staging_cleanup() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let network = Cuttable::to(database_address(&schema));
+    let instance = Instance::start(&pki, &schema, schema.config_on(network.port)).await;
+    let first = instance.instance_id().expect("a lease");
+
+    network.cut();
+    assert!(
+        eventually(TIMES.lapse + Duration::from_secs(5), || instance
+            .instance_id()
+            .is_none())
+        .await,
+        "the lease was not given up"
+    );
+    // Restored once the database reads the old lease as lapsed too, so the new lease's take
+    // removes it.
+    let lapsed = format!(
+        "SELECT count(*) FROM leases WHERE instance_id = '{first}' AND expires_at <= now()"
+    );
+    assert!(
+        eventually(TIMES.lapse + Duration::from_secs(5), || schema
+            .query(&lapsed)
+            == ["1"])
+        .await,
+        "the database never read the old lease as lapsed"
+    );
+    assert_eq!(
+        instance.cleanups.load(Ordering::SeqCst),
+        0,
+        "a cleanup ran before any takeover"
+    );
+
+    network.restore();
+    assert!(
+        eventually(Duration::from_secs(20), || instance
+            .instance_id()
+            .is_some_and(|id| id != first))
+        .await,
+        "no new lease was taken"
+    );
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT count(*) FROM leases WHERE instance_id = '{first}'"
+        )),
+        ["0"],
+        "the new lease's take removed the lapsed one"
+    );
+    assert!(
+        eventually(Duration::from_secs(5), || instance
+            .cleanups
+            .load(Ordering::SeqCst)
+            >= 1)
+        .await,
+        "the take that removed a lapsed lease ran no cleanup"
+    );
+}
+
 /// An instance whose clock jumps past its lease's lapse while it did not run, as after a suspend
 /// of its host, answers nothing more: its next request is not served, a message on a session it
 /// carried is not answered and the session is cut, and it holds no lease until it takes a new one
 /// under a new instance id, with both listeners open again.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_whose_clock_jumps_past_its_lapse_serves_nothing_until_it_holds_a_new_lease() {
     use futures_util::{SinkExt, StreamExt};
@@ -1064,14 +1270,20 @@ async fn an_instance_whose_clock_jumps_past_its_lapse_serves_nothing_until_it_ho
 /// The store as one instance opens it, in the test's schema: what each instance writes through.
 fn records(schema: &Schema) -> Records {
     Records::Postgres(
-        Database::open_in(&schema.config, Exclusive::Shared, Some(&schema.name))
-            .expect("open the database"),
+        Database::open(
+            &schema.config,
+            Opening {
+                schema: Some(&schema.name),
+                ..Opening::default()
+            },
+        )
+        .expect("open the database"),
     )
 }
 
 /// Two instances that each revoke a certificate at the same moment keep both revocations: each
 /// adds its own row, and neither writes the list it holds over the other's.
-/// Verifies: ADR-0025, Q-1
+/// Verifies: ADR-0045, Q-1
 #[test]
 fn two_revocations_committed_at_once_on_two_instances_are_both_kept() {
     let Some(schema) = Schema::named() else {
@@ -1125,7 +1337,7 @@ fn two_revocations_committed_at_once_on_two_instances_are_both_kept() {
 /// An instance that holds an older floor in memory cannot lower the one another instance stored:
 /// the floor is decided from the stored row, and the answer is the `409` of a lower floor, naming
 /// the stored version, which the instance then holds.
-/// Verifies: ADR-0025, ADR-0035, Q-6
+/// Verifies: ADR-0045, ADR-0035, Q-6
 #[test]
 fn an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one() {
     use fleet_server::floors::FloorError;
@@ -1206,7 +1418,7 @@ fn released(configuration: &str, hash: &str) -> fleet_server::agent_store::Persi
 /// revisions: each adds the row it pins and deletes none, and the collection each runs after its
 /// rollout reckons what the Configuration keeps from the stored assignments, in its own
 /// transaction, not from the one assignment the instance knows of.
-/// Verifies: ADR-0025, ADR-0033
+/// Verifies: ADR-0045, ADR-0033
 #[test]
 fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
     use fleet_server::configs::{revision_hash, ConfigStore, Revision};
@@ -1285,7 +1497,7 @@ fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
 /// Two instances that each add an entry of another platform to one Package at the same moment
 /// keep both: each writes the row of its platform, and neither writes the Package it holds over
 /// the other's.
-/// Verifies: ADR-0025, ADR-0034
+/// Verifies: ADR-0045, ADR-0034
 #[test]
 fn two_entries_added_at_once_on_two_instances_are_both_kept() {
     use fleet_server::packages::{PackageId, PackageStore, Platform};
@@ -1343,7 +1555,7 @@ fn two_entries_added_at_once_on_two_instances_are_both_kept() {
 /// writes the row of its member under the Deployment's row lock, and neither writes the
 /// Deployment it holds over the other's. A type another instance filled is refused from what is
 /// stored, whatever the refusing instance holds in memory.
-/// Verifies: ADR-0025, ADR-0033, ADR-0034
+/// Verifies: ADR-0045, ADR-0033, ADR-0034
 #[test]
 fn two_members_added_at_once_on_two_instances_are_both_kept() {
     use fleet_server::deployments::{DeploymentError, DeploymentStore};
@@ -1580,7 +1792,7 @@ fn database_address(schema: &Schema) -> SocketAddr {
 /// An instance whose listening connection is cut and restored acts as if everything had changed:
 /// a revocation committed on A while B heard nothing ends B's session of that certificate once B
 /// listens again.
-/// Verifies: ADR-0025, ADR-0040
+/// Verifies: ADR-0045, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_session_once_back()
 {
@@ -1590,8 +1802,11 @@ async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_
     let pki = Pki::new();
     let network = Cuttable::to(database_address(&schema));
     let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
-    // Without the renewals' comparison, which would catch the revocation on its own.
-    let b = Instance::start_following(&pki, &schema, schema.config_on(network.port), false).await;
+    // Only B's listening connection goes through the cut, so the cut cannot cost B its lease. It
+    // follows without the renewals' comparison, which would catch the revocation on its own.
+    let mut b = Instance::start_deaf(&pki, &schema, schema.config_on(schema.config.port)).await;
+    b.follow_through(&schema, schema.config_on(network.port))
+        .await;
     assert!(b.has_read(1).await, "B never listened");
 
     let (cert, key) = pki.issue("edge-01");
@@ -1614,9 +1829,243 @@ async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_
     );
 }
 
+/// A and B on one database, B following through a listening connection of its own that the
+/// returned network cuts: what A commits while it is cut, B hears nothing of.
+async fn apart(pki: &Pki, schema: &Schema) -> (Instance, Instance, Cuttable) {
+    let network = Cuttable::to(database_address(schema));
+    let a = Instance::start(pki, schema, schema.config_on(schema.config.port)).await;
+    let mut b = Instance::start_deaf(pki, schema, schema.config_on(schema.config.port)).await;
+    b.follow_through(schema, schema.config_on(network.port))
+        .await;
+    assert!(b.has_read(1).await, "B never listened");
+    (a, b, network)
+}
+
+/// Runs `change` on A's state while B's listening connection is cut, and restores it after.
+async fn while_cut<T: Send + 'static>(
+    network: &Cuttable,
+    a: &Instance,
+    change: impl FnOnce(&fleet_server::fleet::AppState) -> T + Send + 'static,
+) -> T {
+    network.cut();
+    let state = a.state.clone();
+    let changed = tokio::task::spawn_blocking(move || change(&state))
+        .await
+        .expect("change");
+    network.restore();
+    changed
+}
+
+/// An assignment A releases to an Agent B carries while B's listening connection is cut is held
+/// by B once it listens again.
+/// Verifies: ADR-0045
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_assignment_committed_while_the_listening_connection_was_cut_is_held_once_back() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0xc1; 16]);
+    let configurable = AgentCapabilities::AcceptsRemoteConfig as u64
+        | AgentCapabilities::ReportsRemoteConfig as u64;
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, configurable, PACKAGED, true).await;
+
+    let assigned = while_cut(&network, &a, |a| {
+        a.save_configuration(
+            "collector",
+            fleet_server::configs::Revision {
+                body: "receivers: {}".to_string(),
+                role: String::new(),
+                service_name: "otelcol".to_string(),
+            },
+        )?;
+        a.deployment_store()
+            .expect("deployments")
+            .put(
+                "stable",
+                std::collections::BTreeMap::from([(
+                    "service.name".to_string(),
+                    "otelcol".to_string(),
+                )]),
+            )
+            .map_err(|e| format!("{e:?}"))?;
+        a.put_deployment_configuration("stable", "collector")
+            .map_err(|e| format!("{e:?}"))?;
+        a.rollout_deployment("stable").map_err(|e| format!("{e:?}"))
+    })
+    .await;
+    assert_eq!(assigned, Ok(1), "A released to the Agent B carries");
+
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            view_of(&b, uid).is_some_and(|view| view.assigned_deployment == "stable")
+        })
+        .await,
+        "B did not hold the assignment once it listened again"
+    );
+}
+
+/// A restart A queues for an Agent B carries while B's listening connection is cut is held by B
+/// once it listens again, which sends it.
+/// Verifies: ADR-0045
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_requested_while_the_listening_connection_was_cut_is_sent_once_back() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0xc2; 16]);
+    let restartable = AgentCapabilities::AcceptsRestartCommand as u64;
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, restartable, PACKAGED, true).await;
+
+    let requested = while_cut(&network, &a, move |a| a.request_restart(&uid).is_ok()).await;
+    assert!(requested, "A queues the restart of an Agent B carries");
+
+    // timed: the deadline for the message, not a wait
+    let sent = next_message(&mut session, Duration::from_secs(15))
+        .await
+        .expect("B did not send the restart once it listened again");
+    assert!(
+        sent.command
+            .is_some_and(|command| command.r#type == opamp::proto::CommandType::Restart as i32),
+        "B sent something else"
+    );
+}
+
+/// Labels A sets on an Agent B carries while B's listening connection is cut are held by B once
+/// it listens again.
+/// Verifies: ADR-0045, ADR-0030
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn labels_set_while_the_listening_connection_was_cut_are_held_once_back() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0xc3; 16]);
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, 0, PACKAGED, true).await;
+
+    let set = while_cut(&network, &a, move |a| {
+        a.set_labels(
+            &uid,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok()
+    })
+    .await;
+    assert!(set, "A sets the labels of an Agent B carries");
+
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            view_of(&b, uid)
+                .is_some_and(|view| view.labels.get("tier").map(String::as_str) == Some("edge"))
+        })
+        .await,
+        "B did not hold the labels once it listened again"
+    );
+}
+
+/// Labels A sets on a Client Agent it carries while B's listening connection is cut reach the
+/// Agent of the same Host B carries, which inherits them once B listens again.
+/// Verifies: ADR-0045, ADR-0030
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_agents_labels_set_while_the_listening_connection_was_cut_are_inherited_once_back()
+{
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue_to_host("h1");
+    let (client, agent) = (InstanceUid([0xc4; 16]), InstanceUid([0xc5; 16]));
+    let mut client_session = websocket(&a, &pki, &cert, &key).await;
+    report_as(
+        &mut client_session,
+        client,
+        1,
+        0,
+        (
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true")],
+        ),
+        true,
+    )
+    .await;
+    let mut session = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut session, agent, 1, 0, PACKAGED, true).await;
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            view_of(&b, agent).is_some_and(|view| view.client_agent == client.to_string())
+        })
+        .await,
+        "B places the Agent under the Client Agent A carries"
+    );
+
+    let set = while_cut(&network, &a, move |a| {
+        a.set_labels(
+            &client,
+            std::collections::BTreeMap::from([("tier".to_string(), "edge".to_string())]),
+        )
+        .is_ok()
+    })
+    .await;
+    assert!(set, "A labels the Client Agent");
+
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            view_of(&b, agent).is_some_and(|view| {
+                view.inherited_labels.get("tier").map(String::as_str) == Some("edge")
+            })
+        })
+        .await,
+        "B's Agent did not inherit the labels once B listened again"
+    );
+}
+
+/// An Agent B carries that A takes while B's listening connection is cut is carried by B no more
+/// once it listens again.
+/// Verifies: ADR-0045
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_agent_taken_while_the_listening_connection_was_cut_is_released_once_back() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let (a, b, network) = apart(&pki, &schema).await;
+    let (cert, key) = pki.issue("edge-01");
+    let uid = InstanceUid([0xc6; 16]);
+    let mut on_b = websocket(&b, &pki, &cert, &key).await;
+    report_as(&mut on_b, uid, 1, 0, PACKAGED, true).await;
+
+    network.cut();
+    let mut on_a = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut on_a, uid, 2, 0, PACKAGED, true).await;
+    let holder = schema.query(&format!(
+        "SELECT holder::text FROM agents WHERE instance_uid = '{uid}'"
+    ));
+    assert_eq!(holder, [a.instance_id().expect("a lease")], "A took it");
+    network.restore();
+
+    assert!(
+        eventually(Duration::from_secs(15), || {
+            view_of(&b, uid).is_some_and(|view| !view.connected)
+        })
+        .await,
+        "B still carries the Agent A took once it listened again"
+    );
+}
+
 /// A notification of a kind the instance does not know, as a newer version sends, has it read
 /// everything again: a revocation it was not told of ends its session.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_notification_of_an_unknown_kind_has_everything_read_again() {
     let Some(schema) = Schema::named() else {
@@ -1649,7 +2098,7 @@ async fn a_notification_of_an_unknown_kind_has_everything_read_again() {
 
 /// The `ETag` of the Gateways' revocation list one instance answered is answered `304` by
 /// another, and a revocation on either moves it on both.
-/// Verifies: ADR-0025, ADR-0040
+/// Verifies: ADR-0045, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_etag_one_instance_answered_is_answered_304_by_another() {
     let Some(schema) = Schema::named() else {
@@ -1727,7 +2176,7 @@ async fn an_etag_one_instance_answered_is_answered_304_by_another() {
 }
 
 /// A floor set on A is what B serves the next Agent that asks for the floors.
-/// Verifies: ADR-0025, ADR-0035
+/// Verifies: ADR-0045, ADR-0035
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_floor_set_on_one_instance_is_served_by_the_other() {
     let Some(schema) = Schema::named() else {
@@ -1803,6 +2252,82 @@ impl fleet_server::fleet::CertificateSigner for Issuing {
 
     fn check_claims(&self, _csr_pem: &str, _sender: &[u8]) -> Result<(), String> {
         Ok(())
+    }
+}
+
+/// A signer of the test's CA that holds each signature while its gate is shut: an approval that
+/// decides its request for as long as the test keeps the gate so.
+#[derive(Clone)]
+struct Gated {
+    issuing: Arc<Issuing>,
+    /// Whether a signature waits at the gate, and whether the gate is open.
+    gate: Arc<(std::sync::Mutex<(bool, bool)>, std::sync::Condvar)>,
+}
+
+impl Gated {
+    fn new(pki: &Pki, open: bool) -> Self {
+        Gated {
+            issuing: Arc::new(Issuing {
+                ca_pem: pki.ca_pem.clone(),
+                ca_key_pem: pki.ca_key_pem.clone(),
+            }),
+            gate: Arc::new((
+                std::sync::Mutex::new((false, open)),
+                std::sync::Condvar::new(),
+            )),
+        }
+    }
+
+    /// Whether a signature waits at the gate.
+    fn waiting(&self) -> bool {
+        self.gate.0.lock().expect("gate").0
+    }
+
+    /// Opens the gate: the signature waiting there, and every one after it, goes ahead.
+    fn open(&self) {
+        let (gate, turned) = &*self.gate;
+        gate.lock().expect("gate").1 = true;
+        turned.notify_all();
+    }
+}
+
+impl fleet_server::fleet::CertificateSigner for Gated {
+    fn sign(
+        &self,
+        csr_pem: &str,
+        host: &str,
+        subject: &fleet_server::revocation::SubjectValues,
+        use_case: fleet_server::pkcs11::UseCase,
+    ) -> Result<fleet_server::revocation::Signed, String> {
+        let (gate, turned) = &*self.gate;
+        let mut held = gate.lock().expect("gate");
+        held.0 = true;
+        while !held.1 {
+            held = turned.wait(held).expect("gate");
+        }
+        drop(held);
+        fleet_server::fleet::CertificateSigner::sign(
+            &*self.issuing,
+            csr_pem,
+            host,
+            subject,
+            use_case,
+        )
+    }
+
+    fn renewal_proof(
+        &self,
+        csr_pem: &str,
+    ) -> Result<Option<fleet_server::revocation::Facts>, String> {
+        fleet_server::fleet::CertificateSigner::renewal_proof(&*self.issuing, csr_pem)
+    }
+
+    fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String> {
+        fleet_server::fleet::CertificateSigner::bootstrap_proof_id(&*self.issuing, csr_pem)
+    }
+
+    fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String> {
+        fleet_server::fleet::CertificateSigner::check_claims(&*self.issuing, csr_pem, sender)
     }
 }
 
@@ -2074,7 +2599,7 @@ async fn two_instances_on_one_token_both_sign_renewals() {
 /// A host enrols through B's Agent plane, over its WebSocket, while A opened the window; it is
 /// approved on A, whose client CA's key is on the token both share, and B hands the certificate to
 /// the connection that asked. The host is admitted on both.
-/// Verifies: ADR-0025, ADR-0027, ADR-0043
+/// Verifies: ADR-0045, ADR-0027, ADR-0043
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
     let Some(schema) = Schema::named() else {
@@ -2151,10 +2676,192 @@ async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
     }
 }
 
+/// Of two instances deciding one enrolment request, B, asked second through its Operator plane,
+/// is answered `409` while A's approval holds the request, to an approval and to a rejection
+/// alike, and `404` once A has decided it, as the manual says.
+/// Verifies: ADR-0045, ADR-0027, ADR-0023
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_asked_through_one_instance_while_another_decides_is_answered_409() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let held = Gated::new(&pki, false);
+    let a = Instance::start_gated(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        held.clone(),
+    )
+    .await;
+    let b = Instance::start_gated(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        Gated::new(&pki, true),
+    )
+    .await;
+    a.enrolment.open(600).expect("A opens the window");
+    let id = "ab".repeat(32);
+    let (request, requester) = enrolment_request(&id);
+    let on_a = a.enrolment.clone();
+    assert_eq!(
+        tokio::task::spawn_blocking(move || on_a.submit(request, requester))
+            .await
+            .expect("submit"),
+        fleet_server::enrolment::Submitted::Waiting
+    );
+    assert!(
+        eventually(Duration::from_secs(10), || b
+            .enrolment
+            .pending()
+            .iter()
+            .any(|pending| pending.id == id))
+        .await,
+        "B never listed the request A took in"
+    );
+
+    let operator = operator_client(&pki);
+    let decide = |instance: &Instance, decision: &str| {
+        let request = operator.post(operator_url(
+            instance,
+            &format!("/api/v1/enrolments/{id}/{decision}"),
+        ));
+        async move {
+            let response = request.send().await.expect("send the decision");
+            let status = response.status().as_u16();
+            (status, response.text().await.expect("the body"))
+        }
+    };
+    let approving = tokio::spawn(decide(&a, "approve"));
+    assert!(
+        eventually(Duration::from_secs(10), || held.waiting()).await,
+        "A's approval never reached its signature"
+    );
+    for decision in ["reject", "approve"] {
+        let (status, body) = decide(&b, decision).await;
+        assert_eq!(status, 409, "{decision} through B: {body}");
+        assert!(
+            body.contains("another Server instance is deciding"),
+            "{decision} through B: {body}"
+        );
+    }
+    held.open();
+    let (status, body) = approving.await.expect("A's approval");
+    assert_eq!(status, 204, "the approval through A: {body}");
+    for decision in ["approve", "reject"] {
+        let (status, body) = decide(&b, decision).await;
+        assert_eq!(status, 404, "{decision} through B once decided: {body}");
+    }
+}
+
+/// A host of a fresh bootstrap certificate of `bootstrap` asks `instance` for its certificate over
+/// a WebSocket: the error its answer carries, if any.
+async fn enrol(instance: &Instance, pki: &Pki, bootstrap: &Pki) -> Option<String> {
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as Ws;
+    let (bootstrap_cert, bootstrap_key) = issue_bootstrap(bootstrap);
+    let mut socket = websocket(instance, pki, &bootstrap_cert, &bootstrap_key).await;
+    let (csr, _) = fresh_csr();
+    let report = csr_report(&InstanceUid::default(), csr);
+    let framed = opamp::frame::encode_within(&report, usize::MAX).expect("frame");
+    socket.send(Ws::Binary(framed.into())).await.expect("send");
+    next_message(&mut socket, Duration::from_secs(20))
+        .await
+        .expect("an answer in time")
+        .error_response
+        .map(|error| error.error_message)
+}
+
+/// The enrolment queue's bound counts the requests of every instance: once A and B have queued
+/// requests at once up to one short of it, a host's request through B's Agent plane takes the last
+/// place, and the next host's, through A's, is answered that the queue is full.
+/// Verifies: ADR-0045, ADR-0027
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_bound_of_the_enrolment_queue_counts_the_requests_of_every_instance() {
+    use fleet_server::enrolment::{Submitted, MAX_PENDING};
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let Some(test) = token::TestToken::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let dir = tempfile::tempdir().expect("dir");
+    let opened = test.open();
+    let (client_ca_pem, _) = test.ca(
+        &opened,
+        Signing::CLIENT_CA,
+        "OpAMP Fleet Client CA",
+        dir.path(),
+    );
+    let signing = Signing {
+        token: &test,
+        client_ca_pem,
+        bootstrap: Pki::named("OpAMP Fleet Bootstrap CA"),
+    };
+    let a = Instance::start_signing(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        &signing,
+    )
+    .await;
+    let b = Instance::start_signing(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        &signing,
+    )
+    .await;
+    a.enrolment.open(600).expect("A opens the window");
+    assert!(
+        eventually(Duration::from_secs(10), || b.enrolment.is_open()).await,
+        "B never took up the window A opened"
+    );
+    // Each request of a bootstrap certificate of its own, so no certificate's share is reached.
+    let queue = |instance: &Instance, name: &'static str, count: usize| {
+        let enrolment = instance.enrolment.clone();
+        tokio::task::spawn_blocking(move || {
+            for n in 0..count {
+                let key = format!("{name}-{n}");
+                let (request, mut requester) = enrolment_request(&key);
+                requester.bootstrap = CertId::new(b"bootstrap CA", &format!("{name}{n:04x}"));
+                assert_eq!(
+                    enrolment.submit(request, requester),
+                    Submitted::Waiting,
+                    "{key}"
+                );
+            }
+        })
+    };
+    let half = MAX_PENDING / 2;
+    let (on_a, on_b) = tokio::join!(queue(&a, "a", half), queue(&b, "b", half - 1));
+    on_a.expect("A queues");
+    on_b.expect("B queues");
+    assert_eq!(
+        schema.query("SELECT count(*) FROM enrolment_requests"),
+        [(MAX_PENDING - 1).to_string()]
+    );
+
+    assert_eq!(
+        enrol(&b, &pki, &signing.bootstrap).await,
+        None,
+        "B's host takes the last place"
+    );
+    let refused = enrol(&a, &pki, &signing.bootstrap).await;
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|message| message.contains("the enrolment queue is full")),
+        "A counts B's requests: {refused:?}"
+    );
+}
+
 /// During an enrolment wave on A, A reads nothing again for its own notifications, and B takes up
 /// every certificate and Host the wave registered. A then takes up the one change B commits, and
 /// that once: what it heard of its own acts before was passed over.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_reads_nothing_again_for_its_own_notifications() {
     let Some(schema) = Schema::named() else {
@@ -2257,7 +2964,7 @@ async fn next_message(
 
 /// A rollout committed on A reaches an Agent B carries: B takes up the Configuration A saved and
 /// the assignment A released, and offers the Agent the new configuration within one second.
-/// Verifies: ADR-0025, ADR-0033
+/// Verifies: ADR-0045, ADR-0033
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_agent() {
     use futures_util::SinkExt;
@@ -2350,7 +3057,7 @@ async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_a
 
 /// A Package created on A, and one deleted there, is what B lists next: B drops the Packages it
 /// holds for each notification and reads them again.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_package_published_on_one_instance_is_listed_by_the_other() {
     use fleet_server::packages::PackageId;
@@ -2397,7 +3104,7 @@ async fn a_package_published_on_one_instance_is_listed_by_the_other() {
 /// A Configuration and a Package deleted through B leave the Deployment that held them in A's
 /// memory too: the transaction that deletes them announces each Deployment it took them out of,
 /// and A reads the Deployments again for it.
-/// Verifies: ADR-0025, ADR-0033
+/// Verifies: ADR-0045, ADR-0033
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_deleted_through_one_instance_leaves_the_deployments_the_other_holds() {
     use fleet_server::packages::PackageId;
@@ -2485,7 +3192,7 @@ async fn a_member_deleted_through_one_instance_leaves_the_deployments_the_other_
 /// A revocation whose notification never arrives, while the listening connection stays up, is
 /// caught by the next lease renewal: it finds the list's version moved, and the instance reads the
 /// ledger again and ends the session it concerns.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal() {
     let Some(schema) = Schema::named() else {
@@ -2519,8 +3226,8 @@ async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal
 
 /// A binding and its Host committed by another instance that ended before it sent the notice
 /// that follows the commit are taken up by the next lease renewal, which reads the ledger again
-/// (ADR-0025 clauses 9 and 10).
-/// Verifies: ADR-0025
+/// (ADR-0045 clauses 9 and 10).
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next_renewal() {
     let Some(schema) = Schema::named() else {
@@ -2557,7 +3264,7 @@ async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next
 /// connection stays up, is taken up by the next lease renewal: so a revocation of the certificate
 /// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0040 clause 28,
 /// ADR-0023 clause 10).
-/// Verifies: ADR-0025, ADR-0023
+/// Verifies: ADR-0045, ADR-0023
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_renewal_whose_notification_is_missed_is_refused_once_its_predecessor_is_revoked() {
     use fleet_server::revocation::{Issued, LedgerStore, RegisterBounds, Registered};
@@ -2617,9 +3324,9 @@ async fn a_renewal_whose_notification_is_missed_is_refused_once_its_predecessor_
 /// An instance killed without a shutdown leaves its lease and its audit chain behind; a running
 /// instance takes the lease over at one of its renewals once it lapsed, and the dead chain ends
 /// with `audit.chain_closed`, `reason` `lease_lapsed`, `closed_by` the running instance's chain
-/// (ADR-0025
+/// (ADR-0045
 /// clause 18).
-/// Verifies: ADR-0029, ADR-0025
+/// Verifies: ADR-0029, ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_instance_closes_the_chain_of_one_killed_at_its_renewal() {
     let Some(schema) = Schema::named() else {
@@ -2631,9 +3338,20 @@ async fn a_running_instance_closes_the_chain_of_one_killed_at_its_renewal() {
     // Killed: a lease and its chain, and nothing renews or closes them.
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let dead = tokio::task::spawn_blocking(move || {
-        let database = Database::open_in(&config, Exclusive::Shared, Some(&name)).expect("open");
+        let database = Database::open(
+            &config,
+            Opening {
+                schema: Some(&name),
+                ..Opening::default()
+            },
+        )
+        .expect("open");
         database
-            .take_lease("killed-host", TIMES.lapse)
+            .take_lease(
+                "killed-host",
+                TIMES.lapse,
+                &fleet_server::postgres::lease::Terms::default(),
+            )
             .expect("lease")
             .instance_id
     })
@@ -2732,7 +3450,7 @@ fn view_of(instance: &Instance, uid: InstanceUid) -> Option<fleet_server::fleet:
 /// Labels set through B on a Client Agent A carries stay as B set them when A writes the Agent's
 /// next report before it heard of them, since A's write is of what a report decides alone; A then
 /// takes them up, and a later change through B reaches A's view within one second.
-/// Verifies: ADR-0030, ADR-0025
+/// Verifies: ADR-0030, ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carries_the_agent() {
     let Some(schema) = Schema::named() else {
@@ -2805,7 +3523,7 @@ async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carrie
 /// A restart requested through B for an Agent A carries stays queued when A writes the Agent's
 /// next report before it heard of it; A then takes it up and sends the restart, which clears it,
 /// and a request made after that is queued again and sent within one second.
-/// Verifies: ADR-0030, ADR-0025
+/// Verifies: ADR-0030, ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it() {
     let Some(schema) = Schema::named() else {
@@ -2865,7 +3583,7 @@ async fn a_restart_requested_through_one_instance_stays_until_the_carrying_insta
 
 /// The ceiling on Agent records holds for the fleet: with room for one, an Agent first heard of
 /// through B is refused once A stored another, and the one A stored keeps reporting through B.
-/// Verifies: ADR-0025, ADR-0040
+/// Verifies: ADR-0045, ADR-0040
 #[test]
 fn the_ceiling_on_agent_records_holds_across_instances() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2907,7 +3625,7 @@ fn the_ceiling_on_agent_records_holds_across_instances() {
 
 /// Many Agents created at once through twelve instances leave no more records than `max_agents`:
 /// each creation counts the records the others created, however many are made at once.
-/// Verifies: ADR-0025, ADR-0030
+/// Verifies: ADR-0045, ADR-0030
 #[test]
 fn many_creations_at_once_on_many_instances_never_pass_the_ceiling() {
     use fleet_server::fleet::{AppState, Transport};
@@ -2963,7 +3681,7 @@ fn many_creations_at_once_on_many_instances_never_pass_the_ceiling() {
 /// An Agent carried by A that went quiet is forgotten through B, which decides from the presence
 /// A wrote: refused while it reports, forgotten once it is silent past the budget, and A then ends
 /// its session within one second.
-/// Verifies: ADR-0030, ADR-0025
+/// Verifies: ADR-0030, ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_one_that_carries_it()
 {
@@ -3414,7 +4132,7 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_w
 /// A's presence batch writes the disconnect of an Agent A took back from B, whose clock runs
 /// ahead of A's: the row still holds the count of takes A was answered, whatever `last_seen_ms` B
 /// stamped it with.
-/// Verifies: ADR-0030, ADR-0025
+/// Verifies: ADR-0030, ADR-0045
 #[test]
 fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_agent() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3462,7 +4180,7 @@ fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_age
 /// A presence batch that names A anew, over an Agent B took and disconnected, counts as a take:
 /// A's disconnect is written under the count it answered, the shutdown flush of B, which took the
 /// Agent before, leaves what A wrote, and that of A, which disconnected the Agent last, writes it.
-/// Verifies: ADR-0030, ADR-0025
+/// Verifies: ADR-0030, ADR-0045
 #[test]
 fn a_batch_that_names_its_instance_anew_counts_as_a_take() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3616,7 +4334,7 @@ fn the_goodbye_of_an_agent_forgotten_through_another_instance_is_written_where_i
 /// the Agent's next report: A's take for the Agent's old connection commits after B's for its
 /// new one, B stops carrying it on hearing of the take, A writes the disconnect when the old
 /// connection closes, and the Agent's next report on B makes B its holder again.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[test]
 fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_its_next_report() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3656,7 +4374,7 @@ fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_it
     b.process(report(2), Transport::WebSocket, Some(9));
     a.process(report(1), Transport::WebSocket, Some(7));
     assert_eq!(stored(), [format!("{lease_a} true")]);
-    b.release_taken(None).expect("B hears of the take");
+    b.catch_up().expect("B hears of the take");
     assert!(!carried(&b), "B stops carrying it");
     a.mark_disconnected(&[uid], 7);
     a.write_presence(lease_a).expect("A's batch");
@@ -3704,7 +4422,7 @@ async fn an_agent_just_connected_is_not_forgotten_through_another_instance() {
 /// reads the holder again and stops carrying it, though its old connection has not closed yet.
 /// When that connection closes and A writes its next batch, the row still names B as the holder,
 /// connected, and B still carries it.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_whose_connection_moves_is_held_by_the_new_instance_and_no_longer_by_the_old() {
     let Some(schema) = Schema::named() else {
@@ -3756,7 +4474,7 @@ async fn an_agent_whose_connection_moves_is_held_by_the_new_instance_and_no_long
 /// Of two instances that take one Agent at once, each hearing of the other's take only after its
 /// own, only the one the row no longer names stops carrying it: each reads the holder again
 /// rather than drop the Agent on hearing of a take.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[test]
 fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carries_it() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3782,8 +4500,8 @@ fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carri
     a.process(report(1), Transport::WebSocket, Some(7));
     b.process(report(2), Transport::WebSocket, Some(9));
     let named = std::collections::HashSet::from([uid]);
-    a.release_taken(Some(&named)).expect("A hears of B's take");
-    b.release_taken(Some(&named)).expect("B hears of A's take");
+    a.release_taken(&named).expect("A hears of B's take");
+    b.release_taken(&named).expect("B hears of A's take");
     let carried = |state: &AppState| {
         state
             .snapshot()
@@ -3797,7 +4515,7 @@ fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carri
 /// An Agent whose holder changes eleven times within a minute, as two connections of one
 /// `instance_uid` on two instances take it in turn, is logged as a likely duplicate once, when
 /// the eleventh change lands, and not before.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[test]
 fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_likely_duplicate() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3845,9 +4563,9 @@ fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_li
                 (&b, &a, 7)
             };
             sequence_num += 1;
-            to.release_taken(Some(&named)).expect("hears of the take");
+            to.release_taken(&named).expect("hears of the take");
             to.process(report(sequence_num), Transport::WebSocket, Some(conn));
-            from.release_taken(Some(&named)).expect("hears of the take");
+            from.release_taken(&named).expect("hears of the take");
             assert_eq!(likely(), usize::from(change == 11), "after change {change}");
         }
     });
@@ -3907,7 +4625,7 @@ async fn assigned(session: &mut Socket, count: usize) -> Vec<Option<Vec<u8>>> {
 /// each, and the newest connection carries them. A report or a goodbye the older connection
 /// delivers after that does not take its Agent back or end it, so the older connection's close
 /// leaves every Agent connected.
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_peer_whose_first_reports_wait_keeps_its_agents_identities_on_its_new_connection() {
     use futures_util::{SinkExt, StreamExt};
@@ -4008,7 +4726,7 @@ async fn a_peer_whose_first_reports_wait_keeps_its_agents_identities_on_its_new_
 /// on two Gateways' connections, whose certificates bind no Agent, and on two connections that
 /// present no host, by the duplicate detection; on two hosts' connections by the binding of the
 /// identity to the host that reported it first. The incumbent keeps its identity each time.
-/// Verifies: ADR-0025, ADR-0040
+/// Verifies: ADR-0045, ADR-0040
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_duplicate_on_live_connections_of_different_peers_is_rekeyed() {
     use futures_util::SinkExt;
@@ -4165,6 +4883,16 @@ async fn gateway(
     balancer: &Balancer,
     dir: &std::path::Path,
 ) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
+    gateway_timed(pki, balancer, dir, fleet_agent::gateway::Timings::default()).await
+}
+
+/// [`gateway`], its time bounds `timings`.
+async fn gateway_timed(
+    pki: &Pki,
+    balancer: &Balancer,
+    dir: &std::path::Path,
+    timings: fleet_agent::gateway::Timings,
+) -> (SocketAddr, tokio::sync::watch::Sender<bool>) {
     let path = |file: &str| dir.join(file).display().to_string();
     let (listener_cert, listener_key) = pki.issue("127.0.0.1");
     std::fs::write(dir.join("listener.pem"), listener_cert).expect("write");
@@ -4199,7 +4927,7 @@ async fn gateway(
     .expect("gateway config");
     let (stop, shutdown) = fleet_agent::shutdown::shutdown_channel();
     tokio::spawn(async move {
-        fleet_agent::gateway::run_on(Arc::new(config), listener, shutdown)
+        fleet_agent::gateway::run_on_timed(Arc::new(config), listener, shutdown, timings)
             .await
             .expect("gateway");
     });
@@ -4264,7 +4992,7 @@ async fn reported(
 /// stops, each downstream Agent A held is taken over by B once, at its next report, and stays
 /// connected to the Gateway; B refuses none of the pool's connections, and the Gateway goes on
 /// admitting downstream peers.
-/// Verifies: ADR-0025, ADR-0016
+/// Verifies: ADR-0045, ADR-0016
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped_one_once() {
     let Some(schema) = Schema::named() else {
@@ -4380,10 +5108,144 @@ async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped
     reported(&mut late, InstanceUid([0xaf; 16]), &mut late_sequence).await;
 }
 
+/// The status and the `otelcol` floor the Gateway at `downstream` answers a peer presenting
+/// `cert`, asked again until they are `wanted` or 15 seconds have passed.
+async fn floors_behind(
+    downstream: SocketAddr,
+    pki: &Pki,
+    cert: &str,
+    key: &str,
+    wanted: (u16, Option<&str>),
+) -> (u16, Option<String>) {
+    let client = agent_client(pki, cert, key);
+    let url = format!("https://127.0.0.1:{}/v1/package-floors", downstream.port());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let response = client.get(&url).send().await.expect("ask the Gateway");
+        let status = response.status().as_u16();
+        let body = response.bytes().await.expect("the body");
+        let version = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|floors| floors["otelcol"]["version"].as_str().map(str::to_string));
+        if (status, version.as_deref()) == wanted || tokio::time::Instant::now() >= deadline {
+            return (status, version);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// A Gateway whose pool reached A alone serves on once A stops: its next fetches reach B, and it
+/// holds the revocation list and the floors B holds, a revocation and a floor committed through B
+/// while A was stopped included. The revoked downstream session is ended, a request with its
+/// certificate is refused, and the floors handed down are B's.
+/// Verifies: ADR-0045, ADR-0040, ADR-0035, ADR-0016
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_gateway_whose_instance_stopped_serves_the_list_and_the_floors_the_other_holds() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let mut a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    mark_gateway(&a, &pki, dir.path());
+    let b = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let on_a = a.floors.clone();
+    tokio::task::spawn_blocking(move || on_a.put("otelcol", "2.0.0", vec![7; 64]))
+        .await
+        .expect("put")
+        .expect("A sets a floor");
+    let a_id = a.instance_id().expect("a lease");
+
+    let balancer = Balancer::to(vec![a.agent, b.agent]).await;
+    balancer.send_to(0);
+    let (downstream, _stop) = gateway_timed(
+        &pki,
+        &balancer,
+        dir.path(),
+        fleet_agent::gateway::Timings {
+            revocation_refresh: Duration::from_secs(1),
+            floors_refresh: Duration::from_secs(1),
+            ..fleet_agent::gateway::Timings::default()
+        },
+    )
+    .await;
+    let (revoked_cert, revoked_key) = pki.issue("edge-revoked");
+    let (kept_cert, kept_key) = pki.issue("edge-kept");
+    let mut revoked = behind(downstream, &pki, &revoked_cert, &revoked_key).await;
+    let mut kept = behind(downstream, &pki, &kept_cert, &kept_key).await;
+    let (revoked_uid, kept_uid) = (InstanceUid([0xb1; 16]), InstanceUid([0xb2; 16]));
+    let (mut revoked_sequence, mut kept_sequence) = (0, 0);
+    reported(&mut revoked, revoked_uid, &mut revoked_sequence).await;
+    reported(&mut kept, kept_uid, &mut kept_sequence).await;
+    assert_eq!(
+        schema.query(&format!(
+            "SELECT holder::text FROM agents WHERE instance_uid = '{kept_uid}'"
+        )),
+        std::slice::from_ref(&a_id),
+        "the Gateway's pool reached A"
+    );
+    assert_eq!(
+        floors_behind(
+            downstream,
+            &pki,
+            &kept_cert,
+            &kept_key,
+            (200, Some("2.0.0"))
+        )
+        .await,
+        (200, Some("2.0.0".to_string())),
+        "the Gateway hands down A's floor"
+    );
+
+    // A stops; while the Gateway reaches no instance, B revokes and sets a higher floor.
+    balancer.send_to(1);
+    let _ = a.stop.take().expect("running").send(());
+    assert!(
+        eventually(Duration::from_secs(15), || schema.query(&format!(
+            "SELECT count(*) FROM leases WHERE instance_id = '{a_id}'"
+        )) == ["0"])
+        .await,
+        "A released its lease"
+    );
+    revoke_through(&b, &pki, &revoked_cert).await;
+    let on_b = b.floors.clone();
+    tokio::task::spawn_blocking(move || on_b.put("otelcol", "3.0.0", vec![7; 64]))
+        .await
+        .expect("put")
+        .expect("B sets a floor");
+
+    assert_eq!(
+        closed_within(&mut revoked, Duration::from_secs(15)).await,
+        Some((1008, "revoked".to_string())),
+        "the Gateway ends the session B's list names"
+    );
+    assert_eq!(
+        floors_behind(downstream, &pki, &revoked_cert, &revoked_key, (401, None))
+            .await
+            .0,
+        401,
+        "the Gateway refuses the certificate B revoked"
+    );
+    assert_eq!(
+        floors_behind(
+            downstream,
+            &pki,
+            &kept_cert,
+            &kept_key,
+            (200, Some("3.0.0"))
+        )
+        .await,
+        (200, Some("3.0.0".to_string())),
+        "the Gateway hands down B's floor"
+    );
+    let reply = reported(&mut kept, kept_uid, &mut kept_sequence).await;
+    assert!(reply.error_response.is_none(), "{:?}", reply.error_response);
+}
+
 /// A Configuration whose revision was pinned through one instance is not deleted through another
 /// that holds no such pin in memory: the deletion counts the stored assignments in its own
 /// transaction, under the Configuration's row lock.
-/// Verifies: ADR-0025, ADR-0033
+/// Verifies: ADR-0045, ADR-0033
 #[test]
 fn a_configuration_pinned_through_one_instance_is_not_deleted_through_another() {
     use fleet_server::agent_store::Pin;
@@ -4453,14 +5315,18 @@ fn a_configuration_pinned_through_one_instance_is_not_deleted_through_another() 
 
 /// Whether `answer` is the refusal `refusal`, as a database adapter answers it: the database named
 /// before it.
-fn refused_with<T: std::fmt::Debug>(answer: Result<T, String>, refusal: &str) -> bool {
-    answer.expect_err("refused").ends_with(refusal)
+fn refused_with<T: std::fmt::Debug>(
+    answer: Result<T, fleet_server::packages::PackageError>,
+    refusal: &fleet_server::packages::PackageError,
+) -> bool {
+    let refused = answer.expect_err("refused");
+    refused.refusal == refusal.refusal && refused.message.ends_with(&refusal.message)
 }
 
 /// A Package pinned through one instance is not changed or deleted through another that holds no
 /// such pin: each write to it counts the stored assignments in its own transaction, under the
 /// Package's row lock, and is refused, leaving the Package as stored.
-/// Verifies: ADR-0025, ADR-0033
+/// Verifies: ADR-0045, ADR-0033
 #[test]
 fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
     use fleet_server::packages::{PackageId, PackageStore, Platform};
@@ -4550,7 +5416,7 @@ fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
 /// A Deployment an Agent was released through on one instance is not deleted through another
 /// that holds no such assignment: the deletion counts the stored assignments in its own
 /// transaction, under the Deployment's row lock.
-/// Verifies: ADR-0025, ADR-0033
+/// Verifies: ADR-0045, ADR-0033
 #[test]
 fn a_deployment_released_through_on_one_instance_is_not_deleted_through_another() {
     use fleet_server::agent_store::Pin;
@@ -4645,12 +5511,73 @@ async fn release_a_package(instance: &Instance) -> usize {
     .expect("release a package")
 }
 
+/// A Package that a release through B pinned, and that a later release through A moved the Agent
+/// off, is deleted through B, which does not carry the Agent: B's own count of the pin is stale,
+/// and the deletion decides from the stored assignments, not from it.
+/// Verifies: ADR-0045, ADR-0033
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_package_released_away_through_one_instance_is_deleted_through_another() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let blobs = tempfile::tempdir().expect("blobs");
+    let a = Instance::start_on_blobs(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        blobs.path(),
+    )
+    .await;
+    let b = Instance::start_on_blobs(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        blobs.path(),
+    )
+    .await;
+    let (cert, key) = pki.issue_to_host("h1");
+    let uid = InstanceUid([0x24; 16]);
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, uid, 1, TAKES_PACKAGES, PACKAGED, true).await;
+    assert_eq!(release_a_package(&b).await, 1, "released through B");
+
+    let on_a = a.state.clone();
+    tokio::task::spawn_blocking(move || {
+        let next = fleet_server::packages::PackageId::new("otelcol", "2.0.0")?;
+        let linux = fleet_server::packages::Platform::new("linux", "amd64")?;
+        on_a.create_package_set(&next)?;
+        on_a.put_package_entry(&next, &linux, &mut &b"v2"[..])?;
+        on_a.put_package_entry_signature(&next, &linux, vec![2; 64])?;
+        on_a.put_deployment_package("stable", &next, true)
+            .map_err(|e| format!("{e:?}"))?;
+        on_a.rollout_deployment("stable")
+            .map_err(|e| format!("{e:?}"))
+    })
+    .await
+    .expect("release")
+    .expect("released 2.0.0 through A");
+
+    let on_b = b.state.clone();
+    let deleted = tokio::task::spawn_blocking(move || {
+        on_b.delete_package_set(&fleet_server::packages::PackageId::new("otelcol", "1.0.0")?)
+            .map_err(String::from)
+    })
+    .await
+    .expect("delete");
+    assert_eq!(
+        deleted,
+        Ok(true),
+        "B deletes the Package no stored assignment pins"
+    );
+}
+
 /// A restarted instance loads no Agent record and holds none until one reports to it, and reads
 /// an Agent another instance carries from the database: the fleet list, the Hosts list and the
 /// deployment reach through B name the Agent A carries with its labels, its assignment and A's
 /// presence, B serves its host the artifact released to it, and once A's lease is gone the Agent
 /// reads as disconnected.
-/// Verifies: ADR-0030, ADR-0025, ADR-0023, ADR-0034
+/// Verifies: ADR-0030, ADR-0045, ADR-0023, ADR-0034
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_carried_by_one_instance_is_read_through_another_that_holds_none_of_it() {
     let Some(schema) = Schema::named() else {
@@ -4771,7 +5698,7 @@ async fn an_agent_carried_by_one_instance_is_read_through_another_that_holds_non
 /// An Agent B carries inherits the labels of its Client Agent, which A carries: B reads the Client
 /// Agent from the database when it places the Agent, once it has taken up the host register
 /// another instance wrote, and follows a change of its labels made through A.
-/// Verifies: ADR-0025, ADR-0030
+/// Verifies: ADR-0045, ADR-0030
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_carries() {
     let Some(schema) = Schema::named() else {
@@ -4878,7 +5805,7 @@ fn holding(instance: &Instance, holder: fleet_server::listing::HolderFilter) -> 
 /// through any instance; the list filters by it, `none` naming the Agents no instance with a live
 /// lease holds; a page's cursor from one instance continues the list on another; and once the
 /// holder's lease is gone the Agent is held by none.
-/// Verifies: ADR-0031, ADR-0025
+/// Verifies: ADR-0031, ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agents_view_names_its_holder_and_the_list_filters_by_it() {
     use fleet_server::listing::HolderFilter;
@@ -5043,7 +5970,7 @@ async fn an_agents_view_names_its_holder_and_the_list_filters_by_it() {
 /// Agent behind the same Gateway, which A carries: B reads the Agents that arrived over the
 /// Gateway's Host through the port's `query_page` when it places the Agent, and places it again
 /// when A changes that Client Agent's labels.
-/// Verifies: ADR-0025, ADR-0030
+/// Verifies: ADR-0045, ADR-0030
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_behind_a_gateway_inherits_the_labels_of_its_client_agent_another_instance_carries(
 ) {
@@ -5141,9 +6068,9 @@ fn two_releases_on() -> &'static [Migration] {
 /// The upgrade from 0.8.0 itself: on the schema 0.8.0 leaves, migrations 1 to 11, with a live lease
 /// as an instance of 0.8.0 takes one, writing no release, two instances of this release that start
 /// at once apply migration 12 once beside it and both serve, and that lease reads 0.8.0
-/// (ADR-0025
+/// (ADR-0045
 /// clause 16).
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
     let Some(schema) = Schema::named() else {
@@ -5153,12 +6080,14 @@ async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
     let config = || schema.config_on(schema.config.port);
     let (before, name) = (config(), schema.name.clone());
     tokio::task::spawn_blocking(move || {
-        Database::open_as(
+        Database::open(
             &before,
-            Exclusive::Shared,
-            Some(&name),
-            "0.8.0",
-            &MIGRATIONS[..11],
+            Opening {
+                schema: Some(&name),
+                release: "0.8.0",
+                migrations: Some(&MIGRATIONS[..11]),
+                ..Opening::default()
+            },
         )
         .map(|_| ())
     })
@@ -5207,9 +6136,9 @@ fn the_next_patch_release() -> &'static [Migration] {
 /// With an instance of N on its schema, two instances of N+1 that start at once apply N+1's
 /// migration once and both serve; the instances of N and N+1 both serve the Agents that report
 /// to either, each reading the other's; and each lease names the release of its instance
-/// (ADR-0025
+/// (ADR-0045
 /// clause 16).
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_versions_serve_side_by_side_and_the_newer_migrates_once() {
     let Some(schema) = Schema::named() else {
@@ -5271,9 +6200,9 @@ async fn two_versions_serve_side_by_side_and_the_newer_migrates_once() {
 /// An instance whose lease lapsed while a Server two releases on migrated checks the schema as
 /// it takes its new lease, and stops: it takes none, keeps the refusal naming both versions, and
 /// ends what its lease sends, so its planes stay closed and the Server exits
-/// (ADR-0025
+/// (ADR-0045
 /// clause 16).
-/// Verifies: ADR-0025
+/// Verifies: ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_its_new_lease() {
     let Some(schema) = Schema::named() else {
@@ -5289,7 +6218,15 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
     let (port, frozen) = freezable_proxy(target);
     let (config, name) = (schema.config_on(port), schema.name.clone());
     let older = tokio::task::spawn_blocking(move || {
-        Database::open_as(&config, Exclusive::Shared, Some(&name), "0.8.0", MIGRATIONS)
+        Database::open(
+            &config,
+            Opening {
+                schema: Some(&name),
+                release: "0.8.0",
+                migrations: Some(MIGRATIONS),
+                ..Opening::default()
+            },
+        )
     })
     .await
     .expect("open")
@@ -5297,7 +6234,7 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
     let lease = {
         let older = older.clone();
         tokio::task::spawn_blocking(move || {
-            fleet_server::instance::Lease::take(older, TIMES, "host-older")
+            fleet_server::instance::Lease::take(older, TIMES, "host-older", Default::default())
         })
         .await
         .expect("take")
@@ -5317,12 +6254,14 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
     schema.sql("UPDATE leases SET expires_at = now() - interval '1 second'");
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     tokio::task::spawn_blocking(move || {
-        Database::open_as(
+        Database::open(
             &config,
-            Exclusive::Shared,
-            Some(&name),
-            "0.10.0",
-            two_releases_on(),
+            Opening {
+                schema: Some(&name),
+                release: "0.10.0",
+                migrations: Some(two_releases_on()),
+                ..Opening::default()
+            },
         )
         .map(|_| ())
     })
@@ -5366,7 +6305,13 @@ async fn signing_record(
 ) {
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let database = tokio::task::spawn_blocking(move || {
-        Database::open_in(&config, Exclusive::Shared, Some(&name))
+        Database::open(
+            &config,
+            Opening {
+                schema: Some(&name),
+                ..Opening::default()
+            },
+        )
     })
     .await
     .expect("open")
@@ -5374,7 +6319,7 @@ async fn signing_record(
     let lease = {
         let database = database.clone();
         tokio::task::spawn_blocking(move || {
-            fleet_server::instance::Lease::take(database, TIMES, "test-host")
+            fleet_server::instance::Lease::take(database, TIMES, "test-host", Default::default())
         })
         .await
         .expect("take")
@@ -5527,9 +6472,16 @@ async fn one_instance_signs_at_a_time_naming_every_chain_and_another_takes_over(
     let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(&key);
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let verified = tokio::task::spawn_blocking(move || {
-        fleet_server::postgres::audit::verify_checked_on(
-            &config,
-            Some(&name),
+        fleet_server::postgres::audit::verify(
+            &Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
             None,
             Some(fleet_server::checkpoint::Check::new(
                 fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
@@ -5550,9 +6502,16 @@ async fn one_instance_signs_at_a_time_naming_every_chain_and_another_takes_over(
     let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(&key);
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let verified = tokio::task::spawn_blocking(move || {
-        fleet_server::postgres::audit::verify_checked_on(
-            &config,
-            Some(&name),
+        fleet_server::postgres::audit::verify(
+            &Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
             None,
             Some(fleet_server::checkpoint::Check::new(
                 fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
@@ -5729,9 +6688,16 @@ async fn a_prune_names_the_last_checkpoint_it_removes_and_the_record_verifies_af
     let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(&key);
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     let verified = tokio::task::spawn_blocking(move || {
-        fleet_server::postgres::audit::verify_checked_on(
-            &config,
-            Some(&name),
+        fleet_server::postgres::audit::verify(
+            &Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
             None,
             Some(fleet_server::checkpoint::Check::new(
                 fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),
@@ -5799,9 +6765,16 @@ async fn verified_against(
     let spki = fleet_server::checkpoint::CheckpointSigner::public_key_der(key);
     let (config, name) = (schema.config_on(schema.config.port), schema.name.clone());
     tokio::task::spawn_blocking(move || {
-        fleet_server::postgres::audit::verify_checked_on(
-            &config,
-            Some(&name),
+        fleet_server::postgres::audit::verify(
+            &Database::open(
+                &config,
+                Opening {
+                    schema: Some(&name),
+                    migrations: None,
+                    ..Opening::default()
+                },
+            )
+            .expect("open"),
             None,
             Some(fleet_server::checkpoint::Check::new(
                 fleet_server::checkpoint::AuditKey::from_der(&spki).expect("key"),

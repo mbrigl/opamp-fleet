@@ -7,6 +7,7 @@ use std::sync::Arc;
 use super::Cached as GenericClient;
 
 use super::{client, sql, Database};
+use crate::changed::Changed;
 use crate::floors::{below, Floor, FloorStore, Put};
 
 /// The floors in `package_floors`.
@@ -80,7 +81,7 @@ impl FloorStore for PgFloorStore {
                 write(&transaction, &agent_type, &floor).await?;
                 break;
             }
-            super::notify::notify(&transaction, super::notify::FLOOR, &agent_type).await?;
+            super::notify::notify(&transaction, Changed::Floor, &agent_type).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Put::Stored)
         })
@@ -101,7 +102,7 @@ impl FloorStore for PgFloorStore {
             if removed == 0 {
                 return Ok(false);
             }
-            super::notify::notify(&transaction, super::notify::FLOOR, &agent_type).await?;
+            super::notify::notify(&transaction, Changed::Floor, &agent_type).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(true)
         })

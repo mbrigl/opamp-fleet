@@ -17,7 +17,7 @@ use std::time::Duration;
 use super::Cached as GenericClient;
 use serde_json::Value;
 
-use super::{client, sql, Database};
+use super::{sql, Database, SessionLock};
 use crate::audit::{Audit as _, Entry};
 use crate::audit_log::{line_hash, AuditLog};
 
@@ -34,6 +34,9 @@ const PRUNE_TIMEOUT: Duration = Duration::from_secs(300);
 /// hundred times that, a round takes 20 s, a fifteenth of [`PRUNE_TIMEOUT`], so a round fits
 /// with room for a database under load, and a backlog drains over as many rounds as it needs.
 pub(crate) const ROUND_ENTRIES: i64 = 100_000;
+
+/// How long a round waits for its session to answer whether it still holds the prune lock.
+const LOCK_ASKED_WITHIN: Duration = Duration::from_secs(10);
 
 /// How long the prune waits for its `audit.pruned` entries to be written.
 const WRITTEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -147,12 +150,64 @@ fn predecessor_named(value: &Value, chain_key: &str) -> Option<Predecessor> {
     })
 }
 
+/// How often an instance prunes the record: at its start and once a day after
+/// (ADR-0023 clause 12).
+const PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Prunes the record on `database` to `retain_days` at once and then once a day, for the chain
+/// `held` names at each prune, recording through `audit`; what each prune did is logged. What the
+/// Server on PostgreSQL runs from its start until it ends.
+pub fn prune_daily(
+    database: Arc<Database>,
+    audit: Arc<AuditLog>,
+    held: crate::instance::Held,
+    retain_days: u64,
+) -> tokio::task::JoinHandle<()> {
+    prune_every(PRUNE_EVERY, database, audit, held, retain_days)
+}
+
+/// [`prune_daily`], every `period` rather than once a day.
+fn prune_every(
+    period: Duration,
+    database: Arc<Database>,
+    audit: Arc<AuditLog>,
+    held: crate::instance::Held,
+    retain_days: u64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut daily = tokio::time::interval(period);
+        loop {
+            daily.tick().await;
+            let (database, audit) = (database.clone(), audit.clone());
+            let own = held.borrow().clone();
+            let pruned =
+                tokio::task::spawn_blocking(move || prune(&database, audit, own, retain_days))
+                    .await;
+            match pruned {
+                Ok(Ok(rounds)) => tracing::info!(
+                    rounds = rounds.len(),
+                    chains = rounds.iter().map(|round| round.chains.len()).sum::<usize>(),
+                    carried = rounds
+                        .iter()
+                        .map(|round| round.carried.len())
+                        .sum::<usize>(),
+                    closed_chains = rounds.iter().any(|round| round.closed_chains),
+                    "pruned the audit record to {retain_days} days"
+                ),
+                Ok(Err(e)) => tracing::warn!(error = %e, "cannot prune the audit record"),
+                Err(e) => tracing::warn!(error = %e, "the audit record's prune stopped"),
+            }
+        }
+    })
+}
+
 /// Prunes the record on `database` for the instance whose chain is `own`, recording through
-/// `audit`, in rounds of [`prune_round`], one right after the other until a round finds nothing
-/// more to remove; answers what each round did.
+/// `audit`, in rounds of at most [`ROUND_ENTRIES`] entries, one right after the other until a
+/// round finds nothing more to remove; answers what each round did.
 ///
 /// # Errors
-/// As [`prune_round`]: the round that fails deleted nothing, and the rounds before it stand.
+/// Returns an error when a round cannot read or write the database, or cannot write its
+/// `audit.pruned` entries: the round that fails deleted nothing, and the rounds before it stand.
 pub fn prune(
     database: &Database,
     audit: Arc<AuditLog>,
@@ -198,7 +253,8 @@ fn prune_in_rounds_of(
 /// # Errors
 /// Returns an error when the database cannot be read or written, or when the `audit.pruned`
 /// entries could not be written; then nothing was deleted.
-pub fn prune_round(
+#[cfg(test)]
+pub(crate) fn prune_round(
     database: &Database,
     audit: Arc<AuditLog>,
     own: Option<String>,
@@ -207,7 +263,7 @@ pub fn prune_round(
     prune_round_of(database, audit, own, retain_days, ROUND_ENTRIES)
 }
 
-/// [`prune_round`] removing at most `budget` entries.
+/// One round of the prune removing at most `budget` entries.
 fn prune_round_of(
     database: &Database,
     audit: Arc<AuditLog>,
@@ -217,59 +273,53 @@ fn prune_round_of(
 ) -> Result<Pruned, String> {
     // At most 36 500 (`[audit] retain_days`), so the bits carry over unchanged.
     let days = super::signed(retain_days);
-    database.run_within(PRUNE_TIMEOUT, move |pool| async move {
-        // A connection of its own, taken from the pool, so that the session-level lock ends with
-        // it whatever happens to this call.
-        let mut lock = deadpool_postgres::Object::take(client(&pool).await?);
-        round_on(&mut lock, audit, own, days, budget).await
+    let (pg, tls) = (database.pg.clone(), database.tls.clone());
+    database.run_within(PRUNE_TIMEOUT, move |_pool| async move {
+        // A session of its own, so that the prune lock ends with it whatever happens to this
+        // call; a round cut off by its bound drops it before its own unlock ran, and the drop
+        // lets go of the lock.
+        let lock = SessionLock::open(&pg, &tls, PRUNE_LOCK, "", |_, _| {}).await?;
+        round_on(&lock, audit, own, days, budget).await
     })
 }
 
-/// [`prune_round_of`] on the connection `lock`, which takes the prune lock when it is free and lets
-/// go of it before it answers. The session ends only some time after the connection is dropped,
-/// so a lock left to it could still be held when the next round of the same prune tries it, and
-/// that round would leave the closed chains as if another instance pruned them.
+/// [`prune_round_of`] on the session of `lock`, which takes the prune lock when it is free and
+/// lets go of it before it answers. The session ends only some time after it is dropped, so a lock
+/// left to it could still be held when the next round of the same prune tries it, and that round
+/// would leave the closed chains as if another instance pruned them.
 async fn round_on(
-    lock: &mut deadpool_postgres::ClientWrapper,
+    lock: &SessionLock,
     audit: Arc<AuditLog>,
     own: Option<String>,
     days: i64,
     budget: i64,
 ) -> Result<Pruned, String> {
-    let locked: bool = lock
-        .query_one(&format!("SELECT pg_try_advisory_lock({PRUNE_LOCK})"), &[])
-        .await
-        .map_err(sql)?
-        .get(0);
+    let locked = lock.try_lock().await?;
     let pruned = round_under(lock, locked, audit, own, days, budget).await;
-    if locked {
-        // Answered either way: what the round did stands, and the session's end lets go of the
-        // lock where this cannot.
-        if let Err(e) = lock
-            .execute(&format!("SELECT pg_advisory_unlock({PRUNE_LOCK})"), &[])
-            .await
-        {
-            tracing::warn!(
-                error = %sql(e),
-                "the audit prune lock was not let go; it goes when its session ends"
-            );
-        }
+    // Answered either way: what the round did stands, and the session's end lets go of the lock
+    // where this cannot.
+    if let Err(e) = lock.unlock().await {
+        tracing::warn!(
+            error = %e,
+            "the audit prune lock was not let go; it goes when its session ends"
+        );
     }
     pruned
 }
 
-/// The work of one round on `lock`, which holds the prune lock when `locked`.
+/// The work of one round on the session of `lock`, which holds the prune lock when `locked`.
 async fn round_under(
-    lock: &mut deadpool_postgres::ClientWrapper,
+    lock: &SessionLock,
     locked: bool,
     audit: Arc<AuditLog>,
     own: Option<String>,
     days: i64,
     budget: i64,
 ) -> Result<Pruned, String> {
+    let session = lock.client().as_ref();
     let mut chains: Vec<String> = Vec::new();
     if let Some(own) = &own {
-        if lock
+        if session
             .query_opt(
                 "SELECT 1 FROM audit_chains WHERE id = $1::text::uuid AND closed_hash IS NULL",
                 &[own],
@@ -282,7 +332,7 @@ async fn round_under(
         }
     }
     if locked {
-        for row in lock
+        for row in session
             .query(
                 "SELECT id::text FROM audit_chains WHERE closed_hash IS NOT NULL \
                  ORDER BY opened_at, id",
@@ -297,7 +347,7 @@ async fn round_under(
     // The own chain may have been closed by a takeover between the two reads.
     let mut seen = BTreeSet::new();
     chains.retain(|chain| seen.insert(chain.clone()));
-    let plan = plan(&**lock, &chains, days, budget).await?;
+    let plan = plan(session, &chains, days, budget).await?;
     let mut pruned = Pruned {
         closed_chains: locked,
         capped: plan.capped,
@@ -323,12 +373,28 @@ async fn round_under(
             "the audit.pruned entries could not be written, so nothing was pruned".to_string(),
         );
     }
+    // The wait for the entries may have outlasted the session, and the lock with it. The deletes
+    // run on that session, so they would fail on their own then; asking first only says why,
+    // rather than with the error of a closed connection.
+    if locked && !lock.holds(LOCK_ASKED_WITHIN).await {
+        return Err(
+            "the audit prune lock was lost with its session while the audit.pruned entries were \
+             written, so nothing was pruned"
+                .to_string(),
+        );
+    }
     // One transaction for every chain: the old link of a chain pruned further may sit in
     // another chain pruned here, so a prune that stopped between two deletes would leave a
     // chain linked by nothing.
-    let transaction = lock.transaction().await.map_err(sql)?;
-    delete(&transaction, &plan.chains).await?;
-    transaction.commit().await.map_err(sql)?;
+    session.batch_execute("BEGIN").await.map_err(sql)?;
+    let deleted = match delete(session, &plan.chains).await {
+        Ok(()) => session.batch_execute("COMMIT").await.map_err(sql),
+        Err(e) => Err(e),
+    };
+    if deleted.is_err() {
+        let _ = session.batch_execute("ROLLBACK").await;
+    }
+    deleted?;
     pruned.chains = plan.chains;
     pruned.carried = plan.carried;
     pruned.predecessor = plan.predecessor.is_some();
@@ -364,8 +430,8 @@ async fn plan(
     // What the chains planned so far remove, so that the checkpoints they hold count as gone.
     let (mut planned_chains, mut planned_ends): (Vec<String>, Vec<i64>) = (Vec::new(), Vec::new());
     for chain in chains {
+        // A budget spent marked the round capped where it was spent.
         if budget == 0 {
-            plan.capped = true;
             break;
         }
         let bounds = client
@@ -582,10 +648,12 @@ async fn delete(client: &impl GenericClient, chains: &[Link]) -> Result<(), Stri
 
 #[cfg(test)]
 mod tests {
+    use crate::postgres::lease::Terms;
+    use crate::postgres::Opening;
     use tokio::sync::watch;
 
     use super::super::testing::TestDatabase;
-    use super::super::Exclusive;
+    use super::super::{client, Exclusive};
     use super::*;
     use crate::audit_log::Limits;
     use crate::postgres::audit::{verify, PgAuditStore};
@@ -602,11 +670,21 @@ mod tests {
     }
 
     fn shared(test: &TestDatabase) -> Arc<Database> {
-        Database::open_in(&test.config(), Exclusive::Shared, Some(&test.schema)).expect("shared")
+        Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
+        )
+        .expect("shared")
     }
 
-    fn writing_on(database: Arc<Database>, host: &str) -> Writing {
-        let chain = database.take_lease(host, LAPSE).expect("lease").instance_id;
+    fn writing_on(database: Arc<Database>, host: &str, terms: &Terms) -> Writing {
+        let chain = database
+            .take_lease(host, LAPSE, terms)
+            .expect("lease")
+            .instance_id;
         let (held, watched) = watch::channel(Some(chain.clone()));
         let audit = AuditLog::start_under(
             Box::new(PgAuditStore::new(database.clone(), watched.clone())),
@@ -625,7 +703,7 @@ mod tests {
     }
 
     fn writing(test: &TestDatabase, host: &str) -> Writing {
-        writing_on(shared(test), host)
+        writing_on(shared(test), host, &Terms::default())
     }
 
     impl Writing {
@@ -689,7 +767,7 @@ mod tests {
     }
 
     fn held(database: &Database) -> crate::postgres::audit::Verified {
-        let verified = verify(database, None).expect("verify");
+        let verified = verify(database, None, None).expect("verify");
         assert!(!verified.failed, "{:?}", verified.lines);
         verified
     }
@@ -860,7 +938,7 @@ mod tests {
             "DELETE FROM audit_entries WHERE chain = '{}' AND seq = 3",
             a.chain
         ));
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(verified.failed, "{:?}", verified.lines);
         assert!(
             verified
@@ -876,7 +954,7 @@ mod tests {
             "f".repeat(64),
             shut.chain
         ));
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(
             verified
                 .lines
@@ -896,8 +974,11 @@ mod tests {
             return;
         };
         let database = shared(&test);
-        database.offer_archive(Some((7, "ab".repeat(32))));
-        let first = writing_on(database, "host-a");
+        let archive = Terms {
+            archive: Some((7, "ab".repeat(32))),
+            ..Terms::default()
+        };
+        let first = writing_on(database, "host-a", &archive);
         first.decide(1);
         assert!(first.audit.close(Duration::from_secs(10)), "not closed");
         let b = writing(&test, "host-b");
@@ -916,7 +997,7 @@ mod tests {
              WHERE chain = '{}' AND seq = 1",
             b.chain
         ));
-        let verified = verify(&b.database, None).expect("verify");
+        let verified = verify(&b.database, None, None).expect("verify");
         assert!(verified.failed, "{:?}", verified.lines);
         assert!(
             verified
@@ -968,7 +1049,7 @@ mod tests {
              WHERE chain = '{}' AND seq = 1",
             a.chain
         ));
-        let verified = verify(&a.database, None).expect("verify");
+        let verified = verify(&a.database, None, None).expect("verify");
         assert!(verified.failed, "{:?}", verified.lines);
         assert!(
             verified
@@ -999,8 +1080,11 @@ mod tests {
         };
         let database = shared(&test);
         let archive = (7, "ab".repeat(32));
-        database.offer_archive(Some(archive.clone()));
-        let first = writing_on(database, "host-a");
+        let terms = Terms {
+            archive: Some(archive.clone()),
+            ..Terms::default()
+        };
+        let first = writing_on(database, "host-a", &terms);
         first.decide(2);
         assert!(first.audit.close(Duration::from_secs(10)), "not closed");
         let second = writing(&test, "host-c");
@@ -1219,12 +1303,13 @@ mod tests {
         let a = writing(&test, "host-a");
         age(&test, &closed.chain, "1, 2");
         let (audit, own) = (a.audit.clone(), a.chain.clone());
+        let (pg, tls) = (a.database.pg.clone(), a.database.tls.clone());
         let (pruned, free) = a
             .database
             .run_within(PRUNE_TIMEOUT, move |pool| async move {
-                let mut lock = deadpool_postgres::Object::take(client(&pool).await?);
+                let lock = SessionLock::open(&pg, &tls, PRUNE_LOCK, "", |_, _| {}).await?;
                 let days = super::super::signed(RETAIN);
-                let pruned = round_on(&mut lock, audit, Some(own), days, ROUND_ENTRIES).await?;
+                let pruned = round_on(&lock, audit, Some(own), days, ROUND_ENTRIES).await?;
                 let other = client(&pool).await?;
                 let free: bool = other
                     .query_one(&format!("SELECT pg_try_advisory_lock({PRUNE_LOCK})"), &[])
@@ -1245,6 +1330,57 @@ mod tests {
         assert_eq!(pruned.chains.len(), 1, "{pruned:?}");
         assert!(free, "the round's session still held the prune lock");
         held(&a.database);
+    }
+
+    /// A round whose session the database ends while it holds the prune lock learns that the lock
+    /// is gone before it deletes, and deletes nothing: another instance may prune the closed
+    /// chains by then. The session is ended while the round waits for its `audit.pruned` entries,
+    /// which a gate holds.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_round_whose_session_ends_while_it_holds_the_prune_lock_prunes_nothing_and_says_so() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        const KEY: i64 = 0x08_0001;
+        let closed = writing(&test, "host-x");
+        closed.decide(3);
+        assert!(closed.audit.close(Duration::from_secs(10)), "not closed");
+        let a = writing(&test, "host-a");
+        age(&test, &closed.chain, "1, 2");
+        let before = lines(&test, &closed.chain);
+        let gate = test.gate(KEY);
+        test.sql(&format!(
+            "CREATE FUNCTION fleet_test_hold_entries() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN PERFORM set_config('lock_timeout', '0', true); \
+                 PERFORM pg_advisory_lock_shared({KEY}); \
+                 PERFORM pg_advisory_unlock_shared({KEY}); RETURN NULL; END $$; \
+             CREATE TRIGGER fleet_test_hold_entries AFTER INSERT ON audit_entries \
+                 FOR EACH ROW EXECUTE FUNCTION fleet_test_hold_entries();"
+        ));
+        let round = std::thread::spawn({
+            let (database, audit, own) = (a.database.clone(), a.audit.clone(), a.chain.clone());
+            move || prune_round(&database, audit, Some(own), RETAIN)
+        });
+        // timed: the deadline of the poll for the lock wait
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !test.waits_for(KEY) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the entries never waited"
+            );
+            // timed: the poll for the lock wait
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        test.end_the_holder_of(PRUNE_LOCK);
+        gate.open();
+        let err = round.join().expect("the round").expect_err("refused");
+        assert!(err.contains("prune lock was lost"), "{err}");
+        assert_eq!(
+            lines(&test, &closed.chain),
+            before,
+            "pruned without the lock"
+        );
     }
 
     /// A chain with an entry missing where a round's budget cuts it is left as it is, and the run
@@ -1328,6 +1464,12 @@ mod tests {
         assert!(err.contains("nothing was pruned"), "{err}");
         assert_eq!(lines(&test, &a.chain)[0].0, 1, "pruned without its record");
         test.mend("audit_entries");
+        // The writer kept the refused batch and tries it again. Written before the test ends, it
+        // cannot meet the drop of the schema, which locks the tables in another order.
+        assert!(
+            a.audit.drain(Duration::from_secs(10)),
+            "the kept audit.pruned entries are written once the record takes them"
+        );
     }
 
     /// Entries stored before the migration that adds `recorded_at` take the time their line
@@ -1339,7 +1481,16 @@ mod tests {
             return;
         };
         let before = &super::super::schema::MIGRATIONS[..9];
-        let database = Database::connect(&test.config(), Some(&test.schema)).expect("connect");
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                exclusive: Exclusive::Alone("server migrate-to-postgres".to_string()),
+                schema: Some(&test.schema),
+                migrations: None,
+                ..Opening::default()
+            },
+        )
+        .expect("connect");
         database.apply_schema(before).expect("the schema before");
         test.sql(
             "INSERT INTO audit_chains (id, host, opened_at) \
@@ -1362,5 +1513,144 @@ mod tests {
             Some("t"),
             "a line that is no entry: {rows:?}"
         );
+    }
+
+    /// The database's clock stopped at `at`, for the connections of the answer alone, which work
+    /// in the time zone `zone`: a `now()` of the test's schema, which reads the instant the table
+    /// `fleet_test_now` holds, shadows the catalog's, as the search path names the schema before
+    /// `pg_catalog`. Every other connection reads the catalog's.
+    fn stopped_at(test: &TestDatabase, at: &str, zone: &str) -> Arc<Database> {
+        // The schema made and brought up to date first, with its defaults on the catalog's clock.
+        drop(shared(test));
+        test.sql(&format!(
+            "CREATE TABLE fleet_test_now (at timestamptz NOT NULL); \
+             INSERT INTO fleet_test_now VALUES (timestamptz '{at}'); \
+             CREATE FUNCTION {schema}.now() RETURNS timestamptz LANGUAGE sql STABLE \
+             AS $$ SELECT at FROM {schema}.fleet_test_now $$;",
+            schema = test.schema
+        ));
+        // `Opening::schema` is named in the connection's options, `-c search_path=<schema>`; the
+        // catalog after it, and the time zone as a further option of the same string.
+        let path = format!("{},pg_catalog -c TimeZone={zone}", test.schema);
+        let database = Database::open(
+            &test.config(),
+            Opening {
+                schema: Some(&path),
+                ..Opening::default()
+            },
+        )
+        .expect("a database on the stopped clock");
+        let (stopped, named) = database
+            .run_within(Duration::from_secs(30), |pool| async move {
+                let row = client(&pool)
+                    .await?
+                    .query_one(
+                        "SELECT now() = (SELECT at FROM fleet_test_now), \
+                         current_setting('TimeZone')",
+                        &[],
+                    )
+                    .await
+                    .map_err(sql)?;
+                Ok((row.get::<_, bool>(0), row.get::<_, String>(1)))
+            })
+            .expect("the stopped clock");
+        assert!(stopped, "the instance's connections read the stopped clock");
+        assert_eq!(named, zone, "the session's time zone");
+        database
+    }
+
+    /// The prune the Server runs, from its start on, keeps an entry stored exactly `retain_days`
+    /// periods of 24 hours ago and removes one stored a microsecond before, in a time zone whose
+    /// clocks change in that time, forward and back; the schedule prunes again at its next turn,
+    /// where the kept entry has become older than that. A day of the calendar instead would cut
+    /// at 23 hours across the change forward, removing the entry exactly a day old, and at 25
+    /// hours across the change back, keeping the one a microsecond older.
+    /// Verifies: ADR-0023
+    #[test]
+    fn the_scheduled_prune_cuts_at_retain_days_of_24_hours_across_a_change_of_daylight_saving_time()
+    {
+        // 2026-03-29 the clocks of Berlin go from 02:00 CET to 03:00 CEST, 2026-10-25 from 03:00
+        // CEST back to 02:00 CET: each instant is noon on the day of a change.
+        for (change, at) in [
+            ("forward", "2026-03-29 12:00:00+02"),
+            ("back", "2026-10-25 12:00:00+01"),
+        ] {
+            let Some(test) = TestDatabase::named() else {
+                return;
+            };
+            let database = stopped_at(&test, at, "Europe/Berlin");
+            let a = writing_on(database.clone(), "host-a", &Terms::default());
+            // A closed chain: one entry older than a day of 24 hours, one exactly a day old, one
+            // 23 hours old, and its closing entry, stored now.
+            let chain = "00000000-0000-4000-8000-000000000032";
+            let ages = [
+                "interval '24 hours' + interval '1 microsecond'",
+                "interval '24 hours'",
+                "interval '23 hours'",
+                "interval '0 hours'",
+            ];
+            let (mut prev, mut values) = (crate::audit_log::GENESIS.to_string(), Vec::new());
+            for (seq, age) in (1..).zip(ages) {
+                let entry = match seq {
+                    1 => Entry::new("audit.chain_opened", "recorded"),
+                    4 => Entry::new("audit.chain_closed", "recorded").with("reason", "shutdown"),
+                    _ => Entry::new("admission.admitted", "admitted").with("n", seq),
+                };
+                let line = crate::audit_log::render(seq, 0, &entry.with("chain", chain), &prev);
+                prev = line_hash(&line);
+                values.push(format!(
+                    "('{chain}', {seq}, '{line}', timestamptz '{at}' - ({age}))"
+                ));
+            }
+            test.sql(&format!(
+                "INSERT INTO audit_chains (id, host, opened_at, closed_at, closed_hash) \
+                 VALUES ('{chain}', 'host-x', timestamptz '{at}' - interval '2 days', \
+                 timestamptz '{at}', '{prev}'); \
+                 INSERT INTO audit_entries (chain, seq, line, recorded_at) VALUES {};",
+                values.join(", ")
+            ));
+            let left = |test: &TestDatabase| -> Vec<u64> {
+                lines(test, chain).into_iter().map(|(seq, _)| seq).collect()
+            };
+            // Waits until a prune removed entry `first` and what came before it, at most.
+            let past = |test: &TestDatabase, first: u64| {
+                let deadline = std::time::Instant::now() + Duration::from_secs(120);
+                while left(test).first() == Some(&first) {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "across the change {change}: no prune removed entry {first}"
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            };
+
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let schedule = {
+                let _entered = runtime.enter();
+                prune_every(
+                    Duration::from_millis(500),
+                    database.clone(),
+                    a.audit.clone(),
+                    a._held.subscribe(),
+                    1,
+                )
+            };
+            // The deletion is one transaction: once entry 1 is gone, the prune has decided.
+            past(&test, 1);
+            assert_eq!(
+                left(&test),
+                [2, 3, 4],
+                "across the change {change}: the entry exactly a day old is kept"
+            );
+            held(&database);
+
+            // A microsecond on, entry 2 is older than a day, and the next turn removes it.
+            test.sql("UPDATE fleet_test_now SET at = at + interval '1 microsecond'");
+            past(&test, 2);
+            assert_eq!(left(&test), [3, 4], "across the change {change}");
+            schedule.abort();
+            drop(runtime);
+            held(&database);
+        }
     }
 }

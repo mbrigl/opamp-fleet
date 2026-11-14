@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::packages::{Entry, Package, PackageBackend, PackageId, Platform, Signed};
+use crate::packages::{Entry, Package, PackageBackend, PackageError, PackageId, Platform, Signed};
 
 /// One file per Package, `<agent_type>@<version>.json`, owner-only.
 pub struct FsPackageBackend {
@@ -126,14 +126,14 @@ impl PackageBackend for FsPackageBackend {
         Ok(packages)
     }
 
-    fn create(&self, id: &PackageId) -> Result<(), String> {
+    fn create(&self, id: &PackageId) -> Result<(), PackageError> {
         if self.read(id)?.is_some() {
             return Ok(());
         }
-        self.put(&Package {
+        Ok(self.put(&Package {
             id: id.clone(),
             entries: BTreeMap::new(),
-        })
+        })?)
     }
 
     /// Its one Server is its only writer: `stored` is asked once, before the entry is written.
@@ -142,16 +142,16 @@ impl PackageBackend for FsPackageBackend {
         id: &PackageId,
         entry: &Entry,
         stored: crate::packages::Stored,
-    ) -> Result<(), String> {
+    ) -> Result<(), PackageError> {
         if !stored()? {
-            return Err(crate::packages::REMOVED_WHILE_UPLOADED.to_string());
+            return Err(crate::packages::removed_while_uploaded());
         }
-        self.amend(id, |package| {
+        Ok(self.amend(id, |package| {
             package
                 .entries
                 .insert(entry.platform.clone(), entry.clone());
             (true, ())
-        })
+        })?)
     }
 
     fn sign(
@@ -160,30 +160,32 @@ impl PackageBackend for FsPackageBackend {
         platform: &Platform,
         content_hash: &[u8],
         signature: Option<&[u8]>,
-    ) -> Result<Signed, String> {
+    ) -> Result<Signed, PackageError> {
         if self.read(id)?.is_none() {
             return Ok(Signed::Changed(None));
         }
-        self.amend(id, |package| match package.entries.get_mut(platform) {
-            Some(entry) if entry.content_hash == content_hash => {
-                entry.signature = signature.map(<[u8]>::to_vec);
-                (true, Signed::Written)
-            }
-            stored => (false, Signed::Changed(stored.cloned())),
-        })
+        Ok(
+            self.amend(id, |package| match package.entries.get_mut(platform) {
+                Some(entry) if entry.content_hash == content_hash => {
+                    entry.signature = signature.map(<[u8]>::to_vec);
+                    (true, Signed::Written)
+                }
+                stored => (false, Signed::Changed(stored.cloned())),
+            })?,
+        )
     }
 
-    fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), String> {
+    fn remove_entry(&self, id: &PackageId, platform: &Platform) -> Result<(), PackageError> {
         if self.read(id)?.is_none() {
             return Ok(());
         }
-        self.amend(id, |package| {
+        Ok(self.amend(id, |package| {
             (package.entries.remove(platform).is_some(), ())
-        })
+        })?)
     }
 
-    fn remove(&self, id: &PackageId) -> Result<(), String> {
-        super::remove_file(&self.path(id))
+    fn remove(&self, id: &PackageId) -> Result<(), PackageError> {
+        Ok(super::remove_file(&self.path(id))?)
     }
 }
 

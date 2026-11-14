@@ -2488,13 +2488,19 @@ mod tests {
             AuditLog::start(Box::new(memory.clone()), Limits::default(), clock()).expect("start");
         // The writer waits on the store while the test holds it, and the channel fills.
         let held = memory.0.lock().expect("lock");
+        // It waits there with an entry it took: one it had not yet taken it could take out of the
+        // channel between the admission refused below and the refusal, which would find room.
+        audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .expect("room");
+        until("the writer took no entry", || audit.pending() == 0);
         let mut queued = 0;
         while audit
             .record(Entry::new("admission.admitted", "admitted"))
             .is_ok()
         {
             queued += 1;
-            assert!(queued <= CHANNEL_CAPACITY + 1, "the channel never filled");
+            assert!(queued <= CHANNEL_CAPACITY, "the channel never filled");
         }
         audit.refusal(
             Entry::new("agent_rate.throttled", "throttled")
@@ -2502,8 +2508,9 @@ mod tests {
                 .with("bucket", "host"),
         );
         drop(held);
-        until("the writer fell behind", || memory.lines().len() >= queued);
+        written(&audit);
         let lines = memory.lines();
+        assert_eq!(lines.len(), queued + 1, "every admission queued is written");
         assert!(
             !lines.iter().any(|l| l.contains("agent_rate.throttled")),
             "the refusal found no room"
@@ -2529,6 +2536,12 @@ mod tests {
         let given_back = audit.reserve().expect("a place");
         // The writer waits on the store while the test holds it, and the channel fills.
         let held = memory.0.lock().expect("lock");
+        // It waits there with an entry it took: one it had not yet taken it could take out of the
+        // channel at any later moment, and each count below would be one off.
+        audit
+            .record(Entry::new("admission.admitted", "admitted"))
+            .expect("room");
+        until("the writer took no entry", || audit.pending() == 2);
         let mut queued = 0;
         while audit
             .record(Entry::new("admission.admitted", "admitted"))
@@ -2552,7 +2565,9 @@ mod tests {
             .is_err());
         std::thread::scope(|scope| {
             // A drain waiting in the channel takes the room beyond the entries, not the place held.
-            let drained = scope.spawn(|| audit.drain(Duration::from_secs(10)));
+            // It waits for a full channel to be written, which takes this store seconds on a
+            // loaded host; only a defect takes a minute.
+            let drained = scope.spawn(|| audit.drain(Duration::from_secs(60)));
             until("the drain was not queued", || {
                 audit.pending() == CHANNEL_CAPACITY + 1
             });

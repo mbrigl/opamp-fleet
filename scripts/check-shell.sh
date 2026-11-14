@@ -28,6 +28,11 @@
 # A here-string, a variable, or grep -c reads the input whole. The same limits as for sed apply:
 # comment lines are not read, the rule reads text, and a pipe on the line before is not seen.
 #
+# Every script directly under scripts/ is committed executable, mode 100755: sessions and skills
+# run it as scripts/<name>.sh, while check-all.sh and CI run each through bash and would not notice
+# one that is not. The libraries under scripts/lib/ are sourced, not run, and keep 100644. The mode
+# is read from git's index, so a script not yet added is held to it once it is.
+#
 # Usage:
 #     scripts/check-shell.sh [repository root]        (or: bash scripts/check-shell.sh)
 # The root defaults to this repository; scripts/test-check-shell.sh passes fixtures.
@@ -92,6 +97,13 @@ for f in "${scripts[@]}"; do
     failed=1
   done < <(grep -nE "$QUIET_PIPE" "$f" | grep -vE '^[0-9]+:[[:space:]]*#')
 done
+
+while read -r mode _ _ path; do
+  [[ -z "$path" || "$mode" == 100755 ]] && continue
+  echo "$path: committed with mode $mode, where a script under scripts/ is committed executable:" \
+    "git update-index --chmod=+x $path"
+  failed=1
+done < <(git -C "$ROOT" ls-files --stage -- ':(glob)scripts/*.sh')
 
 if ((failed)); then
   echo

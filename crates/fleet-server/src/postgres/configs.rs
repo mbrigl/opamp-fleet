@@ -1,7 +1,7 @@
 //! Configurations in PostgreSQL (ADR-0023 clause 5): the PostgreSQL adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one row per Configuration, its retained
 //! revisions in rows of their own, each call one transaction on the rows it names
-//! (ADR-0025
+//! (ADR-0045
 //! clause 19).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use super::Cached as GenericClient;
 
-use super::notify::{notify, CONFIGURATION};
-use super::{client, sql, Database};
+use super::notify::notify;
+use super::{client, snapshot, sql, Database};
+use crate::changed::Changed;
 use crate::configs::{
     check_type, validate_name, ConfigBackend, Configuration, Pinned, Removal, Revision,
 };
@@ -29,10 +30,16 @@ impl PgConfigBackend {
 }
 
 impl ConfigBackend for PgConfigBackend {
+    /// The Configurations and their revisions in one snapshot, a read-only `REPEATABLE READ`
+    /// transaction: a change another instance commits between its two statements is read whole or
+    /// not at all, never a revision of a Configuration the first statement did not see.
     fn load(&self) -> Result<Vec<Configuration>, String> {
         self.database.run(|pool| async move {
-            let client = client(&pool).await?;
-            read_all(&client).await
+            let mut client = client(&pool).await?;
+            let transaction = snapshot(&mut client).await?;
+            let configs = read_all(&transaction).await?;
+            transaction.commit().await.map_err(sql)?;
+            Ok(configs)
         })
     }
 
@@ -44,7 +51,7 @@ impl ConfigBackend for PgConfigBackend {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             save(&transaction, &name, &saved).await?;
-            notify(&transaction, CONFIGURATION, &name).await?;
+            notify(&transaction, Changed::Configuration, &name).await?;
             transaction.commit().await.map_err(sql)
         })
     }
@@ -85,7 +92,7 @@ impl ConfigBackend for PgConfigBackend {
                 .await
                 .map_err(sql)?;
             if collected > 0 {
-                notify(&transaction, CONFIGURATION, &name).await?;
+                notify(&transaction, Changed::Configuration, &name).await?;
             }
             let mut kept = BTreeMap::new();
             for row in transaction
@@ -155,7 +162,7 @@ impl ConfigBackend for PgConfigBackend {
                 &crate::deployments::Member::Configuration(name.clone()),
             )
             .await?;
-            notify(&transaction, CONFIGURATION, &name).await?;
+            notify(&transaction, Changed::Configuration, &name).await?;
             transaction.commit().await.map_err(sql)?;
             Ok(Removal::Removed)
         })
@@ -413,6 +420,92 @@ mod tests {
         );
     }
 
+    /// A Configuration deleted through another instance between the two statements of `load` is
+    /// held with all of its retained revisions or not at all: the read is of the state before the
+    /// deletion.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_configuration_deleted_between_the_reads_of_load_is_held_whole_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let backend = PgConfigBackend::new(test.open());
+        test.sql(
+            "INSERT INTO configurations (name, body, role, service_name) \
+             VALUES ('gone', 'receivers: {}', '', 'otelcol'); \
+             INSERT INTO configuration_revisions (configuration, hash, body, role, service_name) \
+             VALUES ('gone', 'abcd', 'receivers: {}', '', 'otelcol')",
+        );
+        let gate = test.hold_reads(
+            "configuration_revisions",
+            "DELETE FROM configurations WHERE name = 'gone'",
+        );
+        std::thread::scope(|scope| {
+            let loading = scope.spawn(|| backend.load());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT%configuration_revisions%'",
+            ) == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "load never waited for the revisions"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            gate.open();
+            let loaded = loading.join().expect("load").expect("one committed state");
+            let gone = loaded
+                .iter()
+                .find(|config| config.name == "gone")
+                .expect("held, as it was when the read began");
+            assert_eq!(
+                gone.retained.keys().collect::<Vec<_>>(),
+                ["abcd"],
+                "with its retained revision"
+            );
+        });
+    }
+
+    /// A Configuration created and released through another instance between the two statements
+    /// of `load` is read whole or not at all: the revisions are read in the snapshot the
+    /// Configurations were, so none names a Configuration the read did not see.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_configuration_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let backend = PgConfigBackend::new(test.open());
+        let gate = test.hold_reads(
+            "configuration_revisions",
+            "INSERT INTO configurations (name, body, role, service_name) \
+             VALUES ('late', 'receivers: {}', '', 'otelcol'); \
+             INSERT INTO configuration_revisions (configuration, hash, body, role, service_name) \
+             VALUES ('late', 'abcd', 'receivers: {}', '', 'otelcol')",
+        );
+        std::thread::scope(|scope| {
+            let loading = scope.spawn(|| backend.load());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while test.sessions(
+                "wait_event_type = 'Lock' AND query LIKE 'SELECT%configuration_revisions%'",
+            ) == 0
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "load never waited for the revisions"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            gate.open();
+            let loaded = loading.join().expect("load").expect("one committed state");
+            assert!(
+                loaded.iter().all(|config| config.name != "late"),
+                "the Configuration committed after the snapshot is not read"
+            );
+        });
+    }
+
     /// Verifies: ADR-0023
     #[test]
     fn the_configuration_port_contract_holds_on_the_filesystem() {
@@ -425,7 +518,7 @@ mod tests {
         });
     }
 
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0023, ADR-0045
     #[test]
     fn the_configuration_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -501,7 +594,7 @@ mod tests {
     /// A collection on PostgreSQL keeps every revision a stored assignment pins, whatever the
     /// caller names: the assignments are reckoned in its own transaction, so a revision another
     /// instance pinned is not collected by one that never heard of it.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_collection_on_postgres_keeps_what_a_stored_assignment_pins() {
         let Some(test) = TestDatabase::named() else {
@@ -536,7 +629,7 @@ mod tests {
     /// committed. The rollout is held at a gate in the database between its revision and its
     /// record, so the collection runs exactly then; the gate opens once the collection waits, or
     /// once it has finished, which only a collection that took no hold does.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_collection_keeps_a_stored_revision_a_rollout_pins_meanwhile() {
         use opamp::uid::InstanceUid;
@@ -645,7 +738,7 @@ mod tests {
     /// A deletion of a Configuration through B while a rollout through A that pins one of its
     /// revisions has not yet committed waits for the rollout, and then refuses it from the
     /// assignment the rollout stored: the rollout holds the Configuration's row until it commits.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: ADR-0045, ADR-0033
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_configuration_and_is_refused() {
         use crate::agent_store::tests::record;

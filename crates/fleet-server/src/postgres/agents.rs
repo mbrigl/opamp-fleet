@@ -12,12 +12,13 @@ use super::Cached as GenericClient;
 use opamp::uid::InstanceUid;
 use prost::Message;
 
-use super::notify::{notify, ASSIGNMENT, CONFIGURATION, FORGOTTEN, LABELS, RESTART, TAKEN};
-use super::{client, creating_client, signed, sql, unsigned, Database};
+use super::notify::{follow_commit, notify, will_follow};
+use super::{client, creating_client, signed, snapshot, sql, unsigned, Database};
 use crate::agent_store::{
-    AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, StoredAgent,
-    Taken,
+    AgentPage, AgentStore, Creation, Holder, PageQuery, PersistedAgent, Pin, Presence, Silenced,
+    StoredAgent, Taken,
 };
+use crate::changed::Changed;
 use crate::configs::Pinned;
 use crate::fleet::{Assignment, Transport};
 use crate::packages::PackageId;
@@ -381,7 +382,10 @@ impl AgentStore for PgAgentStore {
             // One another instance created in between the two is written to again, the columns a
             // report decides alone.
             let created = loop {
-                if write_reported(&transaction, &uid, &record, None).await? {
+                if write_reported(&transaction, &uid, &record, None)
+                    .await?
+                    .is_some()
+                {
                     break false;
                 }
                 if insert(&transaction, &uid, &record, "DO NOTHING").await? {
@@ -397,12 +401,29 @@ impl AgentStore for PgAgentStore {
         Ok(())
     }
 
-    /// The columns a report decides, of a row that is there; nothing where none is.
+    /// The columns a report decides, of a row that is there; nothing where none is. A write that
+    /// makes the row a Client Agent behind a Gateway's Host, which the stored row was not, is
+    /// announced right after the commit, named by the Host ([`follow_commit`]).
     fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
         let (uid, record) = (*uid, record.clone());
+        // The Host a Client Agent that reports its machine arrives over: what the write may find
+        // to be a Gateway's it newly arrived behind.
+        let over = record.host.clone().filter(|_| {
+            crate::labels::is_client_agent(record.description.as_ref())
+                && crate::labels::machine(record.description.as_ref()).is_some()
+        });
         self.database.run(move |pool| async move {
             let client = client(&pool).await?;
-            write_reported(&client, &uid, &record, None).await
+            // Counted before the write commits, so a write whose answer is lost has its instance
+            // read again what the notice names, whether or not the write was an arrival.
+            if let Some(host) = &over {
+                will_follow(Changed::Arrived, host);
+            }
+            let written = write_reported(&client, &uid, &record, None).await?;
+            if written == Some(true) {
+                follow_commit(client, &pool);
+            }
+            Ok(written.is_some())
         })
     }
 
@@ -430,6 +451,7 @@ impl AgentStore for PgAgentStore {
                 }),
             )
             .await
+            .map(|written| written.is_some())
         })
     }
 
@@ -506,7 +528,7 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?
                 > 0;
             if set {
-                notify(&transaction, LABELS, &key).await?;
+                notify(&transaction, Changed::Labels, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(set)
@@ -545,7 +567,7 @@ impl AgentStore for PgAgentStore {
                     .map_err(sql)?;
             }
             if pending {
-                notify(&transaction, RESTART, &key).await?;
+                notify(&transaction, Changed::Restart, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Some(was))
@@ -564,7 +586,7 @@ impl AgentStore for PgAgentStore {
                 .await
                 .map_err(sql)?;
             if removed > 0 {
-                notify(&transaction, FORGOTTEN, &uid.to_string()).await?;
+                notify(&transaction, Changed::Forgotten, &uid.to_string()).await?;
             }
             transaction.commit().await.map_err(sql)
         })?;
@@ -704,7 +726,7 @@ impl AgentStore for PgAgentStore {
                 .map_err(sql)?
                 .get(0);
             if changed {
-                notify(&transaction, TAKEN, &key).await?;
+                notify(&transaction, Changed::Taken, &key).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(Some(Taken {
@@ -775,7 +797,7 @@ impl AgentStore for PgAgentStore {
         &self,
         uid: &InstanceUid,
         silent_before_ms: u64,
-    ) -> Result<Option<bool>, String> {
+    ) -> Result<Option<Silenced>, String> {
         let key = uid.to_string();
         let silent_before = signed(silent_before_ms);
         let forgotten = self.database.run(move |pool| async move {
@@ -795,17 +817,30 @@ impl AgentStore for PgAgentStore {
             };
             let (connected, last_seen): (bool, i64) = (row.get(0), row.get(1));
             if connected && unsigned(last_seen) >= unsigned(silent_before) {
-                return Ok(Some(false));
+                return Ok(Some(Silenced::Reporting));
             }
+            // What the stored assignment names, under the row's lock: no release changes it
+            // before the row goes.
+            let configurations = transaction
+                .query(
+                    "SELECT configuration FROM agent_assignment_configurations \
+                     WHERE instance_uid = $1 ORDER BY configuration",
+                    &[&key],
+                )
+                .await
+                .map_err(sql)?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
             transaction
                 .execute("DELETE FROM agents WHERE instance_uid = $1", &[&key])
                 .await
                 .map_err(sql)?;
-            notify(&transaction, FORGOTTEN, &key).await?;
+            notify(&transaction, Changed::Forgotten, &key).await?;
             transaction.commit().await.map_err(sql)?;
-            Ok(Some(true))
+            Ok(Some(Silenced::Forgotten(configurations)))
         })?;
-        if forgotten == Some(true) {
+        if matches!(forgotten, Some(Silenced::Forgotten(_))) {
             self.stored([(uid, None)]);
         }
         Ok(forgotten)
@@ -887,7 +922,7 @@ impl AgentStore for PgAgentStore {
                     .execute("DELETE FROM agents WHERE instance_uid = $1", &[&old])
                     .await
                     .map_err(sql)?;
-                notify(&transaction, FORGOTTEN, &old).await?;
+                notify(&transaction, Changed::Forgotten, &old).await?;
             }
             transaction.commit().await.map_err(sql)?;
             Ok(moved)
@@ -947,12 +982,12 @@ impl AgentStore for PgAgentStore {
                     .map(|pinned| pinned.configuration.as_str())
                     .collect();
                 for configuration in pinned {
-                    notify(&transaction, CONFIGURATION, configuration).await?;
+                    notify(&transaction, Changed::Configuration, configuration).await?;
                 }
                 let mut wrote = BTreeSet::new();
                 for (key, assignment) in records {
                     if write_assignment(&transaction, &key, assignment.as_ref()).await? {
-                        notify(&transaction, ASSIGNMENT, &key).await?;
+                        notify(&transaction, Changed::Assignment, &key).await?;
                         wrote.insert(key);
                     }
                 }
@@ -1114,21 +1149,6 @@ pub(crate) async fn read_all(
     read(client, None).await
 }
 
-/// A transaction that reads one committed state of the database and writes nothing: the
-/// statements of a read in it see no commit made between them, such as an Agent's row without
-/// its presence.
-async fn snapshot(
-    client: &mut deadpool_postgres::Object,
-) -> Result<deadpool_postgres::Transaction<'_>, String> {
-    client
-        .build_transaction()
-        .isolation_level(tokio_postgres::IsolationLevel::RepeatableRead)
-        .read_only(true)
-        .start()
-        .await
-        .map_err(sql)
-}
-
 /// The records of the keys `only` names, or of every Agent where it names none, in one statement.
 pub(super) async fn read(
     client: &impl GenericClient,
@@ -1198,7 +1218,8 @@ fn configurations_of(
         .map_err(|e| format!("the assignment's Configurations: {e}"))
 }
 
-/// The assignment the assignment's columns of one row and its Configurations make.
+/// The assignment the assignment's columns of one row and its Configurations make, held to the
+/// rules its write met ([`Assignment::check`]).
 fn assignment_of(
     deployment: Option<String>,
     agent_type: Option<String>,
@@ -1214,11 +1235,15 @@ fn assignment_of(
         _ => return Err("half a package in the assignment".to_string()),
     };
     match deployment {
-        Some(deployment) => Ok(Some(Assignment {
-            deployment,
-            package,
-            configurations,
-        })),
+        Some(deployment) => {
+            let assignment = Assignment {
+                deployment,
+                package,
+                configurations,
+            };
+            assignment.check()?;
+            Ok(Some(assignment))
+        }
         None if package.is_none() && configurations.is_empty() => Ok(None),
         None => Err("an assignment without its Deployment".to_string()),
     }
@@ -1285,13 +1310,17 @@ struct Held<'a> {
 /// Writes the columns a report decides of one Agent record, inside the caller's transaction,
 /// `last_seen_ms` only forward. Where `unless_held_elsewhere` is given, only of a row whose holder
 /// is the one it names, or of one no instance holds whose count of takes is the one it names, and
-/// whose sequence number is not higher than the record's. Answers whether it wrote a record.
+/// whose sequence number is not higher than the record's. Answers `None` where it wrote no record,
+/// and otherwise whether the write made the row a Client Agent that reports its machine behind a
+/// Gateway's Host, which the row it replaced was not: over another Host, not a Client Agent, or
+/// of another machine (ADR-0045
+/// clause 9).
 async fn write_reported(
     client: &impl GenericClient,
     uid: &InstanceUid,
     record: &PersistedAgent,
     unless_held_elsewhere: Option<Held<'_>>,
-) -> Result<bool, String> {
+) -> Result<Option<bool>, String> {
     let key = uid.to_string();
     // `last_seen_ms` never moves back, as a presence batch writes it.
     let sets = REPORTED
@@ -1342,7 +1371,19 @@ async fn write_reported(
             .to_string(),
         )
     });
-    let update = format!("UPDATE agents SET {sets}, {derived_sets} WHERE instance_uid = $1{held}");
+    // The row as it was, locked first, so the write compares its new values with those it replaces.
+    // `FOR NO KEY UPDATE` is the lock the UPDATE takes anyway, as it changes no key: a stronger
+    // one would also wait for the `FOR KEY SHARE` of the foreign-key checks on the row.
+    let update = format!(
+        "UPDATE agents SET {sets}, {derived_sets} \
+         FROM (SELECT host AS was_host, client_agent AS was_client, machine AS was_machine \
+               FROM agents WHERE instance_uid = $1 FOR NO KEY UPDATE) AS was \
+         WHERE instance_uid = $1{held} \
+         RETURNING agents.client_agent AND agents.machine <> '' \
+             AND (was_host IS DISTINCT FROM agents.host OR NOT was_client \
+                  OR was_machine <> agents.machine) \
+             AND EXISTS (SELECT 1 FROM hosts WHERE hosts.host = agents.host AND hosts.gateway)"
+    );
     let (sequence_num, capabilities, last_seen_ms) = (
         signed(record.sequence_num),
         signed(record.capabilities),
@@ -1388,7 +1429,11 @@ async fn write_reported(
             .iter()
             .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync)),
     );
-    Ok(client.execute(&update, &params).await.map_err(sql)? > 0)
+    Ok(client
+        .query_opt(&update, &params)
+        .await
+        .map_err(sql)?
+        .map(|row| row.get(0)))
 }
 
 /// The values of the columns the list of Agents reads, derived from `record`, which every write
@@ -1627,7 +1672,9 @@ mod tests {
     use crate::agent_store::Presence;
     use crate::configs::{revision_hash, Configuration, Revision};
     use crate::fs::{FsAgentStore, FsConfigBackend};
+    use crate::postgres::lease::Terms;
     use crate::postgres::testing::TestDatabase;
+    use crate::postgres::Opening;
 
     /// The two stores a rollout writes into, opened on one backing store.
     type Open<'a> = &'a dyn Fn() -> (Box<dyn AgentStore>, Box<dyn crate::configs::ConfigBackend>);
@@ -1708,7 +1755,7 @@ mod tests {
         assert_eq!(reopened.pinning(Pin::Deployment("stable")), 2);
         assert_eq!(
             reopened.referenced_revisions("base"),
-            BTreeSet::from(["0123abcd".to_string(), revision_hash(&pinned)])
+            BTreeSet::from(["0123abcd".repeat(8), revision_hash(&pinned)])
         );
 
         // The acts that decide the labels and a queued restart write them, and one Agent is read
@@ -1719,7 +1766,7 @@ mod tests {
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(false)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
         // A restart taken for a send that failed is put back, and the next take finds it queued
-        // (ADR-0025
+        // (ADR-0045
         // clause 8).
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(true)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
@@ -1810,10 +1857,51 @@ mod tests {
         );
     }
 
+    /// An instance that does not hold an Agent another instance re-released counts its old pins
+    /// until it reads the whole fleet again, and its forget of that Agent answers the
+    /// Configurations the stored assignment named as it removed the record, not what it read.
+    /// Verifies: ADR-0045, ADR-0033
+    #[test]
+    fn a_forget_answers_what_the_stored_assignment_named() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        test.store_deployments(&["stable", "canary"]);
+        let (a, b) = (
+            PgAgentStore::new(database.clone()),
+            PgAgentStore::new(database),
+        );
+        let uid = InstanceUid::default();
+        a.put(&uid, &record()).expect("created");
+        b.load().expect("B reads the fleet");
+        assert_eq!(b.pinning(Pin::Configuration("base")), 1);
+
+        let mut re_released = record();
+        re_released.assignment = Some(Assignment {
+            deployment: "canary".to_string(),
+            package: None,
+            configurations: BTreeMap::from([("other".to_string(), "4567cdef".repeat(8))]),
+        });
+        a.release(&[], &[(uid, re_released)])
+            .expect("re-released through A");
+        assert_eq!(
+            b.pinning(Pin::Configuration("base")),
+            1,
+            "B still counts what it read"
+        );
+
+        assert_eq!(
+            b.remove_if_silent(&uid, u64::MAX / 2),
+            Ok(Some(Silenced::Forgotten(vec!["other".to_string()]))),
+            "what the stored assignment named, not what B read"
+        );
+    }
+
     /// A report's write on PostgreSQL leaves what the acts wrote through another instance: the
     /// labels, a queued restart and the assignment stay as they are stored, while what the report
     /// decides is written; a record that is not there is not written.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_report_written_on_postgres_keeps_what_the_acts_wrote() {
         let Some(test) = TestDatabase::named() else {
@@ -1975,7 +2063,7 @@ mod tests {
         let assignment = Assignment {
             deployment: "canary".to_string(),
             package: None,
-            configurations: BTreeMap::from([("edge".to_string(), "4567cdef".to_string())]),
+            configurations: BTreeMap::from([("edge".to_string(), "4567cdef".repeat(8))]),
         };
         let stale = PersistedAgent {
             sequence_num: 1,
@@ -2041,6 +2129,99 @@ mod tests {
                 all.into_iter()
                     .map(|(uid, stored)| (uid, stored.record))
                     .collect()
+            },
+        );
+    }
+
+    /// A stored assignment is loaded by the rules its write met, on either store. `plant` stores
+    /// the assignment of `uid` as each case names it — its Deployment, its one Configuration and
+    /// that one's revision — and every read in `reads` is refused in the words of
+    /// [`Assignment::check`], naming the record. Whether a revision is still retained is not
+    /// asked, so the well-formed hash `put` pins is retained by no Configuration.
+    fn assignments_are_held_to_the_write_rules(
+        store: &dyn AgentStore,
+        plant: &dyn Fn(&InstanceUid, &str, &str, &str),
+        reads: &dyn Fn() -> Vec<Result<(), String>>,
+    ) {
+        let hash = "0".repeat(64);
+        let cases = [
+            ("Stable", "base", hash.as_str()),
+            ("stable", "Base", hash.as_str()),
+            ("stable", "base", "0123abcd"),
+        ];
+        for (deployment, configuration, revision) in cases {
+            let uid = InstanceUid::default();
+            let mut held = record();
+            held.assignment = Some(Assignment {
+                deployment: "stable".to_string(),
+                package: None,
+                configurations: BTreeMap::from([("base".to_string(), hash.clone())]),
+            });
+            store.put(&uid, &held).expect("put");
+            assert!(reads().iter().all(Result::is_ok), "a well-formed one loads");
+            plant(&uid, deployment, configuration, revision);
+            let core = Assignment {
+                deployment: deployment.to_string(),
+                package: None,
+                configurations: BTreeMap::from([(configuration.to_string(), revision.to_string())]),
+            }
+            .check()
+            .expect_err("the core refuses it");
+            for read in reads() {
+                let err = read.expect_err("refused");
+                assert!(err.ends_with(&core), "{err}");
+                assert!(err.contains(&uid.to_string()), "the record is named: {err}");
+            }
+            store.remove(&uid).expect("remove");
+        }
+    }
+
+    /// Verifies: ADR-0023, ADR-0033
+    #[test]
+    fn stored_assignments_are_held_to_the_write_rules_on_the_filesystem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let open = || FsAgentStore::open(dir.path()).expect("open");
+        assignments_are_held_to_the_write_rules(
+            &open(),
+            &|uid, deployment, configuration, revision| {
+                let file = dir.path().join(format!("agents/{uid}.json"));
+                let mut envelope: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&file).expect("read")).expect("json");
+                envelope["assignment"] = serde_json::json!({
+                    "deployment": deployment,
+                    "configurations": {configuration: revision},
+                });
+                std::fs::write(&file, envelope.to_string()).expect("write");
+            },
+            &|| vec![open().load().map(|_| ())],
+        );
+    }
+
+    /// Opening the adapter reads the assignments alone, and the load reads every record: both
+    /// are refused.
+    /// Verifies: ADR-0023, ADR-0033
+    #[test]
+    fn stored_assignments_are_held_to_the_write_rules_on_postgres() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        assignments_are_held_to_the_write_rules(
+            &PgAgentStore::new(database.clone()),
+            &|uid, deployment, configuration, revision| {
+                test.sql(&format!(
+                    "UPDATE agents SET deployment = '{deployment}' \
+                     WHERE instance_uid = '{uid}'; \
+                     UPDATE agent_assignment_configurations SET \
+                     configuration = '{configuration}', revision = '{revision}' \
+                     WHERE instance_uid = '{uid}'"
+                ));
+            },
+            &|| {
+                vec![
+                    PgAgentStore::open(database.clone()).map(|_| ()),
+                    PgAgentStore::new(database.clone()).load().map(|_| ()),
+                ]
             },
         );
     }
@@ -2112,10 +2293,13 @@ mod tests {
             return;
         };
         let decoy = format!("fleet_test_decoy_{}", hex::encode(InstanceUid::default().0));
-        let database = crate::postgres::Database::open_in(
+        let database = crate::postgres::Database::open(
             &test.config(),
-            crate::postgres::Exclusive::Alone("the test".to_string()),
-            Some(&format!("\"$user\",{decoy},{}", test.schema)),
+            Opening {
+                exclusive: crate::postgres::Exclusive::Alone("the test".to_string()),
+                schema: Some(&format!("\"$user\",{decoy},{}", test.schema)),
+                ..Opening::default()
+            },
         )
         .expect("open under a path naming $user first");
         let store = PgAgentStore::open(database.clone()).expect("open");
@@ -2207,10 +2391,13 @@ mod tests {
         for (size, creating) in [(2, 1), (6, 3), (40, 20)] {
             let mut config = test.config();
             config.pool_size = size;
-            let database = Database::open_in(
+            let database = Database::open(
                 &config,
-                super::super::Exclusive::Alone("the test".to_string()),
-                Some(&test.schema),
+                Opening {
+                    exclusive: super::super::Exclusive::Alone("the test".to_string()),
+                    schema: Some(&test.schema),
+                    ..Opening::default()
+                },
             )
             .expect("open");
             assert_eq!(database.pool_size(), size, "the pool");
@@ -2233,10 +2420,13 @@ mod tests {
         };
         let mut config = test.config();
         config.pool_size = 2;
-        let database = Database::open_in(
+        let database = Database::open(
             &config,
-            super::super::Exclusive::Alone("the test".to_string()),
-            Some(&test.schema),
+            Opening {
+                exclusive: super::super::Exclusive::Alone("the test".to_string()),
+                schema: Some(&test.schema),
+                ..Opening::default()
+            },
         )
         .expect("open");
         let store = Arc::new(PgAgentStore::open(database.clone()).expect("open"));
@@ -2510,7 +2700,8 @@ mod tests {
         };
         let database = test.open();
         let a = database
-            .take_lease("a", std::time::Duration::from_secs(60))
+            // timed: a lease term, not a wait
+            .take_lease("a", std::time::Duration::from_secs(60), &Terms::default())
             .expect("lease")
             .instance_id;
         let store = PgAgentStore::new(database.clone());
@@ -2545,7 +2736,7 @@ mod tests {
         assert_eq!(opened.pinning(Pin::Deployment("stable")), 1);
         assert_eq!(
             opened.referenced_revisions("base"),
-            BTreeSet::from(["0123abcd".to_string()])
+            BTreeSet::from(["0123abcd".repeat(8)])
         );
     }
 
@@ -2587,7 +2778,7 @@ mod tests {
     /// until the read waits for it. A read in one statement waits before it reads anything, and
     /// reads what the rollout committed; `query` reads in a snapshot taken before it waits, and
     /// reads what was there before.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn an_agent_is_read_in_one_snapshot_whatever_commits_while_it_waits() {
         let Some(test) = TestDatabase::named() else {
@@ -2597,7 +2788,10 @@ mod tests {
         let store = Arc::new(PgAgentStore::new(database.clone()));
         let uid = InstanceUid([7; 16]);
         store.put(&uid, &record()).expect("put");
-        let mut states = [pair("stable", "0123abcd"), pair("canary", "4567cdef")];
+        let mut states = [
+            pair("stable", &"0123abcd".repeat(8)),
+            pair("canary", &"4567cdef".repeat(8)),
+        ];
         // Each race rolls the Agent over to the other state.
         let mut race =
             |label: &str,
@@ -2688,7 +2882,7 @@ mod tests {
     /// commits while the read is part-way, its Configurations held at a gate, is not read in part.
     /// The creation counts the rows of `agents` first, so the gate stands in the Configurations,
     /// behind a view in place of their table.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_creation_that_finds_the_agent_reads_it_in_one_snapshot() {
         let Some(test) = TestDatabase::named() else {
@@ -2718,12 +2912,13 @@ mod tests {
         while !test.waits_for(key) {
             assert!(std::time::Instant::now() < deadline, "never waits");
         }
-        test.sql(
+        test.sql(&format!(
             "UPDATE agents SET deployment = 'canary'; \
-             UPDATE held_configurations SET revision = '4567cdef'",
-        );
+             UPDATE held_configurations SET revision = '{}'",
+            "4567cdef".repeat(8)
+        ));
         gate.open();
-        assert_eq!(answer(), Some(pair("stable", "0123abcd")));
+        assert_eq!(answer(), Some(pair("stable", &"0123abcd".repeat(8))));
     }
 
     /// A record created, a report written and a record imported each carry their derived columns
@@ -2792,7 +2987,12 @@ mod tests {
         };
         let database = test.open();
         let a = database
-            .take_lease("host-a", std::time::Duration::from_secs(60))
+            .take_lease(
+                "host-a",
+                // timed: a lease term, not a wait
+                std::time::Duration::from_secs(60),
+                &Terms::default(),
+            )
             .expect("lease")
             .instance_id;
         let store = PgAgentStore::new(database.clone());
@@ -2960,8 +3160,10 @@ mod tests {
     /// rather than holding the row the first needs next. The first is held at a gate in the
     /// database after its first row; the gate opens once the second waits for that row's lock, or
     /// has reached the gate itself, which only a release that writes in the order given does, and
-    /// then the two would deadlock.
-    /// Verifies: ADR-0025
+    /// then the two would deadlock. Each update sets its session's `lock_timeout` aside before it
+    /// waits for a row, so the second, parked behind the first, outlasts a loaded host's delays in
+    /// opening the gate; the session's `statement_timeout` still bounds it.
+    /// Verifies: ADR-0045
     #[test]
     fn two_releases_over_the_same_agents_in_opposite_orders_both_commit() {
         let Some(test) = TestDatabase::named() else {
@@ -2983,10 +3185,13 @@ mod tests {
              WHILE NOT (SELECT open FROM fleet_test_gate) LOOP PERFORM pg_sleep(0.01); \
              END LOOP; RETURN NEW; END $$; \
              CREATE TRIGGER fleet_test_wait AFTER UPDATE ON agents \
-             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
+             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait(); \
+             CREATE FUNCTION fleet_test_lock_untimed() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM set_config('lock_timeout', '0', true); RETURN NULL; END $$; \
+             CREATE TRIGGER fleet_test_lock_untimed BEFORE UPDATE ON agents \
+             FOR EACH STATEMENT EXECUTE FUNCTION fleet_test_lock_untimed();",
         );
-        let sessions = |condition: &str| test.sessions(condition);
-        let at_gate = || sessions("wait_event = 'PgSleep' AND query LIKE 'UPDATE agents%'");
+        let at_gate = || test.sessions("wait_event = 'PgSleep' AND query LIKE 'UPDATE agents%'");
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !done() {
@@ -3012,7 +3217,7 @@ mod tests {
         let second = release("second", [low, high]);
         until("the second waits for the row, or reaches the gate", &|| {
             at_gate() == 2
-                || sessions("wait_event_type = 'Lock' AND query LIKE 'UPDATE agents%'") == 1
+                || test.sessions("wait_event_type = 'Lock' AND query LIKE 'UPDATE agents%'") == 1
         });
         test.sql("UPDATE fleet_test_gate SET open = true");
         first
@@ -3036,7 +3241,7 @@ mod tests {
     /// presence, and one under an earlier take leaves the presence a take wrote since. Forgetting decides from it: an Agent a live
     /// lease holds and that was heard from recently is kept; one whose holder holds no live lease
     /// reads as disconnected and goes, announced; one silent past the bound goes too.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_presence_batch_names_the_holder_and_forgetting_decides_from_it() {
         let Some(test) = TestDatabase::named() else {
@@ -3044,7 +3249,8 @@ mod tests {
         };
         let database = test.open();
         let a = database
-            .take_lease("a", std::time::Duration::from_secs(60))
+            // timed: a lease term, not a wait
+            .take_lease("a", std::time::Duration::from_secs(60), &Terms::default())
             .expect("lease")
             .instance_id;
         let store = PgAgentStore::new(database.clone());
@@ -3101,19 +3307,21 @@ mod tests {
 
         assert_eq!(
             store.remove_if_silent(&one, 1_000),
-            Ok(Some(false)),
+            Ok(Some(Silenced::Reporting)),
             "still reporting"
         );
         assert_eq!(
             store.remove_if_silent(&one, 7_000),
-            Ok(Some(true)),
-            "silent"
+            Ok(Some(Silenced::Forgotten(vec!["base".to_string()]))),
+            "silent, with what its assignment named"
         );
         assert_eq!(store.remove_if_silent(&one, 7_000), Ok(None), "gone");
         test.sql(&format!("DELETE FROM leases WHERE instance_id = '{a}'"));
-        assert_eq!(
-            store.remove_if_silent(&two, 1_000),
-            Ok(Some(true)),
+        assert!(
+            matches!(
+                store.remove_if_silent(&two, 1_000),
+                Ok(Some(Silenced::Forgotten(_)))
+            ),
             "a holder without a live lease holds no connection"
         );
         let taken = store
@@ -3136,9 +3344,11 @@ mod tests {
             presence(three),
             [[Some("false".into()), None, Some("7000".into())]]
         );
-        assert_eq!(
-            store.remove_if_silent(&three, 1_000),
-            Ok(Some(true)),
+        assert!(
+            matches!(
+                store.remove_if_silent(&three, 1_000),
+                Ok(Some(Silenced::Forgotten(_)))
+            ),
             "disconnected"
         );
         assert!(store.load().expect("load").is_empty());
@@ -3151,7 +3361,7 @@ mod tests {
     /// names its own instance over a row that names none, or an instance without a live lease, and
     /// one answered a count over such a row only while it still holds that count, never over a
     /// live holder.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_batch_read_before_another_instance_took_the_agent_does_not_undo_the_take() {
         let Some(test) = TestDatabase::named() else {
@@ -3159,8 +3369,14 @@ mod tests {
         };
         let database = test.open();
         let lapse = std::time::Duration::from_secs(60);
-        let a = database.take_lease("a", lapse).expect("lease").instance_id;
-        let b = database.take_lease("b", lapse).expect("lease").instance_id;
+        let a = database
+            .take_lease("a", lapse, &Terms::default())
+            .expect("lease")
+            .instance_id;
+        let b = database
+            .take_lease("b", lapse, &Terms::default())
+            .expect("lease")
+            .instance_id;
         let store = PgAgentStore::new(database.clone());
         let (one, two) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
         for uid in [one, two] {
@@ -3285,7 +3501,7 @@ mod tests {
     /// the same millisecond is not written, although its `last_seen_ms` is the stored one. A batch
     /// that names its instance anew answers the count it raised, and a disconnect under that count
     /// is written.
-    /// Verifies: ADR-0030, ADR-0025
+    /// Verifies: ADR-0030, ADR-0045
     #[test]
     fn a_disconnect_is_written_under_the_take_it_was_carried_by_whatever_the_clocks_say() {
         let Some(test) = TestDatabase::named() else {
@@ -3293,8 +3509,14 @@ mod tests {
         };
         let database = test.open();
         let lapse = std::time::Duration::from_secs(60);
-        let a = database.take_lease("a", lapse).expect("lease").instance_id;
-        let b = database.take_lease("b", lapse).expect("lease").instance_id;
+        let a = database
+            .take_lease("a", lapse, &Terms::default())
+            .expect("lease")
+            .instance_id;
+        let b = database
+            .take_lease("b", lapse, &Terms::default())
+            .expect("lease")
+            .instance_id;
         let store = PgAgentStore::new(database.clone());
         let (one, two) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
         for uid in [one, two] {
@@ -3365,19 +3587,105 @@ mod tests {
         assert_eq!(presence(one), [[Some(format!("none false {}", back + 1))]]);
     }
 
+    /// A report's write that makes a record a Client Agent behind a Gateway's Host, which the
+    /// stored record was not, announces it, named by the Host, after the write commits: where that
+    /// notice is lost, as when the instance ends between the commit and the `NOTIFY`, another
+    /// instance hears nothing, and a write that changes nothing of it, or puts the Client Agent
+    /// behind a Host no Gateway's, announces nothing.
+    /// Verifies: ADR-0045
+    #[test]
+    fn a_client_agent_arriving_over_a_gateway_is_announced_after_its_commit() {
+        use super::super::notify::{Heard, Notice};
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let open = || {
+            Database::open(
+                &test.config(),
+                Opening {
+                    schema: Some(&test.schema),
+                    ..Opening::default()
+                },
+            )
+            .expect("open")
+        };
+        let (database, listener) = (open(), open());
+        let (heard, hearing) = std::sync::mpsc::channel();
+        listener.listen(move |what| {
+            let _ = heard.send(what);
+        });
+        let within = std::time::Duration::from_secs(10);
+        assert_eq!(hearing.recv_timeout(within), Ok(Heard::Listening));
+        test.sql(
+            "INSERT INTO hosts (host, gateway, instance_uids, subject) \
+             VALUES ('g', true, '{}', '{}'), ('h', false, '{}', '{}')",
+        );
+        let store = PgAgentStore::new(database.clone());
+        let uid = InstanceUid([0x5a; 16]);
+        store.put(&uid, &record()).expect("put");
+        let client_over = |host: &str| {
+            let mut client = record();
+            client.host = Some(host.to_string());
+            client
+                .description
+                .get_or_insert_with(Default::default)
+                .non_identifying_attributes
+                .extend([
+                    opamp::attributes::string_attr("supervisor.kind.collector", "1"),
+                    opamp::attributes::string_attr("host.id", "m1"),
+                ]);
+            client
+        };
+
+        // Each step is followed by a wait in which nothing more may arrive, so a notice a step
+        // should not have sent is not taken for the one a later step sends.
+        let quiet = |step: &str| {
+            assert_eq!(
+                hearing.recv_timeout(std::time::Duration::from_secs(1)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+                "{step}: nothing (more) is announced"
+            );
+        };
+        let arrives = |step: &str| {
+            assert_eq!(
+                hearing.recv_timeout(within),
+                Ok(Heard::Notified(Notice::new(Changed::Arrived, "g"))),
+                "{step}: the arrival is announced after its commit"
+            );
+            quiet(step);
+        };
+
+        database.afterwards().drop_all(true);
+        assert_eq!(store.write_report(&uid, &client_over("g")), Ok(true));
+        quiet("an arrival whose notice is lost");
+        database.afterwards().drop_all(false);
+        assert_eq!(store.write_report(&uid, &client_over("g")), Ok(true));
+        quiet("a write that changes nothing of the Client Agent");
+        assert_eq!(store.write_report(&uid, &client_over("h")), Ok(true));
+        quiet("a Client Agent behind a Host no Gateway's");
+        assert_eq!(store.write_report(&uid, &client_over("g")), Ok(true));
+        arrives("back behind the Gateway's Host");
+        assert_eq!(store.write_report(&uid, &record()), Ok(true));
+        quiet("no longer a Client Agent");
+        assert_eq!(store.write_report(&uid, &client_over("g")), Ok(true));
+        arrives("an Agent that becomes a Client Agent over the same Host");
+    }
+
     /// A take that replaces another holder is announced, whether or not that holder's lease is
     /// live, and one that replaces none is not.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn a_take_that_replaces_another_holder_is_announced_whatever_its_lease() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
         let open = || {
-            Database::open_in(
+            Database::open(
                 &test.config(),
-                super::super::Exclusive::Shared,
-                Some(&test.schema),
+                Opening {
+                    schema: Some(&test.schema),
+                    ..Opening::default()
+                },
             )
             .expect("open")
         };
@@ -3407,7 +3715,7 @@ mod tests {
         assert_eq!(
             hearing.recv_timeout(within),
             Ok(super::super::notify::Heard::Notified(
-                super::super::notify::Notice::new(TAKEN, &two.to_string())
+                super::super::notify::Notice::new(Changed::Taken, &two.to_string())
             )),
             "the take from A, and before it nothing"
         );
@@ -3416,7 +3724,7 @@ mod tests {
     /// The take that makes an Agent's holder change for the eleventh time within a minute, and no
     /// other, says it is likely a duplicate; a change more than a minute old counts no more, and a
     /// take that keeps the holder, or replaces none, is no change.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_eleventh_change_of_holder_within_a_minute_is_a_likely_duplicate() {
         let Some(test) = TestDatabase::named() else {
@@ -3491,8 +3799,7 @@ mod tests {
              CREATE TRIGGER fleet_test_wait BEFORE UPDATE ON agents \
              FOR EACH ROW EXECUTE FUNCTION fleet_test_wait();",
         );
-        let sessions = |condition: &str| test.sessions(condition);
-        let at_gate = || sessions("wait_event = 'PgSleep'");
+        let at_gate = || test.sessions("wait_event = 'PgSleep'");
         let until = |what: &str, done: &dyn Fn() -> bool| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while !done() {
@@ -3526,7 +3833,7 @@ mod tests {
         until("the first reaches the gate", &|| at_gate() == 1);
         let second = batch(second_holder, [low, high]);
         until("the second waits for a row, or reaches the gate", &|| {
-            at_gate() == 2 || sessions("wait_event_type = 'Lock'") == 1
+            at_gate() == 2 || test.sessions("wait_event_type = 'Lock'") == 1
         });
         test.sql("UPDATE fleet_test_gate SET open = true");
         first
@@ -3547,7 +3854,7 @@ mod tests {
     /// The ceiling on records holds for every instance on the store: the store counts its rows as
     /// it creates one, so a record past it is not created through any of them, and one stored
     /// already passes none.
-    /// Verifies: ADR-0025
+    /// Verifies: ADR-0045
     #[test]
     fn the_records_are_bounded_where_they_are_stored() {
         let Some(test) = TestDatabase::named() else {
@@ -3621,6 +3928,269 @@ mod tests {
         assert!(
             PgAgentStore::open(database).is_ok(),
             "opening meets no record"
+        );
+    }
+
+    /// Two creations of new Agents on two instances at once, with one place left under the
+    /// ceiling, are both in flight when the first commits: each waits for the row the count is
+    /// kept in, the database lets one through, and the other counts the record the first created
+    /// and is refused.
+    /// Verifies: ADR-0045, ADR-0023
+    #[test]
+    fn two_creations_at_once_with_one_place_left_create_one_record() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (a_database, b_database) = (test.shared(), test.shared());
+        let a = PgAgentStore::new(a_database);
+        a.create_within(&InstanceUid([1; 16]), &record(), 2)
+            .expect("the first record");
+        let b = PgAgentStore::new(b_database);
+        // The wait for the count's row outlasts a loaded host's delays in opening the hold; the
+        // session's `statement_timeout` still bounds it.
+        test.sql(
+            "CREATE FUNCTION fleet_test_lock_untimed() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM set_config('lock_timeout', '0', true); RETURN NULL; END $$; \
+             CREATE TRIGGER fleet_test_lock_untimed BEFORE INSERT ON agents \
+             FOR EACH STATEMENT EXECUTE FUNCTION fleet_test_lock_untimed();",
+        );
+        // Both creations are under way before either may count.
+        let hold = test.hold("SELECT agents FROM agent_count FOR UPDATE;");
+        let (a, b) = (Arc::new(a), Arc::new(b));
+        let create = |store: &Arc<PgAgentStore>, byte: u8| {
+            let store = store.clone();
+            std::thread::spawn(move || store.create_within(&InstanceUid([byte; 16]), &record(), 2))
+        };
+        let (on_a, on_b) = (create(&a, 2), create(&b, 3));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while test.sessions("wait_event_type = 'Lock' AND query LIKE 'INSERT INTO agents%'") < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "both creations wait for the count's row"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        hold.open();
+        let mut answers = [
+            on_a.join().expect("A's thread").expect("A's creation"),
+            on_b.join().expect("B's thread").expect("B's creation"),
+        ]
+        .map(|creation| match creation {
+            Creation::Created => "created",
+            Creation::Full => "full",
+            Creation::Found(_) => "found",
+        });
+        answers.sort_unstable();
+        assert_eq!(answers, ["created", "full"], "one is refused");
+        assert_eq!(
+            test.rows("SELECT count(*), (SELECT agents FROM agent_count) FROM agents"),
+            [[Some("2".to_string()), Some("2".to_string())]],
+            "the ceiling holds, and the count is the rows'"
+        );
+    }
+
+    /// A release and a presence batch over the same Agents at once lock the rows in one order,
+    /// whichever comes first: the second waits for the first's commit rather than deadlocking, and
+    /// both writes stay, each in the columns it names. The first is held at a gate the test opens
+    /// once the second waits for a row.
+    /// Verifies: ADR-0045, ADR-0030
+    #[test]
+    fn a_release_and_a_presence_batch_over_the_same_agents_at_once_both_commit() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let (releasing, writing) = (test.shared(), test.shared());
+        let (low, high) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["first", "second"]);
+        let mut bare = record();
+        bare.assignment = None;
+        let store = PgAgentStore::new(releasing.clone());
+        store.put(&low, &bare).expect("put");
+        store.put(&high, &bare).expect("put");
+        test.sql(
+            "CREATE TABLE fleet_test_gate (open boolean NOT NULL); \
+             INSERT INTO fleet_test_gate VALUES (false); \
+             CREATE FUNCTION fleet_test_wait() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             WHILE NOT (SELECT open FROM fleet_test_gate) LOOP PERFORM pg_sleep(0.01); \
+             END LOOP; RETURN NEW; END $$; \
+             CREATE TRIGGER fleet_test_wait AFTER UPDATE ON agents \
+             FOR EACH ROW EXECUTE FUNCTION fleet_test_wait(); \
+             CREATE FUNCTION fleet_test_lock_untimed() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM set_config('lock_timeout', '0', true); RETURN NULL; END $$; \
+             CREATE TRIGGER fleet_test_lock_untimed BEFORE UPDATE ON agents \
+             FOR EACH STATEMENT EXECUTE FUNCTION fleet_test_lock_untimed();",
+        );
+        let at_gate = || test.sessions("wait_event = 'PgSleep'");
+        let waiting = |query: &str| {
+            test.sessions(&format!(
+                "wait_event_type = 'Lock' AND query LIKE '{query}%'"
+            ))
+        };
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !done() {
+                assert!(std::time::Instant::now() < deadline, "{what}");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let release = |deployment: &str, order: [InstanceUid; 2]| {
+            let mut released = bare.clone();
+            released.assignment = Some(Assignment {
+                deployment: deployment.to_string(),
+                package: None,
+                configurations: BTreeMap::new(),
+            });
+            let database = releasing.clone();
+            std::thread::spawn(move || {
+                PgAgentStore::new(database).release(&[], &order.map(|uid| (uid, released.clone())))
+            })
+        };
+        let batch = |holder: &'static str, order: [InstanceUid; 2]| {
+            let database = writing.clone();
+            std::thread::spawn(move || {
+                PgAgentStore::new(database).write_presence(
+                    holder,
+                    &order.map(|uid| {
+                        (
+                            uid,
+                            Presence {
+                                connected: true,
+                                last_seen_ms: 9_000,
+                            },
+                            None,
+                        )
+                    }),
+                )
+            })
+        };
+        let stored = || {
+            test.rows(
+                "SELECT deployment, holder::text, connected::text FROM agents \
+                 ORDER BY instance_uid COLLATE \"C\"",
+            )
+        };
+        let (first_holder, second_holder) = (
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        );
+
+        // The release first: it holds the first row at the gate, and the batch waits for it.
+        let released = release("first", [high, low]);
+        until("the release reaches the gate", &|| at_gate() == 1);
+        let written = batch(first_holder, [low, high]);
+        until("the batch waits for a row", &|| {
+            waiting("SELECT 1 FROM agents") == 1
+        });
+        test.sql("UPDATE fleet_test_gate SET open = true");
+        assert_eq!(
+            released.join().expect("the release's thread"),
+            Ok(vec![high, low]),
+            "the release commits"
+        );
+        assert_eq!(
+            written
+                .join()
+                .expect("the batch's thread")
+                .expect("the batch commits")
+                .len(),
+            2
+        );
+        let both = |deployment: &str, holder: &str| {
+            vec![
+                vec![
+                    Some(deployment.to_string()),
+                    Some(holder.to_string()),
+                    Some("true".to_string()),
+                ];
+                2
+            ]
+        };
+        assert_eq!(stored(), both("first", first_holder), "both writes stay");
+
+        // The batch first: it holds both rows at the gate, and the release waits for them.
+        test.sql("UPDATE fleet_test_gate SET open = false");
+        let written = batch(second_holder, [high, low]);
+        until("the batch reaches the gate", &|| at_gate() == 1);
+        let released = release("second", [low, high]);
+        until("the release waits for a row", &|| {
+            waiting("UPDATE agents") == 1
+        });
+        test.sql("UPDATE fleet_test_gate SET open = true");
+        assert_eq!(
+            written
+                .join()
+                .expect("the batch's thread")
+                .expect("the batch commits")
+                .len(),
+            2
+        );
+        assert_eq!(
+            released.join().expect("the release's thread"),
+            Ok(vec![low, high]),
+            "the release commits"
+        );
+        assert_eq!(stored(), both("second", second_holder), "both writes stay");
+    }
+
+    /// Two threads read the Agents while this instance's release commits between their reading
+    /// the rows and their taking them up: neither takes the count of what pins the Deployment
+    /// below the release's, the one that answers first included, whose end must not drop what
+    /// the other is still decided by.
+    /// Verifies: ADR-0033, ADR-0023
+    #[test]
+    fn two_reads_on_their_own_threads_under_a_commit_keep_what_it_pins() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        test.store_deployments(&["stable"]);
+        let store = Arc::new(PgAgentStore::open(database).expect("open"));
+        let uid = InstanceUid([13; 16]);
+        let mut bare = record();
+        bare.assignment = None;
+        store.put(&uid, &bare).expect("put");
+        // Each read, on its own thread, stops between its rows and taking them up until it is
+        // let go.
+        let read = |store: &Arc<PgAgentStore>| {
+            let (arrived, arrives) = std::sync::mpsc::channel::<()>();
+            let (go, goes) = std::sync::mpsc::channel::<()>();
+            *store.after_read.lock().expect("hook") = Some(Box::new(move || {
+                arrived.send(()).expect("arrived");
+                goes.recv().expect("go");
+            }));
+            let reading = store.clone();
+            let thread = std::thread::spawn(move || reading.query(None).map(|_| ()));
+            arrives.recv().expect("the read has read the rows");
+            (go, thread)
+        };
+        let (go_one, one) = read(&store);
+        let (go_two, two) = read(&store);
+        let released = PersistedAgent {
+            assignment: Some(Assignment {
+                deployment: "stable".to_string(),
+                package: None,
+                configurations: BTreeMap::new(),
+            }),
+            ..bare
+        };
+        assert_eq!(store.release(&[], &[(uid, released)]), Ok(vec![uid]));
+        assert_eq!(store.pinning(Pin::Deployment("stable")), 1, "the release");
+        go_one.send(()).expect("let the first go");
+        one.join().expect("the first's thread").expect("the first");
+        assert_eq!(
+            store.pinning(Pin::Deployment("stable")),
+            1,
+            "after the first answered"
+        );
+        go_two.send(()).expect("let the second go");
+        two.join()
+            .expect("the second's thread")
+            .expect("the second");
+        assert_eq!(
+            store.pinning(Pin::Deployment("stable")),
+            1,
+            "after the second answered"
         );
     }
 }
