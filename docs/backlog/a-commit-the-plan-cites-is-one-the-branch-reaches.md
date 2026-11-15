@@ -8,8 +8,8 @@
   tickets 03 and 07 of `revision-2026-11-12` and in a backlog entry that named no commit of the
   branch any more. Only the review of #173 caught it, once. That a hash resolves is not enough,
   since a rewritten commit stays in the object store; whether HEAD reaches it decides.
-- **A commit message implementing a superseded ADR.** Three commit messages named ADR-0025 instead
-  of ADR-0025, which superseded it (#173).
+- **A commit message implementing a superseded ADR.** Three commit messages named an ADR that a
+  later one had superseded, instead of its successor (#173).
 
 **Idea.** Two checks, each with a self-test that builds its own repository fixture:
 
