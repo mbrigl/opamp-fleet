@@ -38,7 +38,7 @@ Forces:
 
 - The bundled UI is static assets embedded in the Server binary, plain HTML, CSS and JS, with **no
   frontend toolchain**, neither in the Dev Container nor in CI
-  ([ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)). Redoc is
+  ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)). Redoc is
   vendored as one pre-built file and named in `NOTICE`; that is the precedent.
 - The Operator plane's CSP is `script-src 'self'` plus the hashes of the inline scripts, and no
   `'wasm-unsafe-eval'`. TextMate grammars are written for the Oniguruma regex engine, which
@@ -84,7 +84,7 @@ the way its platform allows, and deliver it as upstream's own archives, installe
    - `scripts/vendor-shiki.sh` rebuilds it. It runs only when the version is to change, on a
      developer's machine. CI and the Dev Container do not need node; the bundled UI keeps no
      frontend toolchain
-     ([ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+     ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
    - The Server embeds the file and serves it from its own origin as `/shiki.js`, like the
      stylesheets. The CSP does not change: `script-src 'self'` covers it, and nothing needs
      WebAssembly or `eval`.
@@ -139,13 +139,13 @@ the way its platform allows, and deliver it as upstream's own archives, installe
 
 8. **Telegraf is a single-file package, installed as published.** Assets are
    `telegraf-<version>_<os>_<arch>.tar.gz` (`.zip` for Windows, opened as
-   [ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md) clause 62 decides) from
+   [ADR-0033](0033-packages-signatures-and-delivery.md) clause 62 decides) from
    `https://dl.influxdata.com/telegraf/releases/`. Versions are the `v<major>.<minor>.<patch>`
    tags of `influxdata/telegraf`. The CDN has no listing, so the platform list is the tool's own
    (`TELEGRAF_PLATFORMS`: linux amd64/arm64/386, darwin amd64/arm64, windows amd64/arm64;
    upstream spells `386` as `i386`). It holds the builds whose Platform is beyond doubt.
    `linux_armhf` and `linux_armel` stay out: upstream does not state the ARM level they are built
-   for, and [ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md) clause 6 keeps `armv6` apart
+   for, and [ADR-0033](0033-packages-signatures-and-delivery.md) clause 6 keeps `armv6` apart
    from `arm32`, so an `arm32` entry might be offered to a host it does not run on.
    - **Each asset is verified against two origins.** The SHA-256 is the one the GitHub release
      notes of the tag publish in their table, the row found by the asset's exact name. It is
@@ -166,7 +166,7 @@ the way its platform allows, and deliver it as upstream's own archives, installe
      decide. Where an `.asc` is published it must verify, at any version.
    - **The kind names where the archive holds the program:** `usr/bin/telegraf` on Unix and
      `telegraf.exe` on Windows, below the version-named directory, as the `member` that clause 55
-     of [ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)
+     of [ADR-0033](0033-packages-signatures-and-delivery.md)
      lets a kind name. The file name alone does not decide it: the Unix tarballs also hold
      `etc/logrotate.d/telegraf` and directories named `telegraf`. Only the program is unpacked, so
      the kind has no `program_path`.
@@ -215,7 +215,7 @@ the operator's `telegraf-conf`.
 - **Loading Shiki from a CDN.** It needs no vendoring. It breaks the UI on a host without
   internet, hands the page to a third party, and would need the CSP opened to that origin.
 - **A node toolchain in CI that builds the file on every build.** It keeps the file reproducible at
-  all times. [ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md) rejects
+  all times. [ADR-0008](0008-five-crates-on-tokio-and-axum.md) rejects
   this cost for a rudimentary UI, and the pinned hash (clause 2) catches an unreviewed change.
 - **Colouring on the Server.** Shiki could run there through a JavaScript runtime or a Rust port
   of TextMate (`syntect`). It adds a dependency to the Server binary for a display concern, and
@@ -238,7 +238,7 @@ the operator's `telegraf-conf`.
   `@shikijs/engine-javascript` and `@shikijs/langs`; the CSS-variables theme comes from Shiki's
   core, so `@shikijs/themes` is not bundled.
 - Shiki documentation: the JavaScript regex engine and the CSS-variables theme.
-- [ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md) on the bundled UI
+- [ADR-0008](0008-five-crates-on-tokio-and-axum.md) on the bundled UI
   without a frontend toolchain, and its alternative "A frontend framework and bundler for the UI";
   `NOTICE` (Redoc vendored as a pre-built file); the Operator plane's CSP in
   `crates/fleet-server/src/api.rs`.
