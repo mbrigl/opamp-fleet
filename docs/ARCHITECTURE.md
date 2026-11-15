@@ -118,7 +118,8 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   the UI (`signing`, ADR-0050) — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
   of a PKCS#12 file (ADR-0053). `gpgv` verifies an upstream's OpenPGP signature (ADR-0053 clause
-  29); no command calls it yet. The tool takes from the Client its unpacker (`archive`), its
+  29); no command calls it yet. The tool takes from the Client a helper of its archive module
+  (`archive::unix_mode_attributes`, for a 7z entry; its tests also use the unpacker), its
   PKCS#12 reader (`tls::pkcs12_identity`), and its reads of an administrator's file
   (`nofollow::read_privileged`, `config_init::read_password_file`).
 

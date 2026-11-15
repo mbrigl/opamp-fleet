@@ -11,11 +11,11 @@ of them, so none is dead by mistake:
   `archive::extract_tree_tar_gz`'s kept-link checks for every tree package. `KeptLink` values are
   made only in tests.
 - **`gpgv` and the repack** (ADR-0053 clauses 27 to 29). `crates/fleet-tools/src/gpgv.rs` carries
-  `#[allow(dead_code)]` throughout, and no command calls it. In
-  `crates/fleet-tools/src/fetch.rs`, `pack_tree`, `write_members`, `Member` and
-  `collect_members` (near lines 1037 to 1180) carry it too, and so do three fields of `Release`
-  (near lines 385 to 403). No kind on `main` repacks, so `--repack` (clause 28) has no agent to
-  number.
+  `#[allow(dead_code)]` throughout, and no command calls it. In `crates/fleet-tools/src/fetch.rs`,
+  `pack_tree`, `write_members`, `Member` and `collect_members` (near lines 1037 to 1180) carry it
+  too, as do `MAX_TREE_MEMBERS` (near line 39), `Resolution`, `MAX_LINK_HOPS`, `resolve_inside` and
+  `mode_of` (near lines 1252 to 1376), and so do three fields of `Release` (near lines 385 to 403).
+  No kind on `main` repacks, so `--repack` (clause 28) has no agent to number.
 - **Most fields of `KindDefaults`** (`ports.rs`, near lines 407 to 453). The Foreign Agent kind
   (`command.rs`) returns `KindDefaults::none()`, and the Collector kind (`collector.rs`) sets only
   `endpoint_port`.

@@ -27,7 +27,7 @@ skimmed. The design revision drops what prevented nothing
   line or on a comment line right above it, which `scripts/sensor-tests-kept.sh` reads in place
   of listing it.
 - **A refusal is decided in one function** — two paths that admit the same input call one
-  check. Two routes, or a Gateway and the Server, are such paths. A second copy drifts, and the
+  function. Two routes, or a Gateway and the Server, are such paths. A second copy drifts, and the
   path it misses admits what the other refuses.
 - **A caller tells errors apart by their kind, never by their text** — where a caller answers two
   errors differently, the error carries a kind it matches on. A message is reworded for the

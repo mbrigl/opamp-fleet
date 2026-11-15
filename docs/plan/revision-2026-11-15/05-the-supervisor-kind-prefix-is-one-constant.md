@@ -9,10 +9,12 @@ The attribute prefix by which the Server recognises a Client Agent is spelled tw
 `crates/opamp/src/attributes.rs`, which both ends use. A typo on one side silently breaks
 placement. The prefix moves there, and both ends use it.
 
+**Effort.** S.
+
 ## Acceptance criteria
 
-- [ ] Given the change, when the non-test code is searched for `"supervisor.kind.`, then it is
-  found once, in `opamp::attributes`.
+- [ ] Given the change, when the non-test code is searched for the string literal
+  `"supervisor.kind.` (comments aside), then it is found once, in `opamp::attributes`.
 - [ ] Given the existing placement and Supervisor tests, when the change lands, then they pass.
 
 ## Read first

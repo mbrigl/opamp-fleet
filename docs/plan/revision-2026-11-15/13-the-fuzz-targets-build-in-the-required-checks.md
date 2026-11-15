@@ -17,6 +17,8 @@ required Rust job, if the targets compile without libFuzzer's nightly configurat
 verified. The local `check-fuzz.sh` step either gets its toolchain in the Dev Container or leaves
 `check-all.sh`, the CI fuzz run staying where fuzzing happens. `fuzz.yml` gets a timeout.
 
+**Effort.** S.
+
 ## Acceptance criteria
 
 - [ ] Given a change to a workspace function a fuzz target calls that breaks the target, when

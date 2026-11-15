@@ -29,7 +29,7 @@ normalization leans on check 18, so it must be fixed before then.
 
 ## Blocked by
 
-- None (can start immediately)
+- None as a ticket. Work it after pull request #180 merges, which changes the same code.
 
 ## Mode
 
