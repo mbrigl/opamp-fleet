@@ -18,6 +18,11 @@ once its tag exists.
 
 ### Added
 
+- **The Server warns about a token key that could leave the token, and about a PKCS#11 module
+  others may replace.** At startup it names a key loaded by its label that is not sensitive, is
+  extractable, or was extractable once, and a `[pkcs11] module`, or a directory above it, that its
+  group or others may write. Keys made by `opamp-fleetctl pki token-init` raise neither. **What to
+  do:** nothing, unless the log shows the warning; then replace the key, or tighten the modes.
 - **`opamp-fleetctl package fetch --repack <n>` numbers a later repack of one version**
   ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)
   clause 28), for an agent whose artifact the tool repacks; an agent the tool uploads as upstream

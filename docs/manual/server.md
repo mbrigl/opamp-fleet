@@ -688,7 +688,10 @@ The PIN file may be read by its owner and its group, and written by its owner al
 others may read, or its group may write, stops the Server at startup, naming it. So do a module
 that does not load, a token no slot carries, a PIN the token refuses, and a key label the token
 does not hold. A `key_label`, `bootstrap_ca_key_label` or `[audit] key_label` without `[pkcs11]`
-stops it too. `[pkcs11]` is the same whichever store keeps the records.
+stops it too. A module, or a directory above it, that its group or others may write is named by
+a warning at startup, as is a key that is not sensitive or could leave the token, or whose token
+will not say ([CA keys on a PKCS#11 token](#ca-keys-on-a-pkcs11-token)). `[pkcs11]` is the same
+whichever store keeps the records.
 
 ### `[admission_throttle]`
 
@@ -1292,6 +1295,12 @@ signature into the [audit record](#the-audit-record). No key is on the Server's 
 backup, disk image or database dump holds none, and instances that reach the same token serve side
 by side ([From a standby to side by side](#from-a-standby-to-side-by-side)). The keys are P-256,
 made on the token, sensitive and never extractable.
+
+At startup the Server warns, naming the setting and the label, when a key it loads from the token
+is not sensitive, is extractable, or was extractable once, as a key imported from a file or made
+by another tool may be. It also warns when the module, or a directory above it, is writable by its
+group or by others: such an account could have the Server load code of its own. Both are warnings,
+not refusals; fix the key or the modes and start again to be rid of them.
 
 A Server on the token names it in [`[pkcs11]`](#pkcs11) and each key by its label:
 
