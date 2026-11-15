@@ -41,7 +41,7 @@ own glibc is not newer); it holds 219 symlinks, 38 of them dangling. On a newer 
 starts the agent through `runtime/default` instead, the host's own C library, reached through
 one absolute link to the host's program loader, a link out of the tree. Dereferenced, with that
 one link kept, it runs (about 7 100 files, 248 MB — inside the tree limits of
-[ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)).
+[ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md) clause 57).
 Five links are directories, and one is load-bearing: `usr/share/perl/5.26` → `5.26.1` is the name
 the bundled `PERL5LIB` uses.
 
@@ -308,7 +308,7 @@ distribution plus a relocatable Perl is the only visible route).
   host was run.
 - Negative: we own the Linux repack — one tool run and an upload per release; the artifact does not
   match upstream's hash, so upstream's `.sha256` is checked at packing time. Artifacts are large
-  (~30–70 MB per platform, 259 MB unpacked on Linux), and dereferencing duplicates shared
+  (~30–70 MB per platform, 248 MB unpacked on Linux), and dereferencing duplicates shared
   libraries.
 - Negative: an agent packed differently does not fit; the answer is the packing tool, not a key.
   An extra flag needs a code change or the agent's own configuration.
