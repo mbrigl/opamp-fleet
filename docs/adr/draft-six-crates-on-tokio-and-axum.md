@@ -275,11 +275,14 @@ parse.
       `nofollow`, the file operations that follow no link
       ([ADR-draft-the-accounts-the-service-runs-under](draft-the-accounts-the-service-runs-under.md));
       `password`, with `read_password_file`, which reads the first line of a password file; and
-      `identity`, with `BootstrapIdentity`, a certificate and its key as PEM, `pkcs12_identity`,
-      which opens one from a bootstrap PKCS#12 file
-      ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
-      and `pem_block`, which writes one PEM block in a buffer wiped on drop
-      ([ADR-draft-secrets-in-memory-are-wiped-on-drop](draft-secrets-in-memory-are-wiped-on-drop.md)).
+      `identity`, with `BootstrapIdentity`, a certificate and its key as PEM, and `pem_block`,
+      which writes one PEM block in a buffer wiped on drop
+      ([ADR-draft-secrets-in-memory-are-wiped-on-drop](draft-secrets-in-memory-are-wiped-on-drop.md));
+      and `identity::pkcs12`, whose `open` opens a `BootstrapIdentity` from a bootstrap PKCS#12
+      file
+      ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+      The value and its reader are two modules, so a core module of the Client may name the value
+      ([ADR-0009](0009-ports-and-adapters.md)).
 
 18. **What the measurement leaves where it is.** The Server's router and admission, the Server's
     CA, the Client's CSR flow, the persistence of its connection settings, the choice of which TLS

@@ -185,7 +185,7 @@ upstream that signs with OpenPGP.
    for a token.** The `pki` commands use `rcgen` with the features
    [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
    clause 13 states for issuance, and `time`. `p12-extract` also reads through
-   `fleet_util::identity::pkcs12_identity`, the reader the Client's install uses, and so through
+   `fleet_util::identity::pkcs12::open`, the reader the Client's install uses, and so through
    `fleet_core::pkcs12::file` and `p12-keystore` (ADR-0027). `pki token-init` and `pki bootstrap-ca
    --pkcs11-module` reach a PKCS#11 token through `cryptoki`, the wrapper the Server uses for the
    same token
@@ -365,7 +365,7 @@ upstream that signs with OpenPGP.
     write down.
 
 24. **`p12-extract` reads what the Client's install reads.** `opamp-fleetctl pki p12-extract <file>
-    --out <dir>` opens `<file>` with `fleet_util::identity::pkcs12_identity`, the reader the
+    --out <dir>` opens `<file>` with `fleet_util::identity::pkcs12::open`, the reader the
     Client's install uses. It therefore takes exactly the bootstrap PKCS#12 files
     [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
     clauses 4 and 15 describe, by the file's form and by how the Client reads it, and refuses the
