@@ -14,8 +14,10 @@ it:
 - `a_take_up_reads_again_what_differs_in_one_read` (near lines 10606 to 10643) asserts three `get`s
   before the lock. It counts batched reads instead: one before the lock and one under it.
 - `a_take_up_never_undoes_a_newer_act_of_its_own_instance` (near lines 10538 to 10563) injects its
-  race through the `after_get` hook, which only `Hooked::get` fires (near lines 9030 to 9045). The
-  hook moves to the first `get_many`, so the race of ADR-0045 clauses 8 and 9 stays exercised.
+  race through the `after_get` hook, which only `Hooked::get` fires (near lines 9030 to 9045). A
+  hook is added to the first `get_many`, so the race of ADR-0045 clauses 8 and 9 stays exercised.
+  `after_get` stays on `get`: the report path still reads with `agent_store.get` (`fleet.rs` near
+  line 3452), and `a_label_set_while_a_report_reads_the_record_is_not_undone` depends on it.
 
 The doc comment of `take_up_agents` (`held.rs`, near lines 404 to 416) is updated to say the first
 read is one `get_many`.
