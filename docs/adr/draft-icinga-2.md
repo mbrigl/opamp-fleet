@@ -87,8 +87,8 @@ certificate it presents.
 
 **What reaches one Agent.** A Configuration has no Selector, a Deployment aims its
 Configurations, and a rollout skips an Agent that two Deployments claim
-([ADR-0032](0032-deployments-and-rollouts.md) clauses 2 and 9). A Configuration meant for one host
-alone therefore reaches it only through a Deployment that claims that host alone, and that
+([ADR-0032](0032-deployments-and-rollouts.md) clauses 2, 3, 5 and 9). A Configuration meant for
+one host alone therefore reaches it only through a Deployment that claims that host alone, and that
 Deployment then carries everything the host runs.
 
 ## Decision
@@ -231,7 +231,9 @@ the artifact's reach.
       meanwhile; an enrolment that starts over removes the CA of the certificate it replaces.
     - The ticket is a secret: a failed subcommand is reported with `--ticket`'s value replaced, and
       the value is removed from what Icinga printed, so no log line, health or fleet view carries
-      it.
+      it. Icinga takes the ticket on its command line alone, so while `pki request` runs, at most
+      the 30 s of its bound, the value stands in `/proc/<pid>/cmdline` for any local account to
+      read; the ticket is good for this CN alone.
 
     On success the marker is written and the Runner is sent a restart, which reopens the gate of
     clause 8.
