@@ -34,6 +34,8 @@ use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, Versio
 const PROGRAM: &str = "glpi-agent.exe";
 #[cfg(windows)]
 const PROGRAM_PATH: &str = "perl/bin/glpi-agent.exe";
+// macOS takes the Linux shape too, which is harmless: GLPI ships no darwin package
+// (ADR-draft-glpi-agent clause 7), so no macOS host is handed a tree to run.
 #[cfg(not(windows))]
 const PROGRAM: &str = "AppRun";
 #[cfg(not(windows))]

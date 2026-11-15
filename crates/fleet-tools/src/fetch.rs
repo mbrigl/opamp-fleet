@@ -203,9 +203,7 @@ impl AgentKind {
             AgentKind::Otelcol | AgentKind::OtelcolContrib => {
                 "linux, darwin, windows — as the release publishes".to_string()
             }
-            AgentKind::GlpiAgent => {
-                group_platforms([("linux", "amd64"), ("windows", "amd64")].into_iter())
-            }
+            AgentKind::GlpiAgent => group_platforms([GLPI_LINUX, GLPI_WINDOWS].into_iter()),
             // Named rather than left to the release, unlike the Collectors': this is *this*
             // project's own build matrix (`.github/workflows/release.yml`), so it moves only when
             // this repository decides it should — and the column's question, "does it run on the
@@ -219,8 +217,10 @@ impl AgentKind {
     /// API.
     fn needs_assets(self) -> bool {
         match self {
-            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => true,
-            AgentKind::GlpiAgent => true,
+            AgentKind::Otelcol
+            | AgentKind::OtelcolContrib
+            | AgentKind::GlpiAgent
+            | AgentKind::Supervisor => true,
         }
     }
 
@@ -929,6 +929,12 @@ fn collector_checksum(asset: &str, dist: &str, assets: &[(String, String)]) -> C
     ChecksumSource::Sums { urls }
 }
 
+/// The platform of GLPI's portable Windows zip, as published (ADR-draft-glpi-agent clause 7).
+const GLPI_WINDOWS: (&str, &str) = ("windows", "amd64");
+
+/// The platform of the tree repacked from GLPI's x86_64 AppImage (ADR-draft-glpi-agent clause 7).
+const GLPI_LINUX: (&str, &str) = ("linux", "amd64");
+
 /// GLPI publishes two self-contained builds: a portable zip for Windows, which travels as
 /// published, and an AppImage for Linux, which is repacked (ADR-draft-glpi-agent clauses 5 and 6).
 /// Everything else in the release is an installer for a machine to run, not an artifact a fleet
@@ -951,8 +957,8 @@ fn glpi_plans(tag: &str, package_version: &str, assets: &[(String, String)]) -> 
         lower == format!("glpi-agent-{tag}-x64.zip")
     }) {
         plans.push(Plan {
-            os: "windows".to_string(),
-            arch: "amd64".to_string(),
+            os: GLPI_WINDOWS.0.to_string(),
+            arch: GLPI_WINDOWS.1.to_string(),
             sources: vec![Download {
                 url: url.clone(),
                 checksum: ChecksumSource::Sums {
@@ -970,8 +976,8 @@ fn glpi_plans(tag: &str, package_version: &str, assets: &[(String, String)]) -> 
         .find(|(name, _)| *name == format!("glpi-agent-{tag}-x86_64.AppImage"))
     {
         plans.push(Plan {
-            os: "linux".to_string(),
-            arch: "amd64".to_string(),
+            os: GLPI_LINUX.0.to_string(),
+            arch: GLPI_LINUX.1.to_string(),
             sources: vec![Download {
                 url: url.clone(),
                 checksum: ChecksumSource::Sums {
@@ -1119,8 +1125,9 @@ fn repack_appimage(appimage: &Path, wrapper: &str, out: &Path) -> Result<(), Str
 
 /// [`repack_appimage`] with the extracting program named, so a test can name a stand-in.
 ///
-/// The staging directory holds the whole extracted tree, about 259 MB for GLPI, so it is removed
-/// whether the repack succeeds or not.
+/// The staging directory holds the whole extracted tree, about 248 MB for GLPI, so it is removed
+/// whether the repack succeeds or not. It is named beside the artifact, and a path already there
+/// is refused rather than removed: it may be an operator's.
 fn repack_appimage_with(
     program: &str,
     appimage: &Path,
@@ -1130,8 +1137,14 @@ fn repack_appimage_with(
     let offset = squashfs_offset(appimage)?;
     require_unsquashfs(program)?;
     let staging = out.with_extension("staging");
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging)
+    if std::fs::symlink_metadata(&staging).is_ok() {
+        return Err(format!(
+            "{} already exists; the repack stages the extracted tree there and removes it after, \
+             so move it away first",
+            staging.display()
+        ));
+    }
+    std::fs::create_dir(&staging)
         .map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
     let tree = staging.join("squashfs-root");
     eprintln!("  extracting the AppImage's file system …");
@@ -3291,12 +3304,13 @@ mod tests {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         // A script written moments ago fails to exec with `ETXTBSY` while another test thread's
         // fork still holds the write handle; once it has run, no handle is left.
-        for _ in 0..100 {
+        for attempt in 1.. {
             match std::process::Command::new(&program).arg("--ready").status() {
-                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 100 => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                _ => break,
+                Err(e) => panic!("the stand-in {} does not run: {e}", program.display()),
+                Ok(_) => break,
             }
         }
         program
@@ -3409,6 +3423,30 @@ mod tests {
             assert!(!out.exists(), "{banner}");
             assert!(!out.with_extension("staging").exists(), "{banner}");
         }
+    }
+
+    /// A path already where the repack would stage its tree is refused and left as it is: it may
+    /// be an operator's file in the output directory, and the repack removes its staging after.
+    #[cfg(unix)]
+    #[test]
+    fn a_repack_leaves_a_path_where_it_would_stage_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let calls = dir.path().join("calls");
+        let program =
+            unsquashfs_stand_in(dir.path(), "unsquashfs version 4.5.1 (2022/03/17)", &calls);
+        let image = dir.path().join("glpi-agent-1.19-x86_64.AppImage");
+        std::fs::write(&image, appimage(4096, 64, 30, b"hsqs")).expect("write");
+        let out = dir.path().join("glpi-agent_1.19.0_linux_amd64.tar.gz");
+        std::fs::write(out.with_extension("staging"), b"the operator's").expect("write");
+
+        let err = repack_appimage_with(&program.to_string_lossy(), &image, "w", &out)
+            .expect_err("refused");
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(
+            std::fs::read(out.with_extension("staging")).expect("kept"),
+            b"the operator's"
+        );
+        assert!(!out.exists());
     }
 
     /// The version is read from the first line `unsquashfs -version` prints, and only from a
