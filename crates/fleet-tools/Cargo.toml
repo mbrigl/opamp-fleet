@@ -17,12 +17,12 @@ path = "src/main.rs"
 clap.workspace = true
 # The ring provider every binary installs at startup (ADR-0041, ADR-0012).
 opamp = { workspace = true, features = ["client"] }
-# What the tool shares with the Client, and never the Client itself
-# (ADR-0041 clause 22): `archive` — the 7z Unix-mode convention, used
-# when packing, and the unpackers, used by the tests to open what these tools produce; `tree`, the
-# links a kind's tree keeps; and the readers of the operator's PKCS#12 and password files. Checking
-# an artifact against the code that will install it is the property worth asserting, and it is why
-# these tools live in the same workspace as the Client rather than beside it.
+# What the tool shares with the Client, and never the Client itself (ADR-0041 clause 22):
+# `archive` — the 7z Unix-mode convention, used when packing, and the unpackers, used by the tests
+# to open what these tools produce; `tree`, the links a kind's tree keeps; and the readers of the
+# operator's PKCS#12 and password files. Checking an artifact against the code that will install it
+# is the property worth asserting, and it is why these tools live in the same workspace as the
+# Client rather than beside it.
 fleet-util.workspace = true
 # The PKCS#11 primitives the Server and the operator program share (ADR-0026).
 fleet-core = { workspace = true, features = ["pkcs11"] }
@@ -73,6 +73,6 @@ tempfile = "3"
 # ADR-0043: the end-to-end test runs the real Server and the real Client in-process on what
 # `pki init` wrote, reading the fragments as their configuration files are read.
 fleet-server = { path = "../fleet-server" }
-# ADR-0043: the end-to-end test also runs the real Client
-# in-process. A development dependency links into no artifact.
+# ADR-0043: the end-to-end test also runs the real Client in-process. A development dependency
+# links into no artifact.
 fleet-agent = { path = "../fleet-agent" }
