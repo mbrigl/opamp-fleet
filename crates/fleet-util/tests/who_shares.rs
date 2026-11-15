@@ -2,10 +2,12 @@
 //!
 //! `fleet-util` holds what the Client and the operator tool share and the Server does not use;
 //! `fleet-core` holds what the Server shares with either. This test reads the code under `src/` of
-//! the Server, the Client and the tool, `//` comments cut, and decides from the module paths each
-//! names where every module of the two crates belongs. It also refuses a `pub use` of a
-//! `fleet_util::` item, so an item has one path in use, and a manifest of the Server that names
-//! `fleet-util`. The tests of a crate are not read: the tool's end-to-end tests run the Client.
+//! the Server, the Client and the tool, without comments, string and character literals, and code
+//! under a `cfg` that names `test`, and decides from the module paths each names where every module
+//! of the two crates belongs. It also refuses a `pub use` of a `fleet_util::` item and an alias of
+//! the crate, so an item has one path in use; a manifest of the Server that names `fleet-util`; and
+//! a manifest of `fleet-util` that names a workspace crate but `fleet-core`. The tests of a crate
+//! are not read: the tool's end-to-end tests run the Client.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -26,12 +28,135 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The code of a text, every `//` comment cut: a comment that names a module uses nothing.
+/// The code of a text: comments, string and character literals blanked, and every item under a
+/// `cfg` attribute that names `test` cut. A comment, a message, or a unit test that names a module
+/// uses nothing in the shipped code. Line breaks are kept.
 fn code_of(text: &str) -> String {
-    text.lines()
-        .map(|line| line.find("//").map_or(line, |at| &line[..at]))
-        .collect::<Vec<_>>()
-        .join("\n")
+    without_test_items(&without_literals(text))
+}
+
+/// `text` with every comment and every string or character literal replaced by spaces.
+fn without_literals(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let blank = |c: char| if c == '\n' { '\n' } else { ' ' };
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        let after_ident = i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+        let end = if c == '/' && next == Some('/') {
+            chars[i..]
+                .iter()
+                .position(|&x| x == '\n')
+                .map_or(chars.len(), |at| i + at)
+        } else if c == '/' && next == Some('*') {
+            // Block comments nest in Rust.
+            let (mut depth, mut j) = (0, i);
+            while j < chars.len() {
+                if chars[j] == '/' && chars.get(j + 1) == Some(&'*') {
+                    depth += 1;
+                    j += 2;
+                } else if chars[j] == '*' && chars.get(j + 1) == Some(&'/') {
+                    depth -= 1;
+                    j += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            j
+        } else if c == 'r' && !after_ident && matches!(next, Some('"' | '#')) {
+            // A raw string, r"…" or r#"…"#, closed by a quote and as many hashes as opened it.
+            let hashes = chars[i + 1..].iter().take_while(|&&x| x == '#').count();
+            let open = i + 1 + hashes;
+            if chars.get(open) == Some(&'"') {
+                let mut j = open + 1;
+                while j < chars.len()
+                    && !(chars[j] == '"' && (1..=hashes).all(|k| chars.get(j + k) == Some(&'#')))
+                {
+                    j += 1;
+                }
+                (j + 1 + hashes).min(chars.len())
+            } else {
+                i
+            }
+        } else if c == '"' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '"' {
+                j += if chars[j] == '\\' { 2 } else { 1 };
+            }
+            (j + 1).min(chars.len())
+        } else if c == '\'' && next == Some('\\') {
+            // An escaped character literal: '\n', '\'', '\u{…}'.
+            chars[i + 2..]
+                .iter()
+                .skip(1)
+                .position(|&x| x == '\'')
+                .map_or(i, |at| i + 4 + at)
+        } else if c == '\'' && chars.get(i + 2) == Some(&'\'') {
+            // A plain character literal; a lifetime has no closing quote.
+            i + 3
+        } else {
+            i
+        };
+        if end > i {
+            out.extend(chars[i..end].iter().map(|&x| blank(x)));
+            i = end;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `code` with every item under a `#[cfg(…)]` that names `test` blanked, up to the end of its
+/// braced body or its `;`.
+fn without_test_items(code: &str) -> String {
+    let mut out = code.to_string();
+    let mut from = 0;
+    while let Some(offset) = out[from..].find("#[cfg(") {
+        let at = from + offset;
+        let Some(close) = out[at..].find(")]").map(|c| at + c + 2) else {
+            break;
+        };
+        let names_test = out[at..close]
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|word| word == "test");
+        if !names_test {
+            from = close;
+            continue;
+        }
+        let mut depth = 0;
+        let mut end = out.len();
+        for (k, c) in out[close..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = close + k + 1;
+                        break;
+                    }
+                }
+                ';' if depth == 0 => {
+                    end = close + k + 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let blanked: String = out[at..end]
+            .chars()
+            .map(|c| if c == '\n' { '\n' } else { ' ' })
+            .collect();
+        out.replace_range(at..end, &blanked);
+        from = end;
+    }
+    out
 }
 
 /// The code of every source file under `crates/<krate>/src/`, with the file it came from.
@@ -120,6 +245,59 @@ fn named_by(krate: &str, crate_name: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// The package names every dependency table of `crates/<krate>/Cargo.toml` names: normal, build
+/// and development dependencies, for every target.
+fn dependencies_of(krate: &str) -> BTreeSet<String> {
+    let path = crates_dir().join(krate).join("Cargo.toml");
+    let manifest: toml::Table = fs::read_to_string(&path)
+        .expect("read a manifest")
+        .parse()
+        .expect("the manifest parses");
+    let mut tables = vec![&manifest];
+    if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
+        tables.extend(targets.values().filter_map(toml::Value::as_table));
+    }
+    let mut names = BTreeSet::new();
+    for table in tables {
+        for kind in ["dependencies", "build-dependencies", "dev-dependencies"] {
+            let Some(deps) = table.get(kind).and_then(toml::Value::as_table) else {
+                continue;
+            };
+            for (key, value) in deps {
+                let package = value.get("package").and_then(toml::Value::as_str);
+                names.insert(package.unwrap_or(key).to_string());
+            }
+        }
+    }
+    names
+}
+
+/// The package names of the workspace's members.
+fn workspace_packages() -> BTreeSet<String> {
+    let read = |path: PathBuf| -> toml::Table {
+        fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+            .parse()
+            .expect("the manifest parses")
+    };
+    let root = read(crates_dir().join("../Cargo.toml"));
+    root["workspace"]["members"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .map(|member| {
+            let dir = crates_dir()
+                .join("..")
+                .join(member.as_str().expect("a path"));
+            let manifest = read(dir.join("Cargo.toml"));
+            manifest["package"]["name"]
+                .as_str()
+                .expect("a name")
+                .to_string()
+        })
+        .collect()
+}
+
 /// Every module of `fleet-util` is named by the Client and by the tool and not by the Server;
 /// every module of `fleet-core` is named by the Server; no crate re-exports a `fleet_util::`
 /// item; the Server's manifest does not name `fleet-util`.
@@ -172,19 +350,26 @@ fn each_shared_module_sits_in_the_crate_its_users_choose() {
                 {
                     wrong.push(format!("{}: re-exports: {line}", file.display()));
                 }
+                // An alias would let a `pub use` name the crate's items by another path.
+                if line.contains("fleet_util as ") {
+                    wrong.push(format!("{}: aliases fleet_util: {line}", file.display()));
+                }
             }
         }
     }
 
-    let manifest = crates_dir().join("fleet-server/Cargo.toml");
-    if code_of(
-        &fs::read_to_string(&manifest)
-            .expect("read the Server's manifest")
-            .replace('#', "//"),
-    )
-    .contains("fleet-util")
-    {
-        wrong.push(format!("{}: names fleet-util", manifest.display()));
+    for package in dependencies_of("fleet-server") {
+        if package == "fleet-util" {
+            wrong.push("crates/fleet-server/Cargo.toml: names fleet-util".to_string());
+        }
+    }
+    let workspace = workspace_packages();
+    for package in dependencies_of("fleet-util") {
+        if workspace.contains(&package) && package != "fleet-core" {
+            wrong.push(format!(
+                "crates/fleet-util/Cargo.toml: names {package}, a workspace crate but fleet-core"
+            ));
+        }
     }
 
     assert!(wrong.is_empty(), "{wrong:#?}");
@@ -208,5 +393,28 @@ fn the_reader_finds_the_modules_code_names() {
         ["nofollow", "tree"]
     );
     assert!(names("use not_fleet_util::archive;").is_empty());
-    assert_eq!(code_of("x // fleet_util::tree"), "x ");
+    assert!(modules_named(&code_of("x // fleet_util::tree"), "fleet_util").is_empty());
+}
+
+/// Comments, literals and test code name nothing; a lifetime and the code beside them stay.
+#[test]
+fn comments_literals_and_test_code_are_not_read() {
+    let names = |code: &str| {
+        modules_named(&code_of(code), "fleet_util")
+            .into_iter()
+            .collect::<Vec<_>>()
+    };
+    assert!(names("/* fleet_util::tree /* nested */ fleet_util::archive */").is_empty());
+    assert!(names(r#"let m = "see fleet_util::tree \" fleet_util::archive";"#).is_empty());
+    assert!(names(r###"let r = r#"a "quoted" fleet_util::tree"#;"###).is_empty());
+    assert!(names("#[cfg(test)]\nmod tests {\n    use fleet_util::tree;\n}").is_empty());
+    assert!(names("#[cfg(all(test, unix))]\nfn t() { fleet_util::tree::x(); }").is_empty());
+    assert_eq!(
+        names("fn f<'a>(c: char) -> &'a str { let _ = '\"'; fleet_util::archive::x() }"),
+        ["archive"]
+    );
+    assert_eq!(
+        names("#[cfg(unix)]\nfn f() { fleet_util::nofollow::x(); }"),
+        ["nofollow"]
+    );
 }

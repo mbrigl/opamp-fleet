@@ -1126,6 +1126,7 @@ dependencies = [
  "sevenz-rust2",
  "tar",
  "tempfile",
+ "toml",
  "tracing",
  "zeroize",
  "zip",

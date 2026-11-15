@@ -30,5 +30,7 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+# The tests read the workspace's manifests (ADR-0041 clause 16).
+toml.workspace = true
 # Tests build the `.7z` fixtures they then open; the Client itself only ever decompresses.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
