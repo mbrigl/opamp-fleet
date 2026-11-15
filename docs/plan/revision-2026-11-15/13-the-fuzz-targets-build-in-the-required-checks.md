@@ -21,11 +21,28 @@ verified. The local `check-fuzz.sh` step either gets its toolchain in the Dev Co
 
 ## Acceptance criteria
 
-- [ ] Given a change to a workspace function a fuzz target calls that breaks the target, when
+- [x] Given a change to a workspace function a fuzz target calls that breaks the target, when
   `check-rust.sh` runs, then it fails.
 - [ ] Given the Dev Container, when `check-all.sh` runs, then no fuzz step has a skip as its only
   outcome.
-- [ ] Given `fuzz.yml`, when it is read, then its job has a `timeout-minutes`.
+- [x] Given `fuzz.yml`, when it is read, then its job has a `timeout-minutes`.
+
+## Where it stands
+
+Criteria 1 and 3 landed in 244523a54: the stable `cargo check` of `fuzz/` passes in the Dev
+Container and is the last command of `check-rust.sh`, and `fuzz.yml` has `timeout-minutes: 45`.
+Criterion 2 waits for the human. Check 9 of `scripts/check-docs.sh` fails when a workflow runs a
+script that `check-all.sh` does not run, so `check-fuzz.sh` cannot simply leave `check-all.sh`
+while `fuzz.yml` runs it. The options:
+
+- Install nightly and cargo-fuzz in the Dev Container (ADR-0004): every rebuild grows by a
+  toolchain, and every `check-all.sh` fuzzes eleven targets with an ASan build.
+- Give check 9 an exemption marker for a script that runs in CI only, and name `check-fuzz.sh`
+  on it in `check-all.sh`. This narrows a check, so the human decides it.
+- Keep the step, and let `check-fuzz.sh` without cargo-fuzz say it skips the fuzzing because
+  `check-rust.sh` builds the targets. The step still has a skip as its only local outcome.
+
+The session recommends the second.
 
 ## Read first
 
