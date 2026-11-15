@@ -1,7 +1,7 @@
 //! The Client replacing its own binary on the ADR-0021 version directories (ADR-0019): the
 //! [`SelfUpdater`] adapter and the start-up check of the process that comes after it.
 //!
-//! Updating a Managed Process is done by a Supervisor that outlives it (ADR-0034): stop, swap,
+//! Updating a Managed Process is done by a Supervisor that outlives it (ADR-0050): stop, swap,
 //! restart, watch, roll back. Nothing here outlives anything — the process that installs the
 //! package is the process that has to exit for the install to take effect. So the work is split
 //! across the restart, and this module owns both halves:
@@ -58,7 +58,7 @@ pub struct UpdateMarker {
     /// How many times a process has started and found this marker.
     pub attempts: u32,
     /// The trace the install belongs to, and the span inside it that staged this version
-    /// (ADR-0017 clause 21) — hex, as OpenTelemetry writes them.
+    /// (ADR-0054 clause 21) — hex, as OpenTelemetry writes them.
     ///
     /// **Why a telemetry field is in an operational file.** The install necessarily completes in a
     /// different process than the one that started it, so the span that staged the version is gone
@@ -105,7 +105,7 @@ pub struct UpdateOutcome {
 }
 
 /// The span in which the process that came up after the restart finishes what a previous process
-/// started — a continuation of that install's trace when the marker carries one (ADR-0017 clause 21),
+/// started — a continuation of that install's trace when the marker carries one (ADR-0054 clause 21),
 /// and an ordinary root span when it does not.
 fn continued(marker: &UpdateMarker, span: tracing::Span) -> tracing::Span {
     if let Some(trace) = &marker.trace {
@@ -240,7 +240,7 @@ pub fn install(
 
     // Refuse a downgrade. An offer for an older release than the one running — even a genuinely
     // signed one — is how a compromised Server pushes a build with a known vulnerability back onto a
-    // fleet; the Ed25519 signature covers the Agent type, the version and the hash (ADR-0034), which
+    // fleet; the Ed25519 signature covers the Agent type, the version and the hash (ADR-0050), which
     // ties an artifact to its own version but says nothing of how that version orders against the
     // running one, so an old release stays validly signed forever. A rebuild of the same release
     // (Equal) and any newer one still install. Rollback to the *previous* version is a separate
@@ -293,7 +293,7 @@ pub fn install(
         info!(version = %version, "the offered version is the one already running");
         return Ok(SelfInstall::AlreadyRunning);
     }
-    // The update's own span (ADR-0017). It sits under the install that downloaded the artifact
+    // The update's own span (ADR-0054). It sits under the install that downloaded the artifact
     // when there is one, which there always is today — this is only ever reached from a package
     // offer — and it is the span the *next* process continues from.
     //
@@ -339,7 +339,7 @@ fn stage(
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let binary = dir.join(BINARY_FILENAME);
-    // The artifact is the program or an archive holding it (ADR-0034) — the same shapes a Managed
+    // The artifact is the program or an archive holding it (ADR-0050) — the same shapes a Managed
     // Process's package comes in, which is why the unpacking is shared with the Supervisor's swap.
     install::write_program(artifact, &binary, BINARY_FILENAME, archive_key)?;
 
@@ -515,7 +515,7 @@ fn on_start_as(state_dir: &Path, exe: &Path, running_version: &str) -> Result<St
 /// canonicalising it says where the pointer now leads, not which binary the service manager
 /// actually started. A commit that trusted that would tell the Server a version this host does not
 /// run — and the fleet then holds the package back over a claim the program itself denies, which is
-/// the state ADR-0033 is about. What a binary says about itself is the one thing no stale pointer
+/// the state ADR-0049 is about. What a binary says about itself is the one thing no stale pointer
 /// can fake, so both must agree; the build metadata does not take part (ADR-0038).
 fn took_over(running_version: &str, running_dir: Option<&Path>, marker: &UpdateMarker) -> bool {
     fleet_core::version::same_release(running_version, &marker.version)
@@ -527,7 +527,7 @@ fn took_over(running_version: &str, running_dir: Option<&Path>, marker: &UpdateM
 /// Declares the version this process runs good: the marker goes, and the Server is owed
 /// `Installed`. Called once the Client is up and has reached the Server.
 pub fn commit(state_dir: &Path, marker: &UpdateMarker) {
-    // The last phase of an install that began in a process that no longer exists (ADR-0017).
+    // The last phase of an install that began in a process that no longer exists (ADR-0054).
     let span = continued(
         marker,
         tracing::info_span!(
@@ -629,14 +629,14 @@ mod tests {
         );
     }
 
-    /// The trace the install belongs to rides in the marker (ADR-0017 clause 21) — and a marker
+    /// The trace the install belongs to rides in the marker (ADR-0054 clause 21) — and a marker
     /// written before that field existed still parses.
     ///
     /// The second half is the load-bearing one: an update in flight across a version bump is
     /// exactly when this file is read by a *different* build than the one that wrote it, and a
     /// marker that failed to parse there would put a Client on probation forever over a field that
     /// only decorates a trace.
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0054
     #[test]
     fn a_marker_carries_its_trace_and_one_written_without_it_still_parses() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -800,10 +800,10 @@ mod tests {
         assert_eq!(on_start(dir.path()).expect("start"), Startup::Ordinary);
     }
 
-    /// ADR-0033: the directory a process runs from says which version was *pointed at*; only the
+    /// ADR-0049: the directory a process runs from says which version was *pointed at*; only the
     /// binary says which one came up. A commit that trusted the pointer would report a version this
     /// host does not run, and the fleet would then hold the package back over a claim the program
-    /// denies — the state ADR-0033 is about, created by the very mechanism meant to end it.
+    /// denies — the state ADR-0049 is about, created by the very mechanism meant to end it.
     /// Verifies: ADR-0019
     #[test]
     fn taking_over_needs_the_binary_to_be_the_version_the_marker_names() {
@@ -975,7 +975,7 @@ mod tests {
         probe(&binary, "0.1.1").expect("the release number is what an operator uploads");
         probe(&binary, "0.1.1+799e36a").expect("and the full string still works");
         // A rebuild of the same release passes too; which bytes arrived is the content hash's
-        // question (ADR-0034), never this one.
+        // question (ADR-0050), never this one.
         probe(&binary, "0.1.1+deadbee").expect("same release, other build");
     }
 

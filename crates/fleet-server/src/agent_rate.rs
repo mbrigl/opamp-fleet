@@ -7,7 +7,7 @@
 //! hosts' Agents, so a message through it takes a token from the bucket of the Agent it names and
 //! one from the Gateway's aggregate. An enrolment request through it takes from neither but from
 //! the Gateway's enrolment aggregate and, once its bootstrap certificate is one of a bootstrap CA,
-//! from that certificate's bucket (ADR-0016 clause 26). Both tables are bounded, and a full one
+//! from that certificate's bucket (ADR-0048 clause 26). Both tables are bounded, and a full one
 //! forgets the bucket used least recently, which can only grant tokens.
 
 use std::net::IpAddr;
@@ -38,7 +38,7 @@ impl Default for Limits {
     }
 }
 
-/// Who a message or a download is counted for (ADR-0016 clause 26).
+/// Who a message or a download is counted for (ADR-0048 clause 26).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Subject {
     /// The host a member's certificate names.
@@ -105,7 +105,7 @@ enum Key {
 }
 
 /// What a message through a Gateway is counted for besides an aggregate: the Agent it names, or —
-/// for an enrolment request — the bootstrap certificate the request proves (ADR-0016 clause 26).
+/// for an enrolment request — the bootstrap certificate the request proves (ADR-0048 clause 26).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Named {
     Agent([u8; 16]),
@@ -168,7 +168,7 @@ impl AgentRate {
     }
 
     /// [`admit`](Self::admit) for a message carrying an enrolment request. Through a Gateway it
-    /// takes no token of the Gateway's members (ADR-0016 clause 26). With `bootstrap` — the
+    /// takes no token of the Gateway's members (ADR-0048 clause 26). With `bootstrap` — the
     /// certificate its proof embeds, once checked to be one of a bootstrap CA — it takes one from
     /// that certificate's bucket, sized by `messages_per_sec` and `burst`, and one from the
     /// Gateway's enrolment aggregate, sized by `gateway_messages_per_sec` and `gateway_burst`, so
@@ -329,7 +329,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[test]
     fn a_host_is_one_bucket_whatever_its_agents_report() {
         let (rate, _) = rate(16, 16);
@@ -344,7 +344,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[test]
     fn a_member_certificate_without_a_host_is_counted_by_issuer_and_serial() {
         let (rate, _) = rate(16, 16);
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(passing(&rate, &two, false, None), 3, "another serial");
     }
 
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[test]
     fn an_enrolment_connection_is_counted_by_its_peer_address() {
         let (rate, _) = rate(16, 16);
@@ -372,7 +372,7 @@ mod tests {
         assert_eq!(passing(&rate, &b, false, None), 3, "another address");
     }
 
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[test]
     fn marking_a_gateway_takes_effect_at_the_next_message() {
         let (rate, _) = rate(16, 16);
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(rate.admit(&edge, false, Some(&uid(3))), Err(Bucket::Host));
     }
 
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[test]
     fn behind_a_gateway_a_message_passes_its_agents_bucket_and_the_aggregate() {
         let (rate, _) = rate(16, 64);
@@ -409,7 +409,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[test]
     fn a_message_naming_no_agent_behind_a_gateway_counts_in_the_aggregate_alone() {
         let (rate, _) = rate(16, 16);
@@ -432,7 +432,7 @@ mod tests {
     /// counted in; one whose certificate failed the check is counted in a bucket of its own and
     /// makes no bucket of its certificate. Each names the bucket that was empty. On a host that is
     /// no Gateway an enrolment request is counted as the host's message.
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[test]
     fn enrolments_through_a_gateway_are_counted_in_an_aggregate_of_their_own() {
         let (rate, _) = rate(16, 64);

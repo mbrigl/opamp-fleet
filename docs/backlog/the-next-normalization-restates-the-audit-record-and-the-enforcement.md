@@ -13,7 +13,7 @@ one:
   reader has to assemble what the record holds, how it is chained, signed and exported from four
   records.
 - **Three Enforcement sections name a test or marker as missing that now exists:**
-  - ADR-0030: "No test races a request through one instance against a delivery through another."
+  - ADR-0052: "No test races a request through one instance against a delivery through another."
     `fleet.rs`
     `a_restart_requested_through_one_instance_while_another_delivers_one_stays_until_sent` now
     does.
@@ -23,7 +23,7 @@ one:
   - ADR-0012: `plaintext_off_the_loopback_is_refused_before_connecting` "carries no marker". It
     now carries `Verifies: ADR-0012`.
 
-  ADR-0030 clause 2 also says `get_many` reads under the fleet lock. `take_up_restarts` in
+  ADR-0052 clause 2 also says `get_many` reads under the fleet lock. `take_up_restarts` in
   `crates/fleet-server/src/fleet/held.rs` calls it under the Agents' own locks without that lock,
   for the Agents a notice names (183f49ca8); `catch_up` calls it under both.
 

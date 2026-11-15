@@ -1,4 +1,4 @@
-//! What a package signature covers (ADR-0034): not the artifact's bytes alone, but which Agent type
+//! What a package signature covers (ADR-0050): not the artifact's bytes alone, but which Agent type
 //! the artifact is for, at which version, and its SHA-256 — so a signed artifact cannot be offered
 //! as another type's program, or under another version.
 //!
@@ -31,7 +31,7 @@ pub fn floor_statement(agent_type: &str, version: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn the_statement_names_type_version_and_hash() {
         assert_eq!(

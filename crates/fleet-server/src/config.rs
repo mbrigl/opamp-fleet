@@ -55,13 +55,13 @@ pub struct ServerConfig {
     /// Optional certificate authority for signing Agent CSRs (ADR-0040); absent means the Server
     /// issues nothing and does not declare `AcceptsConnectionSettingsRequest`.
     pub client_ca: Option<ClientCaConfig>,
-    /// Optional destinations for the Agents' own telemetry (ADR-0017); absent means none is
+    /// Optional destinations for the Agents' own telemetry (ADR-0054); absent means none is
     /// offered and no Agent reports any.
     pub telemetry_offer: Option<TelemetryOfferConfig>,
     /// Refused at startup, like `config_dir` (ADR-0023). Read only so that a leftover key can be
     /// named.
     pub packages_dir: Option<IgnoredAny>,
-    /// How the Server checks the signatures on its Package entries (ADR-0034).
+    /// How the Server checks the signatures on its Package entries (ADR-0050).
     #[serde(default)]
     pub packages: PackagesConfig,
     /// Where the artifacts' bytes are kept: the filesystem under `data_dir`, or a bucket of an
@@ -73,7 +73,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub database: DatabaseConfig,
     /// Refused at startup: every package is offered as a path the Client resolves against its own
-    /// endpoint, and a Client downloads from no other host (ADR-0034). Read only so that a leftover
+    /// endpoint, and a Client downloads from no other host (ADR-0050). Read only so that a leftover
     /// key can be named.
     pub advertised_url: Option<IgnoredAny>,
     /// The largest OpAMP message the Server accepts or sends, on either transport and in either
@@ -81,19 +81,19 @@ pub struct ServerConfig {
     /// configurable — a fleet of small status reports can be served with far less.
     #[serde(default = "default_max_message_size")]
     pub max_message_size_bytes: usize,
-    /// The largest package artifact the REST API accepts on upload (ADR-0034). Nothing to do with
+    /// The largest package artifact the REST API accepts on upload (ADR-0050). Nothing to do with
     /// the OpAMP message limit above: a package is a *program*, routinely hundreds of megabytes,
     /// and it travels over the REST plane, never in an OpAMP message.
     #[serde(default = "default_max_package_size")]
     pub max_package_size_bytes: usize,
     /// The total size of all stored package artifacts the REST API keeps before it refuses a new
-    /// upload (ADR-0034). Where `max_package_size_bytes` bounds one artifact, this bounds the whole
+    /// upload (ADR-0050). Where `max_package_size_bytes` bounds one artifact, this bounds the whole
     /// store — so a caller cannot fill the disk by uploading many artifacts under distinct names.
     /// `0` is refused at load.
     #[serde(default = "default_max_total_package_size")]
     pub max_total_package_bytes: u64,
     /// How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view calls
-    /// it stale (ADR-0030). Ignored when `[connection_offer]` names a heartbeat interval — the
+    /// it stale (ADR-0052). Ignored when `[connection_offer]` names a heartbeat interval — the
     /// period this Server asked for is a better answer than a default.
     #[serde(default = "default_stale_after_secs")]
     pub stale_after_secs: u64,
@@ -345,7 +345,7 @@ impl AuditConfig {
     }
 }
 
-/// The `[packages]` section (ADR-0034): the operator's public key, against which the Server checks
+/// The `[packages]` section (ADR-0050): the operator's public key, against which the Server checks
 /// every entry's signature — as feedback only. The Agent's own check decides what is installed.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -571,7 +571,7 @@ pub struct DatabaseConfig {
     /// PostgreSQL only.
     pub lease_secs: Option<u64>,
     /// How often an instance writes the presence of the Agents it carries, in seconds, from 10 to
-    /// 60; PostgreSQL only (ADR-0030 clause 4).
+    /// 60; PostgreSQL only (ADR-0052 clause 4).
     pub presence_interval_secs: Option<u64>,
     /// The connections an instance's pool holds at most, from 2 to 256; PostgreSQL only
     /// (ADR-0023 clause 24).
@@ -878,7 +878,7 @@ pub fn read_secret_file(key: &str, file: &Path) -> Result<zeroize::Zeroizing<Str
 
 /// The Ed25519 adapter behind [`SignatureVerifier`](crate::packages::SignatureVerifier): the
 /// operator's public key from `[packages] verification_key`, checked with `ring`, the provider the
-/// Client verifies with (ADR-0034).
+/// Client verifies with (ADR-0050).
 pub struct Ed25519Verifier(Vec<u8>);
 
 impl Ed25519Verifier {
@@ -1118,13 +1118,13 @@ impl ConnectionOfferConfig {
     }
 }
 
-/// The `[telemetry_offer]` section (ADR-0017): where Agents send their own telemetry.
+/// The `[telemetry_offer]` section (ADR-0054): where Agents send their own telemetry.
 ///
 /// The endpoints are full OTLP/HTTP URLs *with path*, which is what the Baseline requires of them;
 /// this Server does not append `/v1/metrics` for you, because guessing a receiver's routing is how
 /// telemetry disappears into a 404 nobody looks at.
 ///
-/// **What this section says, it says about all three signals** (ADR-0017). A signal left out is
+/// **What this section says, it says about all three signals** (ADR-0054). A signal left out is
 /// offered no destination and is *stopped* on an Agent that was reporting it, and an endpoint set
 /// to the empty string is an explicit withdrawal — the one way to say "stop all three", since a
 /// Server that offers nothing at all is a Server that says nothing at all. Removing the section
@@ -1149,7 +1149,7 @@ impl TelemetryOfferConfig {
     /// meant, and an endpoint that is not an OTLP/HTTP URL would be refused by every Agent.
     ///
     /// An endpoint set to the empty string passes both tests deliberately — it is a withdrawal
-    /// (ADR-0017), which is a thing to be said rather than a URL to be checked.
+    /// (ADR-0054), which is a thing to be said rather than a URL to be checked.
     fn check(&self) -> Result<(), String> {
         let endpoints = [
             ("metrics_endpoint", &self.metrics_endpoint),
@@ -1271,7 +1271,7 @@ fn default_max_message_size() -> usize {
 
 /// Long enough that a host offline over a holiday still comes back on a valid certificate, short
 /// enough that a certificate is not a permanent grant (ADR-0040).
-/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0030): one missed beat is a
+/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0052): one missed beat is a
 /// lost packet, and a fleet view that flickers is one nobody trusts.
 fn default_stale_after_secs() -> u64 {
     90
@@ -1500,7 +1500,7 @@ impl ServerConfig {
             return Err(
                 "advertised_url is removed — every package is offered as a path the Client \
                  resolves against its own Server, and a Client downloads from no other host \
-                 (ADR-0034); remove the key"
+                 (ADR-0050); remove the key"
                     .to_string(),
             );
         }
@@ -1516,7 +1516,7 @@ impl ServerConfig {
         if let Some(auth) = &self.rest.auth {
             auth.check()?;
         }
-        // A malformed key fails startup, not the first signature it would have checked (ADR-0034).
+        // A malformed key fails startup, not the first signature it would have checked (ADR-0050).
         self.packages.verification_key()?;
         self.blobs.check()?;
         self.database.check()?;
@@ -1977,7 +1977,7 @@ impl ConnectionOffer {
     }
 }
 
-/// The `[telemetry_offer]` section as the destinations the fleet offers (ADR-0017).
+/// The `[telemetry_offer]` section as the destinations the fleet offers (ADR-0054).
 impl TelemetryOffer {
     pub fn from_config(config: &TelemetryOfferConfig) -> Self {
         let headers = (!config.headers.is_empty()).then(|| Headers {
@@ -1995,7 +1995,7 @@ impl TelemetryOffer {
                 .as_ref()
                 .map(|endpoint| TelemetryConnectionSettings {
                     destination_endpoint: endpoint.clone(),
-                    // A withdrawal names nothing else (ADR-0017): an empty endpoint stops that
+                    // A withdrawal names nothing else (ADR-0054): an empty endpoint stops that
                     // signal, and the backend's credential travelling with it would be a token
                     // handed out for a connection nobody is going to open.
                     headers: headers.clone().filter(|_| !endpoint.is_empty()),
@@ -2158,8 +2158,8 @@ mod tests {
 
     /// `[packages] verification_key` is the operator's public key, hex, as the Client's key of the
     /// same name: absent by default, decoded when given, and a malformed one fails startup naming
-    /// it (ADR-0034 clause 19).
-    /// Verifies: ADR-0034
+    /// it (ADR-0050 clause 19).
+    /// Verifies: ADR-0050
     #[test]
     fn a_malformed_verification_key_fails_startup() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
@@ -2187,7 +2187,7 @@ mod tests {
 
     /// Every package is offered as a path, so a leftover `advertised_url` is named and refused
     /// rather than ignored: it would tell the operator a mirror is in use that no Client reaches.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn a_leftover_advertised_url_fails_startup_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2245,9 +2245,9 @@ mod tests {
     }
 
     /// The three shapes `[telemetry_offer]` admits: a destination, a withdrawal, and a mistake.
-    /// The withdrawal is the one ADR-0017 adds — an empty endpoint is a thing to say, not a URL to
+    /// The withdrawal is the one ADR-0054 adds — an empty endpoint is a thing to say, not a URL to
     /// check — and it must not be waved through for a value that is merely wrong.
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0054
     #[test]
     fn an_empty_endpoint_is_a_withdrawal_and_a_wrong_one_is_still_an_error() {
         let section = |body: &str| {
@@ -3462,7 +3462,7 @@ mod tests {
     /// each one set fails startup naming it; with PostgreSQL they default to 10, 30 and 30 seconds,
     /// and a lease shorter than three renewals, a renewal of zero, or a presence interval outside 10
     /// to 60 seconds fails naming the key.
-    /// Verifies: ADR-0045, ADR-0030
+    /// Verifies: ADR-0045, ADR-0052
     #[test]
     fn the_lease_keys_apply_to_postgresql_alone() {
         let load = |database: &str| {

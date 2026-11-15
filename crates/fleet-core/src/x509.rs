@@ -1,6 +1,6 @@
 //! What a client certificate is known by, on the Server and on a Gateway alike: the host it names,
 //! its issuer and serial as the Server's register and revocation list name it, and the bound on
-//! its serial (ADR-0016, ADR-0040, ADR-0027 clause 11).
+//! its serial (ADR-0048, ADR-0040, ADR-0027 clause 11).
 //!
 //! This module is the rule. [`read`] reads it from a certificate with `x509-parser`, and [`issue`]
 //! holds what every certificate this project makes gets: its serial and how far its life starts

@@ -1,6 +1,6 @@
 # ADR-0054: What an Agent reports about itself
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-14
 - **Deciders:** Markus Brigl
 - **Applies to:** AgentDescription building and the fold of a Managed Process's description in `crates/fleet-agent/src/supervisor/agent.rs` and `crates/fleet-agent/src/supervisor/agent/description.rs`, the host attributes in `crates/fleet-agent/src/host.rs`, the Agent type resolution in `crates/fleet-agent/src/supervisor/block.rs` and `crates/fleet-agent/src/supervisor/mod.rs`, the attribute keys in `crates/opamp/src/attributes.rs`, `[attributes]`, `service_namespace` and a `[[supervisor]]` block's `service_name` in `supervisor.toml`, the fleet view's name and network columns; `crates/fleet-agent/src/telemetry.rs`, the telemetry half of `crates/fleet-agent/src/connection.rs`, the operation spans in the Client's transport, engine, reconfigure, packages, update (`crates/fleet-agent/src/update/`) and Supervisor modules, the Server's `[telemetry_offer]` (`crates/fleet-server/src/config.rs`, `crates/fleet-server/src/fleet.rs`), the OpenTelemetry crates in `Cargo.toml`, and every document that tells an operator where an Agent's type comes from or what a Managed Process or `[attributes]` contributes to an Agent's description

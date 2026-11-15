@@ -57,7 +57,7 @@ pub enum Exit {
     RestartForUpdate,
 }
 
-/// Starts Gateway Mode when `[gateway]` arms it (ADR-0016), or nothing when it does not.
+/// Starts Gateway Mode when `[gateway]` arms it (ADR-0048), or nothing when it does not.
 ///
 /// It runs as its own task rather than inside the transport loop: the downstream endpoint's
 /// lifetime is the process's, not one upstream connection's, and an Agent behind the Gateway must
@@ -262,7 +262,7 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
 ///
 /// Without this, the net catches everything except the one failure a *new* version is most likely
 /// to bring: a file it refuses. A removed configuration key is exactly that
-/// ([ADR-0046](../../../../docs/adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)),
+/// ([ADR-0051](../../../../docs/adr/0051-supervisor-mode-and-its-kinds.md)),
 /// and for some kinds there is no block both versions accept, so the cutover per host cannot be avoided — only caught.
 fn unreadable_config(spec: &RunSpec, error: String) -> Result<Exit, String> {
     let state_dir = recovery_state_dir(spec);
@@ -379,7 +379,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             .with_floors(agent_type, floors.clone()),
         );
     }
-    // There is no unsigned posture (ADR-0034, ADR-0019): without `[packages] verification_key` no
+    // There is no unsigned posture (ADR-0050, ADR-0019): without `[packages] verification_key` no
     // Agent of this Client takes packages, its own self-update included. Said once at startup, since
     // the Server only sees an Agent that declares no package capability.
     if config.package_key().is_none() {
@@ -400,7 +400,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         );
         crate::update::installer::clear_outcome(&config.state_dir);
     }
-    // Own telemetry (ADR-0017) is owned here rather than by a transport loop, because the
+    // Own telemetry (ADR-0054) is owned here rather than by a transport loop, because the
     // destinations outlive a connection: a reconnect must not tear the exporters down, and a
     // verified new offer is what replaces them.
     let telemetry = crate::telemetry::Telemetry::new();
@@ -409,7 +409,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     let mut system = sysinfo::System::new().ok();
     let sampling = engine.sampling_handle();
 
-    // Gateway Mode (ADR-0016), if armed: a downstream endpoint and an upstream pool, running
+    // Gateway Mode (ADR-0048), if armed: a downstream endpoint and an upstream pool, running
     // beside everything else. It is restarted when a verified offer moves this Client's endpoint,
     // since the pool dials that endpoint and would otherwise keep reaching for the old one.
     let mut gateway = spawn_gateway(&config, &shutdown);
@@ -424,7 +424,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             // And the Server hears about it. The line above just reported these settings APPLIED;
             // saying nothing here would have this Client claim, on every reconnect for the life of
             // the state directory, that a destination is in force which it refused to use
-            // (ADR-0017: refused *and reported*).
+            // (ADR-0054: refused *and reported*).
             let error = refused.join("; ");
             tracing::warn!(reason = %error, "not reporting own telemetry");
             engine.connection_settings_outcome(&stored.hash, Err(&error));
@@ -502,7 +502,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
 }
 
 /// Drives `transport` to its end, calling `sample` every `interval` while `reporting` says a
-/// destination is in force (ADR-0017).
+/// destination is in force (ADR-0054).
 ///
 /// `reporting` is asked on every tick, not once: a destination offered over the connection that is
 /// running comes into force halfway through `transport`. Asked once — as a `select!` precondition,

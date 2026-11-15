@@ -237,7 +237,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, config.name.clone());
-    // A renewal says which certificate it renews, signed with that certificate's key (ADR-0016
+    // A renewal says which certificate it renews, signed with that certificate's key (ADR-0048
     // clause 18): the Server carries the host on from it even when a Gateway is in between.
     if let Some(proof) = renewal_proof(config, &key) {
         let uri = rcgen::string::Ia5String::try_from(proof)
@@ -245,7 +245,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
         params.subject_alt_names.push(rcgen::SanType::URI(uri));
     } else if let Some(proof) = bootstrap_proof(config, &key) {
         // An enrolment says which bootstrap certificate it enrols with, signed with its key
-        // (ADR-0016): the Server files the request under it, directly or through a Gateway.
+        // (ADR-0048): the Server files the request under it, directly or through a Gateway.
         let uri = rcgen::string::Ia5String::try_from(proof)
             .map_err(|e| format!("cannot build a bootstrap proof: {e}"))?;
         params.subject_alt_names.push(rcgen::SanType::URI(uri));
@@ -318,7 +318,7 @@ fn renewal_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
     ))
 }
 
-/// The bootstrap proof for `new_key` (ADR-0016), while this Client holds no certificate the Server
+/// The bootstrap proof for `new_key` (ADR-0048), while this Client holds no certificate the Server
 /// issued: the certificate it presents — the bootstrap certificate it enrols with — and a signature
 /// with that certificate's key. `None` with nothing to present, or when the pair cannot be read or
 /// its key cannot sign; the Server then reads the certificate from the handshake of a direct
@@ -676,7 +676,7 @@ mod tests {
     /// An enrolling Client proves in its request the bootstrap certificate it presents — from the
     /// configured pair, and from the identity a `bootstrap.p12` opened to — signed with its key;
     /// once it holds a certificate the Server issued, its renewal carries a renewal proof alone.
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[test]
     fn an_enrolment_request_proves_its_bootstrap_certificate() {
         let dir = tempfile::tempdir().expect("tempdir");

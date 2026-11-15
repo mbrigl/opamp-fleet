@@ -2,9 +2,9 @@
 //!
 //! An `AgentDescription` carries its identity as `KeyValue` pairs, and the keys are fixed strings
 //! the Baseline names. Both ends match on the same ones —
-//! [ADR-0017](../../../docs/adr/0017-what-an-agent-reports-about-itself.md)
+//! [ADR-0054](../../../docs/adr/0054-what-an-agent-reports-about-itself.md)
 //! gives `service.name` and `service.instance.name` their meaning, and
-//! [ADR-0034](../../../docs/adr/0034-packages-signatures-and-delivery.md) makes them
+//! [ADR-0050](../../../docs/adr/0050-packages-signatures-and-delivery.md) makes them
 //! decide *which binary a host is offered*.
 //!
 //! Spelled as literals at each use, a typo in one of them is not a compile error: it is a Selector
@@ -14,14 +14,14 @@
 use crate::proto::{any_value, AnyValue, ArrayValue, KeyValue};
 
 /// The Agent *type* — a Collector distribution, this Client — never an operator's name for one
-/// (ADR-0017). A package is matched against it (ADR-0034).
+/// (ADR-0054). A package is matched against it (ADR-0050).
 pub const SERVICE_NAME: &str = "service.name";
 /// The namespace a Managed Process may state its own attributes in, and the only one it may
-/// (ADR-0017): every key it reports outside it is dropped.
+/// (ADR-0054): every key it reports outside it is dropped.
 pub const SERVICE_PREFIX: &str = "service.";
-/// The Agent's identity — the Supervisor's uid, never a Managed Process's word (ADR-0017).
+/// The Agent's identity — the Supervisor's uid, never a Managed Process's word (ADR-0054).
 pub const SERVICE_INSTANCE_ID: &str = "service.instance.id";
-/// The operator's name for one Agent (ADR-0017).
+/// The operator's name for one Agent (ADR-0054).
 pub const SERVICE_INSTANCE_NAME: &str = "service.instance.name";
 /// The namespace an Agent runs in, reported only where the environment uses one.
 pub const SERVICE_NAMESPACE: &str = "service.namespace";
@@ -29,25 +29,25 @@ pub const SERVICE_NAMESPACE: &str = "service.namespace";
 pub const SERVICE_VERSION: &str = "service.version";
 /// The namespace that is the Supervisor's own statement — the kinds a Client carries, the version
 /// of the Package a Supervisor installed — which neither a Managed Process nor an operator's
-/// `[attributes]` may state (ADR-0017 clauses 8 and 10).
+/// `[attributes]` may state (ADR-0054 clauses 8 and 10).
 pub const SUPERVISOR_PREFIX: &str = "supervisor.";
 /// The version of the Package a Supervisor installed for its Managed Process — the Supervisor's
-/// statement, never the process's (ADR-0017 clause 8) — and what a Package is held against
+/// statement, never the process's (ADR-0054 clause 8) — and what a Package is held against
 /// where it is reported (ADR-0049 clauses 14 and 25).
 pub const SUPERVISOR_PACKAGE_VERSION: &str = "supervisor.package.version";
 /// The operating system in the semantic-convention spelling (`linux`, `darwin`, `windows`) — half
-/// of the platform a package artifact is chosen by (ADR-0034).
+/// of the platform a package artifact is chosen by (ADR-0050).
 pub const OS_TYPE: &str = "os.type";
 /// The human-readable operating system description, e.g. `Ubuntu 26.04 LTS`.
 pub const OS_DESCRIPTION: &str = "os.description";
 /// The architecture in the semantic-convention spelling (`amd64`, `arm64`) — the other half of the
-/// platform (ADR-0034).
+/// platform (ADR-0050).
 pub const HOST_ARCH: &str = "host.arch";
 
 /// The string value of `key`, or `None` when the attribute is absent, holds another type, or is
 /// empty.
 ///
-/// **An empty string is not a value.** That rule is load-bearing rather than tidy: ADR-0034 refuses
+/// **An empty string is not a value.** That rule is load-bearing rather than tidy: ADR-0050 refuses
 /// to offer a package to an Agent of another type, and an Agent reporting `service.name = ""` must
 /// therefore match no package at all rather than match every untyped one. Stating it here is the
 /// point of the module — one of the two copies this replaces enforced it and the other did not.
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(string_value(&attrs, SERVICE_INSTANCE_NAME), Some("edge-01"));
     }
 
-    /// The rule ADR-0034 leans on: an Agent that reports its type as an empty string reports no
+    /// The rule ADR-0050 leans on: an Agent that reports its type as an empty string reports no
     /// type, so it matches no package rather than every untyped one.
     /// Verifies: ADR-0008
     #[test]

@@ -1,4 +1,4 @@
-//! How the Agents of one Client are placed under its Client Agent (ADR-0030 clauses 18 and 19,
+//! How the Agents of one Client are placed under its Client Agent (ADR-0052 clauses 18 and 19,
 //! ADR-0045 clause 8): the rule for one group, which the fleet in memory and a page read from the
 //! store share, the index of the groups this instance holds members of, how the Client Agents of a
 //! group another instance carries are read, and the placing again after a notice or a catch-up.
@@ -8,7 +8,7 @@ use std::sync::MutexGuard;
 
 use super::*;
 
-/// The Agents one Client presents (ADR-0030 clause 19), as far as the Server can tell them apart.
+/// The Agents one Client presents (ADR-0052 clause 19), as far as the Server can tell them apart.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Group {
     /// On a direct connection: the Agents arriving over the same Host.
@@ -19,7 +19,7 @@ pub enum Group {
 }
 
 /// What the Host an Agent arrived over and its Client Agent add to its effective description
-/// (ADR-0030 clauses 18 and 19). Derived from the records and the host register whenever either
+/// (ADR-0052 clauses 18 and 19). Derived from the records and the host register whenever either
 /// changes; never persisted.
 #[derive(Clone, Debug, Default)]
 pub struct Placement {
@@ -35,7 +35,7 @@ pub struct Placement {
     pub ambiguous: bool,
 }
 
-/// Which Agents each [`Group`] holds (ADR-0030 clause 19), so placing one Agent touches its group
+/// Which Agents each [`Group`] holds (ADR-0052 clause 19), so placing one Agent touches its group
 /// alone. Locked strictly after `fleet`, and only while it is held.
 #[derive(Default)]
 pub(super) struct Groups(Mutex<HashMap<Group, HashSet<InstanceUid>>>);
@@ -56,7 +56,7 @@ impl Groups {
 pub(super) type ClientsByGroup = HashMap<Group, Vec<(InstanceUid, BTreeMap<String, String>)>>;
 
 /// How a placement reads the Client Agents of a group that this instance does not hold
-/// (ADR-0030 clause 19,
+/// (ADR-0052 clause 19,
 /// ADR-0045
 /// clause 8).
 pub(super) enum Elsewhere {
@@ -74,7 +74,7 @@ pub(super) enum Elsewhere {
 /// labels it inherits.
 pub type Placed = (Option<InstanceUid>, bool, BTreeMap<String, String>);
 
-/// Where the Agents that arrived over one Host place each other (ADR-0030 clause 19): on a direct
+/// Where the Agents that arrived over one Host place each other (ADR-0052 clause 19): on a direct
 /// connection they are one group, behind a Gateway one group per machine they report. A group with
 /// exactly one Client Agent places the others under it, and they inherit its labels but those in a
 /// reserved space (clause 20); one with more places nobody and marks every member ambiguous.
@@ -114,7 +114,7 @@ pub fn place_on_host(
     placed
 }
 
-/// The one rule of ADR-0030 clause 19, for one group: `members` placed by the group's Client Agents
+/// The one rule of ADR-0052 clause 19, for one group: `members` placed by the group's Client Agents
 /// `clients`, with their labels. Exactly one places every member under it, and the others inherit
 /// its labels but those in a reserved space (clause 20); more place nobody and mark every member
 /// ambiguous; none places nobody. Answers each member's Client Agent, whether the group is
@@ -145,7 +145,7 @@ pub fn place_group(
 }
 
 impl AppState {
-    /// Where the Host an Agent arrived over places it (ADR-0030 clauses 18 and 19): the
+    /// Where the Host an Agent arrived over places it (ADR-0052 clauses 18 and 19): the
     /// `fleet.host.*` values of a Host it arrived over directly, and the group its Client is
     /// recognised in. Nothing without a host register, and nothing for an Agent that names no
     /// Host.
@@ -688,7 +688,7 @@ fn clients_of_host<'a>(
     clients
 }
 
-/// Places the members of one group under their Client Agent (ADR-0030 clause 19): with exactly one,
+/// Places the members of one group under their Client Agent (ADR-0052 clause 19): with exactly one,
 /// the others inherit its labels but those in a reserved space (clause 20); with more than one,
 /// nobody inherits and every member is marked ambiguous; with none, nobody inherits. `elsewhere`
 /// are the group's Client Agents that `fleet` does not hold, with their labels.
@@ -749,7 +749,7 @@ mod tests {
 
     /// The one rule for a group: one Client Agent places every member and the others inherit its
     /// labels; several place nobody and mark every member ambiguous; none places nobody.
-    /// Verifies: ADR-0030
+    /// Verifies: ADR-0052
     #[test]
     fn a_group_is_placed_by_its_one_client_agent_and_by_no_other() {
         let (client, other, member) = (
@@ -778,7 +778,7 @@ mod tests {
 
     /// On a direct connection the Agents of a Host are one group, behind a Gateway one per
     /// machine; one Client Agent places the others, two place nobody.
-    /// Verifies: ADR-0030
+    /// Verifies: ADR-0052
     #[test]
     fn the_agents_of_one_host_are_placed_by_their_group() {
         use opamp::attributes::string_attr;

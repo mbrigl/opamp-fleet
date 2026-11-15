@@ -713,7 +713,7 @@ pub(crate) fn take_up_held_for(state: &AppState, heard: &[Heard]) -> Result<(), 
 
 /// Writes the presence of the Agents this instance carries every `interval`, in one batch under the
 /// instance id of the lease it holds, and nothing while it holds none
-/// (ADR-0030 clause 4). A batch that fails is logged, and what
+/// (ADR-0052 clause 4). A batch that fails is logged, and what
 /// it held is written with the next one. A batch written later than its interval after it was
 /// due is logged as a warning naming how late it was
 /// (ADR-0045
@@ -1441,7 +1441,7 @@ mod tests {
 
     /// Stopping the presence batches waits for the one being written, so the last batch at
     /// shutdown commits after it, never before.
-    /// Verifies: ADR-0030
+    /// Verifies: ADR-0052
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stopping_the_presence_batches_waits_for_the_one_being_written() {
         use std::future::Future as _;

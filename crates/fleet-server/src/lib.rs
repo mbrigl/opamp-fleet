@@ -262,7 +262,7 @@ impl AppState {
 /// The default wiring of the package store to its filesystem adapter (ADR-0009).
 impl packages::PackageStore {
     /// Opens the store in the data directory `data_dir`, loading every persisted Package
-    /// (ADR-0034, ADR-0023).
+    /// (ADR-0050, ADR-0023).
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened, or a Package in it cannot be read, does
@@ -371,7 +371,7 @@ impl packages::PackageStore {
 /// The default wiring of the package offering to the Deployments' filesystem adapter (ADR-0009).
 impl PackageOffering {
     /// Arms the **Deployments** beside the package store, from `deployments/` in the data
-    /// directory `data_dir` (ADR-0034, ADR-0023).
+    /// directory `data_dir` (ADR-0050, ADR-0023).
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them cannot be read.

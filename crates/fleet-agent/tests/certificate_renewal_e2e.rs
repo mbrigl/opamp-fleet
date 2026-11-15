@@ -84,7 +84,7 @@ fn issued(state_dir: &Path) -> Option<(Vec<u8>, time::OffsetDateTime, Option<Str
 /// Each certificate is replaced before it expires, over and over, and the Server holds the Client
 /// as connected after the third — on a main thread no larger than Windows gives it, which the daemon once
 /// overflowed the moment it applied the offered connection settings. The connection presents no certificate here, so the host that every
-/// generation carries on is the renewal proof's doing (ADR-0016 clause 18).
+/// generation carries on is the renewal proof's doing (ADR-0048 clause 18).
 /// Verifies: ADR-0040
 #[tokio::test]
 async fn a_client_renews_each_certificate_before_it_expires() {

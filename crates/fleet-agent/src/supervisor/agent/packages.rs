@@ -1,4 +1,4 @@
-//! The package channel (ADR-0034, ADR-0019): an offer checked and taken or refused, the
+//! The package channel (ADR-0050, ADR-0019): an offer checked and taken or refused, the
 //! download and install in flight, and the `PackageStatuses` this Agent reports about them.
 
 use opamp::proto::{
@@ -11,7 +11,7 @@ use super::{AgentState, Handled, Local};
 use crate::supervisor::ports::{HighWaterMarks, InstalledPackage, PackageFloors};
 
 impl AgentState {
-    /// Opts this Agent into package delivery (ADR-0034): declares `AcceptsPackages` and
+    /// Opts this Agent into package delivery (ADR-0050): declares `AcceptsPackages` and
     /// `ReportsPackageStatuses`, and restores what it last installed so a restarted Client reports
     /// the version it runs and is not re-offered it.
     ///
@@ -111,15 +111,15 @@ impl AgentState {
         self.local.expected_package = Some(name);
     }
 
-    /// Whether this Agent takes Server-offered packages (ADR-0034) — the self-Agent unless
+    /// Whether this Agent takes Server-offered packages (ADR-0050) — the self-Agent unless
     /// `[packages] self_update = false` withdraws the consent (ADR-0019), and every Supervisor, since every Managed
-    /// Process is one this Client installs (ADR-0046). Read without side effects, so a startup
+    /// Process is one this Client installs (ADR-0051). Read without side effects, so a startup
     /// check can ask it before anything is polled.
     pub fn accepts_packages(&self) -> bool {
         self.protocol.declares(AgentCapabilities::AcceptsPackages)
     }
 
-    /// Records how far the artifact download has got (ADR-0034), so the next report carries
+    /// Records how far the artifact download has got (ADR-0050), so the next report carries
     /// `Downloading` with the details. The Baseline only *permits* these interim reports; without
     /// them a multi-hundred-megabyte download is indistinguishable from a stuck install.
     pub fn package_downloading(&mut self, details: PackageDownloadDetails) {
@@ -148,7 +148,7 @@ impl AgentState {
         self.protocol.package_status_changed();
     }
 
-    /// Closes a package's lifecycle the Supervisor applied (ADR-0034): `Ok(version)` records it
+    /// Closes a package's lifecycle the Supervisor applied (ADR-0050): `Ok(version)` records it
     /// Installed and persists it; `Err` reports InstallFailed (the binary was rolled back). Either
     /// way the offered aggregate is echoed, so the Server stops re-offering the same bytes — a
     /// refusal is a report, not a loop.
@@ -232,7 +232,7 @@ impl Local {
         // For the Client's own Agent there is one without an install record too: *this process*. A
         // Client that arrived by `.deb`, `.rpm`, MSI or by hand has installed no package, and
         // reporting nothing there says "nothing installed under this name" — which is precisely the
-        // answer (ADR-0033) that lets a Set of the version it already runs reach it, and a Set
+        // answer (ADR-0049) that lets a Set of the version it already runs reach it, and a Set
         // *older* than it downgrade it. The binary knows what it is; the record only says how it
         // got here.
         let (has_version, has_hash) = self
@@ -297,7 +297,7 @@ impl Local {
     }
 
     /// Reacts to a `PackagesAvailable` offer: the Server selected what this Agent may have
-    /// (ADR-0034), so this side takes the one **top-level** package out of the offer — the binary
+    /// (ADR-0050), so this side takes the one **top-level** package out of the offer — the binary
     /// of its Managed Process — and ignores addons, which a Supervisor has no way to apply.
     pub(super) fn handle_package_offer(
         &mut self,
@@ -487,7 +487,7 @@ impl Local {
             content_hash: file.content_hash.clone(),
             signature: file.signature.clone(),
             // The Baseline asks the Agent to send these on the GET. This Server sends none; any a
-            // Server does send go to its own origin alone (ADR-0034).
+            // Server does send go to its own origin alone (ADR-0050).
             headers: file
                 .headers
                 .as_ref()
@@ -596,7 +596,7 @@ impl Local {
     ///
     /// For the package that carries the Client itself (ADR-0019, ADR-0020) that question is
     /// answered by the version *this process runs*: what a program reports about itself outranks
-    /// what a record says was once installed here (ADR-0033). The record's hash would otherwise end
+    /// what a record says was once installed here (ADR-0049). The record's hash would otherwise end
     /// an offer of the very bytes this host is not running: a state directory that outlived its
     /// binary claims a version, the Server offers it again, and the claim is what swallows the
     /// offer.
@@ -634,7 +634,7 @@ pub struct PackageDownload {
     /// The Ed25519 signature over the artifact; empty means unsigned.
     pub signature: Vec<u8>,
     /// The headers the offer says this download needs, sent only to this Client's own Server
-    /// origin (ADR-0034). The Baseline: *"The Agent SHOULD include the HTTP headers provided in the
+    /// origin (ADR-0050). The Baseline: *"The Agent SHOULD include the HTTP headers provided in the
     /// headers field for the GET request."*
     ///
     /// Raw pairs rather than the wire type, like every other field here: what the download needs is

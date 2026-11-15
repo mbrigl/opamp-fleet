@@ -54,7 +54,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long one call — every round trip of its transaction, the wait for a connection included —
 /// may take before it fails. The Server's callers hold their own locks while a record is written
-/// (ADR-0030 clause 4), so a database that stops answering holds them this long at most. The
+/// (ADR-0052 clause 4), so a database that stops answering holds them this long at most. The
 /// database's own timeouts below end a statement it is still working on; this one ends a call
 /// whose database, or the network to it, does not answer at all.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(15);

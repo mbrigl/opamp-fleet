@@ -142,7 +142,7 @@ pub(super) struct PresenceWritten {
     /// The count of takes last answered for an Agent whose take since lost its answer, or 0 where
     /// this instance created its record: still the count this instance was last answered, so the
     /// shutdown flush writes the record under it, where the row names no holder and no take was
-    /// counted since (ADR-0030 clause 2). No batch names this instance by it. A count answered since
+    /// counted since (ADR-0052 clause 2). No batch names this instance by it. A count answered since
     /// in `takes` outranks it, so an answer leaves it as it is.
     pub(super) before_lost: HashMap<InstanceUid, u64>,
     pub(super) generations: HashMap<InstanceUid, u64>,
@@ -287,7 +287,7 @@ impl PresenceWritten {
 /// strictly after `fleet`.
 pub(super) struct Kept {
     /// Each persisted record's durable digest as last written — the dirty check that keeps a
-    /// heartbeat from reaching any storage backend (ADR-0030).
+    /// heartbeat from reaching any storage backend (ADR-0052).
     pub(super) written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
     /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
     /// batch writes only what moved since.
@@ -836,7 +836,7 @@ impl AppState {
     }
 
     /// Moves what this instance holds of `old` to `new`, as a re-key moves the stored row: the
-    /// labels go with it (ADR-0030 clause 21), the old identity leaves its group, and what was
+    /// labels go with it (ADR-0052 clause 21), the old identity leaves its group, and what was
     /// written of its presence moves with the row. A put-back of its restart kept for retry moves
     /// too, so the retry queues the restart on the row's new identity
     /// (ADR-0045
@@ -1046,7 +1046,7 @@ impl AppState {
 
     /// Answers a report of an Agent whose record another instance forgot while this one wrote it:
     /// the Agent is dropped here too and its session ended, and the reply offers nothing
-    /// (ADR-0030 clause 10).
+    /// (ADR-0052 clause 10).
     ///
     /// Made after the report's write found no row, so what it reads is read before the fleet lock
     /// is taken: the re-key read back, and the Client Agents of the group the Agent leaves.
@@ -1133,7 +1133,7 @@ impl AppState {
 
     /// Writes the presence of the Agents this instance carries that moved since the last batch, in
     /// one batch naming `holder`, the instance id of the lease it serves under
-    /// (ADR-0030 clause 4): a heartbeat reaches the store at
+    /// (ADR-0052 clause 4): a heartbeat reaches the store at
     /// most once per batch and Agent. An Agent it holds and never carried under `holder`, one
     /// restored at startup among them, is written only once it is connected here, so the first
     /// batch writes the Agents carried and not the fleet; under a new holder the connected ones
@@ -1234,7 +1234,7 @@ impl AppState {
 
     /// On a shared store, takes `uid` at once as connected here, naming this instance as its
     /// holder, so that no other instance forgets it as not connected while the next batch is due
-    /// (ADR-0030 clause 11), and so that an instance that
+    /// (ADR-0052 clause 11), and so that an instance that
     /// carried it before stops carrying it
     /// (ADR-0045
     /// clause 8): one write per connect, never per heartbeat. A take that makes the Agent's holder
@@ -1395,7 +1395,7 @@ impl AppState {
     }
 
     /// The Agents forgotten while connection `conn` carried them, taken once: its loop ends their
-    /// session (ADR-0030 clause 10).
+    /// session (ADR-0052 clause 10).
     pub fn take_forgotten(&self, conn: ConnId) -> Vec<InstanceUid> {
         self.forgotten
             .lock()

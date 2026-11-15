@@ -1,4 +1,4 @@
-//! The register, the revocation list and the Hosts on the filesystem (ADR-0040, ADR-0030,
+//! The register, the revocation list and the Hosts on the filesystem (ADR-0040, ADR-0052,
 //! ADR-0023): the default adapter behind [`LedgerStore`](crate::revocation::LedgerStore).
 
 use std::collections::BTreeMap;
@@ -213,7 +213,7 @@ impl LedgerStore for FsLedgerStore {
 
     /// Answers from the Hosts as last written, which the next write of the Hosts carries the
     /// binding into: another Host speaking for `instance_uid` holds it, unless it is marked as a
-    /// Gateway. A Gateway's Host is bound none (ADR-0030 clause 16), but its file may list
+    /// Gateway. A Gateway's Host is bound none (ADR-0052 clause 16), but its file may list
     /// `instance_uid`s a release before this one kept there, and no migration rewrites the files.
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
         let written = self.written_hosts.lock().expect("hosts lock");
@@ -445,7 +445,7 @@ mod tests {
 
     /// A Host file written before a Host had a valid until loads without one, and one written now
     /// keeps it across a reopen.
-    /// Verifies: ADR-0030
+    /// Verifies: ADR-0052
     #[test]
     fn a_host_file_without_a_valid_until_still_loads() {
         let dir = tempfile::tempdir().expect("tempdir");

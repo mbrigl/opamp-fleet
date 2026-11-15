@@ -302,7 +302,7 @@ impl LedgerStore for PgLedgerStore {
     /// `row` holds it, when the store has none, so no binding stands without its Host's row, and
     /// that row is held for the
     /// transaction: a Gateway mark committed before it is seen, and one that waits for it releases
-    /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0030 clause 16),
+    /// what it bound. A Host whose row is marked as a Gateway is bound none (ADR-0052 clause 16),
     /// and one that holds [`MAX_UIDS_PER_HOST`](crate::revocation::MAX_UIDS_PER_HOST) bindings
     /// of other `instance_uid`s none more.
     /// The hold is one that conflicts with itself, so two binders of one Host wait for each other
@@ -690,7 +690,7 @@ async fn write_seen(client: &impl GenericClient, host: &str, entry: &Host) -> Re
 
 /// Binds every `instance_uid` `entry` speaks for to `host`, in a database that holds no binding of
 /// them yet: what an import of a data directory writes. A Gateway's Host is bound none
-/// (ADR-0030 clause 16), whatever its file lists.
+/// (ADR-0052 clause 16), whatever its file lists.
 pub(crate) async fn write_bindings(
     client: &impl GenericClient,
     host: &str,
@@ -1241,7 +1241,7 @@ mod tests {
         );
         assert_eq!(ledger.hosts, fewer);
 
-        // A Gateway's Host is bound none, whatever its record lists (ADR-0030 clause 16): the next
+        // A Gateway's Host is bound none, whatever its record lists (ADR-0052 clause 16): the next
         // Host that reports an instance_uid it lists binds it. A Host that is gone takes its
         // bindings with it.
         let store = open();
@@ -1697,9 +1697,9 @@ mod tests {
 
     /// A Gateway's mark and a binding to its Host made at once never leave a binding to it: the
     /// binding waits for the mark and sees it, or the mark waits for the binding and releases it
-    /// (ADR-0030 clause 16). The Host has no row before either; a register entry names it, so the
+    /// (ADR-0052 clause 16). The Host has no row before either; a register entry names it, so the
     /// mark knows it.
-    /// Verifies: ADR-0030
+    /// Verifies: ADR-0052
     #[test]
     fn a_gateway_mark_and_a_binding_at_once_leave_the_gateway_bound_none() {
         let Some(test) = TestDatabase::named() else {
@@ -1863,8 +1863,8 @@ mod tests {
 
     /// A certificate an approval mints a Host for is registered with the Host's row or not at all:
     /// the row is made in the register's own write, with the approval, and a refused write makes
-    /// neither (ADR-0030 clause 15).
-    /// Verifies: ADR-0030
+    /// neither (ADR-0052 clause 15).
+    /// Verifies: ADR-0052
     #[test]
     fn an_approvals_host_is_written_with_its_register_entry_or_not_at_all() {
         let Some(test) = TestDatabase::named() else {
@@ -2368,8 +2368,8 @@ mod tests {
     /// A release and a re-key hold for every instance, whatever the instance that makes them holds
     /// in memory: B never heard of A's bindings, and what it releases and moves is what a third
     /// instance finds stored; a Gateway's mark leaves its Host bound none in the store
-    /// (ADR-0030 clauses 10 and 16).
-    /// Verifies: ADR-0030
+    /// (ADR-0052 clauses 10 and 16).
+    /// Verifies: ADR-0052
     #[test]
     fn a_release_a_rekey_and_a_gateway_mark_hold_for_every_instance() {
         let Some(test) = TestDatabase::named() else {
@@ -2409,8 +2409,8 @@ mod tests {
 
     /// A stale instance re-keys only what the store binds: after another instance released the
     /// old `instance_uid`, a re-key on an instance that never heard of the release binds nothing,
-    /// and the new `instance_uid` is bound by the next Host that reports it (ADR-0030 clause 10).
-    /// Verifies: ADR-0030
+    /// and the new `instance_uid` is bound by the next Host that reports it (ADR-0052 clause 10).
+    /// Verifies: ADR-0052
     #[test]
     fn a_stale_rekey_binds_nothing_another_instance_released() {
         let Some(test) = TestDatabase::named() else {
@@ -2787,8 +2787,8 @@ mod tests {
 
     /// A Gateway's Host is bound none when the bindings leave the arrays: an `instance_uid` a
     /// Gateway's array and a Host's array both list moves to the Host, and the migration passes
-    /// (ADR-0030 clause 16).
-    /// Verifies: ADR-0030
+    /// (ADR-0052 clause 16).
+    /// Verifies: ADR-0052
     #[test]
     fn the_bindings_leave_a_gateways_array_behind() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -2818,8 +2818,8 @@ mod tests {
         );
     }
 
-    /// An import binds none of the `instance_uid`s a Gateway's file lists (ADR-0030 clause 16).
-    /// Verifies: ADR-0030
+    /// An import binds none of the `instance_uid`s a Gateway's file lists (ADR-0052 clause 16).
+    /// Verifies: ADR-0052
     #[test]
     fn an_import_binds_nothing_to_a_gateways_host() {
         let Some(test) = TestDatabase::named() else {
@@ -2941,8 +2941,8 @@ mod tests {
 
     /// No instance writes a Host's mark back from a stale copy: B takes the Gateway mark away, A
     /// never heard of it and moves the Host's valid until forward at its next report, and the
-    /// Host stays unmarked (ADR-0030 clause 16).
-    /// Verifies: ADR-0030
+    /// Host stays unmarked (ADR-0052 clause 16).
+    /// Verifies: ADR-0052
     #[test]
     fn a_stale_instance_does_not_write_a_gateways_mark_back() {
         let Some(test) = TestDatabase::named() else {
@@ -2964,8 +2964,8 @@ mod tests {
 
     /// A Host the store holds marked as a Gateway is bound none, however stale the binder's view:
     /// B never heard of A's mark, its report from the Gateway binds nothing, and the
-    /// `instance_uid` stays free for the Host that carries it (ADR-0030 clause 16).
-    /// Verifies: ADR-0030
+    /// `instance_uid` stays free for the Host that carries it (ADR-0052 clause 16).
+    /// Verifies: ADR-0052
     #[test]
     fn a_stale_instance_binds_nothing_to_a_gateways_host() {
         let Some(test) = TestDatabase::named() else {
@@ -2992,7 +2992,7 @@ mod tests {
     /// decided by the database, in the transaction that writes it: B's report wrote the Host, A,
     /// which hears nothing, marks it and holds it as stored, and B holds the mark once it hears of
     /// it; a host only a register entry names is marked too (ADR-0045 clause 19;
-    /// ADR-0030 clause 16).
+    /// ADR-0052 clause 16).
     /// Verifies: ADR-0045
     #[test]
     fn a_gateway_mark_finds_a_host_another_instance_wrote() {
@@ -3072,7 +3072,7 @@ mod tests {
 
     /// A Gateway's mark of a host neither the Hosts nor the register names is refused through any
     /// instance and writes nothing, in either direction, though the instance still holds the Host
-    /// in memory after another instance forgot it (ADR-0045 clause 19; ADR-0030
+    /// in memory after another instance forgot it (ADR-0045 clause 19; ADR-0052
     /// clause 16).
     /// Verifies: ADR-0045
     #[test]
@@ -3157,7 +3157,7 @@ mod tests {
 
     /// A Gateway's mark made while another instance forgets the Host waits for the forget and
     /// finds the Host gone: it is refused and writes no row back, where no register entry names
-    /// the host (ADR-0045 clause 19; ADR-0030 clauses 15 and 16).
+    /// the host (ADR-0045 clause 19; ADR-0052 clauses 15 and 16).
     /// Verifies: ADR-0045
     #[test]
     fn a_gateway_mark_made_while_its_host_is_forgotten_writes_no_row_back() {

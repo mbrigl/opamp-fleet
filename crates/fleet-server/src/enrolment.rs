@@ -52,8 +52,8 @@ pub struct Request {
     pub instance_uid: Vec<u8>,
 }
 
-/// Who asked: the bootstrap certificate the request proves (ADR-0016 clause 22), and from where — the
-/// peer address of an enrolment connection, or the Gateway's host it came through (ADR-0016
+/// Who asked: the bootstrap certificate the request proves (ADR-0048 clause 22), and from where — the
+/// peer address of an enrolment connection, or the Gateway's host it came through (ADR-0048
 /// clause 11).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -228,7 +228,7 @@ pub enum DecisionError {
     NotFound,
     /// The bootstrap certificate the request came with is revoked; the request is withdrawn.
     Revoked,
-    /// The bootstrap certificate's subject cannot be carried into a host certificate (ADR-0016
+    /// The bootstrap certificate's subject cannot be carried into a host certificate (ADR-0048
     /// clause 23); the text names the attribute. Nothing is signed.
     Subject(String),
     /// The CA could not sign the request.
@@ -925,7 +925,7 @@ impl Enrolment {
     /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id, and for a key
     /// that is rejected, here or in the store, [`DecisionError::Revoked`] when the request's
     /// bootstrap certificate is revoked, [`DecisionError::Subject`] when its subject cannot be
-    /// carried into the host certificate (ADR-0016 clause 23), [`DecisionError::Sign`] when the CA
+    /// carried into the host certificate (ADR-0048 clause 23), [`DecisionError::Sign`] when the CA
     /// or the register refuses the request, and [`DecisionError::Store`] when the decision could
     /// not be written; the request then still waits.
     ///
@@ -958,7 +958,7 @@ impl Enrolment {
             return Err(self.withdrawn(state, id));
         }
         // The bootstrap certificate's values, under the rules they were issued by, and never the
-        // request's (ADR-0027 clause 11 and ADR-0016 clause 23).
+        // request's (ADR-0027 clause 11 and ADR-0048 clause 23).
         let subject = entry.pending.requester.carried.clone().map_err(|e| {
             DecisionError::Subject(format!(
                 "the bootstrap certificate's subject cannot be carried into a host \

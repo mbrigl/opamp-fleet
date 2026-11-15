@@ -1,4 +1,4 @@
-//! A stub Managed Process for tests (ADR-0046): pure Rust so it behaves identically on Linux,
+//! A stub Managed Process for tests (ADR-0051): pure Rust so it behaves identically on Linux,
 //! macOS, and Windows CI — no shell scripts.
 //!
 //! Behaviour, driven entirely by arguments:
@@ -13,12 +13,12 @@
 //!   crash-path tests. Without them the stub sleeps until it is killed.
 //! - `--ignore-hup` (Unix only) — ignore `SIGHUP`, the way a daemon that reloads on it survives
 //!   the signal; without the flag the default disposition terminates the stub. What the reload
-//!   tests (ADR-0046) use for both sides of `reload-or-restart`.
+//!   tests (ADR-0051) use for both sides of `reload-or-restart`.
 //! - `--record-hup <path>` (Unix only) — survive `SIGHUP` and write `hups=<count>` to `path`
 //!   each time one arrives, so a test sees that the signal reached this process, not only that
 //!   the process is still there.
 //!
-//! A kind that knows its agent states the arguments itself (ADR-0046), so a test driving one
+//! A kind that knows its agent states the arguments itself (ADR-0051), so a test driving one
 //! cannot pass the stub a flag. It writes them, one per line, into `<program>.args` beside the
 //! copy of the stub it installed, and the stub adds them to its own.
 

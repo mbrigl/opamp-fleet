@@ -1284,7 +1284,7 @@ async fn read_assignments(
     Ok(assignments)
 }
 
-/// The columns a report decides (ADR-0030 clause 2): every
+/// The columns a report decides (ADR-0052 clause 2): every
 /// column but the key, the labels, `restart_pending` and the assignment's.
 const REPORTED: [&str; 12] = [
     "sequence_num",
@@ -1860,7 +1860,7 @@ mod tests {
     /// An instance that does not hold an Agent another instance re-released counts its old pins
     /// until it reads the whole fleet again, and its forget of that Agent answers the
     /// Configurations the stored assignment named as it removed the record, not what it read.
-    /// Verifies: ADR-0045, ADR-0033
+    /// Verifies: ADR-0045, ADR-0049
     #[test]
     fn a_forget_answers_what_the_stored_assignment_named() {
         let Some(test) = TestDatabase::named() else {
@@ -1901,7 +1901,7 @@ mod tests {
     /// A report's write on PostgreSQL leaves what the acts wrote through another instance: the
     /// labels, a queued restart and the assignment stay as they are stored, while what the report
     /// decides is written; a record that is not there is not written.
-    /// Verifies: ADR-0030, ADR-0045
+    /// Verifies: ADR-0052, ADR-0045
     #[test]
     fn a_report_written_on_postgres_keeps_what_the_acts_wrote() {
         let Some(test) = TestDatabase::named() else {
@@ -1959,7 +1959,7 @@ mod tests {
     /// re-key waits for it, and copies the row as B committed it, so B's labels stay under the new
     /// key. A trigger holds B's write open, mid-transaction, until the test lets it go, once A
     /// waits for B.
-    /// Verifies: ADR-0030
+    /// Verifies: ADR-0052
     #[test]
     fn a_label_change_committed_during_a_rekey_moves_with_the_row() {
         let Some(test) = TestDatabase::named() else {
@@ -2021,7 +2021,7 @@ mod tests {
     }
 
     /// A re-key on PostgreSQL moves every column of the row, one the code names nowhere included.
-    /// Verifies: ADR-0030
+    /// Verifies: ADR-0052
     #[test]
     fn a_rekey_on_postgres_moves_every_column() {
         let Some(test) = TestDatabase::named() else {
@@ -2048,7 +2048,7 @@ mod tests {
     /// A release on PostgreSQL writes the assignment of each record alone: the labels, the queued
     /// restart and what a report decided stay as they are stored, whatever the released record
     /// carries of them.
-    /// Verifies: ADR-0030
+    /// Verifies: ADR-0052
     #[test]
     fn a_release_on_postgres_writes_the_assignment_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -2176,7 +2176,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0023, ADR-0033
+    /// Verifies: ADR-0023, ADR-0049
     #[test]
     fn stored_assignments_are_held_to_the_write_rules_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2199,7 +2199,7 @@ mod tests {
 
     /// Opening the adapter reads the assignments alone, and the load reads every record: both
     /// are refused.
-    /// Verifies: ADR-0023, ADR-0033
+    /// Verifies: ADR-0023, ADR-0049
     #[test]
     fn stored_assignments_are_held_to_the_write_rules_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -2229,7 +2229,7 @@ mod tests {
     /// The count of the Agents' records follows every row added and removed, whichever call adds
     /// or removes it, and the ceiling is decided from it and not from the rows: a count that says
     /// full refuses a new Agent though fewer rows are stored.
-    /// Verifies: ADR-0023, ADR-0030
+    /// Verifies: ADR-0023, ADR-0052
     #[test]
     fn the_count_of_agents_follows_every_addition_and_removal_and_decides_the_ceiling() {
         let Some(test) = TestDatabase::named() else {
@@ -2519,7 +2519,7 @@ mod tests {
     /// assignment over it: the release pins what it pins after the query and the read of the
     /// records that began before it, so a deletion it pins stays refused. A read that began after
     /// it takes up what another instance committed.
-    /// Verifies: ADR-0033, ADR-0023
+    /// Verifies: ADR-0049, ADR-0023
     #[test]
     fn a_read_that_began_before_a_release_does_not_undo_what_it_pins() {
         let Some(test) = TestDatabase::named() else {
@@ -2621,7 +2621,7 @@ mod tests {
     /// Of two reads in flight, the one that ends first leaves what the other is decided by: a
     /// release committed while both were in flight is still noted when the older read takes up its
     /// snapshot, so it does not take the older assignment over the release.
-    /// Verifies: ADR-0033, ADR-0023
+    /// Verifies: ADR-0049, ADR-0023
     #[test]
     fn a_read_that_ends_first_leaves_what_an_older_read_in_flight_is_decided_by() {
         let Some(test) = TestDatabase::named() else {
@@ -2692,7 +2692,7 @@ mod tests {
     /// The query reads each record with its stored presence: connected only while the instance
     /// its presence names holds a live lease. Opening the adapter reads the stored assignments
     /// alone, so what pins what is answered without a record loaded.
-    /// Verifies: ADR-0030, ADR-0023
+    /// Verifies: ADR-0052, ADR-0023
     #[test]
     fn the_query_reads_the_stored_presence_and_opening_reads_the_assignments_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -2778,7 +2778,7 @@ mod tests {
     /// until the read waits for it. A read in one statement waits before it reads anything, and
     /// reads what the rollout committed; `query` reads in a snapshot taken before it waits, and
     /// reads what was there before.
-    /// Verifies: ADR-0030, ADR-0045
+    /// Verifies: ADR-0052, ADR-0045
     #[test]
     fn an_agent_is_read_in_one_snapshot_whatever_commits_while_it_waits() {
         let Some(test) = TestDatabase::named() else {
@@ -2882,7 +2882,7 @@ mod tests {
     /// commits while the read is part-way, its Configurations held at a gate, is not read in part.
     /// The creation counts the rows of `agents` first, so the gate stands in the Configurations,
     /// behind a view in place of their table.
-    /// Verifies: ADR-0030, ADR-0045
+    /// Verifies: ADR-0052, ADR-0045
     #[test]
     fn a_creation_that_finds_the_agent_reads_it_in_one_snapshot() {
         let Some(test) = TestDatabase::named() else {
@@ -3241,7 +3241,7 @@ mod tests {
     /// presence, and one under an earlier take leaves the presence a take wrote since. Forgetting decides from it: an Agent a live
     /// lease holds and that was heard from recently is kept; one whose holder holds no live lease
     /// reads as disconnected and goes, announced; one silent past the bound goes too.
-    /// Verifies: ADR-0030, ADR-0045
+    /// Verifies: ADR-0052, ADR-0045
     #[test]
     fn a_presence_batch_names_the_holder_and_forgetting_decides_from_it() {
         let Some(test) = TestDatabase::named() else {
@@ -3501,7 +3501,7 @@ mod tests {
     /// the same millisecond is not written, although its `last_seen_ms` is the stored one. A batch
     /// that names its instance anew answers the count it raised, and a disconnect under that count
     /// is written.
-    /// Verifies: ADR-0030, ADR-0045
+    /// Verifies: ADR-0052, ADR-0045
     #[test]
     fn a_disconnect_is_written_under_the_take_it_was_carried_by_whatever_the_clocks_say() {
         let Some(test) = TestDatabase::named() else {
@@ -3772,7 +3772,7 @@ mod tests {
     /// Two presence batches over the same two Agents, given them in opposite orders, both commit:
     /// each locks the rows in the order of their `instance_uid` before it writes them, as the
     /// gated release test above shows for a release.
-    /// Verifies: ADR-0030
+    /// Verifies: ADR-0052
     #[test]
     fn two_presence_batches_over_the_same_agents_in_opposite_orders_both_commit() {
         let Some(test) = TestDatabase::named() else {
@@ -3993,7 +3993,7 @@ mod tests {
     /// whichever comes first: the second waits for the first's commit rather than deadlocking, and
     /// both writes stay, each in the columns it names. The first is held at a gate the test opens
     /// once the second waits for a row.
-    /// Verifies: ADR-0045, ADR-0030
+    /// Verifies: ADR-0045, ADR-0052
     #[test]
     fn a_release_and_a_presence_batch_over_the_same_agents_at_once_both_commit() {
         let Some(test) = TestDatabase::named() else {
@@ -4137,7 +4137,7 @@ mod tests {
     /// the rows and their taking them up: neither takes the count of what pins the Deployment
     /// below the release's, the one that answers first included, whose end must not drop what
     /// the other is still decided by.
-    /// Verifies: ADR-0033, ADR-0023
+    /// Verifies: ADR-0049, ADR-0023
     #[test]
     fn two_reads_on_their_own_threads_under_a_commit_keep_what_it_pins() {
         let Some(test) = TestDatabase::named() else {

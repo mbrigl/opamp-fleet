@@ -45,14 +45,14 @@ than anywhere else, and none beats one that has stopped being true.
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md),
   ADR-0040). A Client in Gateway Mode carries other Clients' Agents over its own upstream
   connections and refuses what the Server revoked
-  ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)).
+  ([ADR-0048](adr/0048-client-modes-and-the-gateway.md)).
 - **Managed Processes** run on the Client's host under a Supervisor each; a Collector reports
   through its own `opampextension` to the Supervisor Endpoint, which admits only the process its
-  Supervisor started ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)).
+  Supervisor started ([ADR-0048](adr/0048-client-modes-and-the-gateway.md)).
 - **Package downloads** come from the Server alone: every artifact is uploaded to it, and a
   Client fetches only from its own Server's origin, or from its Gateway. What arrives is checked
   against its hash and the operator's signature
-  ([ADR-0034](adr/0034-packages-signatures-and-delivery.md)).
+  ([ADR-0050](adr/0050-packages-signatures-and-delivery.md)).
 - **The service manager** starts the Client and restarts it after a self-update
   ([ADR-0019](adr/0019-the-client-updates-itself-from-a-signed-package.md)). Where a process
   account is registered, it also runs the second service, which starts the Managed Processes
@@ -114,9 +114,9 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   surface in `cli`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
   fetch (`fetch`), pack, hash and sign package artifacts — or sign a Package's signing file from
-  the UI (`signing`, ADR-0034) — its `pki` commands make the fleet's certificates and, through
+  the UI (`signing`, ADR-0050) — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
-  of a PKCS#12 file (ADR-0047).
+  of a PKCS#12 file (ADR-0053).
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
@@ -212,7 +212,7 @@ no module.
   locks — is the core module `fleet::held`, behind the same `AppState` entry points. What it keeps
   of each Agent beside its record is one entry, `Kept`, which a forget drops and a re-key moves as
   one. How the Agents of one Client are placed under its Client Agent
-  ([ADR-0030](adr/0030-the-fleet-record-of-agents-and-hosts.md) clause 19) is the core module
+  ([ADR-0052](adr/0052-the-fleet-record-of-agents-and-hosts.md) clause 19) is the core module
   `fleet::placement`, behind the same `AppState` entry points: the rule for one group, which the
   fleet in memory and a page `postgres::agent_page` reads share; the index of the groups this
   instance holds members of; whether the Client Agents of a group another instance carries are read
@@ -226,7 +226,7 @@ no module.
   from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)). `pki` is `server pki status`
-  and the running Server's warnings before a certificate it depends on ends (ADR-0047).
+  and the running Server's warnings before a certificate it depends on ends (ADR-0053).
 - **Server admission** — `transport::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Behind
@@ -242,7 +242,7 @@ no module.
   each with the subject values of its certificate, its Gateway mark and the Agents bound to it —
   behind the `LedgerStore` port
   ([ADR-0040](adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
-  [ADR-0030](adr/0030-the-fleet-record-of-agents-and-hosts.md)).
+  [ADR-0052](adr/0052-the-fleet-record-of-agents-and-hosts.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
   marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
   `fleet_core::rate`; `transport` takes a token for each
@@ -313,7 +313,7 @@ no module.
   reads `limit` and `cursor`, encodes the opaque cursor, and writes `X-Total-Count` and the `Link`
   of the four lists that page.
 - **Client supervision** — `supervisor::ports` is the Port a Plugin implements
-  ([ADR-0046](adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)),
+  ([ADR-0051](adr/0051-supervisor-mode-and-its-kinds.md)),
   and `shutdown` the handle every task stops on; the Plugins and the process runner are its
   adapters, among them the two Supervisors
   this project brings, the Collector's in `supervisor::collector` and the example Custom
@@ -402,27 +402,27 @@ no module.
   building blocks
   ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
-  ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)),
+  ([ADR-0048](adr/0048-client-modes-and-the-gateway.md)),
   and its `floors` fetches the floors and hands the hosts behind it the ones it last fetched,
   behind the same verdict
   ([ADR-0035](adr/0035-package-versions-high-water-mark-and-floor.md)).
   The Gateway's `cache` sees every offer `registry` hands down, fetches each artifact offered on
   the Server's route once into the state directory, and serves it on the downstream download route
-  to the hosts it was offered to ([ADR-0034](adr/0034-packages-signatures-and-delivery.md)).
+  to the hosts it was offered to ([ADR-0050](adr/0050-packages-signatures-and-delivery.md)).
   Which host the Gateway takes to speak for an `instance_uid` is decided in the core module
   `gateway::policy`; the cache holds the bindings and keeps them across restarts in the journal
   `gateway::store` reads and writes beside the artifacts; while that journal cannot be read the
   Gateway carries no downstream Agent
-  ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)).
+  ([ADR-0048](adr/0048-client-modes-and-the-gateway.md)).
   With a bootstrap CA the Gateway tells an
   enrolling peer from a member and relays its one plain-HTTP enrolment request without a binding
-  ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)).
+  ([ADR-0048](adr/0048-client-modes-and-the-gateway.md)).
   `gateway::rate` holds a token bucket per downstream host, or per enrolling peer's address, in a
   table of `fleet_core::rate`; the downstream endpoint and the download route take a token before
   they do anything else
   ([ADR-0022](adr/0022-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
-  ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)). The transports, the Gateway, telemetry
+  ([ADR-0048](adr/0048-client-modes-and-the-gateway.md)). The transports, the Gateway, telemetry
   (`telemetry`) and the service runtime are adapters around it.
 - **Client service** — `service` is what makes the Client an OS service, but for its log on disk.
   `service::manager` registers, starts, stops and deregisters the Client's
@@ -458,11 +458,11 @@ On the Client, `engine` routes the offer to the Agent's Supervisor, which writes
 the Supervisor's `config/` directory and restarts its process; the Agent reports `APPLIED` or
 `FAILED` with the reason, and the Server stops offering once the reported hash matches
 ([ADR-0032](adr/0032-configurations-and-the-rest-api.md),
-[ADR-0033](adr/0033-deployments-and-rollouts.md)). A
+[ADR-0049](adr/0049-deployments-and-rollouts.md)). A
 Configuration typed for the Client
 itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes into
 `supervisor.toml` before it starts or stops anything
-([ADR-0046](adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)).
+([ADR-0051](adr/0051-supervisor-mode-and-its-kinds.md)).
 
 **An Agent is placed under its Host.** Each Agent record names the Host it last arrived over — its
 own, or the Gateway's behind one. `fleet` derives from it, per Agent, what its effective description
@@ -474,7 +474,7 @@ another instance announces a binding of its Host, a Client Agent arriving behind
 the labels or the forgetting of a Client Agent that instance carries, and every group after a
 missed notification, so every Selector match
 reads the same description without a fleet-wide pass
-([ADR-0030](adr/0030-the-fleet-record-of-agents-and-hosts.md)).
+([ADR-0052](adr/0052-the-fleet-record-of-agents-and-hosts.md)).
 
 **A package reaches an Agent.** An operator uploads an artifact into `packages` and signs its
 entry there — `packages` checks the signature against `[packages] verification_key` when the
@@ -483,7 +483,7 @@ releases it, together with the Configurations the Deployment holds. The Agent is
 with its entry's signature; the Client downloads it
 from its own Server's origin and nowhere else, and `api` serves it only when `fleet` finds it
 offered to an Agent the certificate's host speaks for, by the test `packages` shares with the
-offer ([ADR-0034](adr/0034-packages-signatures-and-delivery.md)); behind a Gateway the
+offer ([ADR-0050](adr/0050-packages-signatures-and-delivery.md)); behind a Gateway the
 Client downloads it from the Gateway's cache, which `gateway` fetched once from the Server. The
 Client checks hash and signature in `packages`, and the
 Supervisor swaps the program, keeps the previous one for its grace period and rolls back if the
@@ -502,7 +502,7 @@ seal both into the PKCS#12 file it keeps, the key's only way out
 ([ADR-0027](adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
 A fresh host presents a bootstrap certificate while an operator has
 the enrolment window open — to the Server, or to a Gateway that relays its request — and proves it
-in its CSR ([ADR-0016](adr/0016-client-modes-and-the-gateway.md));
+in its CSR ([ADR-0048](adr/0048-client-modes-and-the-gateway.md));
 the request is filed under the fingerprint of the key it asks a certificate for and waits until
 an operator approves or rejects it — a rejected key stays refused beyond the window, and may be
 rejected before its request arrives — and the certificate it

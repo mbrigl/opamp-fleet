@@ -87,7 +87,7 @@ pub fn verifies(key: &[u8], agent_type: &str, floor: &Floor) -> bool {
 pub struct FloorFile {
     path: PathBuf,
     /// `[packages] verification_key`: without it nothing verifies, so nothing is fetched or kept —
-    /// and no package is taken anyway (ADR-0034).
+    /// and no package is taken anyway (ADR-0050).
     key: Option<Vec<u8>>,
     kept: Mutex<Result<Floors, String>>,
     /// When a fetch was last tried, whatever came of it.
