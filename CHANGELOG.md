@@ -147,7 +147,7 @@ carries a date once its tag exists.
     published, as Package version `<major>.<minor>.<patch>` of tag `v<major>.<minor>.<patch>`. The
     upload also stores the default configuration `telegraf-conf` from `config/examples/`, left
     untouched where the Server already holds it. **What to do:** install `gpgv` (Debian and Ubuntu
-    have it; on macOS and Windows install GnuPG) on the host that fetches Telegraf 1.34.4 or later.
+    have it; on macOS install GnuPG) on the host that fetches Telegraf 1.34.4 or later.
 
 ## [0.8.3] - 2026-11-15
 

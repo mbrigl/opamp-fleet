@@ -267,7 +267,7 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
   requests (one to list versions, one to read a release), so this is only reached by scripting.
   The error says so rather than leaving you guessing.
 - **`gpgv` on the fetching host** for Telegraf 1.34.4 and later, whose signature it checks.
-  Debian and Ubuntu ship it; on macOS and Windows it comes with GnuPG.
+  Debian and Ubuntu ship it; on macOS it comes with GnuPG.
 - **Only amd64 and arm64 (and 386 where published)** are named, matching what Agents report as
   `os.type` and `host.arch`.
 

@@ -356,7 +356,7 @@ struct Download {
 }
 
 /// An OpenPGP signature published beside an artifact, checked with `gpgv` against a key the tool
-/// carries — Telegraf's `.asc` (ADR-draft-telegraf clause 3).
+/// carries — Telegraf's `.asc` (ADR-draft-telegraf clause 8).
 struct DetachedSignature {
     /// The `.asc` beside the artifact.
     url: String,
@@ -403,7 +403,7 @@ enum ChecksumSource {
     BareDigest { url: String },
     /// A digest the release notes publish on another origin than the artifact's, which a
     /// `sha256sum`-style file beside the artifact must agree with where it exists — Telegraf's
-    /// (ADR-draft-telegraf clause 3): notes on GitHub, artifact and `.DIGESTS` on InfluxData's CDN.
+    /// (ADR-draft-telegraf clause 8): notes on GitHub, artifact and `.DIGESTS` on InfluxData's CDN.
     ReleaseNotes {
         /// What the notes publish for this artifact; `None` when they name it nowhere, which
         /// refuses the artifact.
@@ -838,7 +838,7 @@ async fn plans(agent: AgentKind, release: &Release<'_>) -> Result<Vec<Plan>, Str
 }
 
 /// The notes of one release — its body, as the release page shows it. Telegraf publishes each
-/// asset's SHA-256 there (ADR-draft-telegraf clause 3).
+/// asset's SHA-256 there (ADR-draft-telegraf clause 8).
 async fn release_notes(source: &Source, tag: &str) -> Result<String, String> {
     let body = get_json(&format!(
         "https://api.github.com/repos/{}/releases/tags/{tag}",
@@ -1044,16 +1044,16 @@ fn telegraf_plans(version: &str, release: &str, notes: &str) -> Vec<Plan> {
 }
 
 /// The first Telegraf release from which InfluxData publishes an `.asc` beside every asset; from
-/// it on, every release does (ADR-draft-telegraf clause 3). Before it a few releases carry one
+/// it on, every release does (ADR-draft-telegraf clause 8). Before it a few releases carry one
 /// for some assets, and none for most.
 const TELEGRAF_SIGNED_FROM: &str = "1.34.4";
 
 /// The first Telegraf release from which InfluxData publishes a `.DIGESTS` beside every asset;
-/// from it on, every release does (ADR-draft-telegraf clause 3). Between 1.36.4 and 1.38.4 a few
+/// from it on, every release does (ADR-draft-telegraf clause 8). Between 1.36.4 and 1.38.4 a few
 /// assets carry one and most do not.
 const TELEGRAF_DIGESTS_FROM: &str = "1.39.0";
 
-/// InfluxData's package-signing key, carried in the tool (ADR-draft-telegraf clause 3):
+/// InfluxData's package-signing key, carried in the tool (ADR-draft-telegraf clause 8):
 /// `InfluxData Package Signing Key <support@influxdata.com>`, primary key
 /// [`INFLUXDATA_PRIMARY_KEY`], with its signing subkeys `9D53 9D90 … D8FF 8E1F 7DF8 B07E`
 /// (2023-01-18, expired 2026-01-17) and `AC10 D744 … DA61 C26A 0585 BD3B` (2025-07-10, expires
@@ -1247,7 +1247,7 @@ fn parse_release_notes(notes: &str, asset: &str) -> Option<String> {
 }
 
 /// The SHA-256 an artifact is held to when its release notes and a file beside it may both state
-/// one (ADR-draft-telegraf clause 3): the notes' digest, which must exist, and which the file
+/// one (ADR-draft-telegraf clause 8): the notes' digest, which must exist, and which the file
 /// beside the artifact must agree with when it is published at all.
 fn corroborate(
     notes: Option<&str>,
@@ -2409,14 +2409,15 @@ mod tests {
         assert!(url("linux", "amd64").ends_with("telegraf-1.39.3_linux_amd64.tar.gz"));
         assert!(url("windows", "amd64").ends_with("_windows_amd64.zip"));
         assert!(url("linux", "386").ends_with("_linux_i386.tar.gz"));
-        // The fleet's side of the list is already canonical, so an artifact is stored under the
-        // Platform an Agent reports (ADR-0039 clause 6).
+        // The fleet's side of the list is no alias spelling and a valid token: the core table
+        // leaves each as it is, so the artifact is stored under the spelling written here
+        // (ADR-0039 clause 6). The core names no set of canonical tokens to check it against.
         for (os, arch, _, _) in TELEGRAF_PLATFORMS {
             assert_eq!(fleet_core::platform::os_token(os).as_deref(), Ok(os));
             assert_eq!(fleet_core::platform::arch_token(arch).as_deref(), Ok(arch));
         }
         // The SHA-256 is the release notes' on GitHub, and the `.DIGESTS` beside the asset on the
-        // CDN is what must agree with it (ADR-draft-telegraf clause 3).
+        // CDN is what must agree with it (ADR-draft-telegraf clause 8).
         match &find("linux", "amd64").sources[0].checksum {
             ChecksumSource::ReleaseNotes {
                 digest,
@@ -2514,7 +2515,7 @@ amd64 | Windows | [`telegraf-1.39.3_windows_amd64.zip`](https://dl.influxdata.co
 
     /// The release notes' digest is required, and the file beside the artifact agrees with it or
     /// fails the fetch — and where no such file is published, as for most assets before 1.39.0,
-    /// the notes alone decide (ADR-draft-telegraf clause 3).
+    /// the notes alone decide (ADR-draft-telegraf clause 8).
     /// Verifies: ADR-draft-telegraf
     #[test]
     fn an_artifact_is_held_to_its_release_notes_and_to_the_digests_beside_it() {
@@ -2630,7 +2631,7 @@ amd64 | Windows | [`telegraf-1.39.3_windows_amd64.zip`](https://dl.influxdata.co
 
     /// The key the tool carries is InfluxData's: it verifies InfluxData's own signature of the
     /// `.DIGESTS` beside `telegraf-1.40.2_linux_amd64.tar.gz`, as the CDN served both, made by the
-    /// signing subkey of the pinned primary key (ADR-draft-telegraf clause 3).
+    /// signing subkey of the pinned primary key (ADR-draft-telegraf clause 8).
     /// Verifies: ADR-draft-telegraf
     #[cfg(target_os = "linux")]
     #[test]
@@ -2669,7 +2670,7 @@ amd64 | Windows | [`telegraf-1.39.3_windows_amd64.zip`](https://dl.influxdata.co
     /// From 1.34.4 on every Telegraf asset is planned with its `.asc` required; before, the
     /// `.asc` is checked where it is published. A stand-in host answers `404` for every
     /// signature: that refuses a required one and leaves the SHA-256 to decide otherwise, without
-    /// `gpgv` being asked (ADR-draft-telegraf clause 3).
+    /// `gpgv` being asked (ADR-draft-telegraf clause 8).
     /// Verifies: ADR-draft-telegraf
     #[tokio::test]
     async fn a_missing_signature_refuses_only_a_release_that_signs_every_asset() {
@@ -2726,7 +2727,7 @@ amd64 | Windows | [`telegraf-1.39.3_windows_amd64.zip`](https://dl.influxdata.co
     /// A published `.asc` must verify at any version: one that does not refuses the artifact
     /// before 1.34.4 too, where a missing one would not. A stand-in host serves InfluxData's own
     /// signature of a `.DIGESTS` file, which holds for those bytes and for no others
-    /// (ADR-draft-telegraf clause 3).
+    /// (ADR-draft-telegraf clause 8).
     /// Verifies: ADR-draft-telegraf
     #[cfg(target_os = "linux")]
     #[tokio::test]

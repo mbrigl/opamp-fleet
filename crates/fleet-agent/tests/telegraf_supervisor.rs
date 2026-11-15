@@ -32,7 +32,7 @@ async fn a_two_line_telegraf_block_runs_reports_and_applies() {
 }
 
 /// On Unix the kind applies a Configuration with `SIGHUP`, Telegraf's own way of re-reading it
-/// (ADR-draft-telegraf clause 2): the signal reaches the running process, the apply is
+/// (ADR-draft-telegraf clause 7): the signal reaches the running process, the apply is
 /// acknowledged, and nothing is spawned — the process that was running is still the one running.
 /// Verifies: ADR-draft-telegraf
 #[cfg(unix)]
@@ -72,7 +72,7 @@ async fn telegraf_applies_a_configuration_by_sighup_in_place() {
 }
 
 /// On Windows there is no signal, and the kind applies a Configuration by the Runner's restart
-/// (ADR-draft-telegraf clause 2): the apply is acknowledged from a fresh process, with the same
+/// (ADR-draft-telegraf clause 7): the apply is acknowledged from a fresh process, with the same
 /// block.
 /// Verifies: ADR-draft-telegraf
 #[cfg(windows)]

@@ -2173,7 +2173,10 @@ Telegraf runs under the Client's account. Under the account a Linux package crea
 needs root (`smart`, `ipmi_sensor`) works only with `use_sudo = true` and a `sudoers` rule for that
 account; running the Client as root is your choice per host, with
 `opamp-fleet service install --run-as root`
-([Running it under its own account](#running-it-under-its-own-account)).
+([Running it under its own account](#running-it-under-its-own-account)). Where a
+[process account](#managed-processes-under-a-process-account) is registered, Telegraf runs under
+that account instead, which is never root, so the `sudoers` rule names the process account, and an
+input that needs root fails without one even where the Client runs as root.
 
 The artifact is [`docs/artifacts/telegraf.md`](../artifacts/telegraf.md).
 

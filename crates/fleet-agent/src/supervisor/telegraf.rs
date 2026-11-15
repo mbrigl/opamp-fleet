@@ -24,7 +24,7 @@ const PROGRAM: &str = "telegraf.exe";
 const PROGRAM: &str = "telegraf";
 
 /// Where InfluxData's archive holds the program, below the version-named directory that wraps it
-/// (ADR-draft-telegraf clause 3). The Unix tarballs carry further entries named `telegraf` — the
+/// (ADR-draft-telegraf clause 8). The Unix tarballs carry further entries named `telegraf` — the
 /// logrotate rule `etc/logrotate.d/telegraf`, and the directories `etc/telegraf/`,
 /// `usr/lib/telegraf/` and `var/log/telegraf/` — so the file name alone does not say which member
 /// is the program; the path does, and the installer refuses an archive in which it matches more
@@ -231,6 +231,35 @@ mod tests {
             let err = TelegrafPlugin::default()
                 .check("telegraf", table)
                 .expect_err(key);
+            assert!(err.contains(key), "{err}");
+            assert!(err.contains("no longer a supervisor key"), "{err}");
+        }
+    }
+
+    /// A value the kind derives is refused where a block restates it (ADR-0018 clause 13), through
+    /// the check an offered Supervisor set passes: the program key `command`, and `program_path`,
+    /// which says nothing for a single-file package.
+    /// Verifies: ADR-draft-telegraf
+    #[test]
+    fn restating_a_derived_value_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let block = |line: &str| -> crate::config::ClientConfig {
+            toml::from_str(&format!(
+                "endpoint = \"ws://127.0.0.1:1/v1/opamp\"\nstate_dir = {state:?}\n\
+                 [[supervisor]]\ntype = \"telegraf\"\nname = \"telegraf\"\n{line}",
+                state = dir.path().join("state").to_string_lossy(),
+            ))
+            .expect("parse")
+        };
+        let plain = block("");
+        crate::supervisor::validate_block(&plain, &plain.supervisors[0]).expect("two lines");
+        for (key, line) in [
+            ("command", "command = \"/usr/bin/telegraf\"\n"),
+            ("program_path", "program_path = \"usr/bin/telegraf\"\n"),
+        ] {
+            let config = block(line);
+            let err =
+                crate::supervisor::validate_block(&config, &config.supervisors[0]).expect_err(key);
             assert!(err.contains(key), "{err}");
             assert!(err.contains("no longer a supervisor key"), "{err}");
         }

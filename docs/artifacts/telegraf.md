@@ -52,7 +52,7 @@ list nobody publishes.
 ## 3. Integrity
 
 Two origins state each artifact's SHA-256, and the artifact comes from only one of them
-([ADR-draft-telegraf](../adr/draft-telegraf.md) clause 3):
+([ADR-draft-telegraf](../adr/draft-telegraf.md) clause 8):
 
 - **The release notes on GitHub** (`https://github.com/influxdata/telegraf/releases/tag/v<version>`,
   read through the API as the release's `body`) carry a table of
@@ -90,7 +90,7 @@ fails, naming `gpgv`. `gpgv` does not check revocation.
 **As published.** The bytes InfluxData serves are the bytes this fleet distributes; nothing is
 unpacked, gathered or rewritten.
 
-## 5. Form in the delivered tree
+## 5. Shape in the delivered tree
 
 A **single-file package** ([ADR-0039](../adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)). The
 archive wraps everything in a version-named directory. On Windows the program is `telegraf.exe`
@@ -100,7 +100,7 @@ the directories `etc/telegraf/`, `usr/lib/telegraf/` and `var/log/telegraf/`.
 
 So the file name does not say which member is the program, and the kind names the member by its
 place below the version-named directory: `usr/bin/telegraf` on Unix, `telegraf.exe` on Windows
-(`MEMBER` in the kind, [ADR-draft-telegraf](../adr/draft-telegraf.md) clause 3). The Client
+(`MEMBER` in the kind, [ADR-draft-telegraf](../adr/draft-telegraf.md) clause 8). The Client
 takes the one file whose trailing path components are that place, wherever the archive keeps it in
 its order, and refuses an archive in which it matches more than one
 ([ADR-0039](../adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)
@@ -139,20 +139,7 @@ as the preflight run against a *staged* program before the running one is stoppe
 ([ADR-0018](../adr/0018-supervisor-mode-and-its-kinds.md) clause 54). What makes them a version
 probe is what makes them a safe check — cheap, and touching no state.
 
-## 7. Configurations
-
-| Name | Agent type | Body |
-|---|---|---|
-| `telegraf-conf` | `telegraf` | `config/examples/telegraf-conf.toml` |
-
-`opamp-fleetctl package fetch` uploads it beside the package when the Server has none of that name
-yet, and puts it into no Deployment: it reaches a host once an operator adds it to the Deployment
-that should carry it and rolls that out. The Configuration's name is also the file name its entry
-gets in the Supervisor's `config/` directory, which is what `--config` points at — so **the name
-is not decoration**: renaming it on the Server without renaming `CONFIG_ENTRY` here leaves
-Telegraf pointed at a file that does not exist.
-
-## 8. The account it runs under
+### The account it runs under
 
 Telegraf runs as a Managed Process of the Client, so it runs under the Client's account and inside
 the Client's systemd unit ([ADR-0021](../adr/0021-the-accounts-the-service-runs-under.md)). A Linux
@@ -182,7 +169,24 @@ first registration runs the service, and with it Telegraf, as its own virtual ac
 `NT SERVICE\<PRODUCT_NAME>`; a re-registration keeps the account the service already had,
 `LocalSystem` included.
 
-## 9. What can change, and what goes red
+Telegraf does not write the cgroup tree, so the `ProtectControlGroups=yes` every system unit carries
+(ADR-0021 clause 8) takes nothing from it: its `cgroup` input reads the files under
+`/sys/fs/cgroup` and writes none ([ADR-draft-telegraf](../adr/draft-telegraf.md) clause 12).
+
+## 7. Configurations
+
+| Name | Agent type | Body |
+|---|---|---|
+| `telegraf-conf` | `telegraf` | `config/examples/telegraf-conf.toml` |
+
+`opamp-fleetctl package fetch` uploads it beside the package when the Server has none of that name
+yet, and puts it into no Deployment: it reaches a host once an operator adds it to the Deployment
+that should carry it and rolls that out. The Configuration's name is also the file name its entry
+gets in the Supervisor's `config/` directory, which is what `--config` points at — so **the name
+is not decoration**: renaming it on the Server without renaming `CONFIG_ENTRY` here leaves
+Telegraf pointed at a file that does not exist.
+
+## 8. What can change, and what goes red
 
 No test here reaches upstream, so none can see a release move something. What the tests pin is
 what this repository writes down, on each side, against the facts this document states; when
@@ -195,7 +199,7 @@ upstream moves one of them, the column *caught by* says what an operator meets f
 | moves or renames `.asc` | every fetch from 1.34.4 on: refused, naming the `404` | the refusal; `a_missing_signature_refuses_only_a_release_that_signs_every_asset` pins the URL and the version from which it is required |
 | signs with a subkey or key the carried keyring lacks | every fetch of the releases it signs: refused, naming the primary key | the refusal; the answer is a new `trust/influxdata-archive.gpg`, which `the_carried_key_verifies_influxdatas_own_signature` checks against a signature InfluxData made |
 | drops the SHA-256 table from its release notes, or changes its shape | every fetch of that release: refused, naming the release page | the refusal; `the_release_notes_digest_is_read_by_the_assets_name` pins the shapes of [section 3](#3-integrity) |
-| moves or renames the program inside the archive | the install: refused, naming what the archive holds | the refusal on the first host; `the_program_is_taken_from_its_place_in_upstreams_archive` (client side) pins the layout of [section 5](#5-form-in-the-delivered-tree) against the kind's `MEMBER` |
+| moves or renames the program inside the archive | the install: refused, naming what the archive holds | the refusal on the first host; `the_program_is_taken_from_its_place_in_upstreams_archive` (client side) pins the layout of [section 5](#5-shape-in-the-delivered-tree) against the kind's `MEMBER` |
 | adds a second file at the program's place | the install: refused, naming both | the refusal; `a_member_held_twice_refuses_the_archive_in_every_container` pins it |
 | stops reloading on `SIGHUP` | every apply, invisibly: the process keeps its old configuration | nothing — `telegraf_applies_a_configuration_by_sighup_in_place` shows the kind sends the signal, not that Telegraf acts on it, and this row is the warning |
 | stops printing a plain SemVer version | `service.version`, and the preflight | nothing — the Agent reports no version |
