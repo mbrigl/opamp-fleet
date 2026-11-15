@@ -109,7 +109,7 @@ The forces:
 This serves **G-17** (the connection is secured and the Agent is identified), **G-10** and
 **Q-1** (secure by default).
 
-Four more forces bear on the repack, the reading of a certificate's end and the token:
+Five more forces bear on the repack, the reading of a certificate's end and the token:
 
 - **A repacked tree carries upstream's modes unless the repack sets them.** The trees a kind
   repacks are upstream's, as an AppImage is, and so are their modes: a write bit for the group or

@@ -47,7 +47,7 @@ pub fn written(state_dir: &Path) -> Vec<PathBuf> {
 /// `config` is the configuration the service will run with, its `state_dir` the service's.
 /// `written` is what this run asked and wrote: the bootstrap identity it enrols with, an endpoint
 /// and trust it answered, which replace the file's, and an endpoint named over a kept file, which
-/// holds the file to it (ADR-0021).
+/// holds the file to it (ADR-0021 clause 28).
 /// `roots` are the data root and the layout root. The CA file and the bootstrap pair are read
 /// once, before anything connects; one in a root or the state directory, which the service's
 /// account owns, is read through that directory, never through a link at its name.
@@ -169,7 +169,7 @@ async fn connect(mut config: ClientConfig, mut shutdown: Shutdown) -> Result<(),
 }
 
 /// `config` as the enrolment connects with it: what the run answered in place of what the file
-/// says (ADR-0021),
+/// says (ADR-0021 clause 28),
 /// and the CA file and the bootstrap pair read once, before anything connects, never again by a
 /// path the account gave (ADR-0021 clause 11). `None` where `written` holds no bootstrap identity,
 /// and so nothing to enrol with.
@@ -198,7 +198,7 @@ fn prepare(
 
 /// Refuses the enrolment where `--endpoint` named, over a file the install kept, another endpoint
 /// than the file's: such a run answered nothing, and the file stands for the service
-/// (ADR-0021).
+/// (ADR-0021 clause 28).
 ///
 /// # Errors
 /// Returns an error naming both endpoints.
@@ -215,7 +215,7 @@ pub fn holds_to_named(config: &ClientConfig, written: &Written) -> Result<(), St
 
 /// Puts what the run answered in place of what `config` read from the file: the endpoint, and the
 /// CA copy with the certificates written into it, or no CA where none was answered
-/// (ADR-0021).
+/// (ADR-0021 clause 28).
 fn take_answered(config: &mut ClientConfig, answered: &Answered) {
     config.endpoint.clone_from(&answered.endpoint);
     let ca_file = answered.ca.as_ref().map(|(copy, _)| copy.clone());

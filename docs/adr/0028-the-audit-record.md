@@ -489,8 +489,9 @@ no lease, and its authentication is shell access on a Server host.
 - **Signing each entry with a key.** It proves more than a chain, but a key file would live on
   the same host as the record, so an intruder who can rewrite the record can re-sign it; and with
   the key on the token, one `C_Sign` per decision puts the token in the path of every admission
-  and makes a slow token a slow fleet. Rejected; a checkpoint a minute bounds what can be
-  rewritten unseen to that minute.
+  and makes a slow token a slow fleet. A chain checked against an earlier copy gives most of the
+  value without managing a key. Rejected; a checkpoint a minute bounds what can be rewritten
+  unseen to that minute.
 - **Dropping refusals under load** — cheaper, but an attack is exactly when refusals matter;
   aggregation keeps the count.
 - **An audit record on the Client as well** — a second format to maintain; the Client reports

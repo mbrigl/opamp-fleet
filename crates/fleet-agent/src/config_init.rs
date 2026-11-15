@@ -273,7 +273,7 @@ pub struct Written {
     pub answered: Option<Answered>,
     /// The endpoint `--endpoint` named over a file this run kept: no answer, but an enrolment
     /// refuses a kept file that names another
-    /// (ADR-0021).
+    /// (ADR-0021 clause 28).
     pub named_over_kept: Option<String>,
     /// The paths this run's questions offered from the file, which the enrolment reads through no
     /// link at their name where an answer kept one. A run that answered nothing kept the file,
@@ -293,7 +293,7 @@ impl Written {
 
 /// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
 /// with these, never with what it would read back from the file the service's account owns
-/// (ADR-0021).
+/// (ADR-0021 clause 28).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answered {
     /// The endpoint answered.
