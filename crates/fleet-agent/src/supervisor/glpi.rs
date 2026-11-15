@@ -143,7 +143,7 @@ const RETIRED: &[(&str, &str)] = &[
 ];
 
 /// The root of the delivered tree — `program/tree` under this Supervisor's own directory
-/// (ADR-0039 clause 56).
+/// (ADR-0033 clause 56).
 fn tree_root(ctx: &SupervisorContext) -> PathBuf {
     ctx.supervisor_dir
         .join(crate::config::PROGRAM_DIR)

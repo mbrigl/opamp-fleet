@@ -90,7 +90,7 @@ tree whose agent could not find its own modules.
 
 ## 5. Form in the delivered tree
 
-A **tree package** ([ADR-0039](../adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)), unpacked to
+A **tree package** ([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)), unpacked to
 `<supervisor_dir>/program/tree/`, and the two platforms differ in nearly everything below it:
 
 | | Linux | Windows |
@@ -130,7 +130,7 @@ Four of those are not preferences:
 - **`--no-fork`.** Without it the agent detaches, leaving the Supervisor holding a pid that ends
   immediately while the real process runs on unsupervised.
 - **`--vardir` outside `program/`.** A package swap replaces that directory whole
-  ([ADR-0039](../adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)); state kept inside it would be
+  ([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)); state kept inside it would be
   thrown away with every update, taking the inventory history along. The agent does not create
   it and exits if it is missing, so the kind names it among the directories the spawn guarantees
   — an installation that failed for want of a directory would be this Client's failure, not the

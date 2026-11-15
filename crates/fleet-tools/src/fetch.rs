@@ -1156,7 +1156,7 @@ fn repack_appimage_with(
 
 /// The one absolute link the repacked GLPI tree keeps, the host loader's of upstream's default
 /// runtime, by the path and target the `glpi` kind names (ADR-draft-glpi-agent clause 6). It is
-/// stated here, not taken from the kind: the tool uses only the Client items ADR-0040 clause 22
+/// stated here, not taken from the kind: the tool uses only the Client items ADR-0008 clause 22
 /// names. Two tests hold both sides to the same link (ADR-0018 clause 20):
 /// `the_glpi_tree_keeps_the_link_the_kind_names` here, `the_defaults_are_the_artifacts` in the kind.
 const GLPI_TREE_LINKS: &[KeptLink] = &[KeptLink {
