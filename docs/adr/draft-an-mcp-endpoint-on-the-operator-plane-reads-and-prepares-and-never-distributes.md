@@ -51,7 +51,7 @@ secret.
 
 1. **One endpoint, off by default.** With `[mcp]` in `server.toml` the Operator plane serves `/mcp`
    over MCP's Streamable HTTP transport, revision 2026-07-28, through `rmcp`'s server mounted as an
-   axum route ([ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)
+   axum route ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)
    clause 13). Without `[mcp]` the route does not exist. The Server keeps no state between
    requests: no session, no standalone stream; a `GET` or `DELETE` on `/mcp` is answered `405`. It
    offers tools only — no resources, prompts, sampling or elicitation.

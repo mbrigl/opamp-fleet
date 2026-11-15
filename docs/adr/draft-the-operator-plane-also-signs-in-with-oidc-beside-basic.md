@@ -102,7 +102,7 @@ route code, since a browser presents none.
 One route crosses that line: the package download. Its path is under `/api/v1`, but its audience
 is Agents, and the offered `download_url` is a path the Client resolves against its own OpAMP
 endpoint. Where the route is served, and what protects the artifact, is
-[ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)'s.
+[ADR-0033](0033-packages-signatures-and-delivery.md)'s.
 
 The Agent plane's certificate is made by `opamp-fleetctl pki` from the fleet's own server CA
 ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)). The Clients trust that CA because
@@ -161,7 +161,7 @@ decodes it. Each report takes the fleet lock, may write the Agent's record to di
 certificate to be signed. A plain-HTTP poller can do the same with one request per message. The
 package download route is the Agent plane's other member route, and it costs more: each request
 scans the fleet under its lock to find an Agent the artifact is offered to
-([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)).
+([ADR-0033](0033-packages-signatures-and-delivery.md)).
 
 The specification holds that no vulnerability can be ruled out (Strategy *Security before
 convenience*). A host taken over, or a Client with a bug that loops, is still a member, and
@@ -280,7 +280,7 @@ Forces that shape the answer:
   earlier version, by the self-update of
   [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md), with nobody at the host.
 - **The Agent plane serves the package download besides `/v1/opamp`**
-  ([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)). A handshake that requires a certificate
+  ([ADR-0033](0033-packages-signatures-and-delivery.md)). A handshake that requires a certificate
   requires it there too, so the Client's downloader must present one — to the Server, never to a
   mirror.
 - **An approval means something only when the enrolling peer can be told apart.** A bootstrap
@@ -415,7 +415,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    startup) in both directions and on both transports, applied after decompression: `413` on plain
    HTTP, a `1009` close on WebSocket, and an oversized reply is discarded rather than sent. The
    shared helpers that implement this live in `crates/opamp`
-   ([ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
 
 4. **Reconnection belongs to the Client's transport layer, and a fleet comes back spread out.**
    - The first reconnect after an established connection is lost — cut, or closed by a Server
@@ -448,7 +448,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    provider with the three TLS 1.3 suites and nothing else: `TLS13_AES_256_GCM_SHA384`,
    `TLS13_AES_128_GCM_SHA256` and `TLS13_CHACHA20_POLY1305_SHA256`. Every rustls configuration of
    both ends is built from it with the protocol versions pinned to TLS 1.3
-   ([ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
    Each binary installs it process-wide at
    startup, and every `reqwest` client is built with a minimum of TLS 1.3. This covers every
    connection: OpAMP, the REST API, downloads, mirrors, own telemetry and the Server's connections
@@ -480,7 +480,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    clauses 42 and 71 to 75,
    and its connection cap)
    live inside it; unknown keys are refused as everywhere
-   ([ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
    The router is split accordingly:
    `fleet_server::agent_app(state, admission)` and `fleet_server::operator_app(state, auth)`.
 
@@ -525,7 +525,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 
 15. **Every plane's server is built in one place, with an HTTP/1 header-read timeout of 30
     seconds.** `listen::plane` serves both planes on `opamp::server::listen`
-    ([ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)),
+    ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)),
     which serves plain and TLS through
     `axum_server`, installs `hyper_util::rt::TokioTimer` on the HTTP/1 builder, and sets
     `header_read_timeout` to `HEADER_READ_TIMEOUT` (30 s, hyper's own default and what axum
@@ -585,7 +585,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     clauses 17 and 24), and the issuer `[rest.auth.oidc] issuer` names, for its discovery document
     and the JSON Web Key Set that document names (clause 72). The Server sends no request for a
     package anywhere
-    ([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md), clause 4). This clause and clause 5
+    ([ADR-0033](0033-packages-signatures-and-delivery.md), clause 4). This clause and clause 5
     bind the Server's own code. A library the operator has the Server load opens what its own
     configuration names, over its own stack, and the ADR that has the Server load it decides
     whether it may.
@@ -730,7 +730,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)). A `401` is logged as an
     admission failure and retried with the transport's backoff. The communication layer refuses
     `ws://` and `http://` to a host that is not LOOPBACK
-    ([ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+    ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
 33. **What the Server offers reaches only admitted members.** A connection-settings offer and a
     `[telemetry_offer]` carrying headers are sent only on a connection whose certificate was issued
     by the client CA. An enrolment connection
@@ -867,11 +867,11 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     handshake, and a host gets its first certificate from an operator.
 47. **The package download is reached with a client certificate.** Its route on the Agent plane
     sits behind the same handshake as `/v1/opamp`
-    ([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)). The route requires a certificate from
+    ([ADR-0033](0033-packages-signatures-and-delivery.md)). The route requires a certificate from
     the client CA; a bootstrap certificate is answered `401`. The Client presents its certificate
     only to the Server's own origin — the scheme, host and port of its OpAMP endpoint — and
     presents none to any other host or on a redirect hop that leaves that origin
-    ([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)).
+    ([ADR-0033](0033-packages-signatures-and-delivery.md)).
 48. **Repeated admission failures from one peer address are throttled.** `[admission_throttle]` in
     `server.toml` sets `max_failures` (default 10), `window_secs` (default 60) and `backoff_secs`
     (default 300). Every `401` on `/v1/opamp` and on the download route counts as a failure of the
@@ -1117,7 +1117,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 **Out of scope:**
 
 - Where the package download route is served and which hosts a Client downloads from
-  ([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)); the certificate it requires is clause
+  ([ADR-0033](0033-packages-signatures-and-delivery.md)); the certificate it requires is clause
   47's.
 - Connection settings and the heartbeat offer
   ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)).
@@ -1288,7 +1288,7 @@ forwarded into the Dev Container, and as a workflow service in CI.
   default is a knob nobody turns.
 - **The bound as a shared layer in `crates/opamp`.** It is one framework's builder knob in one
   binary; the Client's outbound transports have no counterpart
-  ([ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+  ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
 - **The weaker posture: TLS 1.2 and 1.3, optional TLS, plaintext on any address, an Agent plane on
   `0.0.0.0:4320` and `ws://` as the Client's default.** A Server that starts with no configuration
   and a fleet that connects without certificates are convenient. Rejected: security comes before
@@ -1348,7 +1348,7 @@ forwarded into the Dev Container, and as a workflow service in CI.
   rely on (Q-1). A fleet that needs more raises the numbers.
 - **Probe a package source over `https://`, with `http://` on the loopback alone.** It sets rules
   for an outbound request the Server does not make: the Server sends no request for a package
-  anywhere ([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md), clause 4), and its outbound
+  anywhere ([ADR-0033](0033-packages-signatures-and-delivery.md), clause 4), and its outbound
   connections are those clause 21 names.
 - **The first reconnect after a lost connection on the backoff's first step, one second with equal
   jitter, and no bound on the Server's new connections.** After a restart every Agent of a fleet
