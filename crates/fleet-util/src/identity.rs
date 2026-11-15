@@ -42,3 +42,33 @@ pub fn pem_block(label: &str, der: &[u8]) -> Zeroizing<String> {
     pem.push_str(&end);
     pem
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A PEM block is the label's frame around the base64 of the DER, 64 characters a line, and
+    /// its `Debug` names neither the certificate nor the key.
+    #[test]
+    fn a_pem_block_frames_its_der_in_lines_of_64() {
+        let der = vec![0xA5_u8; 100];
+        let pem = pem_block("CERTIFICATE", &der);
+        let lines: Vec<&str> = pem.lines().collect();
+        assert_eq!(lines.first(), Some(&"-----BEGIN CERTIFICATE-----"));
+        assert_eq!(lines.last(), Some(&"-----END CERTIFICATE-----"));
+        assert!(lines[1..lines.len() - 1].iter().all(|l| l.len() <= 64));
+        use base64::Engine as _;
+        let body: String = lines[1..lines.len() - 1].concat();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(body)
+                .expect("b64"),
+            der
+        );
+        let identity = BootstrapIdentity {
+            cert_pem: b"cert".to_vec(),
+            key_pem: Zeroizing::new(b"key".to_vec()),
+        };
+        assert_eq!(format!("{identity:?}"), "BootstrapIdentity { .. }");
+    }
+}

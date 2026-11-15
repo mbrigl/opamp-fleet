@@ -32,5 +32,7 @@ libc.workspace = true
 tempfile = "3"
 # The tests read the workspace's manifests (ADR-0041 clause 16).
 toml.workspace = true
+# The PKCS#12 reader's test seals a bootstrap file from a key and a certificate it makes.
+rcgen.workspace = true
 # Tests build the `.7z` fixtures they then open; the Client itself only ever decompresses.
 sevenz-rust2 = { workspace = true, features = ["compress"] }

@@ -1123,6 +1123,7 @@ dependencies = [
  "flate2",
  "fleet-core",
  "libc",
+ "rcgen",
  "sevenz-rust2",
  "tar",
  "tempfile",

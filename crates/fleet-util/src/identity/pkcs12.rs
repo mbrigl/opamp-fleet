@@ -34,3 +34,43 @@ pub fn open(
         key_pem: Zeroizing::new(std::mem::take(&mut *key_pem).into_bytes()),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fleet_core::pkcs12::file::OpenError;
+
+    /// A sealed bootstrap file opens to its certificate and key as PEM under its password; a
+    /// wrong password is `WrongPassword`, and anything else is `Invalid`, naming the file
+    /// (ADR-0027 clause 15).
+    /// Verifies: ADR-0027
+    #[test]
+    fn a_bootstrap_file_opens_under_its_password_alone() {
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = rcgen::CertificateParams::new(vec!["bootstrap".to_string()])
+            .expect("params")
+            .self_signed(&key)
+            .expect("cert");
+        let path = Path::new("bootstrap.p12");
+        let bytes =
+            fleet_core::pkcs12::file::seal(cert.der(), &key.serialize_der(), "twelve chars")
+                .expect("sealed");
+        assert_eq!(
+            open(path, &bytes, "not the password"),
+            Err(OpenError::WrongPassword)
+        );
+        let identity = open(path, &bytes, "twelve chars").expect("opens");
+        assert_eq!(
+            identity.cert_pem,
+            pem_block("CERTIFICATE", cert.der()).as_bytes()
+        );
+        assert_eq!(
+            identity.key_pem.as_slice(),
+            pem_block("PRIVATE KEY", &key.serialize_der()).as_bytes()
+        );
+        match open(path, b"not a PKCS#12 file", "twelve chars") {
+            Err(OpenError::Invalid(why)) => assert!(why.contains("bootstrap.p12"), "{why}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+}
