@@ -6,8 +6,10 @@
 normalization of 2026-11-15 (#185), so their drafts are written once against the restated record:
 glpi uses the repack, the kept links and the version probe; icinga2 the repack, `gpgv` and the
 version probe; telegraf only `gpgv`. The normalization has landed, and the rebased branches
-`feat/glpi`, `feat/icinga2` and `feat/telegraf` cite the restated record. Until the first of them
-merges, the `#[allow(dead_code)]` markers stand.
+`feat/glpi`, `feat/icinga2` and `feat/telegraf` cite its record. A second normalization of the same
+day gave the two superseding ADRs the numbers of those they superseded; each branch takes that
+normalization's map, in the message of its record commit, when it is next rebased. Until the first
+of them merges, the `#[allow(dead_code)]` markers stand.
 
 **What was ticketed.**
 

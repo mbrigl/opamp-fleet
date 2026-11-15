@@ -823,6 +823,10 @@ reproducible tree mode for `opamp-fleetctl package pack`.
 - **Fold `armv7` onto `arm`, the token an Agent reports.** The smallest change, and every Agent
   reporting `arm` would match. Rejected: clause 6 spells a Platform the semantic conventions' way,
   and their `host.arch` value for a 32-bit ARM build is `arm32`; `arm` is folded onto it as well.
+- **Leave the table without a fold for a 32-bit ARM build.** The table as it stood until
+  2026-11-15: an unknown token passes through, so a Collector's `linux_armv7` asset is stored under
+  `linux/armv7`. Rejected: it is uploaded, listed and never offered, since no Agent reports
+  `armv7`, and nothing says so.
 - **Fold `armv6` onto `arm32` too.** One token for every 32-bit ARM build. Rejected: an `armv7`
   build does not run on an ARMv6 host, and an Agent reporting `arm` does not say which it is; an
   `armv6` artifact stays under its own token.

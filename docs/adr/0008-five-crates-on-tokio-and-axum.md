@@ -293,11 +293,11 @@ the operator tools.
 - **The operator tool stops using the two functions.** It would read the PKCS#12 file and the
   password file with code of its own. Rejected: two readers of one secret file that must agree on
   links, modes and size bounds drift apart, and the Client's are the ones its tests hold.
-- **Name the functions without a test.** Rejected: the gap this ADR closes grew because no test
-  checked the list.
-- **Name only `fleet_agent::archive` and `fleet_agent::tls::pkcs12_identity` in clause 22.** The
-  list as it stood until 2026-11-15. Rejected: the tool's code already used the two readers above,
-  so the list no longer said what the tool takes from the Client.
+- **Name the functions without a test.** Rejected: a list no test checks grows unseen.
+- **Name only `fleet_agent::archive` of the Client in clause 22, beside `opamp::tls` and the items
+  of `fleet-core`, with no test.** The clause as it stood until 2026-11-15. Rejected: the tool's
+  code already used the two readers above, so the clause no longer said what the tool takes from
+  the Client.
 - **axum's WebSocket, judged by the bytes the connection reads.** A Ping between two fragments of
   a message looks like progress, so a message stays open for ever; treating control frames as no
   progress closes a peer that only pings. TLS records and the bytes read with the upgrade request
