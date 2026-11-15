@@ -94,7 +94,7 @@ wrapper, and what the Supervisor must spawn is the real program.
 | plugin directory | `<tree>/plugins` | `<tree>/sbin` |
 | state, log, cache, spool, run | beside the tree, under `<supervisor_dir>/` | the same |
 | environment | `LD_LIBRARY_PATH=<tree>/lib` — the tree's own libraries must win over the machine's | none needed |
-| version | `--version`, with a parser for Icinga's own banner, reported as `service.version` — the one attribute of the Agent's description the daemon states; where it runs is the Supervisor's ([ADR-0017](../adr/0017-what-an-agent-reports-about-itself.md)) | the same |
+| version | `--version`, with a parser for Icinga's own banner, reported as `service.version` — the one attribute of the Agent's description the daemon states; where it runs is the Supervisor's ([ADR-0017](../adr/0017-what-an-agent-reports-about-itself.md) clause 5) | the same |
 | preflight | `--version` against the staged program, with `LD_LIBRARY_PATH` | `--version` |
 | reload | `SIGHUP` | restart |
 | console severity | `information` | the same |
@@ -124,12 +124,12 @@ running daemon is stopped.
 
 A Configuration has no Selector: the Deployment that holds it aims it, and its Agent type fits it
 to the `icinga2` Agents of that Deployment alone
-([ADR-0032](../adr/0032-deployments-and-rollouts.md)).
+([ADR-0032](../adr/0032-deployments-and-rollouts.md) clauses 3 and 5).
 
 **Which entry is the root is stated by a role, not by a name.** The daemon is pointed at one file,
 from which it `include`s the rest, and being unroled says *"this is configuration"* rather than
 *"this is the root"* — so the fleet marks the root with `role = "main"`
-([ADR-0031](../adr/0031-configurations-and-the-rest-api.md),
+([ADR-0031](../adr/0031-configurations-and-the-rest-api.md) clause 5,
 [ADR-draft-icinga-2](../adr/draft-icinga-2.md)). Where nothing is
 marked, the conventional name `icinga2-conf` stands in, which is what this tool uploads. Two
 entries marked `main` are a reason not to start, naming both.

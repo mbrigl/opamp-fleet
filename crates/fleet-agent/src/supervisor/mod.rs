@@ -627,7 +627,7 @@ mod tests {
         config
     }
 
-    /// A block of a wrapped kind, as ADR-0018 means one to be written.
+    /// A block of a wrapped kind, as ADR-0018 clause 13 means one to be written.
     #[cfg(feature = "icinga2")]
     fn wrapped(root: &std::path::Path, extra: &str) -> ClientConfig {
         toml::from_str(&format!(
@@ -638,9 +638,9 @@ mod tests {
         .expect("parse")
     }
 
-    /// The point of ADR-0018, at the seam: a wrapped block names its agent and nothing about how
-    /// that agent is built. What the kind supplies has to reach the program path and the Agent
-    /// type without the block saying either.
+    /// The point of ADR-0018 clause 13, at the seam: a wrapped block names its agent and nothing
+    /// about how that agent is built. What the kind supplies has to reach the program path and the
+    /// Agent type without the block saying either.
     #[cfg(feature = "icinga2")]
     #[test]
     fn a_wrapped_block_needs_neither_a_program_nor_a_type() {

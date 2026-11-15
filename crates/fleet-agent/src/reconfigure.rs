@@ -1146,8 +1146,8 @@ mod tests {
     /// A listed `icinga2` enrols only with the parent the operator wrote: a delivered block that
     /// names another parent or node, or points the pin at a file in `${config_dir}` — which, with
     /// remote configuration off, nothing writes, so enrolment would fall back to trust on first
-    /// use — is refused naming the key, although ADR-0018 alone would let it through
-    /// (ADR-0018 clause 51).
+    /// use — is refused naming the key, since a delivered block for a listed Supervisor repeats the
+    /// running block whole (ADR-0018 clause 51). Unlisted, the same block passes.
     /// Verifies: ADR-0018, ADR-draft-icinga-2
     #[cfg(feature = "icinga2")]
     #[test]
@@ -1174,7 +1174,7 @@ mod tests {
         ] {
             let block = delivered(&block);
             crate::supervisor::check_delivered_block(&running("", &operators), &block)
-                .expect("what ADR-0018 alone lets through");
+                .expect("what an unlisted Supervisor takes");
             let err = crate::supervisor::check_delivered_block(&config, &block).expect_err(key);
             assert!(err.contains(key) && err.contains("\"icinga\""), "{err}");
         }

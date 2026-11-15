@@ -213,7 +213,10 @@ claims it, so the ticket goes into a Deployment whose Selector matches exactly t
 file name is the Configuration's name, so the block's `ticket_file` names
 `${config_dir}/icinga2-ticket-edge-01` — or keep the name `icinga2-ticket` in every host's
 Deployment and one block serves them all. The Supervisor then generates a key locally, pins the
-parent's certificate, and requests a signature; the key never leaves the host.
+parent's certificate, and requests a signature; the key never leaves the host. Icinga takes the
+ticket only on the command line of `icinga2 pki request`, so while that request runs, 30 seconds
+at most, any local account on the host can read the ticket from `/proc/<pid>/cmdline`; it is good
+for this node name alone.
 
 **An Agent belongs to at most one Deployment**, and a rollout replaces everything the Agent was
 given. So that per-host Deployment holds everything the Agent is to run while it enrols — the

@@ -3,10 +3,10 @@
 //!
 //! Icinga 2 relocates only if it is *told* to, on every invocation, and the arguments that tell it
 //! are not operator choices: the account it may run under follows the Client's service account
-//! (ADR-0021), the include directory follows the delivered tree, and the state directories follow
-//! `supervisor_dir`. So the block states values — the parent, the node name, where state lives —
-//! and this plugin assembles the command line. What supervision *means* is unchanged: the shared
-//! [`Runner`] spawns, watches, swaps packages, gates health, and stops.
+//! (ADR-0021 clause 1), the include directory follows the delivered tree, and the state directories
+//! follow `supervisor_dir`. So the block states values — the parent, the node name, where state
+//! lives — and this plugin assembles the command line. What supervision *means* is unchanged: the
+//! shared [`Runner`] spawns, watches, swaps packages, gates health, and stops.
 //!
 //! Three properties are Icinga's own and are why this is a kind rather than a recipe:
 //!
@@ -38,10 +38,11 @@ use crate::supervisor::process::{
 };
 use opamp::client::Backoff;
 
-/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0040.
+/// The block's plugin-specific keys, parsed strictly — a typo fails startup
+/// (ADR-0040 clause 23).
 ///
-/// `binary` is not among them: the core takes it out and resolves it (ADR-0018), and what arrives
-/// here is [`SupervisorContext::program`].
+/// `binary` is not among them: the core takes it out and resolves it (ADR-0018 clause 21), and what
+/// arrives here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Icinga2Settings {
@@ -206,7 +207,7 @@ impl Layout {
     /// **The mark is a role, and a role is the kind's to define.** The Baseline says so of
     /// `AgentConfigFile.role`: *"The values and their semantics are Agent type-specific."* So
     /// `main` means *this* to `icinga2` and nothing to anyone else, which is the field working as
-    /// intended rather than being borrowed. ADR-0031's own two values stay what they are for kinds
+    /// intended rather than being borrowed. ADR-0031 clause 5 keeps its own two values for kinds
     /// that define nothing further.
     ///
     /// Resolved on every spawn rather than once at start: which entry is the root is the fleet's
@@ -391,15 +392,22 @@ impl Layout {
     /// that forwarded the apply blindly would report `APPLIED` for a configuration that never took
     /// effect.
     async fn validate(&self) -> Result<(), String> {
-        let mut args = self.daemon_args(&self.root_config()?);
+        // The account is the one [`run_subcommand`] names for every subcommand, so it is left out
+        // here rather than named twice.
+        let mut args = self.daemon_args_with(&self.root_config()?, false);
         // `-C` next to `daemon`, before the rest, so the same command line is exercised.
         args.insert(1, "-C".to_string());
         run_subcommand(self, &args).await.map(|_| ())
     }
 
     /// The daemon's argument vector. Foreground — no `-d`, no `--close-stdio` — because the Runner
-    /// supervises what it started and the Client's logging carries the output (ADR-0020).
+    /// supervises what it started and the Client's logging carries the output (ADR-0018 clause 6).
     fn daemon_args(&self, root: &std::path::Path) -> Vec<String> {
+        self.daemon_args_with(root, true)
+    }
+
+    /// The daemon's argument vector, with the account it drops to or without it.
+    fn daemon_args_with(&self, root: &std::path::Path, account: bool) -> Vec<String> {
         let mut args = vec![
             "daemon".to_string(),
             "-c".to_string(),
@@ -409,7 +417,7 @@ impl Layout {
             args.push("-D".to_string());
             args.push(format!("{key}={value}"));
         };
-        if let Some((user, group)) = &self.run_as {
+        if let Some((user, group)) = self.run_as.as_ref().filter(|_| account) {
             define("RunAsUser", user.clone());
             define("RunAsGroup", group.clone());
         }
@@ -750,7 +758,7 @@ fn write_pin_source(source: &std::path::Path, parent: &str) -> Result<(), String
 
 /// Icinga's own version banner is `icinga2 … (version: r2.14.6-1)`: an `r`, and a packaging
 /// revision the strict SemVer read rejects outright. Reported as `2.14.6`, which is the version an
-/// operator compares and the one a package Set is named after (ADR-0037).
+/// operator compares and the one a package Set is named after (ADR-0034 clause 6).
 fn parse_version(text: &str) -> Option<String> {
     fn numeric(part: Option<&str>) -> bool {
         part.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
@@ -767,7 +775,7 @@ fn parse_version(text: &str) -> Option<String> {
 }
 
 /// The account this Client runs as, which is the account Icinga may drop to. Resolved with `id(1)`
-/// — the idiom ADR-0021's account handling already uses, rather than `getpwuid(3)` behind `unsafe`
+/// — the idiom `service::run_as` already uses, rather than `getpwuid(3)` behind `unsafe`
 /// or a user-lookup dependency for two strings.
 #[cfg(unix)]
 fn current_account() -> Option<(String, String)> {
@@ -787,7 +795,8 @@ fn current_account() -> Option<(String, String)> {
     None
 }
 
-/// The `icinga2` kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0021).
+/// The `icinga2` kind. Its [`Spawner`] is the one the registry hands every plugin
+/// (ADR-0021 clause 18).
 #[derive(Default)]
 pub struct Icinga2Plugin {
     pub spawner: Spawner,
@@ -795,8 +804,8 @@ pub struct Icinga2Plugin {
 
 impl Icinga2Plugin {
     /// Resolves the block against this Supervisor's directories. Everything an operator may write
-    /// goes through the placeholders of ADR-0018; the defaults are expressed in them too, so a
-    /// relocated `supervisor_dir` moves the state with it.
+    /// goes through the placeholders of ADR-0018 clause 25; the defaults are expressed in them too,
+    /// so a relocated `supervisor_dir` moves the state with it.
     fn layout(ctx: &SupervisorContext, settings: &Icinga2Settings) -> Layout {
         let path = |below: &str| -> PathBuf { PathBuf::from(ctx.expand(below)) };
         // Inside the tree this kind delivers (ADR-draft-icinga-2): the ITL the root configuration
@@ -1069,7 +1078,7 @@ async fn intercept(
                     // what was just refused.
                     layout.record_refusal(&e);
                     // The apply ends here rather than at the Runner, so this is where its trace
-                    // learns why (ADR-0017).
+                    // learns why (ADR-0017 clause 19).
                     crate::telemetry::failed(&span, &e);
                     events
                         .send(ProcessEvent::ConfigApplied {
@@ -1257,8 +1266,8 @@ impl Plugin for Icinga2Plugin {
             // repacked tree raises: does this host's libc satisfy it (ADR-draft-icinga-2)?
             preflight: Some(preflight()),
             // Icinga re-reads its configuration on SIGHUP and keeps the umbrella's pid, so the
-            // reload of ADR-0018 applies as it stands. Windows refuses the concept, and the
-            // Runner falls back to the restart there.
+            // reload of ADR-0018 clause 9 applies as it stands. Windows refuses the concept, and
+            // the Runner falls back to the restart there.
             reload_signal: sighup(),
             // The Client itself: where a process account is registered the kind refused to start
             // above (ADR-0021 clause 18).
@@ -1548,6 +1557,35 @@ mod tests {
             marker: dir.join("icinga2-enrolment.json"),
             refused: dir.join("icinga2-refused.json"),
         }
+    }
+
+    /// A validation is the daemon's command line with `-C`, and names the account once: the
+    /// account [`run_subcommand`] adds for every subcommand is not in the arguments it is handed.
+    /// Verifies: ADR-draft-icinga-2
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_validation_names_the_account_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut layout = layout(dir.path());
+        // A program that prints its arguments and fails, so they come back as the reason. A child
+        // writes it, so no descriptor of this process holds it open for writing when a test
+        // running beside this one forks, and the exec does not meet `ETXTBSY`.
+        layout.program = dir.path().join("icinga2");
+        let written = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf '#!/bin/sh\\necho \"$@\"\\nexit 1\\n' > \"$1\" && chmod 755 \"$1\"")
+            .arg("sh")
+            .arg(&layout.program)
+            .status()
+            .expect("sh");
+        assert!(written.success());
+        std::fs::create_dir_all(&layout.config_dir).expect("config");
+        std::fs::write(layout.config_dir.join(CONVENTIONAL_ROOT), "").expect("root");
+
+        let printed = layout.validate().await.expect_err("the program fails");
+        assert!(printed.contains("daemon -C -c"), "{printed}");
+        assert_eq!(printed.matches("RunAsUser=fleet").count(), 1, "{printed}");
+        assert_eq!(printed.matches("RunAsGroup=fleet").count(), 1, "{printed}");
     }
 
     /// What is left after ADR-draft-icinga-2: the enrolment. Everything else this kind supplies
@@ -2354,8 +2392,9 @@ mod tests {
         assert!(!layout.refused.exists());
     }
 
-    /// ADR-0018: an offered Supervisor set is validated before a running process is touched — and
-    /// what it refuses now is a block that still carries a key this kind supplies itself.
+    /// ADR-0018 clause 27: an offered Supervisor set is validated before a running process is
+    /// touched — and what it refuses now is a block that still carries a key this kind supplies
+    /// itself.
     /// Verifies: ADR-draft-icinga-2
     #[test]
     fn check_refuses_a_block_that_names_a_retired_key() {

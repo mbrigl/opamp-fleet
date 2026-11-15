@@ -143,7 +143,7 @@ carries a date once its tag exists.
     without a ticket waits in the master's queue and is asked again with the same key until it is
     signed. A block the Server delivers reads `ticket_file` and `trusted_cert_file` only from
     `${config_dir}/`, and one that names a `parent_host` must name `trusted_cert_file` too
-    ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)).
+    ([ADR-draft-icinga-2](docs/adr/draft-icinga-2.md) clause 25).
   - **`opamp-fleetctl package fetch --agent icinga2`** repacks the vendor's Debian packages into one
     tree for **Linux amd64**, with the check plugins and every shared library the programs link
     taken as packages from Debian's archive of the same release — nothing from the host the tool
@@ -170,13 +170,13 @@ carries a date once its tag exists.
     `check_icmp` and its setuid relatives fail from the tree, while a setuid helper the host
     installed still works, since the unit sets no `NoNewPrivileges=`. Where the delivered plugins
     must run privileged, choose root with `service install --run-as root`
-    ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)).
+    ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md) clause 1).
   - **Not on a host with a process account.** There an `icinga2` block is refused when it is
     checked and when it starts, naming `service install --no-process-account`
-    ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)):
+    ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md) clause 18):
     Icinga drops to an account of its own, which a program under the process account cannot do.
   - **A repack follows no link out of the unpacked packages**
-    ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)): one that leads out
+    ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md) clause 27): one that leads out
     fails it, naming the link.
 
 ## [0.8.3] - 2026-11-15
