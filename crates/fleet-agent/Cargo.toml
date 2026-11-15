@@ -2,7 +2,7 @@
 name = "fleet-agent"
 description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0016)"
 # The test stubs (src/bin/stub_*.rs) are further binaries; `cargo run -p fleet-agent` means this one.
-# The operator tools are not here at all: they are `crates/fleet-tools` (ADR-0040).
+# The operator tools are not here at all: they are `crates/fleet-tools` (ADR-0008).
 default-run = "supervisor"
 version.workspace = true
 edition.workspace = true
@@ -67,10 +67,10 @@ async-trait.workspace = true
 # `host.mac` (ADR-0017).
 sysinfo = { workspace = true, features = ["network"] }
 # The downstream OpAMP endpoint of Gateway Mode (ADR-0016) is `opamp::server`'s, an axum router;
-# its WebSocket upgrade is `opamp`'s own (ADR-0040). The HTTP engine under it — hyper, tower,
+# its WebSocket upgrade is `opamp`'s own (ADR-0008). The HTTP engine under it — hyper, tower,
 # http-body — is already linked through reqwest; this adds the routing layer.
 axum.workspace = true
-# ADR-0039: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
+# ADR-0033: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
 # encrypted `.7z` with the key from `[packages] archive_key`.
 flate2.workspace = true
 tar.workspace = true
@@ -167,7 +167,7 @@ plist = "1"
 # would let it do.
 rustls.workspace = true
 # Tests build the `.7z` fixtures they then open; the daemon itself only ever decompresses. The
-# encoder rides here alone, since `pack` lives in its own crate (ADR-0040) — a dev-dependency
+# encoder rides here alone, since `pack` lives in its own crate (ADR-0008) — a dev-dependency
 # reaches the tests and no shipped binary.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 # ADR-0018: the end-to-end test runs the real Server in-process against the real Client binary.

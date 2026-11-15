@@ -688,7 +688,7 @@ async fn every_mutating_operation_of_the_document_names_its_503() {
     assert!(silent.is_empty(), "no 503 as answered named by: {silent:?}");
 }
 
-/// Verifies: ADR-0031, ADR-0039, ADR-0032, ADR-0034, G-5
+/// Verifies: ADR-0031, ADR-0033, ADR-0032, ADR-0034, G-5
 #[tokio::test]
 async fn the_openapi_document_describes_the_contract() {
     let server = spawn().await;
@@ -733,7 +733,7 @@ async fn the_openapi_document_describes_the_contract() {
         silent.is_empty(),
         "responses without a description: {silent:?}"
     );
-    // Deployments, entry signatures and floors are part of the contract (ADR-0039,
+    // Deployments, entry signatures and floors are part of the contract (ADR-0033,
     // ADR-0034) — a portal generates against this document, and a route it cannot see is a route
     // it cannot call.
     for route in [
@@ -747,7 +747,7 @@ async fn the_openapi_document_describes_the_contract() {
     ] {
         assert!(paths.contains_key(route), "{route} is described");
     }
-    // A signature lives on the entry, and every artifact is uploaded (ADR-0039 clause 12): the
+    // A signature lives on the entry, and every artifact is uploaded (ADR-0033 clause 12): the
     // Deployment signature routes and the entry's source route are not in the contract.
     for gone in [
         "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
@@ -755,7 +755,7 @@ async fn the_openapi_document_describes_the_contract() {
     ] {
         assert!(!paths.contains_key(gone), "{gone} is still described");
     }
-    // And the retired package paths are gone rather than lingering as a promise (ADR-0039).
+    // And the retired package paths are gone rather than lingering as a promise (ADR-0033).
     assert!(
         !paths
             .keys()
@@ -1544,7 +1544,7 @@ async fn a_label_may_not_restate_what_the_agent_reports() {
     let uid = opamp::uid::InstanceUid::default();
     report(&client, server.addr, &support::full_report(&uid, "host", 1)).await;
 
-    // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0039).
+    // `os.type` is reported by this Agent and chooses which artifact it is offered (ADR-0033).
     let refused = set_labels(
         &client,
         server.rest_addr,
@@ -2034,11 +2034,11 @@ async fn the_ui_lists_hosts_and_marks_inherited_labels() {
 }
 
 /// The Packages tab shows each entry's SHA-256 and signature state, offers what a signature covers
-/// as a signing file, and imports a signed one through the entry's signature route (ADR-0039) — so
+/// as a signing file, and imports a signed one through the entry's signature route (ADR-0033) — so
 /// the page writes the one format `opamp-fleetctl package sign --signing-info` reads, and the
 /// fields it reads must be the ones the API serves. A rename on either side breaks here rather than
 /// in an empty column or a signing file with a hole in it.
-/// Verifies: ADR-0031, ADR-0039
+/// Verifies: ADR-0031, ADR-0033
 #[tokio::test]
 async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
     let server = spawn().await;

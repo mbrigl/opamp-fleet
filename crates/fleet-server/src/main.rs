@@ -834,7 +834,7 @@ async fn serve() {
         .verification_key()
         .and_then(|key| {
             if key.is_some() {
-                // ADR-0039.
+                // ADR-0033.
                 info!("checking package signatures against [packages] verification_key");
             }
             fleet_server::packages::PackageStore::open_on(
@@ -855,7 +855,7 @@ async fn serve() {
         })
         .and_then(|(store, staging)| {
             if !store.is_empty() {
-                // ADR-0039.
+                // ADR-0033.
                 info!("offering software packages to the fleet");
             }
             fleet_server::fleet::PackageOffering::on(&records, store)
@@ -1482,7 +1482,7 @@ mod tests {
 
     /// Without `[client_ca]` the Server says at startup that an uploaded artifact needs a
     /// certificate naming a host, and how one is named; with it, it says nothing.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn a_server_without_client_ca_says_uploaded_artifacts_need_a_host() {
         let notice = uploaded_artifacts_notice(false).expect("a notice");

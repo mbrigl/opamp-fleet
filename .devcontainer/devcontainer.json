@@ -36,7 +36,7 @@
     // (AGENTS.md, section 6).
     "ghcr.io/devcontainers/features/github-cli:1": {},
     // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
-    // toolchain (ADR-0040). The build chain needs no system protoc (ADR-0011 uses the
+    // toolchain (ADR-0008). The build chain needs no system protoc (ADR-0011 uses the
     // pure-Rust protox), so no extra system packages are required here.
     "ghcr.io/devcontainers/features/rust:1": {}
   },

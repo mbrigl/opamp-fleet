@@ -418,7 +418,7 @@ mod tests {
     /// A secret is masked whatever TOML spelling carries it: a multi-line string, basic or
     /// literal, must not leave its continuation lines behind, and a dotted key, a quoted key, an
     /// inline table or an array of tables hides it no better. What is not secret stays as written.
-    /// Verifies: ADR-0018, ADR-0039
+    /// Verifies: ADR-0018, ADR-0033
     #[test]
     fn redaction_masks_every_spelling_of_a_secret_value() {
         let spellings = [
@@ -464,7 +464,7 @@ mod tests {
     }
 
     /// Text that does not parse cannot be taken apart, so it is reported as a placeholder.
-    /// Verifies: ADR-0018, ADR-0039
+    /// Verifies: ADR-0018, ADR-0033
     #[test]
     fn redaction_replaces_text_that_does_not_parse_whole() {
         let redacted = redact_secrets("archive_key = \"\"\"\nleak\nnot = closed\n");

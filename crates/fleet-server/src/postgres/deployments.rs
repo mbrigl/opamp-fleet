@@ -920,7 +920,7 @@ mod tests {
     /// write, so the second runs exactly then; the gate opens once the second waits for the
     /// Deployment's row, or has reached the gate itself, which only an amendment that took no hold
     /// does.
-    /// Verifies: ADR-0025, ADR-0039
+    /// Verifies: ADR-0025, ADR-0033
     #[test]
     fn two_packages_of_one_type_added_at_once_add_one() {
         let Some(test) = TestDatabase::named() else {

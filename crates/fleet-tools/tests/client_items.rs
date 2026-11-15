@@ -1,5 +1,5 @@
 //! What the operator tool takes from the Client: only the items its ADR names
-//! (ADR-0040 clause 22).
+//! (ADR-0008 clause 22).
 //!
 //! The tool depends on `fleet-agent`, so the compiler lets it name anything the Client makes
 //! public. This test reads the tool's own code under `src/` and holds every `fleet_agent::` path
@@ -133,7 +133,7 @@ fn allowed(path: &str) -> bool {
             .any(|m| path.strip_prefix(m).is_some_and(|r| r.starts_with("::")))
 }
 
-/// Verifies: ADR-0040
+/// Verifies: ADR-0008
 #[test]
 fn the_operator_tool_uses_only_the_client_items_its_adr_names() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -164,7 +164,7 @@ fn the_operator_tool_uses_only_the_client_items_its_adr_names() {
 }
 
 /// The reader finds what code can name, and lets an allowed item pass.
-/// Verifies: ADR-0040
+/// Verifies: ADR-0008
 #[test]
 fn the_reader_finds_every_form_a_path_takes() {
     assert_eq!(

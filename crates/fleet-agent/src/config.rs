@@ -64,7 +64,7 @@ pub struct ClientConfig {
     /// [`leftover_auth_notice`](Self::leftover_auth_notice) reports, once, at startup.
     #[serde(default, rename = "auth")]
     pub leftover_auth: Option<serde::de::IgnoredAny>,
-    /// Package verification (ADR-0039); absent means unsigned packages are accepted on their
+    /// Package verification (ADR-0033); absent means unsigned packages are accepted on their
     /// content hash alone.
     pub packages: Option<PackagesConfig>,
     /// A `[self_update]` section, which ADR-0019 replaced with `[packages] self_update`. Read only
@@ -80,7 +80,7 @@ pub struct ClientConfig {
     /// and the apply grace. Absent takes the defaults.
     #[serde(default, rename = "supervisors")]
     pub supervisor_defaults: SupervisorsConfig,
-    /// How Managed-Process package updates behave once applied (ADR-0039) — the retention of a
+    /// How Managed-Process package updates behave once applied (ADR-0033) — the retention of a
     /// superseded version. Absent takes the defaults: one day.
     #[serde(default)]
     pub updates: UpdatesConfig,
@@ -126,7 +126,7 @@ pub struct ClientConfig {
     #[serde(default = "default_max_message_size")]
     pub max_message_size_bytes: usize,
     /// The largest package or self-update artifact the Client downloads before verifying it
-    /// (ADR-0039). Streaming already caps peak memory at one chunk, but disk is finite: without a
+    /// (ADR-0033). Streaming already caps peak memory at one chunk, but disk is finite: without a
     /// ceiling a Server could answer the artifact GET with an endless body and fill the staging
     /// filesystem before the content hash is ever checked. Matches the Server's own per-package
     /// ceiling; `0` is refused at load, the same as the message limit.
@@ -177,7 +177,7 @@ pub struct SupervisorBlock {
     /// key.
     ///
     /// Set it where the file name is not the type — a Collector whose `dist.name` should be its
-    /// type, every Foreign Agent — so a Selector can aim at what this Agent *is* (ADR-0039).
+    /// type, every Foreign Agent — so a Selector can aim at what this Agent *is* (ADR-0033).
     pub service_name: Option<String>,
     /// The Supervisor Endpoint's loopback port; `0` (the default) binds an ephemeral port. Pin
     /// it when the distributed configuration carries the `opampextension` pointing at it.
@@ -196,12 +196,12 @@ pub struct SupervisorBlock {
     /// acknowledgement ADR-0018 names). `0` acknowledges on start. `None` takes the global value,
     /// and a wrapped kind refuses the key for the reason above.
     pub apply_grace_secs: Option<u64>,
-    /// Overrides the global `[updates] retain_previous_secs` for this Supervisor (ADR-0039): how
+    /// Overrides the global `[updates] retain_previous_secs` for this Supervisor (ADR-0033): how
     /// long the version a successful update supersedes is kept before deletion. `None` — the
     /// default — takes the global value.
     pub retain_previous_secs: Option<u64>,
-    /// Where the program sits *inside* a package that is a whole directory tree (ADR-0039), e.g.
-    /// `bin/fluent-bit`. `None` — the default — is the single-file package of ADR-0039: one
+    /// Where the program sits *inside* a package that is a whole directory tree (ADR-0033), e.g.
+    /// `bin/fluent-bit`. `None` — the default — is the single-file package of ADR-0033: one
     /// member, one file. Setting it is what asks for the tree to be unpacked whole.
     ///
     /// It never decides *whether* packages are taken; the written shape of `binary`/`command`
@@ -215,11 +215,11 @@ pub struct SupervisorBlock {
 ///
 /// Called `program` and not `bin` on purpose: it holds one file for a single-file package, and a
 /// Foreign Agent's whole tree — an executable with the shared objects it loads — is unpacked under
-/// the same root (ADR-0039, in [`TREE_DIR`]), so no path on disk moved when that arrived. A
+/// the same root (ADR-0033, in [`TREE_DIR`]), so no path on disk moved when that arrived. A
 /// directory name is cheap; a layout migration on every host is not.
 pub const PROGRAM_DIR: &str = "program";
 
-/// The subdirectory of `program/` holding an unpacked package tree (ADR-0039), with the tree it
+/// The subdirectory of `program/` holding an unpacked package tree (ADR-0033), with the tree it
 /// replaced kept beside it under the same name plus `.rollback`.
 ///
 /// Two fixed names rather than a version directory and a pointer: it is the mechanism the
@@ -267,7 +267,7 @@ pub struct Program {
 /// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
 /// wrote. **One shape** (ADR-0018): a **bare file name**, resolving to
 /// `<supervisor_dir>/program/<value>` — or `program/tree/<program_path>` for a multi-file package
-/// (ADR-0039) — a directory this Client creates and owns, so it may replace what is in it. A bare
+/// (ADR-0033) — a directory this Client creates and owns, so it may replace what is in it. A bare
 /// name cannot escape that directory, which is why nothing here has to sanitize a path.
 ///
 /// Everything else is refused, and an **absolute path** gets its own message: it names a program on
@@ -302,7 +302,7 @@ pub fn resolve_program(
     let bare = matches!(components.next(), Some(std::path::Component::Normal(_)))
         && components.next().is_none();
     if bare {
-        // With a tree the program is one file *inside* the unpacked package (ADR-0039), and the
+        // With a tree the program is one file *inside* the unpacked package (ADR-0033), and the
         // bare name above is what it always was: the consent, readable in the file.
         let path = match program_path {
             Some(inside) => supervisor_dir.join(PROGRAM_DIR).join(TREE_DIR).join(inside),
@@ -352,7 +352,7 @@ pub(crate) const WINDOWS_RESERVED: [&str; 22] = [
 
 /// The only way to build an [`InstanceName`]: validated against the grammar above. `pub` because
 /// callers outside this module need to construct one and there is nothing else to do it with
-/// (ADR-0040 widens visibility by need).
+/// (ADR-0008 widens visibility by need).
 ///
 /// # Errors
 /// Returns an error naming the rule the value breaks.
@@ -450,7 +450,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
             ),
         };
         // `package = "name"` would choose the artifact on the host, a decision that is the Server's
-        // Selector's (ADR-0039). Refuse it loudly rather than ignore a key an operator believes in.
+        // Selector's (ADR-0033). Refuse it loudly rather than ignore a key an operator believes in.
         if table.contains_key("package") {
             return Err(format!(
                 "supervisor {name:?}: `package` is no longer a supervisor key — the Server \
@@ -483,7 +483,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
     }
 }
 
-/// Checks a `program_path` (ADR-0039): a relative path inside the package, and nothing that could
+/// Checks a `program_path` (ADR-0033): a relative path inside the package, and nothing that could
 /// reach outside it.
 ///
 /// The same three refusals the archive sanitizer makes, made here instead — at startup, where the
@@ -552,9 +552,9 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
 /// `verification_key` is the *public* half of the signing pair.
 pub(crate) const SECRET_KEYS: &[&str] = &["bearer_token", "password", "archive_key"];
 
-/// The `[packages]` block (ADR-0039): how downloaded package artifacts are verified, and whether
+/// The `[packages]` block (ADR-0033): how downloaded package artifacts are verified, and whether
 /// this Client takes its own (ADR-0019). Where they come from is not configurable: always this
-/// Client's own Server origin (ADR-0039).
+/// Client's own Server origin (ADR-0033).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackagesConfig {
@@ -565,20 +565,20 @@ pub struct PackagesConfig {
     ///
     /// The consent is narrowed to one package, the Client's own Agent type, and that name is not
     /// configurable: a package with an empty Selector reaches every Agent that accepts packages
-    /// (ADR-0039), so without the name the first fleet-wide Collector artifact would be installed
+    /// (ADR-0033), so without the name the first fleet-wide Collector artifact would be installed
     /// over the Client. Whether the consent takes effect is decided by `verification_key`.
     #[serde(default = "default_self_update")]
     pub self_update: bool,
     /// Hex-encoded Ed25519 public key. Every offered package MUST carry a valid signature against
     /// it; without it this Client takes no packages at all, its own self-update included
-    /// (ADR-0039, ADR-0019).
+    /// (ADR-0033, ADR-0019).
     pub verification_key: Option<String>,
-    /// `allowed_sources`, which ADR-0039 removed: a package is downloaded only from this Client's
+    /// `allowed_sources`, which ADR-0033 removed: a package is downloaded only from this Client's
     /// own Server origin. Read only so that [`ClientConfig::checked`] can refuse it by name — a
     /// list an operator believes is in force, and is not, is worse than a failed start.
     #[serde(default, rename = "allowed_sources")]
     pub leftover_allowed_sources: Option<serde::de::IgnoredAny>,
-    /// The key that opens an encrypted `.7z` package artifact (ADR-0039). Unset means artifacts are
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0033). Unset means artifacts are
     /// expected unencrypted; an encrypted one then fails to install, naming this key.
     ///
     /// One secret for the fleet — a single archive serves every Agent. Wiped when it is dropped
@@ -765,13 +765,13 @@ impl Default for SupervisorsConfig {
     }
 }
 
-/// The `[updates]` section (ADR-0039): how a Managed Process's package updates behave once applied.
+/// The `[updates]` section (ADR-0033): how a Managed Process's package updates behave once applied.
 /// Global here, overridable per `[[supervisor]]` block, the shape `apply_grace_secs` already has.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdatesConfig {
     /// How long the version a successful update supersedes is kept before it is deleted, so an
-    /// operator has a fallback window (ADR-0039). `0` deletes it on success, with no
+    /// operator has a fallback window (ADR-0033). `0` deletes it on success, with no
     /// fallback window. A per-Supervisor `retain_previous_secs` overrides this for one block.
     #[serde(default = "default_retain_previous_secs")]
     pub retain_previous_secs: u64,
@@ -812,7 +812,7 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_carried_agents")]
     pub max_carried_agents: usize,
     /// The most bytes of package artifacts this Gateway holds for the Agents behind it
-    /// (ADR-0039 clause 45), under `<state_dir>/gateway-packages`. An artifact larger than this, or
+    /// (ADR-0033 clause 45), under `<state_dir>/gateway-packages`. An artifact larger than this, or
     /// than `max_artifact_size_bytes`, is not cached and not delivered through the Gateway. `0` is
     /// refused at load.
     #[serde(default = "default_package_cache_bytes")]
@@ -884,7 +884,7 @@ pub struct GatewayTlsConfig {
 }
 
 impl GatewayConfig {
-    /// Loud validation (ADR-0040): a pool of zero would carry nothing, and the pool is a WebSocket
+    /// Loud validation (ADR-0008): a pool of zero would carry nothing, and the pool is a WebSocket
     /// pool — a polling upstream cannot carry the Server's pushes to the Agents behind it.
     fn check(&self, endpoint: &str) -> Result<(), String> {
         if self.upstream_connections == 0 {
@@ -949,7 +949,7 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    /// Loud validation (ADR-0040): half an identity is a configuration error, not a fallback to
+    /// Loud validation (ADR-0008): half an identity is a configuration error, not a fallback to
     /// none — a Server demanding mutual TLS would refuse the connection with no hint why.
     fn check(&self) -> Result<(), String> {
         match (&self.cert_file, &self.key_file) {
@@ -1006,7 +1006,7 @@ fn default_max_carried_agents() -> usize {
 }
 
 /// Ten gibibytes: room for a handful of releases of a large Agent across a few Platforms, which is
-/// what one rollout behind a Gateway asks for (ADR-0039 clause 45).
+/// what one rollout behind a Gateway asks for (ADR-0033 clause 45).
 fn default_package_cache_bytes() -> u64 {
     10 * 1024 * 1024 * 1024
 }
@@ -1123,7 +1123,7 @@ impl ClientConfig {
             return Err(format!(
                 "{}: [packages] allowed_sources is removed — this Client downloads a package only \
                  from its own Server's origin, and every artifact is uploaded to the Server \
-                 (ADR-0039). Remove the key.",
+                 (ADR-0033). Remove the key.",
                 path.display()
             ));
         }
@@ -1177,7 +1177,7 @@ impl ClientConfig {
         Ok(config)
     }
 
-    /// The Ed25519 public key package signatures are verified against (ADR-0039), or `None`.
+    /// The Ed25519 public key package signatures are verified against (ADR-0033), or `None`.
     pub fn package_key(&self) -> Option<&[u8]> {
         self.package_key.as_deref()
     }
@@ -1541,8 +1541,8 @@ mod tests {
     }
 
     /// `[packages] allowed_sources` fails the load whatever it holds, naming the key as removed:
-    /// ignored, it would be a list an operator believes is in force and is not (ADR-0039 clause 51).
-    /// Verifies: ADR-0039
+    /// ignored, it would be a list an operator believes is in force and is not (ADR-0033 clause 51).
+    /// Verifies: ADR-0033
     #[test]
     fn allowed_sources_fails_the_load_naming_the_key_as_removed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1582,7 +1582,7 @@ mod tests {
     /// The artifact download has a ceiling so a Server cannot fill the staging disk before the hash
     /// is checked; it defaults to the Server's own per-package limit, is configurable, and zero is
     /// a bound that could carry nothing rather than "unlimited", so it fails startup.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn the_artifact_size_limit_defaults_is_configurable_and_rejects_zero() {
         assert_eq!(ClientConfig::default().max_artifact_size_bytes, 1 << 30);
@@ -1630,7 +1630,7 @@ mod tests {
 
     /// The Gateway's package cache holds ten gibibytes by default, and zero is a bound that could
     /// hold nothing rather than "unlimited", so it fails startup.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn the_package_cache_defaults_to_ten_gib_and_rejects_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1736,10 +1736,10 @@ mod tests {
     }
 
     /// Both keys that would configure package delivery on the host are refused rather than ignored:
-    /// `package` would name the artifact (the Server's Selector does, ADR-0039), and
+    /// `package` would name the artifact (the Server's Selector does, ADR-0033), and
     /// `accepts_packages` would say whether to take one (ADR-0018 derives that from the program's
     /// path). An operator who has either in a file believes it does something.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn the_retired_package_keys_are_refused() {
         let block = |extra: &str| {
@@ -1805,10 +1805,10 @@ mod tests {
         }
     }
 
-    /// With a tree (ADR-0039) the program is one file *inside* the package, so the spawn path is
+    /// With a tree (ADR-0033) the program is one file *inside* the package, so the spawn path is
     /// the one the configuration writes — and the bare name keeps meaning exactly what ADR-0018
     /// made it mean, which is consent and nothing else.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn a_tree_spawns_from_the_path_written_inside_the_package() {
         let dir = PathBuf::from("/srv/fleet/fluent-bit");
@@ -1832,7 +1832,7 @@ mod tests {
 
     /// Refused at startup, where the operator is still looking at the file — not at rollout time
     /// on every matched host, which is where the archive sanitizer would catch the same thing.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn a_program_path_must_stay_inside_the_package() {
         assert_eq!(
@@ -1989,7 +1989,7 @@ mod tests {
         ClientConfig::load(&path).expect("plaintext on a loopback literal loads");
     }
 
-    /// Verifies: ADR-0012, ADR-0040
+    /// Verifies: ADR-0012, ADR-0008
     #[test]
     fn rejects_an_unknown_scheme_and_unknown_keys() {
         let cfg = ClientConfig {
@@ -2040,9 +2040,9 @@ mod tests {
         assert!(command.settings.contains_key("args"));
     }
 
-    /// ADR-0039: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
+    /// ADR-0033: retention defaults to a day, is set globally by `[updates]`, and a `[[supervisor]]`
     /// block overrides it for itself — the shape `apply_grace_secs` has.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn retention_defaults_globally_and_is_overridable_per_supervisor() {
         let default: ClientConfig = toml::from_str("").expect("parse");

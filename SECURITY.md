@@ -101,7 +101,7 @@ a peer behind one, can report under any `instance_uid`** and update that Agent's
 *not* a cross-fleet or unauthenticated exposure: it is bounded by admission.
 
 **A host receives from the Server only what is released to an Agent it speaks for**
-([ADR-0039](docs/adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)).
+([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)).
 A composed configuration travels
 only to the Agent it was released to,
 and the package download serves an uploaded artifact only to a host one of whose Agents is

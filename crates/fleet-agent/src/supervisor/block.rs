@@ -16,7 +16,7 @@ pub struct Resolved<'a> {
     pub plugin: &'a dyn Plugin,
     pub settings: toml::Table,
     pub program: Program,
-    /// Where the program sits inside a package tree (ADR-0039); `None` for a single file.
+    /// Where the program sits inside a package tree (ADR-0033); `None` for a single file.
     pub program_path: Option<PathBuf>,
     pub service_name: String,
     pub timing: Timing,
@@ -136,7 +136,7 @@ pub fn take_program(
     Ok((settings, program, program_path))
 }
 
-/// Where the program sits inside a package tree (ADR-0039): the block's answer, or the one the kind
+/// Where the program sits inside a package tree (ADR-0033): the block's answer, or the one the kind
 /// knows (ADR-0018). A kind that knows it refuses a block that states it, for the reason
 /// [`take_program`] refuses a program name.
 ///

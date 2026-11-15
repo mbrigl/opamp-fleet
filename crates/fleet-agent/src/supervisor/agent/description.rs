@@ -113,7 +113,7 @@ impl Local {
             // The operator's name for this Agent (ADR-0017). Non-identifying because the Baseline
             // has no key for a human instance name and admits "any user-defined attributes the end
             // user would like to associate with this Agent" here; identity itself stays
-            // `service.instance.id`. A Selector can match it, which is how ADR-0039's "pin one
+            // `service.instance.id`. A Selector can match it, which is how ADR-0033's "pin one
             // host" is expressed for a machine running several Supervisors.
             string_attr(attributes::SERVICE_INSTANCE_NAME, &self.instance_name),
             string_attr(attributes::OS_TYPE, os_type()),
@@ -275,7 +275,7 @@ pub(super) fn os_type() -> &'static str {
 }
 
 /// OpenTelemetry semantic-convention value for `host.arch` — the convention says `amd64`/`arm64`
-/// where Rust's constant says `x86_64`/`aarch64` (ADR-0039).
+/// where Rust's constant says `x86_64`/`aarch64` (ADR-0033).
 ///
 /// The Baseline points at the conventions for these keys, and the Collector's `opampextension`
 /// reports `runtime.GOARCH`, which is already this vocabulary. Reporting Rust's spelling instead

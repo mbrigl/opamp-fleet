@@ -466,7 +466,7 @@ fn carry_packages(
             if let Some(url) = entry.source_url {
                 report.line(format!(
                     "dropped: {id} for {tag} — a referenced entry ({url}); every artifact is \
-                     uploaded now (ADR-0039)"
+                     uploaded now (ADR-0033)"
                 ));
                 continue;
             }

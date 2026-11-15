@@ -15,7 +15,7 @@ The core repack (#179, 834010bff) added mechanisms that no kind on `main` calls.
 of them, so none is dead by mistake:
 
 - **The kept-link chain** (clause 57 of
-  ADR-0039). `KindDefaults::tree_links`
+  ADR-0033). `KindDefaults::tree_links`
   (`crates/fleet-agent/src/supervisor/ports.rs`, near line 423) is `&[]` for every kind. The empty
   list still runs through `install_target`, `InstallTarget::Tree`, `stage_tree` and
   `archive::extract_tree_tar_gz`'s kept-link checks for every tree package. `KeptLink` values are
@@ -66,7 +66,7 @@ The choice was settled before the normalization of 2026-11-15: the mechanisms st
 - Touches: `crates/fleet-agent/src/supervisor/`, `crates/fleet-agent/src/archive.rs`,
   `crates/fleet-tools/src/fetch.rs`, `crates/fleet-tools/src/gpgv.rs`,
   `crates/fleet-core/src/tree.rs`, `crates/fleet-core/src/version.rs`, `scripts/check-rust.sh`
-- ADR-0039 clause 57, ADR-0036 clauses 27 to 29, ADR-0018
+- ADR-0033 clause 57, ADR-0036 clauses 27 to 29, ADR-0018
   (the kinds), ADR-0034 clause 6.
 
 **Its mode.**

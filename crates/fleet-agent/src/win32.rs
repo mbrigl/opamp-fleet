@@ -5,7 +5,7 @@
 //! The SID text and the pipe's SDDL are plain string logic, compiled on every platform so that
 //! their tests run everywhere. The calls into the system are declared here by hand, each against
 //! its Microsoft Learn page: the `windows-sys` features they live in are not enabled anywhere in the
-//! build, and enabling them is a dependency decision (ADR-0040) this module does not take.
+//! build, and enabling them is a dependency decision (ADR-0008) this module does not take.
 
 /// The SID of `LocalSystem`, which never runs the second service and is never the Client's account
 /// where a process account is registered (ADR-0021 clause 16).

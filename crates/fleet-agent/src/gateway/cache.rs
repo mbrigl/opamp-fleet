@@ -1,4 +1,4 @@
-//! The Gateway's package cache (ADR-0039 clauses 41 to 46 and ADR-0016 clause 15): each uploaded
+//! The Gateway's package cache (ADR-0033 clauses 41 to 46 and ADR-0016 clause 15): each uploaded
 //! artifact the Gateway relays an offer of is fetched from the Server once, with the Gateway's own
 //! certificate, and passed on only to a downstream host whose Agent it relayed that offer to.
 //!
@@ -54,25 +54,25 @@ pub const ROUTE: &str = "/api/v1/packages/{agent_type}/{version}/file";
 /// What every offered path on the Server's download route begins with.
 const ROUTE_PREFIX: &str = "/api/v1/packages/";
 
-/// How many fetches run at a time (ADR-0039 clause 41): a rollout rarely offers more distinct
+/// How many fetches run at a time (ADR-0033 clause 41): a rollout rarely offers more distinct
 /// artifacts at once, and each one holds a reservation of up to the per-artifact limit.
 const CONCURRENT_FETCHES: usize = 4;
 
 /// The most `instance_uid`s bound at once, over all hosts (ADR-0016 clause 15).
 pub(crate) const MAX_BINDINGS: usize = 1_000_000;
 
-/// How many lines per host and minute are logged one by one (ADR-0039 clause 44).
+/// How many lines per host and minute are logged one by one (ADR-0033 clause 44).
 const LINES_PER_MINUTE: u32 = 5;
 
 /// What a request is told to wait while a fetch runs (ADR-0016 clause 15).
 const RETRY_AFTER_SECS: &str = "30";
 
-/// The pace a fetch keeps up after its grace, or it is cut (ADR-0039 clause 41).
+/// The pace a fetch keeps up after its grace, or it is cut (ADR-0033 clause 41).
 const PACE_FLOOR_BYTES_PER_SEC: u64 = 64 * 1024;
 const PACE_GRACE: Duration = Duration::from_secs(60);
 
 /// Whether a fetch that has received `bytes` in `elapsed` has fallen below the pace floor: after
-/// the grace, at least 64 KiB for every second past it (ADR-0039 clause 41).
+/// the grace, at least 64 KiB for every second past it (ADR-0033 clause 41).
 fn below_pace(bytes: u64, elapsed: Duration) -> bool {
     let Some(past) = elapsed.checked_sub(PACE_GRACE) else {
         return false;
@@ -81,7 +81,7 @@ fn below_pace(bytes: u64, elapsed: Duration) -> bool {
 }
 
 /// One artifact as an offer names it: the path on the Server's route, query included, and the
-/// content hash the offer carries (ADR-0039 clause 43).
+/// content hash the offer carries (ADR-0033 clause 43).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Artifact {
     pub path: String,
@@ -90,7 +90,7 @@ pub struct Artifact {
 
 impl Artifact {
     /// The artifact a relayed file names, when it is one the Server hosts: a path on its download
-    /// route (ADR-0039). The Server offers every artifact as such a path. An absolute URL, which only
+    /// route (ADR-0033). The Server offers every artifact as such a path. An absolute URL, which only
     /// a foreign Server could send, is `None`: a downstream Client refuses it, since its only source
     /// is its own origin, this Gateway. So is a hash that is no SHA-256 and could never verify.
     #[must_use]
@@ -155,7 +155,7 @@ struct Held {
     copy: u64,
 }
 
-/// What one line of a host is to the log (ADR-0039 clause 44).
+/// What one line of a host is to the log (ADR-0033 clause 44).
 #[derive(Debug, PartialEq, Eq)]
 enum Note {
     /// Log it.
@@ -288,7 +288,7 @@ impl Inner {
 }
 
 /// The artifacts to delete so that `need` more bytes fit within `capacity` beside `other` bytes
-/// already counted (ADR-0039 clause 45): those no current offer names first, then offered ones,
+/// already counted (ADR-0033 clause 45): those no current offer names first, then offered ones,
 /// each least recently used first. `None` when deleting every held artifact is not enough.
 fn victims(
     held: &HashMap<Vec<u8>, Held>,
@@ -313,7 +313,7 @@ fn victims(
 
 /// Why a fetch stored nothing.
 enum Failure {
-    /// Past the bound of ADR-0039 clause 45: remembered for the run, and not fetched again.
+    /// Past the bound of ADR-0033 clause 45: remembered for the run, and not fetched again.
     TooLarge(u64),
     Other(String),
 }
@@ -488,7 +488,7 @@ enum Opened {
 }
 
 /// Opens the Gateway's directory `dir` without following a link, empties it of every artifact an
-/// earlier run left (ADR-0039 clause 45) and keeps the store, reads the bindings from it and
+/// earlier run left (ADR-0033 clause 45) and keeps the store, reads the bindings from it and
 /// rewrites it whole from what they are with `create` (ADR-0016 clause 16). A store that cannot
 /// be read or rewritten is [`Opened::Unreadable`]: the Gateway does not rely on it.
 fn open_dir(
@@ -561,7 +561,7 @@ pub fn log_unreadable(why: &str, store: &Path) {
 }
 
 impl PackageCache {
-    /// The cache of the Gateway `config` arms, its directory emptied of artifacts (ADR-0039
+    /// The cache of the Gateway `config` arms, its directory emptied of artifacts (ADR-0033
     /// clause 45) and its bindings read from the store (ADR-0016 clause 16).
     ///
     /// # Errors
@@ -942,7 +942,7 @@ impl PackageCache {
 
     /// Records what a `ServerToAgent` relayed to `uid` offers, over a downstream connection whose
     /// certificate names `host`, and starts fetching each Server-hosted artifact it names that may
-    /// be fetched (ADR-0039 clause 41 and ADR-0016 clause 15). A message without `packages_available` leaves the offer
+    /// be fetched (ADR-0033 clause 41 and ADR-0016 clause 15). A message without `packages_available` leaves the offer
     /// standing; an offer over a certificate that names no host, or for an `instance_uid` bound to
     /// another host, is not recorded and starts nothing.
     pub fn observe(
@@ -1167,7 +1167,7 @@ impl PackageCache {
     }
 
     /// Reserves `need` bytes for the fetch of `hash`, deleting held artifacts to make room
-    /// (ADR-0039 clause 45). Files whose deletion failed before are deleted again first. The
+    /// (ADR-0033 clause 45). Files whose deletion failed before are deleted again first. The
     /// victims are chosen under the lock and deleted after it is released; until they are gone
     /// they stay counted.
     async fn reserve(&self, hash: &[u8], need: u64) -> Result<(), String> {
@@ -1238,14 +1238,14 @@ impl PackageCache {
     }
 
     /// Streams the artifact from the Server into `staged`, hashing on the way, and checks the hash
-    /// (ADR-0039 clauses 41, 43 and 45). Returns its length.
+    /// (ADR-0033 clauses 41, 43 and 45). Returns its length.
     async fn download(&self, artifact: &Artifact, staged: &Path) -> Result<u64, Failure> {
         use tokio::io::AsyncWriteExt as _;
 
         let config = self.config.clone();
         let path = artifact.path.clone();
         // This Gateway's own certificate to its Server's origin, as every Client's download
-        // (ADR-0039 clause 51), and no offered headers. The material is read from disk, so off the
+        // (ADR-0033 clause 51), and no offered headers. The material is read from disk, so off the
         // async workers.
         let (url, origin, identified) = tokio::task::spawn_blocking(move || {
             let url = crate::packages::resolve_url(&path, &config.endpoint)?;
@@ -1368,7 +1368,7 @@ impl PackageCache {
     }
 
     /// Logs one refusal of an enrolling peer's report or upgrade, aggregated per host it speaks as,
-    /// as every refusal of the Gateway is (ADR-0039 clause 44, ADR-0016 clause 24).
+    /// as every refusal of the Gateway is (ADR-0033 clause 44, ADR-0016 clause 24).
     pub fn log_enrolment_refusal(&self, speaker: &str, peer: &str, why: &str) {
         match self.inner().refusals.note(speaker, Instant::now()) {
             Note::Log => warn!(host = %speaker, %peer, "refusing an enrolling peer: {why}"),
@@ -1381,7 +1381,7 @@ impl PackageCache {
         }
     }
 
-    /// Logs one refused download request, aggregated per host (ADR-0039 clause 44).
+    /// Logs one refused download request, aggregated per host (ADR-0033 clause 44).
     fn log_refusal(&self, host: Option<&str>, serial: Option<&str>, path: &str) {
         let host = host.unwrap_or("none");
         let serial = serial.unwrap_or("none");
@@ -1568,7 +1568,7 @@ mod tests {
     /// To make room the cache deletes what no current offer names before what one does, each
     /// least recently used first, no more than the room it needs, and nothing when even deleting
     /// everything would not make room beside what other fetches reserved.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn room_is_made_from_artifacts_no_longer_offered_first() {
         let held = HashMap::from([
@@ -1598,8 +1598,8 @@ mod tests {
     }
 
     /// Every path on the Server's own download route with a SHA-256 is an artifact the Gateway
-    /// caches; an absolute URL is not, whichever host it names (ADR-0039 clause 42).
-    /// Verifies: ADR-0039
+    /// caches; an absolute URL is not, whichever host it names (ADR-0033 clause 42).
+    /// Verifies: ADR-0033
     #[test]
     fn only_a_path_on_the_servers_route_is_cached() {
         let file = |url: &str, hash: Vec<u8>| DownloadableFile {
@@ -1635,7 +1635,7 @@ mod tests {
 
     /// The first five lines of a host in a minute are logged, the rest counted, and the count is
     /// logged with the host's first line of the next minute. Hosts are counted apart.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn refusals_are_logged_five_a_minute_per_host_and_the_rest_counted() {
         let mut log = RefusalLog::default();
@@ -1780,7 +1780,7 @@ mod tests {
 
     /// Requests for an artifact being fetched are told to come back instead of waiting, and the
     /// upstream serves the one fetch.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn requests_while_fetching_are_answered_busy_and_the_upstream_serves_one() {
         let bytes = b"the-binary".to_vec();
@@ -1884,7 +1884,7 @@ mod tests {
     /// What an earlier run left in the cache directory is gone once the Gateway opens it, the
     /// bindings' store aside, which is none of the cache's artifacts; and the directory is the
     /// owner's alone.
-    /// Verifies: ADR-0039, ADR-0016
+    /// Verifies: ADR-0033, ADR-0016
     #[tokio::test]
     async fn the_cache_is_emptied_at_start_and_owner_only() {
         let bytes = b"the-binary".to_vec();
@@ -1938,7 +1938,7 @@ mod tests {
     /// Two offered artifacts that do not fit together: a request fetches an evicted one again,
     /// but only once per relayed offer of it, so requests cannot make the two evict each other in a
     /// loop. The next relayed offer re-arms it.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn an_evicted_offered_artifact_is_fetched_again_on_a_request_once_per_offer() {
         let (a_bytes, b_bytes) = (vec![1u8; 10], vec![2u8; 10]);
@@ -1984,7 +1984,7 @@ mod tests {
 
     /// A file whose deletion fails stays counted, so the room it takes is not handed out, and is
     /// deleted on a later attempt — without touching a newer copy of the same artifact.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn a_file_whose_deletion_fails_stays_counted_until_deleted() {
         static FAILURES: AtomicUsize = AtomicUsize::new(1);
@@ -2048,7 +2048,7 @@ mod tests {
 
     /// A held artifact whose file disappeared is not served, and is forgotten; with no refetch left
     /// under the current offer the request is answered `Nothing`.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn a_held_artifact_whose_file_disappeared_is_forgotten() {
         let bytes = b"the-binary".to_vec();
@@ -2071,7 +2071,7 @@ mod tests {
 
     /// An offered artifact evicted between the lookup and the open — its file gone — is decided
     /// again: the refetch the current offer allows starts, and the request is told to come back.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn an_artifact_evicted_between_lookup_and_open_is_fetched_again() {
         let bytes = b"the-binary".to_vec();
@@ -2160,7 +2160,7 @@ mod tests {
     }
 
     /// Past its grace a fetch must keep an average of 64 KiB/s since the grace ended.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn a_fetch_below_the_pace_floor_is_cut() {
         let kib64 = 64 * 1024;
@@ -2172,7 +2172,7 @@ mod tests {
 
     /// A fetch the Server defers with `503` and `Retry-After` gives its slot back while it waits,
     /// asks again, and completes.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn a_deferred_fetch_gives_its_slot_back_while_it_waits() {
         let bytes = b"the-binary".to_vec();
@@ -2236,7 +2236,7 @@ mod tests {
 
     /// A shutdown ends a fetch that waits out the Server's `Retry-After`: nothing is left marked as
     /// being fetched.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn a_shutdown_ends_a_fetch_that_waits_out_retry_after() {
         let count = Arc::new(AtomicUsize::new(0));
@@ -2279,7 +2279,7 @@ mod tests {
     }
 
     /// A fetch cannot reserve room that other fetches hold.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn a_fetch_cannot_reserve_room_other_fetches_hold() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2294,7 +2294,7 @@ mod tests {
     }
 
     /// At most four fetches run at once; a fifth waits for a slot.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn no_more_than_four_fetches_run_at_once() {
         let versions = ["1", "2", "3", "4", "5"];
@@ -2345,7 +2345,7 @@ mod tests {
     }
 
     /// A fetch whose task ends without settling leaves no entry and no reservation behind.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[tokio::test]
     async fn an_unfinished_fetch_leaves_no_entry_behind() {
         let dir = tempfile::tempdir().expect("tempdir");

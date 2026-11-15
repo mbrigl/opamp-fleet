@@ -52,7 +52,7 @@ than anywhere else, and none beats one that has stopped being true.
 - **Package downloads** come from the Server alone: every artifact is uploaded to it, and a
   Client fetches only from its own Server's origin, or from its Gateway. What arrives is checked
   against its hash and the operator's signature
-  ([ADR-0039](adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)).
+  ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)).
 - **The service manager** starts the Client and restarts it after a self-update
   ([ADR-0019](adr/0019-the-client-updates-itself-from-a-signed-package.md)). Where a process
   account is registered, it also runs the second service, which starts the Managed Processes
@@ -67,10 +67,10 @@ The parts the system is made of, each with one responsibility, named in the voca
 golden path and the test pattern an agent copies from are named here.
 
 Five crates in one workspace
-([ADR-0040](adr/0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)):
+([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)):
 
 - **`opamp`** — the OpAMP communication layer, publishable on its own
-  ([ADR-0040](adr/0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)).
   Always the
   generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
   machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
@@ -118,7 +118,7 @@ Five crates in one workspace
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
   fetch (`fetch`), pack, hash and sign package artifacts — or sign a Package's signing file from
   the UI (`signing`,
-  ADR-0039)
+  ADR-0033)
   — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
   of a PKCS#12 file (ADR-0036). `gpgv` verifies an upstream's OpenPGP signature (ADR-0036 clause
@@ -399,7 +399,7 @@ no module.
   `install`, the Gateway's package cache, and the second service's purge on Windows, which goes
   by path — works by path in directories that account owns and no other account may write.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
-  ([ADR-0040](adr/0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md));
+  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md));
   `config_file` reads it from disk, makes
   its
   directories absolute, finds the identity the state directory holds, and redacts the text the
@@ -409,7 +409,7 @@ no module.
   settings verification in `connection`, the Gateway's upstream pool (`gateway::pool`) and its
   downstream listener, and the Supervisor Endpoint (`supervisor::endpoint`) use the same `opamp`
   building blocks
-  ([ADR-0040](adr/0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)).
   The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
   ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)),
@@ -419,7 +419,7 @@ no module.
   The Gateway's `cache` sees every offer `registry` hands down, fetches each artifact offered on
   the Server's route once into the state directory, and serves it on the downstream download route
   to the hosts it was offered to
-  ([ADR-0039](adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)).
+  ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)).
   Which host the Gateway takes to speak for an `instance_uid` is decided in the core module
   `gateway::policy`; the cache holds the bindings and keeps them across restarts in the journal
   `gateway::store` reads and writes beside the artifacts; while that journal cannot be read the
@@ -495,7 +495,7 @@ with its entry's signature; the Client downloads it
 from its own Server's origin and nowhere else, and `api` serves it only when `fleet` finds it
 offered to an Agent the certificate's host speaks for, by the test `packages` shares with the
 offer
-([ADR-0039](adr/0039-a-32-bit-arm-build-is-spelled-arm32.md));
+([ADR-0033](adr/0033-packages-signatures-and-delivery.md));
 behind a Gateway the
 Client downloads it from the Gateway's cache, which `gateway` fetched once from the Server. The
 Client checks hash and signature in `packages`, and the
