@@ -128,7 +128,7 @@ mod tests {
     }
 
     /// A CA issued what it signed under its own name, and not what another key signed under it.
-    /// Verifies: ADR-0048
+    /// Verifies: ADR-0016
     #[test]
     fn a_ca_issued_only_what_it_signed_directly() {
         let ca_key = rcgen::KeyPair::generate().expect("ca key");

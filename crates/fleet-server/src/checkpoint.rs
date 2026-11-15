@@ -1,5 +1,5 @@
 //! Signed checkpoints of the heads of the audit chains
-//! (ADR-0041).
+//! (ADR-0028).
 //!
 //! About once a minute, and at an orderly shutdown, the process that signs writes the entry
 //! `audit.checkpoint` into its own chain. It names the head of every chain and is signed with the
@@ -41,8 +41,8 @@ pub const FS_CHAIN: &str = "fs";
 pub const TAIL_INTERVALS: u32 = 3;
 
 /// The signer port for checkpoints
-/// (ADR-0043
-/// clause 5): the audit key, by its label, with its public half.
+/// (ADR-0026
+/// clause 37): the audit key, by its label, with its public half.
 pub trait CheckpointSigner: Send + Sync {
     /// The key's label.
     fn label(&self) -> &str;
@@ -433,7 +433,7 @@ struct Removal {
 /// checkpoint names a head of its chain at or after it and the store still holds that head with
 /// the hash the checkpoint names; one in the unsigned tail or inside a cut run is reported and
 /// never honoured
-/// (ADR-0041 clause 4).
+/// (ADR-0028 clause 13).
 #[derive(Debug)]
 pub struct Check {
     key: AuditKey,
@@ -1071,7 +1071,7 @@ mod tests {
 
     /// An untouched record holds against its checkpoints, and the newest one is answered for the
     /// operator to keep.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn an_untouched_record_holds_against_its_checkpoints() {
         let record = two_chains();
@@ -1093,7 +1093,7 @@ mod tests {
 
     /// A chain rewritten from a head on, its tail cut, a chain removed whole, or a checkpoint whose
     /// signature does not verify each fail naming the chain and the checkpoint.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_cut_a_rewrite_a_removed_chain_and_a_bad_signature_fail_naming_them() {
         let record = two_chains();
@@ -1139,7 +1139,7 @@ mod tests {
 
     /// A chain closed before the previous checkpoint is not named again, and removing it is still
     /// found from the checkpoint that named it closed.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_closed_chain_is_carried_forward_and_its_removal_still_fails() {
         let mut record = Record::new();
@@ -1169,7 +1169,7 @@ mod tests {
 
     /// An entry written more than three intervals after the newest checkpoint fails as an
     /// unsigned tail, unless an `audit.checkpoint_failed` lies between.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn an_entry_long_after_the_newest_checkpoint_is_an_unsigned_tail() {
         let mut record = two_chains();
@@ -1188,7 +1188,7 @@ mod tests {
     }
 
     /// A record without any checkpoint fails when a key is given: removed whole, they are missed.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_record_without_checkpoints_fails_naming_them_missing() {
         let mut record = Record::new();
@@ -1198,7 +1198,7 @@ mod tests {
 
     /// The checkpoints follow each other: one removed from the middle, or two with one number,
     /// fail; after a removal the first one left follows the last one the removal names.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn the_checkpoints_follow_each_other_and_the_first_left_follows_the_last_removed() {
         let mut record = two_chains();
@@ -1255,7 +1255,7 @@ mod tests {
 
     /// A saved checkpoint the record holds unchanged holds; one changed, one past the newest, or
     /// one neither held nor removed fails; one a removal names holds by its hash.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_saved_checkpoint_is_held_unchanged_or_named_by_its_removal() {
         let record = two_chains();
@@ -1330,7 +1330,7 @@ mod tests {
     /// A removal added after the newest checkpoint is reported and not honoured: a chain removed
     /// whole, or cut at its start, with an `audit.pruned` forged to explain it, still fails, and so
     /// does a files record whose oldest entries went with a forged `audit.rotated`.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_removal_no_checkpoint_covers_is_not_honoured() {
         let mut record = Record::new();
@@ -1432,7 +1432,7 @@ mod tests {
 
     /// The audit key is read only as a P-256 public key: another curve, another algorithm, or
     /// bytes after the key are refused, naming it.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn an_audit_key_not_on_p256_is_refused() {
         let p256 = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("key");
@@ -1451,7 +1451,7 @@ mod tests {
     /// A removal counts only where a head that covers it is still there with its signed hash: a
     /// young run cut with a prune placed inside it, naming the chain's own newest head, fails, and
     /// so do two chains cut with prunes that excuse each other.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_removal_inside_a_cut_run_covers_nothing() {
         let mut record = Record::new();

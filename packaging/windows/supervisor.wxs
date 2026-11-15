@@ -17,7 +17,7 @@
   make. There is one install path on four operating systems and this is not a second one.
 
   Built by `wix build` with the UI extension; `Version` and `BinaryPath` come in as -d arguments
-  from the release workflow, so the version in the MSI is the one the binary reports (ADR-0038).
+  from the release workflow, so the version in the MSI is the one the binary reports (ADR-0037).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
 

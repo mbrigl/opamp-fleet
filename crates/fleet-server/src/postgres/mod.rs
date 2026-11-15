@@ -1,7 +1,7 @@
 //! The Server's records in one PostgreSQL database (ADR-0023): the connection every PostgreSQL
 //! adapter shares, the exclusive lock of an instance that must be alone on it, the leases every
 //! instance holds, the notifications they share, and the schema the Server applies itself
-//! (ADR-0045).
+//! (ADR-0025).
 //!
 //! The connection is TLS 1.3 on the *ring*-only client of `opamp::tls`, the database's
 //! certificate verified against the public roots or the root `ca_file` names and its host name
@@ -54,7 +54,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long one call — every round trip of its transaction, the wait for a connection included —
 /// may take before it fails. The Server's callers hold their own locks while a record is written
-/// (ADR-0052 clause 4), so a database that stops answering holds them this long at most. The
+/// (ADR-0029 clause 4), so a database that stops answering holds them this long at most. The
 /// database's own timeouts below end a statement it is still working on; this one ends a call
 /// whose database, or the network to it, does not answer at all.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -97,7 +97,7 @@ const APPLICATION_NAME: &str = "opamp-fleet-server";
 /// Whether an instance must be the only one on its database, and why.
 ///
 /// An instance whose blobs or CA keys are files must be alone
-/// (ADR-0045
+/// (ADR-0025
 /// clause 2): what it keeps on its own disk no other instance can reach.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exclusive {
@@ -153,7 +153,7 @@ pub struct Database {
     release: &'static str,
     /// Set once a lease taken after a lost one found a schema that needs a newer Server: the
     /// refusal, naming both versions, and the instance stops
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 16).
     outdated: std::sync::Mutex<Option<String>>,
     /// The notifications of the calls whose answer was lost, which the listener hands on
@@ -403,7 +403,7 @@ impl Database {
 
     /// Applies `migrations` in one transaction (ADR-0023 clause 22), once the schema and the
     /// releases of the live leases are checked under the migrations' lock
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 16).
     ///
     /// # Errors
@@ -547,7 +547,7 @@ impl Database {
             return Err(lost_lock(&self.name));
         }
         // What the call announced is counted as it is sent: where its answer is lost, it may have
-        // committed, and the instance reads again what it names (ADR-0045
+        // committed, and the instance reads again what it names (ADR-0025
         // clause 10).
         let call = notify::Call::new(self.afterwards.clone());
         let answer = self.bridge.run(notify::sending(
@@ -698,8 +698,8 @@ pub(crate) fn blob_lock_refused(error: tokio_postgres::Error) -> String {
 
 /// A session-level advisory lock on a connection of its own, outside the pool: the one way the
 /// Server holds such a lock. It is the exclusive lock of an instance that must be alone
-/// (ADR-0045 clause 2), the blob store's lock (ADR-0023 clause 14), the audit prune lock (ADR-0023
-/// clause 12), or the lock of the audit's signer (ADR-0041 clause 2).
+/// (ADR-0025 clause 2), the blob store's lock (ADR-0023 clause 14), the audit prune lock (ADR-0023
+/// clause 12), or the lock of the audit's signer (ADR-0028 clause 11).
 ///
 /// The lock goes with its session, so the session's connection is watched: when it ends while the
 /// lock is held, the lock is gone, and [`lost`](Self::lost) says so from then on. A holder that
@@ -2129,7 +2129,7 @@ mod tests {
 
     /// An instance that must be alone lets go of its exclusive lock as it is dropped, so the next
     /// instance has it at once rather than once the database has ended the session.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[test]
     fn an_instance_that_must_be_alone_lets_go_of_its_lock_as_it_is_dropped() {
         let Some(test) = TestDatabase::named() else {
@@ -2380,7 +2380,7 @@ mod tests {
     /// A second instance that must be alone, against a database one already holds alone, fails
     /// startup naming the database and the key that makes it alone; once the first is gone, the
     /// lock is free again.
-    /// Verifies: ADR-0023, ADR-0045
+    /// Verifies: ADR-0023, ADR-0025
     #[test]
     fn a_second_instance_that_must_be_alone_fails_startup_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -2699,9 +2699,9 @@ mod tests {
     /// A lease of 0.8.0 counts as 0.8.0 by the column's default; a lapsed lease, and the live one
     /// of an instance that had to be alone and whose lock is free, count as none; with no such
     /// lease the instance applies every migration it lacks
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 16).
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[test]
     fn an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves() {
         let Some(test) = TestDatabase::named() else {
@@ -2789,7 +2789,7 @@ mod tests {
 
     /// An instance whose migrations name the oldest Server a live lease's release is, or older,
     /// serves beside it: a newer patch release of 0.8 beside a lease of 0.8.0.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[test]
     fn a_patch_release_serves_beside_a_lease_of_the_release_its_migrations_name() {
         let Some(test) = TestDatabase::named() else {
@@ -2822,10 +2822,10 @@ mod tests {
     /// Of a lease taken while a Server two releases on migrates, the later sees the earlier: the
     /// lease waits for the migrations' lock, then finds the schema that needs a newer Server and
     /// is refused, naming both versions, taking nothing and keeping the refusal
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 16). The other order, the lease first, is
     /// `an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves`.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[test]
     fn a_lease_taken_while_a_newer_server_migrates_sees_its_schema_and_is_refused() {
         let Some(test) = TestDatabase::named() else {
@@ -2968,7 +2968,7 @@ mod tests {
     /// One function builds the read-only snapshot, [`snapshot`]: no adapter of `postgres` builds
     /// a `REPEATABLE READ` or read-only transaction of its own, so every read of several statements
     /// that reads one committed state reads it alike.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[test]
     fn one_function_builds_the_read_only_snapshot() {
         // Split, so that this test does not find itself.

@@ -15,7 +15,7 @@
 //! [`crate::fs::FsAuditStore`], one chain in files that rotate by size.
 //!
 //! On PostgreSQL the record is one chain per lease
-//! (ADR-0029), the adapter
+//! (ADR-0028), the adapter
 //! [`crate::postgres::audit::PgAuditStore`]. Each entry is marked with the lease it was decided
 //! under. The writer writes into the chain of the lease held now: entries decided under a lease
 //! that lapsed before they were written go into the next chain, marked `taken_under` the old one,
@@ -144,7 +144,7 @@ pub trait AuditStore: Send {
 
     /// The `checkpoint_seq` and hash of the last checkpoint the file `file`, which the last
     /// [`rotate`](Self::rotate) deleted, held or named as removed, if any
-    /// (ADR-0041 clause 1).
+    /// (ADR-0028 clause 10).
     fn removed_checkpoint(&mut self, file: &str) -> Option<(u64, String)> {
         let _ = file;
         None
@@ -154,7 +154,7 @@ pub trait AuditStore: Send {
     /// is `checkpoint_prev`, alone, as [`append`](Self::append) does. A store several processes
     /// write holds at most one checkpoint per `checkpoint_seq` and takes one only while
     /// `checkpoint_prev` names its newest
-    /// (ADR-0041 clause 2).
+    /// (ADR-0028 clause 11).
     ///
     /// # Errors
     /// Returns an error when the line cannot be written, or another checkpoint came first; then
@@ -201,8 +201,8 @@ enum Message {
 
 /// The lease a decision was taken under, as its entry names it where the store keeps one chain
 /// per lease
-/// (ADR-0029
-/// clause 3).
+/// (ADR-0028
+/// clause 7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Under {
     /// No lease to name: the store keeps one chain, or the writer adds the entry of its own.
@@ -370,8 +370,8 @@ impl AuditLog {
 
     /// [`start`](Self::start), or with `held` [`start_under`](Self::start_under), and every line
     /// the store accepts handed to `export` as well
-    /// (ADR-0043
-    /// clause 9).
+    /// (ADR-0028
+    /// clause 15).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read.
@@ -387,7 +387,7 @@ impl AuditLog {
 
     /// [`start_exporting`](Self::start_exporting), and, with `signing`, a checkpoint of the heads
     /// of every chain signed at every interval and at the shutdown's close
-    /// (ADR-0041 clause 2).
+    /// (ADR-0028 clause 11).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read.
@@ -491,8 +491,8 @@ impl AuditLog {
 
     /// [`drain`](Self::drain) at an orderly shutdown, and then, where the store keeps one chain
     /// per lease, the chain closed with `audit.chain_closed` and `reason` `shutdown`
-    /// (ADR-0029
-    /// clause 3). A closing write whose answer was lost counts as written when the chain holds its
+    /// (ADR-0028
+    /// clause 7). A closing write whose answer was lost counts as written when the chain holds its
     /// closing entry. Once the chain is closed every decision is refused and counted
     /// ([`unrecorded_count`](Self::unrecorded_count)).
     /// From its start no place is given ([`Audit::reserve`]), and it waits within `timeout` for
@@ -1029,8 +1029,8 @@ impl Writer {
                         let mut entry = Entry::new("audit.rotated", "recorded")
                             .with("deleted_last_hash", line_hash(&last));
                         // The last checkpoint the file held, which a verifier goes on from
-                        // (ADR-0041
-                        // clause 1).
+                        // (ADR-0028
+                        // clause 10).
                         if let Some((seq, hash)) = self.store.removed_checkpoint(&file) {
                             entry = entry
                                 .with("checkpoint_seq", seq)
@@ -1210,7 +1210,7 @@ impl Writer {
 }
 
 /// The checkpoints' signing
-/// (ADR-0041 clause 2): the
+/// (ADR-0028 clause 11): the
 /// audit key, where the heads come from, and how often.
 pub struct Signing {
     pub signer: Arc<dyn crate::checkpoint::CheckpointSigner>,
@@ -1686,12 +1686,12 @@ pub struct Walked {
     pub closed: bool,
     /// The `seq` and the hash of the archive's last entry, where its `audit.chain_opened` names
     /// them as its predecessor
-    /// (ADR-0029 clause 6).
+    /// (ADR-0028 clause 9).
     pub predecessor: Option<(u64, String)>,
 }
 
 /// Walks one chain of a lease in `seq` order
-/// (ADR-0029 clauses 3 and 5):
+/// (ADR-0028 clauses 7 and 8):
 /// it starts with `audit.chain_opened` and 64 zeros as `prev`, or, once pruned, after an entry an
 /// `audit.pruned` names as the last it removed; every entry names the chain, carries the `seq`
 /// after the one before and the hash of the one before as its `prev`, and nothing follows an
@@ -2160,7 +2160,7 @@ mod tests {
     /// The export is handed every line once the store has accepted it, as the store holds it, in
     /// the order of the chain; the lines of a batch the store refused are lost, and none of them is
     /// exported.
-    /// Verifies: ADR-0043, ADR-0028
+    /// Verifies: ADR-0028
     #[test]
     fn the_export_is_handed_each_line_the_store_accepted_as_it_holds_it() {
         let memory = Memory::default();
@@ -2781,7 +2781,7 @@ mod tests {
     /// as the last it removed, and a closed chain pruned whole when one names its closing hash;
     /// a first retained entry no `audit.pruned` links, and a closed empty chain whose closing hash
     /// none names, fail naming the chain.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0028
     #[test]
     fn a_pruned_chain_holds_only_where_an_audit_pruned_links_it() {
         let chain = lease_chain(4, true);
@@ -2826,7 +2826,7 @@ mod tests {
     /// follows the one before; an altered entry, one removed from the end of a closed chain, an
     /// entry after its `audit.chain_closed`, and a closing the record does not hold each fail,
     /// naming the chain and the entry; an open chain is reported open with its last entry.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0028
     #[test]
     fn a_chain_of_a_lease_fails_where_it_was_cut_or_changed() {
         let open = lease_chain(3, false);
@@ -2926,7 +2926,7 @@ mod tests {
     /// A checkpoint is written once an interval has passed, naming the head of the chain, the
     /// entry before it, and following the one before; none is written while nothing grew; and the
     /// shutdown's close writes a last one.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_checkpoint_names_the_head_each_interval_and_at_the_close() {
         let memory = Memory::default();
@@ -3002,7 +3002,7 @@ mod tests {
 
     /// A token that refuses to sign, or does not sign in time, leaves `audit.checkpoint_failed`
     /// naming why, and decisions are recorded meanwhile.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_token_that_does_not_sign_leaves_checkpoint_failed_and_decisions_go_on() {
         for (refuse, delay, why) in [
@@ -3045,7 +3045,7 @@ mod tests {
 
     /// A rotation that deletes a file holding checkpoints names the last of them, and the writer
     /// started on what is left goes on from it.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_rotation_names_the_last_checkpoint_it_deleted() {
         let dir = tempfile::tempdir().expect("dir");

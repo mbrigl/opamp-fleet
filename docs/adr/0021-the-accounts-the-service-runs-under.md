@@ -1,9 +1,9 @@
 # ADR-0021: The accounts the service runs under
 
 - **Status:** 🟢 accepted
-- **Date:** 2026-10-27
+- **Date:** 2026-11-10
 - **Deciders:** Markus Brigl
-- **Applies to:** the account a `service install` chooses, accepts, sets and hands the roots to, `--run-as`, `--process-account` and `--no-process-account`, and the second service in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/runtime.rs`, `crates/fleet-agent/src/service/windows.rs`, `crates/fleet-agent/src/service/layout.rs`, `crates/fleet-agent/src/service/windows_config.rs`, `crates/fleet-agent/src/service/windows_rights.rs` and `crates/fleet-agent/src/service/withdrawal.rs`, the systemd units, launchd plists and SCM entries the install registers, `service start`, `service stop` and `service uninstall` on Windows, the install lock, the pipe, the job objects, the security of the second service's process and threads and the handle-based walks in `crates/fleet-agent/src/win32.rs` and `crates/fleet-agent/src/win32/`, the no-follow adapter `crates/fleet-agent/src/nofollow.rs` and the state the Client keeps through it in `crates/fleet-agent/src/storage.rs`, `crates/fleet-agent/src/csr.rs`, `crates/fleet-agent/src/connection.rs` and `crates/fleet-agent/src/tls.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel in `crates/fleet-agent/src/supervisor/channel.rs` and `crates/fleet-agent/src/supervisor/channel/windows.rs`, `supervisor_dir` and the Supervisors' directories with their modes, owners and ACLs, the modes a package archive gives a program, `packaging/linux/postinst` and `packaging/linux/postrm`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `packaging/windows/supervisor.wxs`, the Windows service smoke in `crates/fleet-agent/tests/service_smoke.rs`, and every document that tells an operator which account the Client or a Managed Process runs as or what the separation by a process account holds against a Managed Process on Windows
+- **Applies to:** the account a `service install` chooses, accepts, sets and hands the roots to, `--run-as`, `--process-account` and `--no-process-account`, and the second service in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/runtime.rs`, `crates/fleet-agent/src/service/windows.rs`, `crates/fleet-agent/src/service/layout.rs`, `crates/fleet-agent/src/service/windows_config.rs`, `crates/fleet-agent/src/service/windows_rights.rs` and `crates/fleet-agent/src/service/withdrawal.rs`, the systemd units, launchd plists and SCM entries the install registers, `service start`, `service stop` and `service uninstall` on Windows, the install lock, the pipe, the job objects, the security of the second service's process and threads and the handle-based walks in `crates/fleet-agent/src/win32.rs` and `crates/fleet-agent/src/win32/`, the no-follow adapter `crates/fleet-agent/src/nofollow.rs` and the state the Client keeps through it in `crates/fleet-agent/src/storage.rs`, `crates/fleet-agent/src/csr.rs`, `crates/fleet-agent/src/connection.rs` and `crates/fleet-agent/src/tls.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel in `crates/fleet-agent/src/supervisor/channel.rs` and `crates/fleet-agent/src/supervisor/channel/windows.rs`, `supervisor_dir` and the Supervisors' directories with their modes, owners and ACLs, the modes a package archive gives a program, `packaging/linux/postinst` and `packaging/linux/postrm`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `packaging/windows/supervisor.wxs`, the Windows service smoke in `crates/fleet-agent/tests/service_smoke.rs`, the enrolment `service install` and `service config` run in `crates/fleet-agent/src/service/enrol.rs` and what the questionnaire and `--endpoint` hand it in `crates/fleet-agent/src/config_init.rs`, and every document that tells an operator which account the Client or a Managed Process runs as or what the separation by a process account holds against a Managed Process on Windows
 
 ## Context
 
@@ -17,7 +17,7 @@ everything the Client can: the whole `state_dir` with the Client's private key `
 `config/` of every other Supervisor, and the Client's environment through `/proc`. It can rewrite
 its own `program/` and so outlast the next package, and with the Client's key it can present itself
 to the Server for any `instance_uid` of its host
-([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 
 The specification places a Managed Process and its account below the Client's account on its
 host: it must not gain the Client's key, program, or configuration. Its Strategy puts security
@@ -93,6 +93,39 @@ Forces:
   and `THREAD_SET_CONTEXT` on one is enough to run code in its process. Changing the token's
   default DACL would reach every program the second service starts.
 
+The enrolment that `service install` and `service config` run connects to the Server with the
+bootstrap identity the administrator provided
+([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+clause 16). Its endpoint and trust (`[tls] ca_file`) stand in `supervisor.toml`, which the
+questionnaire or `--endpoint` wrote. That file and the CA copy beside it lie in the data root,
+which the service's account owns (clause 1). Clause 11 keeps a privileged step from going through
+a link the account placed, and the enrolment reads the CA file and the bootstrap pair once,
+bounded, through the held directory. Clause 11 does not cover the *content* of a file the account
+owns. An account that is taken over can rewrite `endpoint` or the CA copy between the write and a
+read-back. The privileged step would then present the administrator's bootstrap identity to a
+Server the account chose.
+
+The gain for such an account is small. The certificate an enrolment obtains lands in the state
+directory, which the account owns anyway, and the service connects wherever the file says once it
+runs. What the account cannot otherwise do is make root present the administrator's bootstrap
+identity to a Server of its choosing. The bootstrap key may be one the account cannot read.
+[`HARDENING.md`](../HARDENING.md) lists the measure and its residual, and it serves Q-1.
+
+Four runs enrol, and they differ in what the administrator said:
+
+- **`--interactive` and `service config`:** the questionnaire asks for the endpoint and the CA;
+  its defaults come from the file, and the administrator sees and confirms each.
+- **`service install --endpoint` writing a new file:** the administrator names the endpoint; the
+  CA comes from beside the program
+  ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+  clause 17).
+- **`service install --endpoint` over an existing file:** the file is kept as it is
+  ([ADR-0020](0020-the-installed-service-and-its-state.md)), so the service runs with its
+  endpoint, not the one named. The MSI's custom action runs this way on an upgrade that is given
+  an endpoint; the Linux packages' `postinst` only prints the command for the administrator.
+- **`service install` without either, over an existing file:** nothing is answered; an upgrade
+  with a bootstrap identity beside the program enrols with what the file says.
+
 ## Decision
 
 We will run the installed Client under the account its registration names: on a first
@@ -101,7 +134,8 @@ account, while the binary's own first registration under systemd or launchd runs
 an account is named. We will run every program its Supervisors start under a process account
 through a second service where the operator names one, and reach everything the Client keeps in
 its roots through a no-follow adapter, so that no privileged install step goes through a link
-either account placed.
+either account placed, and have a privileged enrolment connect with the endpoint and CA its own
+run answered.
 
 1. **The system service runs under the account its registration names, and both roots belong to
    it, except what the process account keeps there.** `service install --run-as <account>` names
@@ -254,7 +288,7 @@ either account placed.
    ```
 
    - **Directory name.** It is the bare base and the commit short-hash of the version
-     [ADR-0038](0038-the-products-version.md) resolves, never the pre-release. The release `1.2.3`
+     [ADR-0037](0037-the-products-version.md) resolves, never the pre-release. The release `1.2.3`
      and a development build heading for it are told apart by their commit, and the manifest's
      full string answers release-or-dev.
    - **The program.** The service's program is `<layout root>/current/supervisor`, so a version
@@ -384,7 +418,8 @@ either account placed.
     the way to enrol without a terminal. The alternative it prints for writing the file by hand
     names the endpoint together with `[tls] cert_file` and `key_file`, the identity the operator
     adds before the start, and names no credential and no `[auth]` section, because the Client reads
-    none ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+    none
+    ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 
     On Windows the stop and the start go as follows, so that nothing runs under an account whose
     rights the install changes or takes away, nor under a registration it rewrites:
@@ -465,7 +500,7 @@ either account placed.
     its key are files the operator puts on the host, and `EndpointDlg` says that they are added to
     `supervisor.toml` afterwards, or through `service install --interactive` from an elevated
     prompt. It mentions no credential, because the Client reads none
-    ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+    ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 
 11. **No privileged step goes through a link the account could have placed.** This covers every
     read, write, rename, removal, mode change and ownership change `service install` and
@@ -787,7 +822,7 @@ either account placed.
 
     One knob moves state and program together. Staging beside `program/` makes a raw artifact's
     install a rename on one filesystem. The directory is `program/`, not `bin/`, because it holds
-    a whole tree for a multi-file package ([ADR-0034](0034-packages-signatures-and-delivery.md)).
+    a whole tree for a multi-file package ([ADR-0033](0033-packages-signatures-and-delivery.md)).
     Moving `supervisor_dir` on a running host leaves the old tree behind and migrates nothing; each
     Supervisor then registers as a new Agent.
 
@@ -883,6 +918,21 @@ either account placed.
     - **An uninstall without the lock still stops and deregisters.** It leaves the record alone,
       since another run may be rewriting it, and says so.
 
+28. **A privileged enrolment connects where its own run answered.** The enrolment of
+    `service install` and `service config` uses the endpoint and CA its own run answered, held in
+    memory. It reads either from `supervisor.toml` only where the run answered none.
+    - **An answered endpoint** — the questionnaire's answer or `--endpoint` — is the endpoint the
+      enrolment connects to. The enrolment does not read the file back for it.
+    - **An answered CA** is held in memory as the certificates the run copied beside the
+      configuration. The enrolment trusts these and does not read the copy again. An answer that
+      names no CA leaves the built-in roots, whatever the file says by then.
+    - **`--endpoint` over a kept file** answers nothing, because the file stands for the service.
+      The enrolment must not run when the kept file names another endpoint than `--endpoint`. The
+      install then fails and names both endpoints. Where they are the same, the run enrols as one
+      that answered nothing.
+    - **A run that answered nothing** takes both from the file, read once as clause 11 says. This
+      is a residual, and the documents that describe the install say so.
+
 **Out of scope:**
 
 - macOS sandboxing, and an account of the macOS Client's own: its first registration stays root,
@@ -916,6 +966,9 @@ either account placed.
   replaced; a socket the service manager creates and owns (socket activation); a peer that is the
   second service's process but runs a build other than the Client's, which the handshake already
   refuses (clause 20).
+- For the enrolment of clause 28: the file the service runs with afterwards, which stays the
+  account's (clause 21); `[tls] cert_file` and `key_file`, which an enrolment does not present
+  while a bootstrap identity stands in; whether an unanswered run enrols at all.
 
 ## Alternatives considered
 
@@ -1099,6 +1152,22 @@ either account placed.
 - **A protected process (PPL).** It needs a signing level the product does not have. Rejected.
 - **Only a unit test of the DACL.** It would not show that a process of the same account is
   refused. Rejected in favour of the smoke under *Enforcement*.
+- **A privileged step never takes the endpoint or the trust from a file in the account's
+  directory.** An unanswered `service install` would not enrol, and an upgrade with a bootstrap
+  identity beside the program would need `--endpoint` again. Rejected: it changes what automation
+  relies on, for a gain the Context weighs as small.
+- **Accept the residual of a read-back enrolment and change no code.** The file is the account's
+  word, and the enrolment produces nothing the account does not control already. Rejected: where
+  the administrator just answered, the run already holds the true values, and using them costs
+  little.
+- **Re-read the file and compare it with the answers, refusing on a difference.** It detects a
+  rewrite instead of ignoring it. Rejected for a run that wrote the file: holding the answers
+  needs no comparison. Chosen for `--endpoint` over a kept file, where no answer was written.
+- **`--endpoint` over a kept file enrols with `--endpoint`.** Rejected: the certificate would come
+  from one Server while the service connects to the other.
+- **`--endpoint` over a kept file counts as no answer, without a check.** Rejected: the MSI passes
+  `--endpoint` on an upgrade, so an account that rewrote the file would have root present the
+  bootstrap identity to its Server on a common path.
 
 ## Sources / Prior art
 
@@ -1248,6 +1317,11 @@ either account placed.
 - The code: `crates/fleet-agent/src/supervisor/channel/windows.rs` and
   `crates/fleet-agent/src/win32.rs`, the DACLs of the second service's process and threads and the
   Client's hold on the peer's process.
+- The sources above on link following in privileged steps (clause 11); clause 28 applies the same
+  reasoning to content the account can change.
+- CWE-367, Time-of-check Time-of-use (TOCTOU) Race Condition,
+  <https://cwe.mitre.org/data/definitions/367.html>: a value checked or written and later
+  re-read from a location another party can change.
 
 ## Consequences
 
@@ -1277,6 +1351,9 @@ either account placed.
   Endpoint's token, and the programs the Client knows of end with its connection. On Linux and
   Windows, the Managed Processes cannot read or write the second service's memory either, run code
   in it or take its handles.
+- Positive (clause 28): an administrator who answered the questionnaire or gave `--endpoint`
+  enrols with what they answered, whatever the account does to the file meanwhile. The enrolment
+  reads no file back for its endpoint or trust in the common runs.
 - Negative / trade-offs: on a fresh host, agents that need root or `LocalSystem` fail under the
   account. These include an inventory agent's full inventory and deploy task, inputs without a
   `sudo` rule, any listener on a port below 1024, a file log receiver reading `root:adm` files, and
@@ -1346,6 +1423,11 @@ either account placed.
   Managed Process can still remove or replace the socket, and while it does the Client finds the
   second service away; that is a denial of what the process account's own programs run, which the
   shared account already allows.
+- Negative / trade-offs (clause 28): the questionnaire and `--endpoint` hand the enrolment the
+  answered endpoint and certificates, which `config_init` returns. An unanswered run keeps the
+  residual, and so does the CA of a kept file under a matching `--endpoint`; `HARDENING.md` names
+  both. An upgrade with `--endpoint` over a file that names another endpoint does not enrol, and
+  the administrator corrects the file or the flag.
 - Follow-ups: a way for an administrator to run the installed CLI without executing account-owned
   code; an account of its own for the macOS Client; a `sysusers.d` entry; whether the unit should
   order itself after `network-online.target`; the groups each Supervisor kind needs on Windows,
@@ -1355,7 +1437,8 @@ either account placed.
   at a time from the root, which closes the window between the check of what lies beneath a root
   and the open; an account per Supervisor; making the separation the default; job objects for the
   process tree on a host without a process account; pinning the peer's process on macOS; a socket
-  the service manager owns on Linux and macOS; a health detail that names a refused peer.
+  the service manager owns on Linux and macOS; a health detail that names a refused peer; whether
+  an unanswered privileged run enrols at all, if the residual proves to matter.
 
 ## Enforcement
 
@@ -1595,8 +1678,21 @@ Tests that carry `Verifies: ADR-0021`:
   `the_endpoint_dialog_names_the_identity_and_no_credential`.
 - `crates/fleet-agent/src/supervisor/mod.rs`:
   `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (clause 25). The archive tests of
-  [ADR-0034](0034-packages-signatures-and-delivery.md), `a_tree_keeps_the_modes_the_archive_carried`
+  [ADR-0033](0033-packages-signatures-and-delivery.md), `a_tree_keeps_the_modes_the_archive_carried`
   among them, cover the modes of clause 23.
+- `crates/fleet-agent/src/config_init.rs` and `crates/fleet-agent/src/service/enrol.rs`
+  (clause 28):
+  - `what_an_endpoint_install_answered_is_handed_on` and
+    `answers_without_a_ca_hand_on_their_endpoint_and_no_ca`: an `--endpoint` install and the
+    questionnaire hand on the endpoint and the CA they answered, no CA where none was answered,
+    and nothing for a kept file.
+  - `a_run_that_answered_enrols_with_its_answers_whatever_the_file_says_by_now`: a run answers an
+    endpoint and a CA, `supervisor.toml` and the CA copy are rewritten before the enrolment
+    connects, and the enrolment connects to the answered endpoint with the answered trust.
+  - `a_run_that_answered_nothing_enrols_with_what_the_file_says`: without answers the enrolment
+    takes both from the file.
+  - `an_endpoint_named_over_a_kept_file_that_names_another_refuses_the_enrolment`: `--endpoint`
+    over a kept file that names another endpoint is refused, naming both.
 
 **Not mechanically decidable:** that every supported agent works under the account and under root
 with these units. The kinds' end-to-end tests run without systemd. The manual checklist in

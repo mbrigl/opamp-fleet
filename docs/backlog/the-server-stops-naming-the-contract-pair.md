@@ -53,7 +53,7 @@ The human decides these questions first, before the next normalization of the AD
   above;
 - whether the restated clause 22 keeps concrete release steps;
 - whether the ticket may depart from clause 22's sequence, in which the release after 0.8.1
-  removes the mirror columns. The ticket defers the removal to X+1. ADR-0045 clause 16 allows that,
+  removes the mirror columns. The ticket defers the removal to X+1. ADR-0025 clause 16 allows that,
   since what N+1 stops using is removed by N+2 "at the earliest".
 
 The first cheap step needs no decision: the load stops selecting `instance_uids`.
@@ -83,7 +83,7 @@ The release after X drops the columns; the backlog entry
   `crates/fleet-server/src/postgres/deployments.rs`, `crates/fleet-server/src/postgres/ledger.rs`,
   `crates/fleet-server/src/postgres/mod.rs`, `crates/fleet-server/src/postgres/agents.rs`,
   `crates/fleet-server/src/fleet.rs`, `crates/fleet-server/tests/instances.rs`
-- ADR-0023 clause 22; ADR-0045 clause 16.
+- ADR-0023 clause 22; ADR-0025 clause 16.
 
 **Its mode.**
 

@@ -19,7 +19,7 @@ The human decides one of two:
 - `fleet-tools` stops using them.
 
 Either way, a test lists the `fleet_agent::` paths that `fleet-tools` uses against an allowlist.
-`fleet_agent::tls::pkcs12_identity` stays on that list, since ADR-0053 clauses 5 and 24 name it.
+`fleet_agent::tls::pkcs12_identity` stays on that list, since ADR-0036 clauses 5 and 24 name it.
 
 This must be settled before the next normalization of the ADR record.
 
@@ -35,7 +35,7 @@ This must be settled before the next normalization of the ADR record.
 **Its reading.**
 
 - Touches: `crates/fleet-tools/src/pki.rs`, `crates/fleet-core/tests/dependency_direction.rs`
-- ADR-0008 clause 22; ADR-0053 clauses 5 and 24.
+- ADR-0008 clause 22; ADR-0036 clauses 5 and 24.
 
 **Its mode.**
 

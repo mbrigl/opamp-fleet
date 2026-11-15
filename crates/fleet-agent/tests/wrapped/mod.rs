@@ -1,4 +1,4 @@
-//! Drives a Supervisor kind through `Plugin::start` the way the core drives it (ADR-0051), with
+//! Drives a Supervisor kind through `Plugin::start` the way the core drives it (ADR-0018), with
 //! the stub standing in for its agent — the harness each kind's integration tests share.
 //!
 //! The unit tests in each module check what a kind *builds* — the program's name per platform, the
@@ -58,8 +58,8 @@ pub fn start(plugin: &dyn Plugin, name: &str, stub_args: &[String]) -> Harness {
 ///
 /// The program is put where the kind's `defaults()` say the install puts it: inside the unpacked
 /// tree for a kind that names a `program_path`, else as a single file named `name` in this
-/// Supervisor's own `program/` directory (ADR-0051), found in its archive at the place the kind
-/// names (ADR-0050 clause 55). This is the install's side of the
+/// Supervisor's own `program/` directory (ADR-0018), found in its archive at the place the kind
+/// names (ADR-0033 clause 55). This is the install's side of the
 /// same agreement, so a kind whose path disagreed with the install would spawn nothing here.
 ///
 /// `stub_args` are flags for the stub that the kind's own arguments cannot carry; the stub reads
@@ -75,7 +75,7 @@ pub fn start_with(
     let program_dir = dir.path().join("program");
     let defaults = plugin.defaults();
     let (program, install) = match defaults.program_path {
-        // A tree package: the program sits inside the unpacked tree (ADR-0050).
+        // A tree package: the program sits inside the unpacked tree (ADR-0033).
         Some(path) => (
             program_dir.join("tree").join(path),
             InstallTarget::Tree {
@@ -146,7 +146,7 @@ pub async fn wait_for_running_version(harness: &mut Harness) -> (String, u32) {
             ProcessEvent::Pid(Some(reported)) => pid = Some(reported),
             ProcessEvent::Description(description) => {
                 // What a kind reports of its process is the process's own `service.*` alone;
-                // where it runs is the Supervisor's to state (ADR-0054).
+                // where it runs is the Supervisor's to state (ADR-0017).
                 for attribute in description
                     .identifying_attributes
                     .iter()

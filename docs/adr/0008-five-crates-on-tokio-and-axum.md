@@ -49,7 +49,7 @@ grammar, the platform aliases) is this project's own, and lives in an internal c
 a test reach the Client?** Cargo hands a test a helper binary's path
 (`CARGO_BIN_EXE_<name>`) only in an integration test, and an integration test links only a
 package's library. **Where do operator tools live?** `opamp-fleetctl`, the operator tool
-([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)), runs on an operator's machine and uses a
+([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)), runs on an operator's machine and uses a
 few Client items: the 7z Unix-mode convention, the unpackers, and the TLS provider helper.
 
 Operators hand-edit both configuration files, often over SSH; a format's failure modes matter more
@@ -143,7 +143,8 @@ configuration to a strict parse.
    which files hold the material, which identity is in force, which credential is sent and when it
    rotates. It parses `server.toml` and `supervisor.toml`. It persists and merges connection
    settings (ADR-0013). It runs the CSR flow and the CA, and it decides admission
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)). Its `AgentState` keeps the
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+   Its `AgentState` keeps the
    Client's decisions over one protocol state machine. Its flows after a reply run in one order:
    connection settings, certificate, packages, the self-update restart, the Supervisor set
    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). Connection settings come
@@ -212,14 +213,14 @@ configuration to a strict parse.
       protocol state machine and connection, and `tls` with the PEM readers `certificates` and
       `private_key`. Their path-based wrappers and error wording stay in each end, where what the
       file means is known.
-    - `fleet-core`: `version`, the version helper ([ADR-0038](0038-the-products-version.md));
-      `platform`, the platform alias table ([ADR-0034](0034-packages-signatures-and-delivery.md));
+    - `fleet-core`: `version`, the version helper ([ADR-0037](0037-the-products-version.md));
+      `platform`, the platform alias table ([ADR-0033](0033-packages-signatures-and-delivery.md));
       `package`, the statements a package signature and a floor signature cover, which the operator
       tool signs and the Client verifies
-      ([ADR-0035](0035-package-versions-high-water-mark-and-floor.md)); `ending`, the rule that says
+      ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md)); `ending`, the rule that says
       when a certificate is ending, as plain date arithmetic without a dependency, and `naming`,
       what a certificate is called, which the Server and the operator tool apply alike
-      ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)); `pkcs12`, the bootstrap
+      ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)); `pkcs12`, the bootstrap
       certificate's file
       ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md));
       `host`, `x509`, `csr`, `renewal` and `bootstrap_proof`, what a client certificate is known by
@@ -252,7 +253,7 @@ configuration to a strict parse.
     only inside the crate that declares them.
 
 22. **The operator tool is its own crate, depending on the Client.** `crates/fleet-tools`
-    produces `opamp-fleetctl` (ADR-0037) and has no library. The arrow points one way:
+    produces `opamp-fleetctl` (ADR-0036) and has no library. The arrow points one way:
     `fleet-tools` uses `fleet_agent::archive`, `opamp::tls` and the items of `fleet-core` clause 17
     names rather than restating them, and its tests open what the tool produces with the Client's
     own unpacker. Nothing in `fleet-agent`, `fleet-server` or `opamp` depends on `fleet-tools`.

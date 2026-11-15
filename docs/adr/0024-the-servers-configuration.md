@@ -27,7 +27,8 @@ inherited by every child process. Docker's secrets reach a container as files un
 Server keeps every secret it needs in a file named by a `*_file` key: the PostgreSQL password,
 the S3 secret key, the CA keys. Two tables of `server.toml` may hold sensitive values inline:
 `[rest.auth.basic_users]`, whose Argon2id hashes an attacker can attack offline
-([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), and
+([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)),
+and
 `[telemetry_offer.headers]`, which typically carries an access token for the receiving backend.
 
 The keys of those two tables are data — user names and header names — not schema. An environment

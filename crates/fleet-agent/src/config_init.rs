@@ -1,7 +1,7 @@
 //! The configuration file the questionnaire writes and edits — `service install --interactive`
 //! and `service config` (ADR-0020).
 //!
-//! A release artifact is the bare binary (ADR-0039), so a fresh host has nothing to copy from, and
+//! A release artifact is the bare binary (ADR-0038), so a fresh host has nothing to copy from, and
 //! [`ClientConfig::load`](crate::config::ClientConfig::load) answers a missing file with the
 //! development defaults — a service that installs, starts, dials `127.0.0.1`, and manages nothing.
 //! This module is the way out of that state: it asks the handful of questions a fresh host cannot
@@ -210,7 +210,7 @@ impl Beside {
 pub struct Answers {
     /// The Server's OpAMP endpoint; its scheme selects the transport (ADR-0012).
     pub endpoint: String,
-    /// The operator's name for this Client, reported as `service.instance.name` (ADR-0054) — which
+    /// The operator's name for this Client, reported as `service.instance.name` (ADR-0017) — which
     /// of the fleet's Clients this is. Not its `service.name`: that is the Agent *type*, the
     /// constant `supervisor` (ADR-0020), the same on every host and nothing to ask about.
     pub name: String,
@@ -218,7 +218,7 @@ pub struct Answers {
     /// The questionnaire always asks for it there; `None` for a loopback `ws://` / `http://`
     /// endpoint, or where no question was put — a packaged install.
     pub ca_file: Option<PathBuf>,
-    /// The hex Ed25519 key packages are verified against (ADR-0050); `None` takes no package until
+    /// The hex Ed25519 key packages are verified against (ADR-0033); `None` takes no package until
     /// one is set.
     pub verification_key: Option<String>,
     /// `[packages] self_update` (ADR-0019): whether the Server may replace this Client's own
@@ -237,7 +237,7 @@ pub enum BootstrapFiles {
     Pkcs12(PathBuf),
 }
 
-/// The bootstrap identity (ADR-0040) the Client enrols with. Asked for only while the Client is
+/// The bootstrap identity (ADR-0026) the Client enrols with. Asked for only while the Client is
 /// not enrolled, and never copied or written into the file: the questionnaire's enrolment presents
 /// it once, to obtain the certificate the Server issues (ADR-0027 clause 16).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,7 +273,7 @@ pub struct Written {
     pub answered: Option<Answered>,
     /// The endpoint `--endpoint` named over a file this run kept: no answer, but an enrolment
     /// refuses a kept file that names another
-    /// (ADR-0044).
+    /// (ADR-0021).
     pub named_over_kept: Option<String>,
     /// The paths this run's questions offered from the file, which the enrolment reads through no
     /// link at their name where an answer kept one. A run that answered nothing kept the file,
@@ -293,7 +293,7 @@ impl Written {
 
 /// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
 /// with these, never with what it would read back from the file the service's account owns
-/// (ADR-0044).
+/// (ADR-0021).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answered {
     /// The endpoint answered.
@@ -712,7 +712,7 @@ pub fn ask(
         None
     };
 
-    // The bootstrap identity (ADR-0040) a host not yet enrolled enrols with: a PEM certificate and
+    // The bootstrap identity (ADR-0026) a host not yet enrolled enrols with: a PEM certificate and
     // its key, or a PKCS#12 file and its password (ADR-0027 clause 16). There is no answer without
     // one, and no question asks for a credential (ADR-0027) — the password opens a file on this
     // host and is sent nowhere. An enrolled host renews what it was issued and is not asked.
@@ -728,7 +728,7 @@ pub fn ask(
         )?)
     };
 
-    // Without it nothing is installed, the Client's own updates included (ADR-0050); an empty
+    // Without it nothing is installed, the Client's own updates included (ADR-0033); an empty
     // answer is allowed and said so. A key the file holds is the default, so Enter keeps it and a
     // single `-` is how it is removed.
     let mut prompt = Input::<String>::new().allow_empty(true);
@@ -1577,7 +1577,7 @@ mod tests {
     /// What an `--endpoint` install answered is handed on: the endpoint as given, and the copy
     /// with the certificates written into it; a loopback endpoint answers no CA, and a file kept
     /// answers nothing.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0021
     #[test]
     fn what_an_endpoint_install_answered_is_handed_on() {
         let program = tempfile::tempdir().expect("tempdir");
@@ -1624,7 +1624,7 @@ mod tests {
     }
 
     /// Answers without a CA are handed on with their endpoint and no CA, and nothing is copied.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0021
     #[test]
     fn answers_without_a_ca_hand_on_their_endpoint_and_no_ca() {
         let to = tempfile::tempdir().expect("tempdir");

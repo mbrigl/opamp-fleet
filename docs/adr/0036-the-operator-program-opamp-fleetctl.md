@@ -1,16 +1,15 @@
-# ADR-0047: The operator program `opamp-fleetctl`
+# ADR-0036: The operator program `opamp-fleetctl`
 
-- **Status:** ⚪ superseded by [ADR-0053](0053-the-operator-program-opamp-fleetctl.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-14
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/fleet-tools/` (the one program it builds, its `pki` commands in `src/pki.rs`, `pki token-init` among them, `p12-extract`, and the deterministic repack of `package fetch` in `src/fetch.rs`, `pack_tree` and `collect_members`), the dependencies of `crates/fleet-tools/Cargo.toml`, `cryptoki` among them, and their entries in `deny.toml`, the Server's `pki status` command in `crates/fleet-server/src/main.rs` and the module that carries it, the expiry warnings of the running Server, the leaf naming of host and bootstrap certificates in `crates/fleet-server/src/ca.rs` and its startup check, how the Server holds its CA keys, in a file or on a PKCS#11 token, the ending rule, the reading of a certificate's end with the line `pki status` prints for it, and the naming rule in `crates/fleet-core/`, the operator-tool build and its archives in `.github/workflows/release.yml`, the release notes, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), every kind whose upstream tree the repack packs, and every document that names an operator command, tells an operator how to make, inspect or convert a certificate, or says what a repacked package carries
-- **Supersedes:** [ADR-0042](0042-the-operator-program-opamp-fleetctl.md)
+- **Applies to:** `crates/fleet-tools/` (the one program it builds, its `pki` commands in `src/pki.rs`, `pki token-init` among them, `p12-extract`, and the deterministic repack of `package fetch` in `src/fetch.rs`, `pack_tree` and `collect_members`, its numbering of a later repack, and its verification of an upstream's OpenPGP signature in `src/gpgv.rs`), the dependencies of `crates/fleet-tools/Cargo.toml`, `cryptoki` among them, and their entries in `deny.toml`, the Server's `pki status` command in `crates/fleet-server/src/main.rs` and the module that carries it, the expiry warnings of the running Server, the leaf naming of host and bootstrap certificates in `crates/fleet-server/src/ca.rs` and its startup check, how the Server holds its CA keys, in a file or on a PKCS#11 token, the ending rule, the reading of a certificate's end with the line `pki status` prints for it, the naming rule and the kept-link rule (`tree.rs`) in `crates/fleet-core/`, the operator-tool build and its archives in `.github/workflows/release.yml`, the release notes, `scripts/dev-pki.sh` and what reads its output (`scripts/seed_test_configs.sh`, `.vscode/launch.json`, `.vscode/tasks.json`, the startup message of `crates/fleet-server/src/config.rs` that names it), every kind whose upstream tree the repack packs, and every document that names an operator command, tells an operator how to make, inspect or convert a certificate, or says what a repacked package carries
 
 ## Context
 
 An Agent proves fleet membership with a client certificate in the TLS handshake and nothing else,
 and the Server presents a certificate of its own on both planes
-([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
+([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
 [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)).
 That takes three certificate authorities, each with one job: a server CA that signs the Server's
 certificate and a Gateway's downstream certificate, the client CA the Server signs every host's
@@ -64,14 +63,14 @@ The forces:
   client checks a server certificate's names against its subject alternative names
   (RFC 9525 section 2), and the Server tells an enrolment connection from a member's by its
   issuer, names a host by the SAN URI it puts in and decides a renewal by its proof
-  ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
+  ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
   [ADR-0016](0016-client-modes-and-the-gateway.md)). The subject is free to say what an auditor
   needs, and the name an operator wants there is that of their own installation, which no build
   constant knows.
 - **The operator's own machine comes first.** It is where an operator works before any Server
   exists. Whoever holds the package signing key and can make an offer runs code on every host it
   reaches, which is why the Client installs only what a key the operator holds has signed
-  ([ADR-0034](0034-packages-signatures-and-delivery.md)); the server CA's key is kept off the
+  ([ADR-0033](0033-packages-signatures-and-delivery.md)); the server CA's key is kept off the
   Server host for a like reason. A program that makes those keys is a program for the operator's
   machine, and the binary that serves the fleet has no use for it.
 - **One audience, one job.** The certificates, the signing key, the packing and the fetch are all
@@ -84,7 +83,7 @@ The forces:
   with `npm install -g fleetctl` and from its GitHub releases. Two `fleetctl` on one `PATH` cannot
   both be found, and a search for either finds the other.
 - **The release is a contract too.** It is one workflow run from one version
-  ([ADR-0039](0039-releases-attestations-and-the-server-image.md)),
+  ([ADR-0038](0038-releases-attestations-and-the-server-image.md)),
   and every row of its build matrix already builds the packer for the runner it runs on, Windows
   included, because the Client's archives are packed by it.
 - **Some places want a PEM pair while only a `bootstrap.p12` is at hand:** a host whose install is
@@ -95,7 +94,8 @@ The forces:
   and the operator program already depends on both crates.
 - **Where an upstream publishes no artifact a Client can run as published,** the operator program
   unpacks it on the operator's host and repacks the tree before it is signed. A tree package
-  carries no link ([ADR-0034](0034-packages-signatures-and-delivery.md)), so the repack
+  carries no link but those its kind keeps
+  ([ADR-0033](0033-packages-signatures-and-delivery.md)), so the repack
   dereferences links: a linked directory is packed under the linked name with its contents,
   because that name is one the agent uses (a tree may reach its Perl library through
   `usr/share/perl/5.26`, a link to `5.26.1`). Resolving a link with `std::fs::metadata` and
@@ -109,19 +109,31 @@ The forces:
 This serves **G-17** (the connection is secured and the Agent is identified), **G-10** and
 **Q-1** (secure by default).
 
-This ADR restates [ADR-0042](0042-the-operator-program-opamp-fleetctl.md) in full. It changes where
-a certificate's end is read: once, in `fleet-core`, with the line `pki status` prints for it,
-rather than in each program. The reason ADR-0042 gave against that, the internal crate's first
-`x509-parser` and `time` dependencies, has lapsed: `fleet-core` carries both, for `x509` and
-`csr`, and the reading and the line were written twice, verbatim, in `fleet-server` and
-`fleet-tools`. The file stays each program's to read, through `opamp::tls`, the one reader of a
-certificate's PEM (ADR-0008 clause 17). The core `ending` itself stays plain date arithmetic
-without a dependency, as ADR-0008 clause 17 describes it; the reading is its adapter
-`ending::read`. As in ADR-0042, clauses 5 to 8, 12, 13 and 16 to 18 and the out-of-scope list
-carry the decision of
-[ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md):
-`pki token-init`, `pki bootstrap-ca --pkcs11-module`, `pki init --ca-keys-on-token`, the flags of
-`token-init` and `cryptoki`.
+Four more forces bear on the repack, the reading of a certificate's end and the token:
+
+- **A repacked tree carries upstream's modes unless the repack sets them.** The trees a kind
+  repacks are upstream's, as an AppImage is, and so are their modes: a write bit for the group or
+  for others, or a setuid bit, would travel into the signed artifact, with only the Client's mask
+  on unpacking to take it off.
+- **One upstream version can need a second repack,** one that takes newer files from its sources
+  or is packed by a changed rule, and the Server cannot hold it under the version of the first.
+  More than one kind's fetch verifies an upstream's OpenPGP signature.
+- **Some upstream trees need an absolute link.** An AppImage's runtime reaches the program loader
+  of the host it runs on through one.
+- **The reading of a certificate's end has a natural home in `fleet-core`.** `fleet-core` carries
+  `x509-parser` and `time` for `x509` and `csr`. The file stays each program's to read, through
+  `opamp::tls`, the one reader of a certificate's PEM
+  ([ADR-0008](0008-five-crates-on-tokio-and-axum.md) clause 17). The core `ending` stays plain
+  date arithmetic without a dependency, as that clause describes it; the reading is its adapter
+  `ending::read`.
+- **A CA key the Server reads from a file can be copied.** Whoever reads the client CA's key once,
+  from the host, a backup or a disk snapshot, can sign a member certificate for any host until the
+  CA is replaced. Clauses 5 to 8, 12, 13 and 16 to 18 and the out-of-scope list carry the operator
+  side of
+  [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
+  which lets the Server hold its CA keys on a PKCS#11 token: `pki token-init`,
+  `pki bootstrap-ca --pkcs11-module`, `pki init --ca-keys-on-token`, the flags of `token-init` and
+  `cryptoki`.
 
 ## Decision
 
@@ -130,7 +142,8 @@ for Linux and macOS, that makes the fleet's certificate authorities, the Server'
 certificate and its package signing key with `rcgen`, names every certificate by its product and
 its role, says with the Server before any certificate ends, turns a bootstrap PKCS#12 file into
 PEM, and repacks an upstream tree deterministically and from inside that tree alone, so that no
-step of setting up or running a fleet needs `openssl` or another external tool.
+step of setting up or running a fleet needs `openssl` or another external tool beyond `gpgv` for an
+upstream that signs with OpenPGP.
 
 1. **The crate builds exactly this program.** `crates/fleet-tools` has no library and one binary,
    `opamp-fleetctl`, and keeps the dependency direction of
@@ -149,7 +162,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
 3. **One archive per target, named like the Client's.**
    `opamp-fleetctl_<version>_<os>_<arch>.tar.gz`, by the asset-name grammar and the platform tokens
    of
-   [ADR-0039](0039-releases-attestations-and-the-server-image.md),
+   [ADR-0038](0038-releases-attestations-and-the-server-image.md),
    packed by `opamp-fleetctl package pack --format tar.gz` with the one member `opamp-fleetctl` and
    its executable mode. No `.deb`, `.rpm` or `.msi` carries it. The four archives are assets of the
    release beside the Client's and are covered by the same `SHA256SUMS`.
@@ -170,8 +183,8 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    `pkcs12_identity`, and so through `fleet_core::pkcs12::file` and `p12-keystore` (ADR-0027).
    `pki token-init` and `pki bootstrap-ca --pkcs11-module` reach a PKCS#11 token through `cryptoki`,
    the wrapper the Server uses for the same token
-   ([ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
-   clause 1). Every key is ECDSA P-256. A key written to a file is PKCS#8 PEM, the form
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+   clause 35). Every key is ECDSA P-256. A key written to a file is PKCS#8 PEM, the form
    `[client_ca]` loads; a key made on a token stays on it. Every certificate is PEM. Every serial is
    16 random bytes, as the client CA's are.
 
@@ -184,7 +197,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    end, and `server pki status` says when those of the Server host end. The Server's command runs
    and exits like `hash-credential` and `audit-verify`, before the Server starts serving. The Server
    binary carries no code that makes a CA or a server certificate. It signs host certificates
-   ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
    and bootstrap certificates
    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
    When a certificate counts as ending (clause 21) is one rule in `fleet-core`, plain date
@@ -202,7 +215,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    token-init` makes both on the Server host (clause 8). `--offline-dir` receives what stays with
    the operator: `server-ca.pem` and `server-ca-key.pem`; the package signing key, an Ed25519 key in
    PKCS#8 as `package keygen` writes it, as `package-signing-key.pk8`, and its public half in hex as
-   `package-signing-key.pub` ([ADR-0034](0034-packages-signatures-and-delivery.md)); and
+   `package-signing-key.pub` ([ADR-0033](0033-packages-signatures-and-delivery.md)); and
    `supervisor.toml.fragment` naming `server-ca.pem` in `[tls] ca_file`, `bootstrap.pem` and
    `bootstrap-key.pem` under `--host-path` in `cert_file` and `key_file`, where a host puts the pair
    the Server issues it, and the public half in `[packages] verification_key`. No key of the server
@@ -219,7 +232,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
    `opamp-fleetctl pki token-init --pkcs11-module <path> --token-label <label> --pin-file <file>
    --out <dir>`, run on the Server host, generates the client CA's, the bootstrap CA's and the
    audit key on the token of
-   [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+   [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
    with `CKA_EXTRACTABLE` false and `CKA_SENSITIVE` true, signs each CA certificate through the
    token with its own key, and writes to `--out` `client-ca.pem`, `bootstrap-ca.pem` and
    `token.toml.fragment`, which names `[pkcs11]`, `[client_ca]` with `key_label`, `[enrolment]`
@@ -230,7 +243,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
 9. **The CAs are told apart by role and sign no CA.** The three CAs are `CN=<product> Server CA`,
    `CN=<product> Client CA` and `CN=<product> Bootstrap CA` (clause 17), so the bootstrap CA never
    shares a subject with the client CA
-   ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
    Each CA certificate is `CA:TRUE` with a path length of 0, `keyCertSign` and `cRLSign`.
 
 10. **A server certificate names what is dialled in its SAN and its role in its subject.**
@@ -256,7 +269,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
     operator copies both to the Server host in place of `[enrolment]`'s files. With it, and with
     `--token-label` and `--pin-file`, the command runs on the Server host, and the key is generated
     on the token of
-    [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+    [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
     under a new label, `bootstrap-ca.pem` is written to `<dir>`, and the command prints the label,
     which the operator names in `bootstrap_ca_key_label`. It never overwrites a file or a token
     object. The operator restarts the Server. Bootstrap certificates from the old CA stop passing
@@ -270,7 +283,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
     later than the server CA that signs it, and one asked to outlive it is cut to the CA's end with
     a notice. Bootstrap certificates live as clause 14 states. Host certificates are the running
     Server's, signed for `[client_ca] validity_days` as
-    [ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+    [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
     states.
 
 14. **A bootstrap certificate lives 10 days by default, at most 90, never past its CA.**
@@ -287,7 +300,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
     CA key from a file, it reads it unattended; that file and the offline keys are protected by
     where they are kept and by their mode, as every other key of the project is. A key on the token
     of
-    [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+    [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
     is created non-extractable and is used only through `C_Sign`; the Server never reads it. The
     secrets left on the Server's host are the PIN file, the TLS listener's key, and with SoftHSM2
     its token directory, which with the PIN is a copy of every key on the token.
@@ -324,7 +337,7 @@ step of setting up or running a fleet needs `openssl` or another external tool.
     whole life is shorter than 90 days, within the last third of it — is *ending*: it is logged as a
     warning naming the file, its subject and the date, and recorded in the audit as `pki.expiring`;
     one that has ended is logged as an error and recorded as `pki.expired`
-    ([ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
+    ([ADR-0028](0028-the-audit-record.md)).
     Neither stops the Server: the hosts it serves decide for themselves, and a Server that refuses
     to start cannot be told to renew.
 
@@ -370,8 +383,10 @@ step of setting up or running a fleet needs `openssl` or another external tool.
 27. **Every repack `opamp-fleetctl package fetch` makes is deterministic, and it carries nothing
     from outside its tree.** Where an upstream publishes no artifact a Client can run as
     published, the tool repacks it on the operator's host, before it is signed, into a `.tar.gz`
-    that keeps file modes. The repack has a fixed member order and zeroed times and ownership, and
-    it carries no link.
+    that stores normalized file modes: `0o755` for a directory and for a file any execute bit is
+    set on, `0o644` for every other file, so no write bit beyond the owner's and no setuid, setgid
+    or sticky bit reaches the signed artifact. The repack has a fixed member order and zeroed times
+    and ownership, and it carries no link but those its kind keeps.
     - **A link is resolved inside the tree.** Its target is taken relative to the directory holding
       the link, and every link met on the way is resolved by the same rule. A link that resolves to
       a file or a directory inside the tree is dereferenced: a linked directory is packed under the
@@ -381,18 +396,79 @@ step of setting up or running a fleet needs `openssl` or another external tool.
       exists at the path it would name on the operator's host. The repack stops before it writes
       the artifact and names every such link by its path in the tree and its target. Nothing of
       the operator's host is read through it.
+    - **A kind may keep an absolute link, which is packed as that link.** The kind names it by
+      its exact path in the tree and its exact absolute target, and only a link at that path, met
+      at that path and not through a linked directory, whose target is byte for byte that one is
+      kept. It is packed with mode `0o777`, read from the tree and never followed, so nothing of
+      the operator's host is read through it, and the Client creates exactly those links
+      ([ADR-0033](0033-packages-signatures-and-delivery.md)
+      clause 57). A link at a named path with another target, and every link the kind does not
+      name, leads out and fails the repack as the bullet above states.
+      The shared rule is `fleet_core::tree::is_kept`.
     - **A link that names nothing inside the tree is dropped.**
     - **A link leading back up the tree is not followed,** the root of the tree included: a link to
       a directory the walk is already inside is packed as that name and not descended into.
-    - The member cap a tree package has ([ADR-0034](0034-packages-signatures-and-delivery.md)) is
+    - The member cap a tree package has ([ADR-0033](0033-packages-signatures-and-delivery.md)) is
       checked while packing.
 
     Repacking the same release therefore yields the same bytes and the same hash on any
     operator's host, and no accidental rollout.
 
+28. **A later repack of one upstream version is a pre-release of the next patch.** The first
+    repack of a version is the Package that version names
+    ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 6). A later repack of
+    the same version, one that takes newer files from its sources or is packed by a changed rule,
+    is named by `opamp-fleetctl package fetch --repack <n>`, `n` from 2, and uploaded as Package
+    `<major>.<minor>.<patch+1>-0.r.<n>`: the second repack of `2.14.3` is `2.14.4-0.r.2`.
+    - **It orders between the version and the next release.** In SemVer precedence it lies above
+      the first repack and every earlier one, and below `<major>.<minor>.<patch+1>`. The repack
+      number is an identifier of its own and numeric, so it is compared as a number: `r.9` orders
+      below `r.10`, up to the largest number the flag takes. The leading `0` orders every repack
+      below any pre-release upstream names for the next patch.
+    - **The program keeps the version it is.** Its program keeps reporting the upstream version,
+      so the Server holds the Package against the version of the Package the host's Supervisor
+      installed ([ADR-0032](0032-deployments-and-rollouts.md) clauses
+      14 and 25): a host on an earlier repack is offered the later one, a host on the later one is
+      offered it no more, and upstream's next release still replaces it. Build metadata
+      (`2.14.3+r2`) is not the form: two versions that differ only in it compare equal
+      ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 2).
+    - **Refused:** `--repack 0`; a later repack of a version that is not three numbers; and a later
+      repack of an agent whose artifact the tool uploads as upstream publishes it, which has one
+      artifact per version. `--repack 1`, the default, is the version itself. The operator counts
+      on from the last repack uploaded; the tool does not look it up.
+
+29. **An upstream's OpenPGP signature is verified with `gpgv`, against a key the tool carries, by
+    a pinned primary key.** Where a kind's upstream signs what `package fetch` downloads with
+    OpenPGP, as a detached signature beside an artifact or as a clear-signed repository index,
+    the tool verifies it with `gpgv` against a binary keyring it carries for that upstream, never
+    a keyring of the host.
+    - **A home of its own.** The keyring and the signature are written to a directory of the
+      process's own under the system's temporary directory, owner-only, which is `gpgv`'s home,
+      and every file is named to `gpgv` by its absolute path, so no keyring and no option of the
+      user's is read. The directory is removed after the run.
+    - **The verdict is `gpgv`'s status lines, never its prose:** a `VALIDSIG` whose last field,
+      the primary key of the key that made the signature, is one of the primary fingerprints the
+      kind pins for that upstream, and no `BADSIG`. A signature by a subkey is its primary's, and
+      a subkey that has expired since it signed still counts.
+    - **A detached signature also needs a run `gpgv` calls a success.** The file beside an
+      artifact carries the one signature its upstream made, so a non-zero exit status refuses it
+      whatever the status lines say.
+    - **A clear-signed text is judged by the status lines alone.** An archive signs its index
+      with several keys at once, and a signature by a key the keyring does not hold (`ERRSIG`)
+      decides nothing either way and makes the exit status non-zero, so the exit status is not
+      read there.
+    - **A clear-signed text is the text the signature covers.** What is read of it is what `gpgv`
+      writes out as signed, never the file as it came, which may carry more around the signed
+      part.
+    - **No `gpgv`, no fetch.** A fetch that has to verify a signature and finds no `gpgv` fails,
+      naming it. The tool installs nothing.
+
+    Which upstream signs, with which key, from which version on, and whether a missing signature
+    refuses the artifact, each kind states.
+
 **Out of scope:** the names of the command trees of `opamp-fleetctl`, which commands each holds, and
 the absence of any other program name for them, which
-[ADR-0035](0035-package-versions-high-water-mark-and-floor.md) states; issuing a host certificate by
+[ADR-0034](0034-package-versions-high-water-mark-and-floor.md) states; issuing a host certificate by
 any route other than enrolment, which the specification rules out; how the Server issues, records,
 hands out and revokes bootstrap certificates, and what of their subject a host certificate carries
 ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md));
@@ -402,22 +478,23 @@ passphrase prompt; a token for the server CA's key or the package signing key, w
 with the operator; replacing the server CA, which every host's configuration follows; replacing the
 client CA, which every host's enrolment follows, but for the move of a fleet onto a token, whose new
 client CA `pki token-init` makes and which
-[ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
-clause 13 rolls out; and holding two bootstrap CAs at once while one replaces the other; enforcing a
+[ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+clause 40 rolls out; and holding two bootstrap CAs at once while one replaces the other; enforcing a
 CA's end in the handshake, or limiting the running Server's signatures to its CA's end; certificate
 revocation lists or OCSP; ACME and certificates from a public CA, which the Server reads as they
 are; a `pki` command on the Client binary; the Server's `pki status` on Windows or macOS, where the
 Server does not run; the operator tool on Windows; native packages, Homebrew, `npm` or any other
 installer; provenance of the release's assets
-([ADR-0039](0039-releases-attestations-and-the-server-image.md)); commands that drive the running
+([ADR-0038](0038-releases-attestations-and-the-server-image.md)); commands that drive the running
 fleet through the Operator plane beyond the upload `package fetch` makes; writing the extracted key
 encrypted, extracting files other than the bootstrap form, and making a PKCS#12 file with the tool;
-the file modes the repack keeps, including group- and world-writable bits a tree may carry, which
-the repack leaves as upstream set them and the Client applies as
-[ADR-0021](0021-the-accounts-the-service-runs-under.md) clause 23 states; a kind's own removal,
-before packing, of links it knows upstream leaves behind (as an AppImage's repack removes
-`.DirIcon`), which each kind states where it is decided; hard links, which are files of the tree;
-and the trust in the extracted tree's origin, which the hash of what was downloaded settles.
+how the Client applies a tar's modes, which [ADR-0021](0021-the-accounts-the-service-runs-under.md)
+clause 23 states; a kind's own removal, before packing, of links it knows upstream leaves behind (as
+an AppImage's repack removes `.DirIcon`), which each kind states where it is decided; hard links,
+which are files of the tree; the trust in the extracted tree's origin, which the hash of what was
+downloaded settles; following an upstream's key at run time, a new key reaching the tool in a new
+carried keyring with a release of the tool; and a revocation the carried keyring does not state,
+which `gpgv` cannot know of.
 
 ## Alternatives considered
 
@@ -430,7 +507,7 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
   package signing key and the server CA's key are kept away from, and the archive writers and the
   release fetcher would be linked into the binary that faces the fleet — attack surface with no use
   in serving, since the Server never creates or opens an artifact
-  ([ADR-0034](0034-packages-signatures-and-delivery.md)). With the operator tool published, the
+  ([ADR-0033](0033-packages-signatures-and-delivery.md)). With the operator tool published, the
   one argument for it — no second binary to obtain — is gone; the version both share is the
   release's.
 - **Keep the bootstrap CA offline and make bootstrap certificates with `opamp-fleetctl`.** It gives
@@ -465,10 +542,11 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
   but a fleet that skips the second step has no key, and its Clients take no package until
   someone sets `verification_key` by hand. The key belongs where `init` already puts what stays
   offline, and `keygen` remains for a second key or a replacement.
-- **Each program reads the certificate itself, the date rule alone in `fleet-core`.** It kept the
-  internal crate free of `x509-parser`, `time` and a PEM reader while it had none, but the reading
-  and the line `pki status` prints were then written twice, verbatim, and `fleet-core` carries
-  those dependencies for `x509` and `csr` anyway.
+- **Each program reads the certificate itself, the date rule alone in `fleet-core`.** It would keep
+  the internal crate free of `x509-parser`, `time` and a PEM reader, but `fleet-core` carries those
+  dependencies for `x509` and `csr` anyway, and the reading and the line `pki status` prints would
+  be written twice, verbatim, in `fleet-server` and `fleet-tools`. Rejected for clause 6's one
+  function.
 - **`fleet-tools` depending on `fleet-server` for the rule.** No new code in `fleet-core`, but the
   operator tool would link the Server's library, its router included, for a dozen lines.
 - **`pki status` in one program only.** The Server host does not hold the server CA's certificate
@@ -481,8 +559,13 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
   side channel, and a route would let the operator credential alone mint a member.
 - **Limit every signature of the running Server to its CA's end, and refuse renewals under an ended
   CA.** It belongs with how the Server signs
-  ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md));
+  ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md));
   this decision warns instead (clauses 21 and 22).
+- **Every CA key the Server uses in a file, a hardware security module out of scope.** No token,
+  no `cryptoki`, one way to set up. Rejected: a key file the Server reads unattended can be copied
+  from the host, a backup or a snapshot, and a copy signs member certificates nobody can tell from
+  real ones. Several Server instances would each need a copy. A file stays one of the two places
+  (clauses 7, 8 and 16); the token is the other.
 - **Encrypt the offline CA keys with a passphrase.** It needs an encryption crate beyond clause 5
   and a prompt the commands must handle; kept out of scope, not ruled out.
 - **Recommend `step` or `cfssl`.** Either makes certificates well, but each is one more tool to
@@ -508,7 +591,7 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
   protected at rest. But the Client's install reads the pair in the clear
   ([ADR-0020](0020-the-installed-service-and-its-state.md)), and neither `rustls` nor `rcgen`
   reads an encrypted key. Owner-only permissions are what every other key is given
-  ([ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+  ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 - **`p12-extract` writes the certificate only.** The key never leaves the file. Not chosen: the
   operator asked for the key, and the PEM pair is a form the Client takes.
 - **Read any PKCS#12 file (other schemes, several certificates).** This is more general, but needs
@@ -529,9 +612,18 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
   kind whose upstream reliably leaves such links removes them by name before packing, which is a
   reviewed, per-kind choice rather than a general silence. Dropping is cheaper to the operator;
   hardening outranks that.
-- **Pack the out-of-tree link as a link.** Faithful to upstream, but a tree package refuses every
-  link ([ADR-0034](0034-packages-signatures-and-delivery.md)), so the Client would refuse the
-  artifact on every host. Rejected.
+- **Fail every link that leads out of the tree.** The strictest rule, and no tree package would
+  carry a link the installing host resolves. Rejected: an AppImage's runtime reaches the host's
+  program loader through an absolute link, so its kind could not be repacked. A link the kind
+  names by its exact path and target is kept, and every other still fails (clause 27).
+- **Keep the file modes upstream set.** Faithful to upstream, and the Client's mask on unpacking
+  takes some bits off. Rejected: a group or world write bit, or a setuid bit, would travel into an
+  artifact the operator signs, with the Client's mask as the only guard. The repack stores
+  normalized modes (clause 27).
+- **Pack every out-of-tree link as a link.** Faithful to upstream, but a link whose target nobody
+  reviewed names whatever the installing host holds there, and the Client would have to create
+  any link an archive carries. Rejected. Only a link the kind names by path and target is packed
+  as one, a reviewed, per-kind choice the Client holds the archive against.
 - **Decide by the canonical path on the operator's host** (`canonicalize` the target and compare it
   with the canonical root). Simple to write, but a target that does not exist cannot be
   canonicalized, so a dangling absolute link would be dropped on one host and refused on another,
@@ -540,6 +632,25 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
 - **Confine the walk with the operating system** (`openat2` with `RESOLVE_BENEATH`, or a chroot).
   Strong where it exists, but Linux-only, and the repack also runs on macOS. Left to the
   implementation as a further guard, not the rule.
+- **One repack per upstream version, under that version.** No numbering to learn. Rejected: a
+  repack that takes newer files from its sources, or is packed by a changed rule, could not be
+  uploaded, since the Server holds one Package per version (clause 28).
+- **Leave an upstream's OpenPGP signature to each kind's fetch.** Each kind would verify in its own
+  way. Rejected: more than one kind's upstream signs with OpenPGP, and one tested verdict verifies
+  them alike (clause 29).
+- **Number a later repack `-0.r<n>`, the number fused to the letter (`2.14.4-0.r2`).** One
+  identifier fewer, but it is alphanumeric, compared as text, so `r10` orders below `r9` and the
+  tenth repack would have to be refused. Rejected for the numeric identifier of clause 28.
+- **Number a later repack by build metadata (`2.14.3+r2`).** It keeps the upstream version
+  visible, but two versions that differ only in it compare equal, so the Server holds one of them
+  and a host on the first is never offered the second. Rejected.
+- **Verify OpenPGP with a Rust crate (`sequoia-openpgp`, `pgp`).** No program on the fetch host,
+  but a large dependency with its own cryptography for a check the operator runs a few times a
+  release, against clause 5's short list. `gpgv` is the verifier `apt` itself uses, and the
+  verdict is read from its machine-readable lines. Rejected.
+- **Trust the host's keyrings (`/usr/share/keyrings`, `apt`'s trusted keys).** No keyring in the
+  tool, but what the artifact carries would then depend on files of whichever host fetches it,
+  and on hosts without them nothing verifies. Rejected for the carried keyring.
 
 ## Sources / Prior art
 
@@ -595,18 +706,18 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
 - Reproducible Builds (reproducible-builds.org): an artifact's bytes must not depend on the build
   host's file system beyond its declared inputs. Recalled, not re-read.
 - A wrapped kind's AppImage repack, on that kind's branch, whose extraction of an AppImage built
-  from Debian packages leaves links pointing at files no tree carries. Whether any of them is
-  absolute is not verified.
+  from Debian packages leaves links pointing at files no tree carries, and one absolute link from
+  the AppImage's runtime to the host's program loader.
 - This project's own requirements:
-  [ADR-0040](0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
   on admission, the client CA and how the Server signs;
   [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
   on the bootstrap CA, the crates issuance adds, the `bootstrap.p12` file and its reader;
   [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) on the planes; `docs/SPECIFICATION.md` on
-  how an Agent obtains its certificate; [ADR-0034](0034-packages-signatures-and-delivery.md) on why
+  how an Agent obtains its certificate; [ADR-0033](0033-packages-signatures-and-delivery.md) on why
   a package is signed by a key the operator holds and what a tree package may carry;
   [ADR-0020](0020-the-installed-service-and-its-state.md) on the member a package artifact carries;
-  [ADR-0039](0039-releases-attestations-and-the-server-image.md) on the release, its naming and its
+  [ADR-0038](0038-releases-attestations-and-the-server-image.md) on the release, its naming and its
   assets.
 
 ## Consequences
@@ -645,24 +756,30 @@ and the trust in the extracted tree's origin, which the hash of what was downloa
 - Negative / trade-offs: an extracted key lies in the clear on whatever disk `--out` names, as
   the PEM pair the Client's install takes does. Protecting that directory is the operator's job.
 - Negative / trade-offs: an upstream tree with an absolute or escaping link does not repack until
-  the kind removes that link by name. If an AppImage's Debian leftovers are absolute, that
-  kind's repack has to name them, which the kind's change does with its tests. Resolving a link
-  component by component inside the tree is more code than calling `metadata`; it is bounded by
-  the member cap and by the ancestor guard against cycles.
+  the kind removes that link by name or names it as a link it keeps. If an AppImage's Debian
+  leftovers are absolute, that kind's repack has to name them, which the kind's change does with
+  its tests. A kept link names a path on the installing host, which the kind's ADR answers for.
+  Resolving a link component by component inside the tree is more code than calling `metadata`;
+  it is bounded by the member cap and by the ancestor guard against cycles.
+- Positive: a later repack of a version reaches every host on an earlier one and gives way to
+  upstream's next release by SemVer's order, held against the version of the Package a host's
+  Supervisor installed rather than the program's own; two kinds that verify OpenPGP signatures
+  verify them alike, by one tested verdict.
+- Negative / trade-offs: a later repack's version names a patch upstream has not released, and the
+  operator, not the tool, counts the repacks. A fetch of a kind whose upstream signs with OpenPGP
+  needs `gpgv` on the host, and a new upstream key needs a release of the tool.
 - Follow-ups: encrypting the offline keys; replacing a CA without every host enrolling again, and
   holding two bootstrap CAs while one replaces the other; enforcing a CA's end in the handshake,
   or limiting the running Server's signatures to it; showing the issuer's O and OU wherever the
   Server lists certificates; a view of the certificates' ends in the bundled UI; the operator tool
   on Windows with key files only their owner can read; a command tree for the running fleet, if
   one is ever wanted, under this program's name; whether the Enrolments tab should offer the PEM
-  pair, which the tool can make; whether a repack keeps a group- or world-writable mode as
-  upstream set it or normalizes modes (for example to `0755`/`0644`), together with how the Client
-  applies a tar's modes, and whether the Client's tree extraction should clear those bits
-  regardless of how the artifact was built.
+  pair, which the tool can make; whether the Client's tree extraction should clear group
+  and world write bits regardless of how the artifact was built.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0047`:
+Tests that carry `Verifies: ADR-0036`:
 
 - `pki init` writes exactly the files of clause 7 into the two directories: the bootstrap CA's key
   into `--server-dir`, no server-CA key and no package signing key into it,
@@ -736,14 +853,36 @@ Tests that carry `Verifies: ADR-0047`:
   inside the tree is not descended into:
   `a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang` and
   `a_link_to_the_root_is_not_followed` (clause 27).
+- `a_link_the_kind_keeps_is_packed_as_that_link`: a link the kind names by path and target is
+  packed as that link with mode `0o777` and a zeroed time, and the Client installing the tree with
+  the same kind creates it; `a_link_the_kind_does_not_keep_still_fails_the_repack`: the same link
+  without the kind naming it, the named path with another target, an unnamed absolute link beside
+  a kept one, and the kept link reached through a linked directory each fail the repack, naming
+  it, with no artifact left; `only_the_named_path_with_the_named_target_is_kept` in
+  `crates/fleet-core/src/tree.rs` (clause 27).
+- `a_repack_stores_normalized_modes`: a file with any execute bit is stored `0o755`, every other
+  file `0o644`, a directory `0o755`, whatever write, setuid, setgid or sticky bits the tree carried
+  (clause 27).
 - Packing the same tree twice yields byte-identical artifacts (clause 27).
 - Clauses 5 to 8, 12, 13 and 16 to 18 as they stand here, the keys generated on a token included,
   are verified by the tests
-  [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
+  [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
   names.
+- `a_later_repack_orders_between_the_version_and_the_next_release`: `--repack 1` keeps the
+  version, `--repack 2` of `2.14.3` is `2.14.4-0.r.2`, the repacks order above `2.14.3` and below
+  `2.14.4` with `r.9` below `r.10`, and `--repack 0`, a version of other than three numbers and a
+  later repack of an agent the tool does not repack are refused (clause 28).
+- In `crates/fleet-tools/src/gpgv.rs`, with throwaway keys whose primary certifies and whose
+  subkey signs: `a_detached_signature_verifies_only_by_a_pinned_key_over_its_bytes` and
+  `a_clear_signed_text_yields_only_what_a_pinned_key_signed` (an altered byte, a key the keyring
+  does not hold, a key it holds but does not pin, and a page in place of a signature are each
+  refused; the clear-signed text comes back without its armour), and
+  `a_signature_verdict_needs_a_pinned_primary_and_no_bad_signature` on `gpgv`'s status lines,
+  and `a_detached_signature_needs_a_run_gpgv_calls_a_success`, which refuses a detached signature
+  whose lines carry a pinned `VALIDSIG` and no `BADSIG` when `gpgv` failed (clause 29).
 
 The test of the command tree, `opamp-fleetctl --help`, `package --help` and `pki --help`, verifies
-[ADR-0035](0035-package-versions-high-water-mark-and-floor.md), which states the tree.
+[ADR-0034](0034-package-versions-high-water-mark-and-floor.md), which states the tree.
 
 **Not mechanically decidable:** that no document of the project tells an operator to use an
 external tool, and that the operator manual describes issuing through the Server and names no

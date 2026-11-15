@@ -6,7 +6,7 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A version is the one
 `[workspace.package] version` in `Cargo.toml` names, which the release pipeline creates the
-`version/*` tag from ([ADR-0038](docs/adr/0038-the-products-version.md)). A section carries a date
+`version/*` tag from ([ADR-0037](docs/adr/0037-the-products-version.md)). A section carries a date
 once its tag exists.
 
 > **Where this file starts.** Entries begin with release 0.1.0. The work before it — package
@@ -19,7 +19,7 @@ once its tag exists.
 ### Added
 
 - **`opamp-fleetctl package fetch --repack <n>` numbers a later repack of one version**
-  ([ADR-0053](docs/adr/0053-the-operator-program-opamp-fleetctl.md)
+  ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)
   clause 28), for an agent whose artifact the tool repacks; an agent the tool uploads as upstream
   publishes it refuses a number above 1. The second repack of `2.14.3` is
   uploaded as Package `2.14.4-0.r.2`, above every earlier repack and below the next release, and
@@ -35,7 +35,7 @@ once its tag exists.
 ### Changed
 
 - **An instance on PostgreSQL takes up the Agents a notice names in one read**
-  ([ADR-0045](docs/adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clauses 8 and 9). When another instance changes the records of Agents this instance holds, it
   read them one database round trip per Agent before it took them up; a rollout over many Agents
   cost as many round trips. It now reads them in one, then reads again under its lock only those
@@ -44,7 +44,7 @@ once its tag exists.
 
 - **A Supervisor reports the version of the Package it installed, and the Server holds the next
   Package against it**
-  ([ADR-0049](docs/adr/0049-deployments-and-rollouts.md) clauses 14 and
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md) clauses 14 and
   25). A Supervisor-backed Agent reports `supervisor.package.version` once its Supervisor has
   installed a Package, and the Server's candidate, reach count, fleet view and rollout act compare
   a Package with it, falling back to `service.version` where it is not reported. A host that
@@ -55,7 +55,7 @@ once its tag exists.
 
 - **A single-file package installs one regular file, never a directory, and an archive holding
   its program twice is refused**
-  ([ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md)
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)
   clause 55). The Client took the first entry whose file name was the program's, so an archive
   that also held a directory or another file of that name installed whichever came first. It now
   takes only a regular file, never a directory, a link or a 7z anti-item, and refuses an archive in
@@ -67,13 +67,13 @@ once its tag exists.
   once.
 
 - **Every repack `opamp-fleetctl package fetch` makes stores normalized modes**
-  ([ADR-0053](docs/adr/0053-the-operator-program-opamp-fleetctl.md)
+  ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)
   clause 27): `0o755` for directories and executables and `0o644` for every other file, so no group
   or world write bit and no setuid bit upstream set reaches the signed artifact.
   **What to do:** nothing.
 
 - **Breaking: the Client refuses an `[attributes]` key in the `supervisor.` namespace**
-  ([ADR-0054](docs/adr/0054-what-an-agent-reports-about-itself.md)
+  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)
   clause 10). The namespace is
   the Supervisor's own statement. A `supervisor.kind.*` entry made every Agent of the host look
   like a Client's own Agent to the Server. A `supervisor.package.version` entry chose the version
@@ -85,7 +85,7 @@ once its tag exists.
   `supervisor.toml` before upgrading, or the Client does not start.
 
 - **The Server refuses a label in the `supervisor.` namespace**
-  ([ADR-0052](docs/adr/0052-the-fleet-record-of-agents-and-hosts.md)
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)
   clause 20).
   `PUT /api/v1/agents/{uid}/labels`, which the UI's label editor uses, answers `400` naming the
   key, as it does for `fleet.`: a Selector would otherwise match such a label as if a Supervisor
@@ -95,9 +95,9 @@ once its tag exists.
   nothing.
 
 - **A tree package may keep the absolute links its Supervisor's kind names, and no other link**
-  ([ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md)
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)
   clause 57,
-  [ADR-0053](docs/adr/0053-the-operator-program-opamp-fleetctl.md)
+  [ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)
   clause 27). A kind may name a link by its exact path in the tree and its exact absolute target;
   `opamp-fleetctl package fetch` packs it as that link, and the Client creates it when it unpacks
   a `.tar.gz` tree for that kind. Every other link still fails the repack, and still refuses the
@@ -116,8 +116,8 @@ once its tag exists.
 ### Fixed
 
 - **The fleet search finds an Agent under the platform its package is offered for**
-  ([ADR-0031](docs/adr/0031-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
-  clause 6, [ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md) clauses 6 and 14). The
+  ([ADR-0030](docs/adr/0030-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+  clause 6, [ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md) clauses 6 and 14). The
   search text held `os.type` and `host.arch` as reported, and only from the non-identifying
   attributes. An Agent that reports `linux` and `x86_64` is now found by `linux-amd64`, and an
   Agent that reports its platform only among its identifying attributes by its platform too. A
@@ -127,7 +127,7 @@ once its tag exists.
   **What to do:** nothing.
 
 - **`opamp-fleetctl package fetch` names a platform as the Server does**
-  ([ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md) clause 6). The tool kept a
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md) clause 6). The tool kept a
   platform table of its own: it passed over an asset named `osx`, `win64` or `x64`, and every
   platform it had no name for, such as `linux/s390x`. It now folds an asset's platform through the
   table the Server stores an entry under, and offers a platform the table does not know under its
@@ -137,7 +137,7 @@ once its tag exists.
   do not fetch it.
 
 - **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
-  ([ADR-0045](docs/adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clauses 8 and 9). On PostgreSQL, an instance that placed an Agent before another instance bound
   the Client Agent of its Host, or before the Client Agent first arrived behind the same Gateway on
   another instance, held the Agent without the Client Agent's labels in its memory until the group
@@ -148,28 +148,28 @@ once its tag exists.
   everything again at each such arrival, as for any notice it does not know.
   **What to do:** nothing.
 - **A Host's bound of 256 Agents holds across instances**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
   Two instances binding new Agents of one Host at once could pass it; the binding's own
   transaction now counts it.
   **What to do:** nothing.
 - **A restart requested through one instance while another delivers one is sent**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
   A request that landed between the delivery's clear and its end stayed queued in the database
   until a later take-up; the carrying instance now holds it when its announcement arrives, and
   when it takes up every Agent after a missed notification.
   **What to do:** nothing.
 - **The blob and prune locks are let go when their holder ends**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
   A dropped blob hold, or a prune round cut off by its bound, kept its lock until its database
   session ended.
   **What to do:** nothing.
 - **A deletion on a shared store is decided by the database, not by an instance's pin cache**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
   A Configuration, a Deployment or a Package an instance's stale cache held pinned was refused
   although no assignment pinned it any more.
   **What to do:** nothing.
 - **A Package refusal on PostgreSQL keeps its status**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)).
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)).
   The REST API answers a missing, conflicting or invalid Package by its kind (`404`, `409`,
   `400`), where on PostgreSQL it could answer by the wording of the message.
   **What to do:** nothing.
@@ -185,7 +185,7 @@ once its tag exists.
   without a host is not re-keyed by its own reconnect.
   **What to do:** nothing.
 - **A configuration offered twice restarts its Managed Process once**
-  ([ADR-0046](docs/adr/0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)
+  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)
   clause 56). A heartbeat that left the Client before the Server's push of a rollout arrived still
   named the old hash, the Server answered it with the offer again, and the Client applied both:
   the Managed Process restarted once more after reporting `APPLIED`, and the Client's own Agent
@@ -200,8 +200,8 @@ once its tag exists.
 
 - **The CA keys and the audit key may live on a PKCS#11 token, and instances that reach it serve
   side by side**
-  ([ADR-0043](docs/adr/0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md),
-  [ADR-0040](docs/adr/0040-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
+  [ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
   clauses 8 and 17). `[pkcs11]` names the token by `module`, `token_label` and `pin_file`, and
   `[client_ca] key_label`, `[enrolment] bootstrap_ca_key_label` and `[audit] key_label` name its
   keys in place of the key files; a key is named by a file or a label, never both. The token
@@ -248,7 +248,7 @@ once its tag exists.
   - **From 0.8.0 or earlier:** do what the *What to do* of 0.8.1 below says as well.
 
 - **The heads of the audit chains are signed, and `server audit-verify` checks them**
-  ([ADR-0041](docs/adr/0041-the-heads-of-the-audit-chains-are-signed-with-a-key-on-the-token.md)).
+  ([ADR-0028](docs/adr/0028-the-audit-record.md)).
   With `[audit] key_label`, the Server signs with the audit key on the token, at its start, about
   once a minute while a chain grew, and at an orderly shutdown, a checkpoint naming the head of
   every chain: the entry `audit.checkpoint`, on the files and on PostgreSQL alike. A token that
@@ -276,11 +276,12 @@ once its tag exists.
   again.
 
 - **The audit record may be exported as OTLP log records**
-  ([ADR-0043](docs/adr/0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
-  clause 9). `[audit.export]` with `endpoint`, the full OTLP/HTTP URL with its path, and an optional
-  `ca_file` sends every entry, once the store has written it, to a receiver of your own, such as an
-  OpenTelemetry Collector that forwards it to write-once storage. Each record's body is the line as
-  the store holds it, with `seq`, `time` and `prev`; its attribute `audit.event` names the event.
+  ([ADR-0028](docs/adr/0028-the-audit-record.md)
+  clause 15). `[audit.export]` with `endpoint`, the full OTLP/HTTP URL with its path, and an
+  optional `ca_file` sends every entry, once the store has written it, to a receiver of your own,
+  such as an OpenTelemetry Collector that forwards it to write-once storage. Each record's body is
+  the line as the store holds it, with `seq`, `time` and `prev`; its attribute `audit.event` names
+  the event.
   The connection is TLS 1.3, `http://` only to `127.0.0.1` or `::1`; it follows no redirect, takes
   no proxy, presents no credential, and takes no setting from an `OTEL_*` variable. A receiver that
   is down never holds up a decision: up to 2048 entries wait, a batch is sent again until taken,
@@ -290,7 +291,7 @@ once its tag exists.
   **What to do:** nothing; to keep a copy the Server cannot rewrite, name a receiver.
 
 - **`opamp-fleetctl pki token-init` makes the CA keys and the audit key on the token**
-  ([ADR-0042](docs/adr/0042-the-operator-program-opamp-fleetctl.md) clauses 6, 8, 12 and 16).
+  ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md) clauses 6, 8, 12 and 16).
   Run on the Server host with `--pkcs11-module`, `--token-label`, `--pin-file` and `--out`, it makes
   the client CA's, the bootstrap CA's and the audit key on the token, labelled `client-ca`,
   `bootstrap-ca` and `audit`, none of them extractable, refuses a label the token holds already,
@@ -307,8 +308,8 @@ once its tag exists.
 
 - **A renewal proof may come from any client CA in `[tls] client_ca_file`, and from a client leaf
   alone**
-  ([ADR-0043](docs/adr/0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
-  clause 13). A renewal was accepted only from a certificate the client CA of `[client_ca]` signed.
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  clause 40). A renewal was accepted only from a certificate the client CA of `[client_ca]` signed.
   It is now accepted from a certificate any CA of `client_ca_file` issued directly, named as its
   issuer and signed with its key, so a host renews across a move to new CA keys; a certificate
   that is no client-authentication leaf, a server-only leaf or a CA certificate among them, is
@@ -321,7 +322,7 @@ once its tag exists.
 ### Added
 
 - **Several Server instances serve the fleet on when one of them is lost**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md),
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md),
   [ADR-0015](docs/adr/0015-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md),
   G-20 in [the specification](docs/SPECIFICATION.md)). Two or more instances on one PostgreSQL
   database and one bucket, with no CA key in a file, serve a fleet of up to about 100 000 Agents:
@@ -382,7 +383,7 @@ once its tag exists.
     0.8.0 below says as well.
 
 - **The lists that grow with the fleet page, filter on the Server, and name the holder**
-  ([ADR-0031](docs/adr/0031-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)).
+  ([ADR-0030](docs/adr/0030-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)).
   `GET /api/v1/agents`, `/hosts`, `/certificates` and `/revocations` take `limit` (1 to 1000)
   and answer one page with `X-Total-Count` and a `Link` to the next; the Agents take `q`,
   `selector`, `connected`, `stale`, `service_name`, `sort`, `order` and, on PostgreSQL, `holder`.
@@ -402,7 +403,7 @@ once its tag exists.
   name gets `400` now.
 
 - **Two consecutive releases serve one PostgreSQL database side by side**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 16). The instances of 0.8.0 keep serving beside those of this release, so a rolling
   update may replace them one at a time. Migration 12 records the release of each lease; a lease
   of 0.8.0 counts as 0.8.0. An instance refuses its start, naming both releases and changing
@@ -414,14 +415,14 @@ once its tag exists.
 
 - **The `opamp` crate's WebSocket driver may connect from a named address, and logs the delay it
   drew after a lost connection**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 20). `ws::run_from` and `ws::connect_from` take a local address; `ws::run` and
   `ws::connect` are unchanged and name none. The line *connection lost; reconnecting* carries
   `delay_ms`, the wait before the first attempt.
   **What to do:** nothing.
 
 - **A presence batch written late is logged**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 5). On PostgreSQL an instance warns, with `late_ms`, when a batch is written later than
   `presence_interval_secs` after it was due.
   **What to do:** nothing; the warning says the database is not keeping up with the fleet.
@@ -465,7 +466,7 @@ once its tag exists.
   Agent labelled. `MALLOC_ARENA_MAX` sets another count.
   **What to do:** nothing.
 - **A connecting fleet's new Agents no longer commit one at a time across the database**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clauses 9 and 10). On PostgreSQL each new Agent's binding to its Host announced itself in its
   commit, and PostgreSQL lets such commits through one at a time, each waiting for the flush of the
   one ahead: a fleet of 10 000 connected at about 120 to 210 new Agents a second, and other calls
@@ -478,7 +479,7 @@ once its tag exists.
   **What to do:** nothing.
 
 - **A Gateway's mark finds a Host another instance wrote**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 19). On PostgreSQL `PUT /api/v1/hosts/{host}/gateway` decided whether the host is known
   from the instance's copy of the Hosts and the register, so a Host whose first report reached
   another instance was answered `404` until this instance had heard of it, and a Host the database
@@ -509,7 +510,7 @@ once its tag exists.
   **What to do:** nothing.
 
 - **An Agent that comes back on a new connection of its host keeps its identity**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 8). A peer whose reports waited for the database longer than one heartbeat interval
   ended its connection for silence and came back while the Server still handled the old one's
   reports; its Agents were taken for duplicates of themselves and re-keyed, each into a record of
@@ -528,7 +529,7 @@ once its tag exists.
   **What to do:** nothing; give a cloned host a certificate of its own.
 
 - **A revocation is made only with its certificate on the audit record**
-  ([ADR-0028](docs/adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  ([ADR-0028](docs/adr/0028-the-audit-record.md)
   clauses 1 and 5). The `revocation.revoked` that names a revoked certificate followed the
   revocation and was dropped when the audit record's queue filled, or a write failed, after the
   revocation's `operator.act` was queued: the revocation took effect, and the record did not say
@@ -541,7 +542,7 @@ once its tag exists.
   **What to do:** nothing; a `503` to a revocation is retried like any other.
 
 - **Every act a restore repeats is made only with its entry on the audit record**
-  ([ADR-0028](docs/adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  ([ADR-0028](docs/adr/0028-the-audit-record.md)
   clauses 1 and 5). A Gateway mark set or cleared, a floor set, a request rejected and the
   enrolment window closed by an operator wrote their entries after the act, and lost them when
   the queue filled or a write failed in between, so a restore of the database did not repeat
@@ -555,7 +556,7 @@ once its tag exists.
 
 - **An instance on PostgreSQL takes up its Agents without waiting one database round trip at a
   time**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 8,
   [ADR-0023](docs/adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 22). Each Agent's report held one lock of the whole instance across its calls to the
@@ -629,7 +630,7 @@ once its tag exists.
   neither names, or one named `unknown`, `GET /api/v1/certificates` answers while the
   certificate is valid.
 - **A presence row ends with its connection**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 8). On PostgreSQL an Agent's row could keep naming an instance as connected after the
   connection ended, until the silence bound, so the fleet list and the holder named an instance
   that no longer carried the Agent. That happened when a connect's take was written but its
@@ -641,7 +642,7 @@ once its tag exists.
   and no instance took it since.
   **What to do:** nothing.
 - **A shutdown flush keeps what a newer carrier wrote**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 8). On PostgreSQL an instance stopping could write its older record of an Agent over the
   report of the instance that carried the Agent next, when that instance's take was not written:
   the Operator plane then showed the older sequence number, description and health. A shutdown
@@ -653,7 +654,7 @@ once its tag exists.
   Agent's next report.
   **What to do:** nothing.
 - **A Deployment keeps no deleted member**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 19). On PostgreSQL a Deployment could keep naming a Configuration or a Package that was
   deleted: when an instance that had not yet heard of the deletion added it, when an add met the
   deletion, or when a crash cut the deletion off before it took the member out of the
@@ -682,7 +683,7 @@ once its tag exists.
   seconds while a sweep's call to the bucket was in flight, or a failover to an asynchronous
   replica the marks had not reached can leave one.
 - **A suspended instance serves nothing on a lease that lapsed meanwhile**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 3,
   [ADR-0023](docs/adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 14). On PostgreSQL an instance measured its lease on a clock that does not count the time
@@ -698,7 +699,7 @@ once its tag exists.
   the pause, is not covered: such an instance serves on until its next renewal finds its lease
   lapsed, as before.
 - **An Agent is read in one snapshot**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)). On PostgreSQL an instance
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)). On PostgreSQL an instance
   read an Agent's Configurations and then its row as two statements, when it read the fleet whole,
   a few Agents, the assignments at its start, or an Agent it was about to create and found stored.
   A rollout that committed between them paired its revisions with another rollout's Deployment,
@@ -706,7 +707,7 @@ once its tag exists.
   of these reads is now one statement, which reads one committed state.
   **What to do:** nothing.
 - **An act whose answer is lost is taken up once it commits**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clauses 8 and 10). On PostgreSQL an act whose commit landed while its answer was lost, on a
   dropped connection or the bound of a call, was taken as failed, and the instance that made it
   passed its own notification over. Its memory kept what was there before until its listening
@@ -728,7 +729,7 @@ once its tag exists.
   instance that re-keyed it has stopped and its lease lapsed, and is forgotten by the silence
   bound, or at once through `DELETE /api/v1/agents/{uid}`.
 - **A queued restart survives a failed send**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clause 8). The Server cleared an Agent's queued restart before it sent the command, so a send
   that failed lost a restart the Operator plane had accepted, on files and on PostgreSQL alike. A
   command whose WebSocket frame the connection does not take, or whose plain-HTTP answer is past
@@ -744,9 +745,9 @@ once its tag exists.
   lost after the connection took it, and on plain HTTP a lost answer to a poll, is still not seen.
   **What to do:** nothing. Request a restart that did not happen again, and one the warning names.
 - **The audit record names the lease of each decision**
-  ([ADR-0029](docs/adr/0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
-  clause 3,
-  [ADR-0028](docs/adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  ([ADR-0028](docs/adr/0028-the-audit-record.md)
+  clause 7,
+  [ADR-0028](docs/adr/0028-the-audit-record.md)
   clause 5). On PostgreSQL a decision an instance took while it held no lease, such as an
   enrolment window running out after its lease lapsed, was written into the chain of its next
   lease as if taken under that lease. It now carries `taken_under` `none`, as does one taken while
@@ -777,7 +778,7 @@ once its tag exists.
 ### Added
 
 - **Several Server instances serve one fleet on one PostgreSQL database and one bucket**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
   Every Server on PostgreSQL is an instance:
   - **The lease.** Before it opens either listener, an instance takes a lease in the database
     under an instance id of its own. It renews the lease every `[database] lease_renew_secs`
@@ -876,7 +877,7 @@ once its tag exists.
   refused. A rollback to 0.7.1 after the upgrade needs the database restored from that backup.
 - **With PostgreSQL and S3, a `data_dir` fails startup, and the image names no data directory**
   ([ADR-0023](docs/adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md),
-  [ADR-0039](docs/adr/0039-releases-attestations-and-the-server-image.md)).
+  [ADR-0038](docs/adr/0038-releases-attestations-and-the-server-image.md)).
   - A Server on PostgreSQL and S3 keeps nothing on its disk. A `data_dir` named in `server.toml` or
     as `FLEET_SERVER__DATA_DIR` stops the start, naming the key.
   - `server migrate-to-postgres` with S3 takes no `--data-dir` and refuses one. It uploads the
@@ -898,7 +899,7 @@ once its tag exists.
   **What to do:** on PostgreSQL, remove `[audit] max_file_bytes` and `keep_files` from
   `server.toml` before the upgrade.
 - **With PostgreSQL, an `instance_uid` is bound to one Host by a row of its own**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)).
   The Server adds the table `host_bindings` at its first start (migration 4), filled from the
   Hosts, and still writes the Hosts' arrays.
   - An `instance_uid` that two Hosts hold fails the migration with `the instance_uid <uid> is
@@ -909,7 +910,7 @@ once its tag exists.
   **What to do:** on such a failure, release that `instance_uid` from all but one Host, and start
   again.
 - **On PostgreSQL the audit record is in the database, one hash chain per lease**
-  ([ADR-0029](docs/adr/0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)).
+  ([ADR-0028](docs/adr/0028-the-audit-record.md)).
   Each instance opens a chain with each lease, closes it at an orderly shutdown, and closes the
   chain of every lapsed lease it takes over; entries queued under a lease that lapsed land in the
   next chain, marked `taken_under`. `server audit-verify --config <server.toml>` walks every
@@ -937,7 +938,7 @@ once its tag exists.
 
 - **With PostgreSQL, a Configuration's revisions, a Package's entries and a Deployment's members are
   written one row at a time**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
   Every act writes the rows it names and decides from what is stored, so two Server instances on
   one database that edit one Configuration, Package or Deployment at once keep both changes, and a
   revision another instance's rollout pins is never collected. At its first start the Server adds
@@ -950,7 +951,7 @@ once its tag exists.
   again and sign the bytes it holds.
 
 - **Forgetting an Agent ends its session, and with PostgreSQL any instance may forget it**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)).
   A WebSocket that carried only the forgotten Agent is closed with code `1000` and the reason
   `forgotten`; one that carries other Agents too stays open. With PostgreSQL each instance writes
   where the Agents it carries are connected, and which instance holds them, in one batch every
@@ -964,7 +965,7 @@ once its tag exists.
 
 - **With PostgreSQL the newest connection takes an Agent, and an Agent two instances take in turn
   is logged as a likely duplicate**
-  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)).
+  ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
   The instance an Agent connects to names itself as the Agent's holder at once, and the instance
   that held it before stops carrying it; a presence batch of that instance written afterwards no
   longer names it again. Whether a disconnect is written depends no more on the instances' clocks
@@ -977,7 +978,7 @@ once its tag exists.
 
 - **With PostgreSQL, an Agent's report, its labels, a restart request and a rollout each write
   their own columns of its record**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)).
   The Server instance that carries an Agent writes only what a report decides, so labels, a
   restart or a release made through another instance on the same database stay, and that
   instance takes them up from the database at once; a restart is sent once, by the instance that
@@ -991,7 +992,7 @@ once its tag exists.
   **What to do:** nothing.
 
 - **On PostgreSQL an instance loads no fleet, and the Operator plane reads it from the database**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)).
   - An instance holds in memory the Agents connected to it, each read at its first report.
   - The fleet list, an Agent's view, the Hosts, the reach counts, both rollout acts and the
     download check read the records from the database, each Agent connected as its stored
@@ -1039,7 +1040,7 @@ once its tag exists.
 - **`server audit-verify <dir>` holds a record the Server repaired after a crash, and binds the
   repair to the entries before it.** A crash mid-write leaves a torn last line, and the next start
   follows it with `audit.chain_broken` chained on its hash
-  ([ADR-0028](docs/adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
+  ([ADR-0028](docs/adr/0028-the-audit-record.md)).
   `audit-verify` failed on that torn line as not an entry, and on a torn line cut inside a
   character could not read the file at all. It now takes the repair as holding, and still fails a
   torn line nothing follows. `audit.chain_broken` now also names as `last_whole` the hash of the
@@ -1062,7 +1063,7 @@ once its tag exists.
 ### Added
 
 - **A signed floor per Agent type keeps every older build off the fleet**
-  ([ADR-0035](docs/adr/0035-package-versions-high-water-mark-and-floor.md)).
+  ([ADR-0034](docs/adr/0034-package-versions-high-water-mark-and-floor.md)).
   `opamp-fleetctl package floor --agent-type <type> --version <version>` signs the version below
   which no package of the type is taken any more, and `PUT /api/v1/package-floors/{agent_type}`
   stores it on the Server, which serves it on the Agent plane at `/v1/package-floors`, through
@@ -1084,7 +1085,7 @@ once its tag exists.
 ### Changed
 
 - **The UI colours as TOML only the Client's own configuration**
-  ([ADR-0036](docs/adr/0036-the-ui-colours-configurations-with-shiki.md)). The core's UI chooses a
+  ([ADR-0035](docs/adr/0035-the-ui-colours-configurations-with-shiki.md)). The core's UI chooses a
   grammar for `otelcol*`, the Client's own type and `fluent-bit` alone. An Agent of the one other
   type an earlier release also coloured as TOML is now shown as plain text, whichever Client build
   it reports through; a Server built with that Agent's kind colours it again. **What to do:**
@@ -1291,7 +1292,7 @@ once its tag exists.
   it and restart the Client.
 
 - **A repack carries nothing from outside its tree**
-  ([ADR-0037](docs/adr/0037-the-operator-program-opamp-fleetctl.md)). `opamp-fleetctl package
+  ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)). `opamp-fleetctl package
   fetch` resolves links inside the upstream tree alone: a link with an absolute target, or one that
   climbs above the tree's root, fails the repack, naming it, instead of packing files of the
   operator's host into the signed artifact. A pipe, socket or device in the tree fails it too, the
@@ -1315,7 +1316,7 @@ once its tag exists.
   connection when it reports again.
 
 - **The audit record syncs what is queued together once**
-  ([ADR-0028](docs/adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md),
+  ([ADR-0028](docs/adr/0028-the-audit-record.md),
   [ADR-0023](docs/adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   clause 12). The Server synced
   the disk after every audit entry, so it recorded no more decisions a second than the disk
@@ -1376,7 +1377,7 @@ once its tag exists.
 ### Added
 
 - **The Server ships as a container image**
-  ([ADR-0039](docs/adr/0039-releases-attestations-and-the-server-image.md)).
+  ([ADR-0038](docs/adr/0038-releases-attestations-and-the-server-image.md)).
   Every release pushes `ghcr.io/mbrigl/opamp-fleet-server:<version>` for `linux/amd64` and
   `linux/arm64`: the Server binary the release built and checked for its version, on
   `gcr.io/distroless/cc-debian13:nonroot` pinned by digest, with no shell, running as UID and GID
@@ -1524,7 +1525,7 @@ once its tag exists.
   A development setup on the loopback names its plaintext endpoint in `supervisor.toml`.
 
 - **A Package version is SemVer, and a Supervisor never installs one below its high-water mark**
-  ([ADR-0035](docs/adr/0035-package-versions-high-water-mark-and-floor.md)).
+  ([ADR-0034](docs/adr/0034-package-versions-high-water-mark-and-floor.md)).
   A compromised Server could move a Supervisor back to an old, validly signed build: by offering
   it under a version that cannot be ordered, such as `1.19`, or by purging the Supervisor and
   adding it back, which deleted the record its floor was read from. A Package version must now
@@ -1596,7 +1597,7 @@ once its tag exists.
   release assets are unchanged by this.
 
 - **Every release asset is attested, and every shipped program has an SBOM**
-  ([ADR-0039](docs/adr/0039-releases-attestations-and-the-server-image.md)).
+  ([ADR-0038](docs/adr/0038-releases-attestations-and-the-server-image.md)).
   Until now `SHA256SUMS` proved only that a download matched the file beside it on the same
   release page. Every asset of a release, `SHA256SUMS` included, is now a subject of one SLSA
   build-provenance attestation, signed through Sigstore by the release workflow and recorded in
@@ -1681,7 +1682,7 @@ once its tag exists.
 
 - **A Host and its bindings end with its last valid certificate, and forgetting an Agent releases
   its binding**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)).
   A Host with a bound Agent was never removed, even long after its last certificate expired, and
   forgetting an Agent left its `instance_uid` bound, so the host register only ever grew. Each
   Host now records its valid until — the latest end of a certificate naming it that the Server
@@ -1712,7 +1713,7 @@ once its tag exists.
   chosen before in this browser still holds.
 
 - **Coloured effective configurations**
-  ([ADR-0036](docs/adr/0036-the-ui-colours-configurations-with-shiki.md)). The
+  ([ADR-0035](docs/adr/0035-the-ui-colours-configurations-with-shiki.md)). The
   Agents tab colours an Agent's effective configuration, in its cell and in the dialog, with the
   TextMate grammars VS Code uses, in the colours of the look and theme chosen: YAML for
   `otelcol*`, TOML for the fleet's own Client and Telegraf, INI for Fluent Bit; any other type stays
@@ -1730,14 +1731,14 @@ once its tag exists.
   `server.toml` has to change. `server pki status` and the expiry warnings include it.
 
 - **The Server checks package signatures, as feedback**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). An optional
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). An optional
   `[packages] verification_key` in `server.toml` — the same hex public key the Clients hold —
   makes the Server check each entry's signature when it is written and when it starts, and the
   Packages tab and `GET /api/v1/packages` show it as `valid` or `invalid` (`unchecked` without the
   key, `missing` with none). An invalid signature is shown as a warning and kept; each Client's own
   check still decides what is installed. A malformed key fails startup.
 
-- **Hosts, and a Hosts tab** ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)). A
+- **Hosts, and a Hosts tab** ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)). A
   Host is what a
   client certificate of this Server names: the Server writes it when you approve its enrolment, or
   at the first report of a provisioned certificate that names a host id, with the certificate's
@@ -1749,7 +1750,7 @@ once its tag exists.
   `GET /api/v1/agents` names its `host`.
 
 - **Selectors can match the Host's certificate, and a Client's own Agent labels its whole Client**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)). An Agent on a direct
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)). An Agent on a direct
   connection carries its Host's subject values as `fleet.host.country`, `fleet.host.state`,
   `fleet.host.locality`, `fleet.host.organization`, `fleet.host.site` (the organizational unit)
   and `fleet.host.organization_id`, which no Agent can report over; an Agent behind a Gateway
@@ -1830,7 +1831,7 @@ once its tag exists.
   `organizational_unit` in every request.
 
 - **Labels are part of the Agent's record, and forgetting an Agent removes them**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)). Labels follow an Agent
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)). Labels follow an Agent
   the Server re-keys, and are gone with an Agent you forget; one that comes back starts with only
   what its Client Agent's labels give it. A label key
   starting `fleet.` is refused `400`, and a reported attribute starting `fleet.` is left out of what
@@ -1839,7 +1840,7 @@ once its tag exists.
   state lives under one data directory* above), which moves each Agent's labels into its record.
 
 - **A Deployment carries Configurations, and is the one thing rolled out**
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)). A
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)). A
   Deployment holds any number of Configurations beside its Packages
   (`PUT|DELETE /api/v1/deployments/{name}/configurations/{configuration}`, or the Deployments
   tab), and one press of its rollout releases both: each Agent it claims gets the Package for its
@@ -1867,14 +1868,14 @@ once its tag exists.
   `scripts/seed_test_configs.sh` puts each into a Deployment of that Collector's name.
 
 - **Nothing an Agent's assignment pins can be deleted**
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)). Deleting a Configuration, a
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)). Deleting a Configuration, a
   Package or a Deployment that any Agent's assignment pins answers `409`, saying how many Agents
   pin it, where deleting a Configuration or a Package used to take it out of every assignment.
   A deleted Configuration or Package leaves every Deployment that held it. **What to do:** roll the
   Agents out through a Deployment without it — or forget them — and delete it then.
 
 - **Every Configuration names its Agent type**
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)).
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)).
   `service_name` is required: a `PUT /api/v1/configurations/{name}` without it, or with an empty
   one, is answered `400` naming it, and the Configurations tab marks the Agent type required. A
   Configuration reaches only the Agents of its Deployment that report that `service.name`; one
@@ -1887,7 +1888,7 @@ once its tag exists.
   its old file with a type.
 
 - **A package's signature lives on its entry, not on the Deployment**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). Sign each
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). Sign each
   entry once, with `PUT /api/v1/packages/{agent_type}/{version}/entries/{os}/{arch}/signature`
   (`{"signature": "<hex>"}`) or on the Packages tab, where the signing-file import now lives too;
   every Deployment that holds the Package offers that signature. Uploading new bytes to an entry
@@ -1902,7 +1903,7 @@ once its tag exists.
   a rollout of a Deployment holding it is refused naming it.
 
 - **A Client downloads packages only from its own Server's origin**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). A path is
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). A path is
   resolved against the origin of its OpAMP endpoint; an absolute URL on any other origin, or a
   redirect off it, is refused before a byte is fetched and reported `InstallFailed` naming that
   origin.
@@ -1933,13 +1934,13 @@ once its tag exists.
   `scripts/seed_test_configs.sh --enrol` does so.
 
 - **A Configuration's own Selector and its rollout route**
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)).
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)).
   `POST /api/v1/configurations/{name}/rollout` answers `404`, and the Configurations tab has no
   Selector and no rollout press. **What to do:** aim through a Deployment and press its rollout
   (see *A Deployment carries Configurations* above); a script that calls the route or sends a
   `selector` has to change the same way.
 
-- **Referenced package entries** ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). An
+- **Referenced package entries** ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). An
   entry is an uploaded artifact and nothing
   else: `PUT …/entries/{os}/{arch}/source`, its `url`, `sha256` and `headers`, and the Server's
   probe of the URL are gone (the route answers `404`), and the Packages tab takes files only. The
@@ -1949,13 +1950,13 @@ once its tag exists.
   migrate` drops a referenced entry it still finds, naming it — upload that artifact afterwards.
 
 - **`[packages] allowed_sources` in `supervisor.toml`**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). There is no other
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). There is no other
   download source than the Client's own Server, and a file that still names the key fails the
   Client's start, naming it. **What to do:** delete `allowed_sources` from every `supervisor.toml`
   before the Client is upgraded.
 
 - **`advertised_url` in `server.toml`**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). Every package is offered as a
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). Every package is offered as a
   path the Client
   resolves against its own Server, and a Client downloads from no other host, so a URL naming a
   mirror reached no Client. A file that still names the key fails the Server's start, naming it.
@@ -1967,17 +1968,17 @@ once its tag exists.
   certificate file anew, so a file replaced without a restart silenced the warning while the
   Server still served the old, ending certificate. It now judges what the Server read at startup,
   and says when a file holds another certificate than the one served: restart the Server to serve
-  it ([ADR-0037](docs/adr/0037-the-operator-program-opamp-fleetctl.md)
+  it ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)
   clause 21).
 - **An Agent that asks the Server for a new `instance_uid` keeps its labels**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)). The record moved to the new
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)). The record moved to the new
   identity but its
   labels stayed under the old one, so after the next restart the Agent had none and fell out of
   the Deployment its labels put it in. Labels now live in the Agent's record and follow it.
   **What to do:** `server migrate` lists the labels it drops because no Agent record of their
   Instance UID exists — those are the leftovers; set them again on the re-keyed Agent.
 - **A deleted Package leaves the Deployments that held it**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)).
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)).
   The Deployment kept the Package and its signatures, so the Deployment still passed the check for
   unsigned Packages, and a Package created again under the same type and version reappeared in it
   with the old signatures. **What to do:** nothing — `server migrate` drops such a name from its
@@ -1990,7 +1991,7 @@ once its tag exists.
   certificate for its key. The revocation now takes it out of the queue, and an approval of a
   request whose bootstrap certificate is revoked is refused (`409`) with nothing signed. The
   revocation's audit entry counts the withdrawn requests as `withdrawn_requests`
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
   clause 28).
 
 ## [0.5.4] - 2026-10-15
@@ -2024,7 +2025,7 @@ once its tag exists.
   `DELETE /api/v1/bootstrap-certificates/{serial}`. The entry and any `bootstrap.p12` go; the
   revocation stays, so the certificate is still refused. A valid certificate is not deleted.
 - **`opamp-fleetctl pki p12-extract <bootstrap.p12> --out <dir>`**
-  ([ADR-0037](docs/adr/0037-the-operator-program-opamp-fleetctl.md)) writes
+  ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)) writes
   the file's certificate as `bootstrap.pem` and its key, unencrypted and owner-only, as
   `bootstrap-key.pem`: the pair a Client's install takes, without OpenSSL. The password is asked
   for with input hidden, or read from the first line of `--password-file`; neither file is
@@ -2054,7 +2055,7 @@ once its tag exists.
 - **A client certificate past its end is refused on every request**, not only in the TLS
   handshake: a kept-alive HTTP or HTTP/2 connection gets `401` on `/v1/opamp` and on the download
   route once its certificate has expired
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)).
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
   **What to do:** nothing; a Client that renews on time never meets it.
 - **A peer is a fleet member only when its certificate verifies against a client CA's key**, not
   when its issuer merely carries a client CA's name. **What to do:** nothing.
@@ -2099,7 +2100,7 @@ once its tag exists.
   starts with a path under the Supervisors' root. A value the running block already carries still
   passes. **What to do:** an offered set that brings such a variable or value is refused whole;
   write it into the host's `supervisor.toml` by hand instead.
-- **A `.tar.gz` package is decompressed no further than its bound** (ADR-0034): the members'
+- **A `.tar.gz` package is decompressed no further than its bound** (ADR-0033): the members'
   2 GiB plus 64 MiB for the tar's own headers, GNU long names and PAX records. Memory is not bounded
   per record below that: the tar parser holds a single long-name or PAX record in memory whole, up
   to the same bound. **What to do:** nothing; a real release stays far below it.
@@ -2125,7 +2126,7 @@ once its tag exists.
   were trusted. The CA replaces those roots for the calls to the Server alone; downloads from
   upstream keep them.
 - **A whole Package signed in one go**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)).
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)).
   The Packages tab lists each entry with its size and full SHA-256 and downloads the Package's
   **Signing info** (`opamp-fleet-signing-v1`); `opamp-fleetctl package sign --signing-info <file>`
   signs every entry from its hash, without the artifacts; the Deployments tab imports the signed
@@ -2156,7 +2157,7 @@ once its tag exists.
   for a fleet set up otherwise or to replace the key. **What to do:** nothing; a fleet that has a
   key keeps it.
 - **Breaking: every certificate is named by its product and its role, with your organization**
-  ([ADR-0037](docs/adr/0037-the-operator-program-opamp-fleetctl.md)).
+  ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)).
   `opamp-fleetctl pki init` and `pki bootstrap-ca` take `--product` (default `OpAMP Fleet`) in
   place of `--fleet`, and `--organization` and `--organizational-unit` for an O and an OU: the CAs
   are `<product> Server CA`, `Client CA` and `Bootstrap CA`, the server certificate
@@ -2171,7 +2172,7 @@ once its tag exists.
   Certificate`.
 - **Breaking: the Server issues bootstrap certificates, and the bootstrap CA lives a year**
   ([ADR-0027](docs/adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md),
-  [ADR-0037](docs/adr/0037-the-operator-program-opamp-fleetctl.md)).
+  [ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)).
   With `[enrolment] bootstrap_ca_key_file` set, `POST /api/v1/bootstrap-certificates` issues a
   bootstrap certificate with the organization and unit an operator names — the customer and the
   site, say — and a common name the Server sets, for 10 days or up to 90, and hands out its private
@@ -2194,7 +2195,7 @@ once its tag exists.
   matches each signature to the binary with its platform and SHA-256 and skips one whose hash
   differs; the free-text signature fields are gone.
 - **Breaking: the build's product variables are named for the product**
-  ([ADR-0038](docs/adr/0038-the-products-version.md) clauses 1 and 4,
+  ([ADR-0037](docs/adr/0037-the-products-version.md) clauses 1 and 4,
   [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md) clause 2).
   `OPAMP_FLEET_PRODUCT_NAME` is now `OPAMP_PRODUCT_NAME`, `OPAMP_FLEET_PRODUCT_DISPLAY_NAME` is
   `OPAMP_PRODUCT_TITLE` and `OPAMP_FLEET_VERSION` is `OPAMP_PRODUCT_VERSION`; the version the build
@@ -2207,7 +2208,7 @@ once its tag exists.
 ### Added
 
 - **The fleet's certificates without `openssl`, and a warning before one ends**
-  ([ADR-0037](docs/adr/0037-the-operator-program-opamp-fleetctl.md)).
+  ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)).
   `opamp-fleetctl pki init` makes the server CA, the client CA and the bootstrap CA, the Server's
   certificate and a bootstrap certificate valid for 10 days, split into a directory for the Server
   host and one that stays offline, with `server.toml` and `supervisor.toml` fragments naming them.
@@ -2257,7 +2258,7 @@ once its tag exists.
   delivered earlier may have written some of them; switching it back on lets the first released
   set replace every block.
 - **A Gateway delivers uploaded packages to the Clients behind it**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). When it relays an offer of an
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). When it relays an offer of an
   artifact the Server hosts, the Gateway fetches it once with its own certificate, checks its
   SHA-256 against the offer, and serves it on its own listener at the path the offer names, only to
   a host whose Agent it relayed that offer to; everything else is answered `404`. It holds the
@@ -2270,7 +2271,7 @@ once its tag exists.
   `advertised_url` unset in a fleet with Gateways, and give the Gateway's `state_dir` room for the
   cache.
 - **A download waits out `Retry-After` from the Server's own origin**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md) clause 47). A `429` or `503` with
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md) clause 47). A `429` or `503` with
   `Retry-After` in seconds — the Server's rate limit, or a Gateway still fetching — is waited out,
   each wait at most 60 seconds and all waits of one download at most 30 minutes, before the
   download is reported failed. **What to do:** nothing.
@@ -2280,13 +2281,13 @@ once its tag exists.
   queue and the closed enrolment window now carry the message's `instance_uid`, so the Client and
   a Gateway route the reply to its Agent and the Agent waits as told.
 - **A refused request for the Gateways' revocation list is recorded**
-  ([ADR-0028](docs/adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  ([ADR-0028](docs/adr/0028-the-audit-record.md)
   clause 1): a member
   whose host is not marked as a Gateway leaves a `gateway_list.refused` line naming its host.
 - **`Unavailable` tells the Agent when to retry**
   ([ADR-0027](docs/adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
   clause 9,
-  [ADR-0028](docs/adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  [ADR-0028](docs/adr/0028-the-audit-record.md)
   clause 5): a full
   enrolment queue, the Agent-record ceiling and a certificate request held back while the audit
   record cannot be written are answered with `retry_info` of 30 seconds; the last was answered
@@ -2294,7 +2295,8 @@ once its tag exists.
 - **A certificate names its host, and a host speaks only for its own Agents**
   ([ADR-0027](docs/adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
   clause 11,
-  [ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md) clause 12, and
+  [ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  clause 12, and
   [ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md) clause 18). Every certificate the Server
   signs carries `urn:opamp-fleet:host:<id>`; a connection
   reporting for an Agent another host reported first is re-keyed, and a host holds at most three
@@ -2312,7 +2314,7 @@ once its tag exists.
   `server.ws` in every Collector configuration that reports through the endpoint.
 
 - **An audit record of every security decision**
-  ([ADR-0028](docs/adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)):
+  ([ADR-0028](docs/adr/0028-the-audit-record.md)):
   admissions and
   refusals, enrolment, issuance, revocation and the sessions it ends, operator acts with the
   operator's name, and package outcomes, as JSON lines in `config_dir/audit/`, each
@@ -2323,7 +2325,8 @@ once its tag exists.
   rewrite it unseen.
 
 - **`server.toml` holds no credential that authenticates on its own**
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md) clause 21). An
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  clause 21). An
   operator's
   Basic password in `[rest.auth]` is listed as an Argon2id hash; `server hash-credential --basic`
   makes the entry. **What to do:** before upgrading, replace every password in `[rest.auth]` with
@@ -2340,7 +2343,7 @@ once its tag exists.
   is refused, naming the block and the key, and the running set stays as it is.
 
 - **Revocation that takes effect at once**
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)).
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
   `POST /api/v1/revocations` revokes a certificate, by issuing CA (`client` or `bootstrap`) and
   serial and with every renewal of it; the Server refuses it and closes every session it admitted.
   `GET /api/v1/certificates` lists what the client CA signed. Every certificate the client CA
@@ -2348,7 +2351,8 @@ once its tag exists.
   list is kept in `config_dir/revocation/`. **What to do:** nothing; back that directory up with
   the rest of `config_dir`.
 - **A CSR naming another Agent's `instance_uid` is refused**
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)). The Client of
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+  The Client of
   this project names none and is not affected.
 - **`service config` asks the questionnaire of `install --interactive` again on an installed
   Client** — each question offers what `supervisor.toml` holds, only the asked keys change, and a
@@ -2366,7 +2370,7 @@ once its tag exists.
   running does not report into nothing. **What to do:** start the stack with
   `docker compose -f observability/compose.yaml up -d`, then uncomment the section.
 - **Breaking: a host fetches from the download route only the artifact offered to its own
-  Agents** ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)).
+  Agents** ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)).
   An uploaded artifact is served only to a certificate whose host speaks for an Agent that a
   rollout assigned it to — the Agents that reported with that certificate, or any Agent for a host
   marked as a Gateway. Everything else is answered `404`, exactly as an artifact the store does
@@ -2378,10 +2382,11 @@ once its tag exists.
   no host gets `404` for uploaded artifacts, and the Server says so at startup. Referenced
   artifacts are unaffected.
 - **Breaking: the Agent plane admits by a client certificate alone, and the fleet credential is
-  gone** ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md),
+  gone**
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
   [ADR-0013](docs/adr/0013-connection-settings-that-never-lead-to-plaintext.md),
   [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md),
-  [ADR-0028](docs/adr/0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md),
+  [ADR-0028](docs/adr/0028-the-audit-record.md),
   [ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md)).
   The Server reads no `Authorization` header on `/v1/opamp` or the download route; one an older
   Client sends is ignored. It refuses to start with an `[auth]` section, and with
@@ -2402,7 +2407,8 @@ once its tag exists.
   Client needs a client certificate.
 - **A Gateway refuses a certificate the Server revoked, and admits nobody until its host is
   marked** ([ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md),
-  [ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)). A host
+  [ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+  A host
   marked as a Gateway fetches the revoked certificates of the client CA from
   `GET /v1/gateway/revocations` every 30 s and refuses them downstream with `401`, closing their
   sessions with `1008`. A Gateway with no list younger than 300 s answers every downstream peer
@@ -2412,14 +2418,15 @@ once its tag exists.
   `PUT /api/v1/hosts/<host>/gateway` before the Gateway is upgraded. An unmarked Gateway admits
   nobody.
 - **A package signature now covers the Agent type, the version and the SHA-256**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)), and a
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)), and a
   Supervisor refuses a package for another Agent type or older than the one it runs. **What to
   do:** sign every Deployment's entries again with `opamp-package-sign sign --agent-type <type>
   --version <version> <artifact>` and `PUT` the new signatures; signatures over the bytes alone no
   longer verify.
 
 - **Client certificates live 30 days by default, not 90**
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md) clause 8);
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  clause 8);
   a Client renews at two thirds of the life. **What to do:** nothing, unless a host is offline
   longer than about 20 days; then set `[client_ca] validity_days` higher.
 - **A Client moves to an offered endpoint only when its own `[tls] ca_file` vouches for it**
@@ -2433,7 +2440,7 @@ once its tag exists.
   private address. That covers the Client's `endpoint`, a `[connection_offer] endpoint`
   ([ADR-0013](docs/adr/0013-connection-settings-that-never-lead-to-plaintext.md)), a
   referenced package `url`
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md))
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md))
   and an own-telemetry destination
   ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)). A
   peer that speaks only TLS 1.2 can no longer connect. **What to do:** move every such URL to
@@ -2448,7 +2455,7 @@ once its tag exists.
   **What to do:** a Client that relied on the old `ws://` default needs `[tls] ca_file` for the
   Server's certificate.
 - **Nothing is installed without a signature**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md),
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md),
   [ADR-0019](docs/adr/0019-the-client-updates-itself-from-a-signed-package.md)). A Client without
   `[packages] verification_key` takes no packages and no self-update. The Server offers no entry
   its Deployment has not signed, and refuses (`409`) to roll out a Deployment with an unsigned
@@ -2457,7 +2464,7 @@ once its tag exists.
   Client, sign every entry of every Deployment before rolling it out, and list any mirror in
   `allowed_sources`.
 - **Every Agent is admitted by a client certificate, and a new host is approved by an operator**
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md),
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
   [ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md),
   [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
   The Server requires `[tls] client_ca_file`, and asks for the client certificate in
@@ -2493,7 +2500,7 @@ once its tag exists.
 
 - **The operator tools are one program, `opamp-fleetctl`, and every release publishes it for Linux
   and macOS**
-  ([ADR-0037](docs/adr/0037-the-operator-program-opamp-fleetctl.md)).
+  ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)).
   `opamp-fleetctl package` holds `fetch`, `pack`, `sha256`, `sign`, `keygen` and `public-key`,
   with the options and output they had; `opamp-fleetctl pki` holds the certificate commands
   above. A release now carries `opamp-fleetctl_<version>_<os>_<arch>.tar.gz` for `linux` and
@@ -2550,7 +2557,7 @@ once its tag exists.
   the Client waits for them. **What to do:** nothing.
 - **The Server shuts down gracefully on `SIGTERM`**
   ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md)
-  clause 17, [ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md) clause 4). It took
+  clause 17, [ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md) clause 4). It took
   only `SIGINT` (Ctrl-C) as a shutdown,
   so a service manager's stop, which sends `SIGTERM`, ended the process without draining the
   planes or saving the Agent records. Both signals now drain and save. **What to do:** nothing.
@@ -2559,7 +2566,7 @@ once its tag exists.
   its stderr instead; under systemd both reach the journal unchanged.
 - **A Server that shuts down closes its WebSocket sessions before it saves the fleet**
   ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md)
-  clause 17, [ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md) clause 4). The
+  clause 17, [ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md) clause 4). The
   shutdown drain counted
   HTTP connections only, so an Agent's WebSocket session kept being served after the drain and
   after the Agent records were flushed, and ended without a close frame when the process exited.
@@ -2587,7 +2594,8 @@ once its tag exists.
   deadline, so a large upload over a slow link still completes, and an idle connection is left
   alone. **What to do:** nothing.
 - **An enrolment and a renewal each issue one certificate, not two**
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)). A
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+  A
   Client that received its certificate sent the request it had just been answered for once more
   on its next connection, and the Server signed it again, so every host held a second valid
   certificate it never used. **What to do:** nothing; a duplicate already issued expires with its
@@ -2631,7 +2639,7 @@ once its tag exists.
 
 - **A package is now `(Agent type, version)`, and a new object — the **Deployment** — carries the
   aim, the signature and the rollout act**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). The free-form package name is
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). The free-form package name is
   gone; the Agent type is the identity and the name a package carries on the wire.
 
   **What you must do before starting the upgraded Server:**
@@ -2785,14 +2793,15 @@ once its tag exists.
   [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)) could not be attributed to
   the version that wrote it — and then the trust and the client certificate actually in force,
   which is a Server-issued one no `supervisor.toml` mentions when there is one
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)). A
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+  A
   configuration file that is not there is now said out loud as well, because a mistyped `--config`
   otherwise starts cleanly on defaults and supervises nothing. **What to do:** nothing; anything
   parsing the log gains lines, and loses none.
 
 - **More is visible at `debug` when an install or a Managed Process misbehaves.** A tree member left
   unpacked because it sits outside the program's own directory
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)) is now named, not only counted;
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)) is now named, not only counted;
   the Collector
   Supervisor states which config-map entries it hands the Collector on every (re)start; and the
   `command` Supervisor states the fully expanded invocation of its Foreign Agent
@@ -2807,7 +2816,7 @@ once its tag exists.
 - **`opamp-package-fetch` can fetch the Client itself** — `--agent supervisor` reads this project's
   own releases, verifies each `.tar.gz` against the `SHA256SUMS` the release publishes, and uploads
   the five platforms into one Set named and typed `supervisor`
-  ([ADR-0039](docs/adr/0039-releases-attestations-and-the-server-image.md) is what made this
+  ([ADR-0038](docs/adr/0038-releases-attestations-and-the-server-image.md) is what made this
   possible: the Client's release is now an ordinary fleet package). It replaces the download,
   checksum and `curl` loop from the release notes, and it is the same tool and the same questions as
   for every other agent — with one difference at the end, since nothing supervises a Client: it
@@ -2852,7 +2861,7 @@ once its tag exists.
 
 - **The version an Agent reports *running* now decides which packages reach it, and the version its
   package status claims is no longer read beside it**
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)). A Set had to be greater than the lower of
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)). A Set had to be greater than the lower of
   the
   two versions an Agent reports *and* never lower than the one its package status claimed. That
   second guard stranded hosts whose record was simply wrong: a Client whose `installed-package.json`
@@ -2897,7 +2906,7 @@ once its tag exists.
   name of yours first.
 
 - **Release artifacts are `.tar.gz` and are named `supervisor_…`**
-  ([ADR-0039](docs/adr/0039-releases-attestations-and-the-server-image.md)).
+  ([ADR-0038](docs/adr/0038-releases-attestations-and-the-server-image.md)).
   A release published `opamp-fleet-client_<version>_<os>_<arch>.7z`; it now publishes
   `supervisor_<version>_<os>_<arch>.tar.gz`, and the `.deb`, `.rpm` and `.msi` beside it take the
   same name. `.tar.gz` is what every other agent's package already ships as — the only container
@@ -2921,9 +2930,9 @@ once its tag exists.
      `apt`, `dnf` or MSI upgrade across this release is an ordinary upgrade and not a second package
      beside the first.
 - **A package Set now reaches an Agent only as an upgrade**
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md), amending
-  [ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md) and
-  [ADR-0033](docs/adr/0033-deployments-and-rollouts.md)). What an Agent reports installed for a
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md), amending
+  [ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md) and
+  [ADR-0032](docs/adr/0032-deployments-and-rollouts.md)). What an Agent reports installed for a
   package is now part of matching, beside its type, its platform and the Selector: a Set reaches it
   only if the Set's version is **greater**, compared as SemVer. Equal does not count, and a
   reported version that cannot be ordered is refused rather than guessed at. Agents that report no
@@ -3015,7 +3024,7 @@ once its tag exists.
   this
   Client's own Agent type. An offer under any other name is still refused and reported, and nothing
   is offered at all until an explicit rollout act assigns it
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)).
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)).
   **What to do:** if you want a host to keep managing its own Client binary, write this into its
   `client.toml` **before** upgrading — a host that has no `[self_update]` section today starts
   accepting self-update offers once it comes up on this version:
@@ -3054,7 +3063,7 @@ once its tag exists.
   rollback. The Collector uses its own `--version`; the `command` kind uses
   `version_args`, the arguments an operator has already declared safe to invoke the program with,
   and without that key it keeps no preflight at all. The health gate and rollback of
-  [ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md) are unchanged behind
+  [ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md) are unchanged behind
   it. **What to do:** nothing, unless a program you supervise cannot answer the arguments you gave
   it — a Collector that does not respond to `--version` within five seconds, or a `command` whose
   `version_args` exit non-zero, now has its *packages* refused as well as reporting no version.
@@ -3087,7 +3096,7 @@ once its tag exists.
   The bodies are the ones in `config/examples/`, compiled into the tool.
   **What to do:** nothing. A Configuration the Server already holds is asked for first and **left
   untouched**, edits included, so a second upload changes nothing; and saving still distributes
-  nothing ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)) — read the default over and
+  nothing ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)) — read the default over and
   roll it out yourself, since it carries example values.
 
 - **The install path lost two levels, and `--instance` is gone.** The Client installed under
@@ -3142,7 +3151,7 @@ once its tag exists.
 
 - **A package behind an authenticated mirror could not be downloaded.** The Server has always passed
   a referenced Set entry's headers to the Agent verbatim — the credential an operator configures for
-  a private source ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)) — and the Client
+  a private source ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)) — and the Client
   dropped them, so the fetch came back `401` and the rollout failed with an opaque transport error.
   The headers now ride the `GET`, as the protocol asks. Because such a header is a credential given
   for *one* host, a download that carries any now follows its redirect chain itself and re-attaches
@@ -3253,7 +3262,7 @@ once its tag exists.
   reinstalled on top of the state directory — was held back for good: the fleet view showed
   `pkg: supervisor 0.4.1` on an agent reporting 0.4.0, and neither the rollout act nor the waiting
   list would offer it anything. A Set is now held against **both** versions an Agent reports
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)): it must be greater than the
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)): it must be greater than the
   lower of the two, and never lower than the version the package status claims — so what a program
   says it is running can admit a package, and can never propose moving one backwards. The Client
   side matches: an offer for its own package is settled by the version this process runs rather than
@@ -3268,7 +3277,7 @@ once its tag exists.
   Clients that were already running its version, and a Client running a newer development build was
   offered the older release — a downgrade of the program that manages the host. Both came from the
   same gap: since
-  [ADR-0033](docs/adr/0033-deployments-and-rollouts.md) a Set reaches an Agent only
+  [ADR-0032](docs/adr/0032-deployments-and-rollouts.md) a Set reaches an Agent only
   as an upgrade over what that Agent reports *installed*, and a Client that arrived by `.deb`,
   `.rpm`, MSI or by hand had installed no package, so it reported nothing and there was nothing to
   hold the Set against. A Client now reports the version it runs under the name `[self_update]`
@@ -3282,8 +3291,8 @@ once its tag exists.
   once it runs this version — a Client already in the field will never report a package version,
   because the code that would report it is the code it does not have. So the Server now measures
   such an Agent by the version it reports *running*, its `service.version`
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md),
-  amending [ADR-0033](docs/adr/0033-deployments-and-rollouts.md) point 2). A
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md),
+  amending [ADR-0032](docs/adr/0032-deployments-and-rollouts.md) point 2). A
   version reported for the package itself still wins over it, and one nothing can order — a GLPI
   Agent's `1.19`, an appliance's `24.04.1` — says nothing rather than blocking, so no Agent becomes
   unreachable by numbering itself its own way.
@@ -3298,7 +3307,7 @@ once its tag exists.
 ### Added
 
 - **Basic authentication for the REST API and the UI**
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)).
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
   `[rest.auth.basic_users]`
   in `server.toml` — `user = "password"`, several allowed — guards the **whole** Operator plane:
   `/api/v1/…`, the OpenAPI document, `/api/v1/docs`, and the UI at `/`. A request without a matching
@@ -3339,8 +3348,8 @@ once its tag exists.
 - **`opamp-package-fetch` says why an upload was refused, instead of "cannot reach".** The Server
   decides some uploads before it reads a byte of the artifact — an identity nobody created, a Set
   already rolled out and therefore immutable
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)), a package store at its ceiling
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). With hundreds of megabytes
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)), a package store at its ceiling
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). With hundreds of megabytes
   already in flight that answer races the upload, the connection resets, and what the tool could
   report was a transport error naming the one thing that was *not* the problem: the Server had
   answered, and said why. It now asks a second time with an empty artifact — refused in its own
@@ -3355,7 +3364,7 @@ once its tag exists.
 ### Changed
 
 - **Publication is gone; a rollout is an explicit act, per Agent or per resource**
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)). Saving a Configuration or a
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)). Saving a Configuration or a
   package Set never distributes anything, and there is no draft/published state any more: what an
   Agent runs is its **assignment**, written only by a rollout act — `POST
   /api/v1/configurations/{name}/rollout` or `POST /api/v1/packages/{name}/{type}/{version}/rollout`
@@ -3455,8 +3464,8 @@ once its tag exists.
 ### Changed
 
 - **A Managed Process's package updates no longer loop, and keep a fallback**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). Three changes to
-  how a Supervisor applies a package (ADR-0034):
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). Three changes to
+  how a Supervisor applies a package (ADR-0033):
   - A **first** install that will not start is no longer discarded — the verified program is kept in
     place and reported `InstallFailed`. Previously it was removed, which emptied `program/` and set
     the Server re-offering the same artifact in a download-crash-rollback loop.
@@ -3523,7 +3532,7 @@ once its tag exists.
 ### Changed
 
 - **Saving a Configuration no longer distributes it**
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)).
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)).
   `PUT /api/v1/configurations/{name}` now stores a **draft**; releasing it is its own act,
   `PUT /api/v1/configurations/{name}/publication` with `{"published": true}`, and editing a
   published Configuration stages the change (`pending_changes: true`) until the next publication.
@@ -3543,7 +3552,7 @@ once its tag exists.
   endpoint, credentials, and state directory can never arrive over the wire. Previously the
   Client's Agent stored any offered configuration and reported `APPLIED` without doing anything.
   **What to do:** state whom your Configurations are for
-  (`service_name`, [ADR-0032](docs/adr/0032-configurations-and-the-rest-api.md)). An
+  (`service_name`, [ADR-0031](docs/adr/0031-configurations-and-the-rest-api.md)). An
   *untyped* Configuration with a Selector the Client matches now reaches its Agent too, and a
   body that is not TOML `[[supervisor]]` blocks is reported `FAILED` instead of a hollow
   `APPLIED` — the fleet view shows the reason. Nothing changes for the Supervisors' own
@@ -3553,7 +3562,7 @@ once its tag exists.
 ### Added
 
 - **A Configuration can state the Agent type it is for**
-  ([ADR-0032](docs/adr/0032-configurations-and-the-rest-api.md)). The optional
+  ([ADR-0031](docs/adr/0031-configurations-and-the-rest-api.md)). The optional
   `service_name` field is compared raw against the `service.name` an Agent reports, before the
   Selector; unset keeps today's meaning, every type. The bundled UI offers the types the fleet
   currently reports as suggestions.
@@ -3593,7 +3602,7 @@ once its tag exists.
 
 - **The fleet survives a Server restart.** Agent records now persist — one JSON file per Agent
   under `<config_dir>/agents/`, behind a storage port a database or external store can replace
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)). After a restart
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)). After a restart
   every Agent the Server knew keeps its row, its last-reported build, health, and configuration
   state, shown as disconnected until it reports again; a reconnecting Agent's compressed heartbeat
   is accepted without a fleet-wide `ReportFullState`, and a queued restart survives. Only
@@ -3610,10 +3619,10 @@ once its tag exists.
   a Selector, holds one entry per platform (an upload, or a source URL + sha256, optionally
   signed), and **saving never distributes**: every Set is a draft until
   `PUT …/publication` releases it, and a published Set's entries are immutable
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). Among Sets of one name the most
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). Among Sets of one name the most
   specific Selector wins and, at equal specificity, the greater version — so a canary ring is one
   Selector edit, and a rollback is retracting the newest version (the hidden one-step history of
-  ADR-0034 is gone; old `previous` artifacts migrate to unpublished Sets of their version). The
+  ADR-0033 is gone; old `previous` artifacts migrate to unpublished Sets of their version). The
   routes moved to `/api/v1/packages/{name}/{agent_type}/{version}` with `…/entries/{os}/{arch}`
   beneath; `…/type` and `…/rollback` are gone. The Packages tab is now a master–detail view: a
   table of Sets, a detail form for the selected one (Create/OK/Cancel/Delete, publish as its own
@@ -3630,7 +3639,7 @@ once its tag exists.
   Operating System, Network, Configuration, Matched configs, Effective config, Seq, Last seen,
   Status); pressing a row makes that Agent the current one and unfolds its attribute chips,
   capabilities, and per-Agent actions beneath it. A Disconnected Agent now reads soft red instead
-  of gray, and its badge carries a ✕ that forgets the Agent in place (ADR-0030) — the forget chip
+  of gray, and its badge carries a ✕ that forgets the Agent in place (ADR-0029) — the forget chip
   in the details stays, since an Agent behind a Gateway reads Connected however dead its host is.
   No operator action required.
 
@@ -3690,7 +3699,7 @@ once its tag exists.
   (`169.254.169.254`) or other internal services and the answer reflected back. The probe now
   refuses a URL that resolves to a link-local, shared/CGNAT, or other never-routable address, and it
   no longer follows redirects (which could bounce a public URL onto such an address). Loopback and
-  RFC 1918 / unique-local addresses stay reachable on purpose — an operator's mirror (ADR-0034)
+  RFC 1918 / unique-local addresses stay reachable on purpose — an operator's mirror (ADR-0033)
   legitimately lives on an internal network. No operator action required unless a source URL
   deliberately used a link-local or CGNAT host.
 
@@ -3712,7 +3721,8 @@ once its tag exists.
 - **A Gateway now serves its downstream hop over TLS, and `[gateway.tls] client_ca_file` gates who
   may connect.** The `[gateway.tls]` section
   ([ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md),
-  [ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)) was read and
+  [ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+  was read and
   then ignored: the endpoint stayed plaintext and the client CA verified nobody, so the downstream
   `Authorization` credential travelled in the clear and any peer could connect and report under any
   `instance_uid`. The section now takes effect — the Gateway presents its `cert_file`/`key_file`,
@@ -3745,7 +3755,7 @@ once its tag exists.
   No operator action required.
 
 - **A referenced package's private-source token is stored owner-only on the Server.** A referenced
-  source (ADR-0034) can carry headers — a bearer token for a private artifact host — that were
+  source (ADR-0033) can carry headers — a bearer token for a private artifact host — that were
   persisted in the package store at the umask default, readable by other local users on the Server
   host. The store directory is now `0700` and its metadata files `0600`. The token remains, by
   design, cleartext at rest and delivered to every targeted Agent; the API and store docs now say
@@ -3758,13 +3768,13 @@ once its tag exists.
   connection-settings probe now refuse redirects — a redirect there could only bounce an
   authenticated session elsewhere. Artifact downloads still follow redirects (a mirror is often a
   CDN
-  that bounces to signed storage, ADR-0034) but are now bounded to a short chain; integrity still
+  that bounces to signed storage, ADR-0033) but are now bounded to a short chain; integrity still
   rests on the content hash and signature, never on where the bytes came from. No operator action
   required unless an OpAMP endpoint was, unusually, served behind an HTTP redirect.
 
 - **The Agent's state and configuration directories are kept owner-only.** The persisted state
   directory and the `config/` directory the Managed Process reads from were created at the umask
-  default, and a config-map entry read by path (a `${file:...}` reference, ADR-0032) can be a
+  default, and a config-map entry read by path (a `${file:...}` reference, ADR-0031) can be a
   certificate or a key — so on a multi-user host that material was world-readable. The directories
   are now `0700` and the stored configuration protobuf and each entry file `0600`; the Managed
   Process runs as the same user and still reads its own config. No operator action required.
@@ -3776,7 +3786,7 @@ once its tag exists.
   or supervisor directory) is now `0700`. No operator action required.
 
 - **A Client that installs packages without a verification key now says so at startup.** Package
-  signing is opt-in (ADR-0034): with no `[packages] verification_key`, an offered package or
+  signing is opt-in (ADR-0033): with no `[packages] verification_key`, an offered package or
   self-update is accepted on the Server-supplied content hash alone, with no signature binding the
   bytes to a key the operator holds. That is unchanged — but a Client that accepts packages (a
   managed process's, or its own self-update) without a key now logs a warning at startup, so the
@@ -3892,8 +3902,8 @@ once its tag exists.
   to, and named no commit; two binaries of one workspace disagreed about their own version.
 
   Both ends now read the same helper, `opamp::version::current()`, which
-  [ADR-0038](docs/adr/0038-the-products-version.md) always required and the Server had
-  opted out of ([ADR-0038](docs/adr/0038-the-products-version.md)). A
+  [ADR-0037](docs/adr/0037-the-products-version.md) always required and the Server had
+  opted out of ([ADR-0037](docs/adr/0037-the-products-version.md)). A
   development build reports `0.2.0-dev+<commit>` and a released one `0.2.0+<commit>`.
 
   **Anything matching the Server's `--version` output exactly has to be relaxed** — a check for
@@ -3923,16 +3933,16 @@ once its tag exists.
 
   The package itself goes when its last artifact does, so nothing is left behind either. Deleting
   uninstalls nothing: an Agent keeps running what it took, exactly as retracting does
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)).
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)).
 
   `DELETE /api/v1/packages/{name}` is unchanged and still deletes the whole package; the form now
   sends the `?os=…&arch=…` form of it that
-  [ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md) added.
+  [ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md) added.
 
 ### Removed
 
 - **The ↩ Roll back button is gone from the package form.** The store still remembers the version
-  each artifact replaced ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)) and
+  each artifact replaced ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)) and
   `POST /api/v1/packages/{name}/rollback?os=…&arch=…` still puts it back — only the button is
   removed. The package list still shows `0.157.0 ← 0.156.0`, so what "back" would be is still on
   screen; asking for it is now a request rather than a press.
@@ -3942,7 +3952,7 @@ once its tag exists.
 ### Added
 
 - **The Server can label an Agent**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)).
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)).
   `PUT /api/v1/agents/{instance_uid}/labels` sets key/value pairs that join what a Selector matches,
   and the bundled UI has a `🏷 labels…` action on every fleet row.
 
@@ -3970,7 +3980,7 @@ once its tag exists.
 ### Changed
 
 - **A package is published before it is offered — uploading only stages it**
-  ([ADR-0033](docs/adr/0033-deployments-and-rollouts.md)). A newly created
+  ([ADR-0032](docs/adr/0032-deployments-and-rollouts.md)). A newly created
   package is a **draft**: its artifact is stored, its type and Selector can be set, and it reaches
   no Agent until it is released.
 
@@ -3987,7 +3997,7 @@ once its tag exists.
   `{"published": false}` **retracts** it: the offer stops for Agents that have not taken the
   package,
   and **nothing is uninstalled** — an Agent keeps running what it installed, exactly as when a
-  Selector stops matching it (ADR-0034). The protocol has no revert; this is not a recall.
+  Selector stops matching it (ADR-0033). The protocol has no revert; this is not a recall.
 
   **Nothing that is already running stops.** A package stored before this state existed loads as
   published, so an upgrade withdraws no rollout in flight. And **replacing the artifact of a
@@ -4001,7 +4011,7 @@ once its tag exists.
   package that button reads *Retract*, and the package list marks a draft.
 
 - **The package form in the UI is one intent per button, and every one of them states the Agent
-  type.** A package with no type is stored, looks uploaded, and is offered to nobody (ADR-0034) —
+  type.** A package with no type is stored, looks uploaded, and is offered to nobody (ADR-0033) —
   the form used to make that the easiest state to produce by hand, with the type one
   optional-looking
   field among several and a separate button to remember afterwards.
@@ -4011,7 +4021,7 @@ once its tag exists.
   | | what it sends |
   | --- | --- |
   | **Upload** | the chosen file as the artifact for the platform named, then the Agent type and the Selector — a complete package from one press, created if the name is new |
-  | **Update** | the same without new bytes: a source url replaces the artifact with one hosted elsewhere ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)), and the type and Selector are set either way |
+  | **Update** | the same without new bytes: a source url replaces the artifact with one hosted elsewhere ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)), and the type and Selector are set either way |
   | **Offer** | whom the package reaches, and nothing else: the type that arms it and the Selector that aims it. No upload, so correcting a rollout that reached nobody is one press |
 
   None of them runs without an Agent type, so the UI can no longer create a package that reaches
@@ -4023,7 +4033,7 @@ once its tag exists.
   button standing among the ones that write.
 
   The **Agent type** field now offers the types the fleet actually reports, with how many Agents
-  report each. The comparison is raw and has no canonical set to fall back on (ADR-0034), so a typo
+  report each. The comparison is raw and has no canonical set to fall back on (ADR-0033), so a typo
   is a rollout that silently never starts — picking from the list is the spelling that matches. A
   type no Agent has reported yet can still be typed in.
 
@@ -4037,7 +4047,7 @@ once its tag exists.
   Nothing about the API changed: the artifact, the source, the type and the Selector are still four
   requests over four sub-resources, and a package uploaded by script is still untyped until
   `PUT /api/v1/packages/{name}/type` is called. The type is never guessed from a name or a file
-  name — that is the alternative ADR-0034 weighed and rejected.
+  name — that is the alternative ADR-0033 weighed and rejected.
 
 ### Fixed
 
@@ -4058,7 +4068,7 @@ once its tag exists.
   again, and **the host is updated back to the published version.** That is the point — the Server
   decides what the fleet runs. To keep a host on an older Client, retract the package first
   (`PUT /api/v1/packages/{name}/publication` with `{"published": false}`,
-  [ADR-0033](docs/adr/0033-deployments-and-rollouts.md)); retracting uninstalls
+  [ADR-0032](docs/adr/0032-deployments-and-rollouts.md)); retracting uninstalls
   nothing, so the host stays where it is.
 
   This is the Client's own package only. A Managed Process's package record is unchanged: only the
@@ -4100,7 +4110,7 @@ once its tag exists.
 - **A package says how many Agents it reaches.** `GET /api/v1/packages` gains `targeted_agents`,
   and the package list in the UI shows `⚠ reaches no agent` when it is zero.
 
-  This closes a silent failure the follow-ups of ADR-0034 and ADR-0017 both named: a
+  This closes a silent failure the follow-ups of ADR-0033 and ADR-0017 both named: a
   package can target nobody — through an Agent type that is unset or misspelled, artifacts for
   platforms nobody runs, or a Selector that matches no one — and none of those is an upload error.
   The package stored fine and reached no one, and nothing said so until somebody noticed the version
@@ -4115,7 +4125,7 @@ once its tag exists.
 
 ### Added
 
-- **An Agent can be forgotten** ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)).
+- **An Agent can be forgotten** ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)).
   `DELETE /api/v1/agents/{instance_uid}` drops what the Server knows about one Agent, and the
   bundled UI has a `✕ forget` action on every fleet row. A decommissioned host no longer occupies a
   row forever.
@@ -4136,7 +4146,7 @@ once its tag exists.
   but the configuration is applied again, which for a managed agent is one restart.
 
 - **A fleet row now says when an Agent stopped talking**
-  ([ADR-0030](docs/adr/0030-the-fleet-record-of-agents-and-hosts.md)). `AgentView` gains
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md)). `AgentView` gains
   `stale`, and the bundled UI shows it beside the connection pill.
 
   It is a second fact, not a replacement: `connected` still means "a connection carrying this Agent
@@ -4213,7 +4223,8 @@ once its tag exists.
   whatever the Client logs. The protocol explicitly permits this refusal.
 
 - **Mutual TLS, with client certificates this Server issues itself**
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)). Goal 17 is
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+  Goal 17 is
   complete: the connection is encrypted, and the peer at each end can now be proved.
 
   **On the Server**, `[tls]` gains an optional `client_ca_file`. With it set, every request to
@@ -4276,11 +4287,11 @@ once its tag exists.
   `opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux and macOS on `x86_64` and `aarch64`, and
   Windows
   on `x86_64`, together with `SHA256SUMS`
-  ([ADR-0039](docs/adr/0039-releases-attestations-and-the-server-image.md)). Until now there was
+  ([ADR-0038](docs/adr/0038-releases-attestations-and-the-server-image.md)). Until now there was
   nothing to install but a build of your own.
 
   **The version is `[workspace.package] version` in `Cargo.toml`**, and the pipeline creates the
-  `version/*` tag from it ([ADR-0038](docs/adr/0038-the-products-version.md)) — so a release is
+  `version/*` tag from it ([ADR-0037](docs/adr/0037-the-products-version.md)) — so a release is
   "merge the bump, run the workflow", and no tag is typed by hand. It refuses rather than guesses:
   a version that already has a tag or a release is spent, and the run says so before it builds
   anything — including a dry run, which is the run meant to catch a forgotten bump — and a binary
@@ -4316,7 +4327,7 @@ once its tag exists.
 - **`opamp-package-sign pack`** builds a package artifact from a single-file program and prints its
   SHA-256, and **`opamp-package-sign sha256`** hashes an existing one — the value
   `PUT /api/v1/packages/{name}/source` needs for an artifact the Server will not hold
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). Until now the project could open
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). Until now the project could open
   the
   two container formats but gave an operator no supported way to produce one, and an encrypted
   `.7z` in particular had no answer at all.
@@ -4338,7 +4349,7 @@ once its tag exists.
   and configures a Foreign Agent entirely from the Server.
 
 - **`program_path` in a `[[supervisor]]` block delivers an agent that is more than one file**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). An executable plus the shared
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). An executable plus the shared
   objects it
   loads — Fluent Bit is the case — could not be a package before, because exactly one archive
   member was installed. Naming where the program sits inside the package unpacks the whole archive
@@ -4379,7 +4390,7 @@ once its tag exists.
   so a Server offering either was told the settings were in force when they were not. It now applies
   everything it does honour — endpoint, credential, heartbeat, certificate — and reports `FAILED`
   with an `error_message` naming what it dropped
-  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation.md)).
+  ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 
   Nothing to do on any host. A Server whose `[connection_offer]` never carried those fields — this
   project's Server cannot — sees no change at all.
@@ -4413,7 +4424,7 @@ once its tag exists.
   can target a distribution release, or pin one machine by its host name.
 
   **`host.name` in particular was promised and missing.**
-  [ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md) offers "a Selector matching that
+  [ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md) offers "a Selector matching that
   host's
   `host.name`" as *the* way to hold one host to one artifact; no Agent reported it, so such a
   Selector silently matched nothing. It works now.
@@ -4442,7 +4453,7 @@ once its tag exists.
 
 - **What a Client reports as its version now names the release it is heading *for*, not the one it
   descends *from*.** The base comes from `Cargo.toml` and git decides only the rest
-  ([ADR-0038](docs/adr/0038-the-products-version.md)): a build with no release tag on its commit
+  ([ADR-0037](docs/adr/0037-the-products-version.md)): a build with no release tag on its commit
   reports `0.1.0-dev+<hash>` where it used to report `0.0.0-dev+<hash>`. Nothing to do — but the
   fleet view, `opamp-fleet-client --version`, and the name of the versioned install directory all
   shift with it,
@@ -4507,7 +4518,7 @@ once its tag exists.
 ### Changed — breaking
 
 - **A package now states the Agent type it is built for, and reaches no Agent of another**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). ADR-0034 made the
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). ADR-0033 made the
   Server refuse to send an artifact to a machine it cannot run on; this does the same for an Agent
   it
   was not built for. A Promtail artifact can no longer be swapped over a Collector because someone
@@ -4529,7 +4540,7 @@ once its tag exists.
   before typing it. It belongs to the package name, not to an artifact, so it is set once for all
   platforms.
 
-  An Agent that reports no `service.name` at all is now offered no package, the same rule ADR-0034
+  An Agent that reports no `service.name` at all is now offered no package, the same rule ADR-0033
   applies to a missing platform. Every Client this project ships reports one.
 
   **New route** `PUT /api/v1/packages/{name}/type`; `PackageView` gains `service_name`.
@@ -4573,7 +4584,7 @@ once its tag exists.
   `service_instance_name` and fall back to `service_name`, which is what the bundled UI now does.
 
 - **A package now holds one artifact per platform, and `os`/`arch` are required**
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)). An Agent is offered only the
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)). An Agent is offered only the
   artifact
   built for the operating system and architecture it reported, and never another — so uploading a
   Windows build no longer installs it over every Linux host in the fleet.
@@ -4602,7 +4613,7 @@ once its tag exists.
 
 - **The Client reports `host.arch` as `amd64`/`arm64`**, the semantic-convention values the protocol
   points at, where it used to report Rust's `x86_64`/`aarch64`
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)).
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)).
 
   **A Selector written against `host.arch` must be edited on the Server** — `{"host.arch":
   "x86_64"}`
@@ -4616,11 +4627,11 @@ once its tag exists.
 - **Release artifacts are named `<name>_<version>_<os>_<arch>.7z`** —
   `opamp-fleet-client_1.2.3_linux_amd64.7z`, `opamp-fleet-client_1.2.3_darwin_arm64.7z`. Both halves
   of that changed: the platform tokens, which used to say `macos` and `x86_64`
-  ([ADR-0034](docs/adr/0034-packages-signatures-and-delivery.md)), and the separator between the
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)), and the separator between the
   four
   fields, which used to be `-`
-  ([ADR-0039](docs/adr/0039-releases-attestations-and-the-server-image.md)) — both
-  as [ADR-0039](docs/adr/0039-releases-attestations-and-the-server-image.md) names them now.
+  ([ADR-0038](docs/adr/0038-releases-attestations-and-the-server-image.md)) — both
+  as [ADR-0038](docs/adr/0038-releases-attestations-and-the-server-image.md) names them now.
 
   **Anything scripted against the old names breaks**, including a glob like `*-linux-amd64.7z`;
   releases already published keep the names they have, and nothing is renamed.
@@ -4649,7 +4660,7 @@ once its tag exists.
   promised and never actually set.
 
 - **A version is compared and shown without its build metadata**
-  ([ADR-0038](docs/adr/0038-the-products-version.md)). Two
+  ([ADR-0037](docs/adr/0037-the-products-version.md)). Two
   things change, and one of them is an API break.
 
   **Uploading a Client package now takes the release number.** `?version=1.2.3` matches a binary

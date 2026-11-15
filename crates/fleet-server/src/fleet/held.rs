@@ -1,4 +1,4 @@
-//! What one instance holds of the Agents it carries on a shared store (ADR-0045 clause 8): the
+//! What one instance holds of the Agents it carries on a shared store (ADR-0025 clause 8): the
 //! take and the release of an Agent, the presence it writes, the re-keys whose
 //! answer was lost, the restarts kept for retry, the take-up of what other instances announced, and
 //! the per-Agent locks. Behind the same `AppState` entry points as before.
@@ -31,7 +31,7 @@ pub(super) enum Took {
 
 /// Which connection carries an Agent a WebSocket report arrives for, as the duplicate detection
 /// sees it
-/// (ADR-0045
+/// (ADR-0025
 /// clause 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Carried {
@@ -142,7 +142,7 @@ pub(super) struct PresenceWritten {
     /// The count of takes last answered for an Agent whose take since lost its answer, or 0 where
     /// this instance created its record: still the count this instance was last answered, so the
     /// shutdown flush writes the record under it, where the row names no holder and no take was
-    /// counted since (ADR-0052 clause 2). No batch names this instance by it. A count answered since
+    /// counted since (ADR-0029 clause 2). No batch names this instance by it. A count answered since
     /// in `takes` outranks it, so an answer leaves it as it is.
     pub(super) before_lost: HashMap<InstanceUid, u64>,
     pub(super) generations: HashMap<InstanceUid, u64>,
@@ -287,7 +287,7 @@ impl PresenceWritten {
 /// strictly after `fleet`.
 pub(super) struct Kept {
     /// Each persisted record's durable digest as last written — the dirty check that keeps a
-    /// heartbeat from reaching any storage backend (ADR-0052).
+    /// heartbeat from reaching any storage backend (ADR-0029).
     pub(super) written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
     /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
     /// batch writes only what moved since.
@@ -331,7 +331,7 @@ impl Kept {
 
     /// Moves what is kept of `old` to `new`, as a re-key moves the stored row whole: what was
     /// written of its presence and a restart kept for retry move, so the retry queues the restart
-    /// on the new identity (ADR-0045 clause 8). The digest does not: the record is written whole
+    /// on the new identity (ADR-0025 clause 8). The digest does not: the record is written whole
     /// under `new` at the report's end. A pending re-key of `old` is the caller's, which knows
     /// whether this re-key is the one it names: the report that made it drops it, and the read
     /// back that found it moved marks it so.
@@ -402,7 +402,7 @@ impl Kept {
 
 impl AppState {
     /// Takes up what another instance wrote to the records of Agents this one holds
-    /// (ADR-0045
+    /// (ADR-0025
     /// clauses 8 and 9): the record of each Agent of `uids` this instance holds is read again from
     /// the store. Its assignment, its labels and
     /// its queued restart are taken into what is held, its group is placed again for its labels,
@@ -503,7 +503,7 @@ impl AppState {
     }
 
     /// Catches up after a missed notification, which counts as every notification
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 10): what other instances changed of the Agents this instance holds is taken up from
     /// one read of their records and one of their holders, whatever kinds of state it keeps of
     /// them. From these two reads:
@@ -689,7 +689,7 @@ impl AppState {
     /// Re-keys the stored record of `old` to `new`. Where the store answers an error, the move may
     /// have committed all the same, so it is read back before the Agent is answered: moved, it
     /// stands. A read back that fails leaves the pair for the Agent's next report to read back
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 10).
     pub(super) fn rekey_reading_back(
         &self,
@@ -836,10 +836,10 @@ impl AppState {
     }
 
     /// Moves what this instance holds of `old` to `new`, as a re-key moves the stored row: the
-    /// labels go with it (ADR-0052 clause 21), the old identity leaves its group, and what was
+    /// labels go with it (ADR-0029 clause 21), the old identity leaves its group, and what was
     /// written of its presence moves with the row. A put-back of its restart kept for retry moves
     /// too, so the retry queues the restart on the row's new identity
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8).
     pub(super) fn rekey_held(
         &self,
@@ -861,7 +861,7 @@ impl AppState {
     /// wherever the send is seen to fail. That holds on a lease that lapsed meanwhile too, since
     /// setting it again only restores what the Operator asked for. A put-back the store does not
     /// take is kept and tried again by [`retry_restarts`](Self::retry_restarts)
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8).
     pub fn unsent(&self, message: &ServerToAgent) {
         let restart = opamp::proto::CommandType::Restart as i32;
@@ -880,7 +880,7 @@ impl AppState {
     /// instance, with a warning naming the Agent. One whose row moved through a re-key of this
     /// instance's own not read back yet waits for the read back. The composition root calls this every second, so
     /// the intervals grow to a minute; a process that ends first loses the restarts still kept
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8).
     pub fn retry_restarts(&self) -> usize {
         for uid in self.due_restarts() {
@@ -911,7 +911,7 @@ impl AppState {
     /// restart; one whose record the store does not hold, forgotten or re-keyed through another
     /// instance, is logged and dropped, and one whose record a re-key of this instance's own whose
     /// answer was lost may have moved stays kept, for the read back to move it
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8).
     pub(super) fn put_back(&self, uid: &InstanceUid, retry: bool) {
         let _agent = self.agent_lock(uid);
@@ -974,7 +974,7 @@ impl AppState {
 
     /// Takes up what another instance announced of the restarts of `uids`: a request there is this
     /// restart now, so a put-back still kept is dropped
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8).
     ///
     /// A request of an Agent held here is read under the Agent's own lock and held: a delivery
@@ -1021,7 +1021,7 @@ impl AppState {
 
     /// Drops the put-backs kept for retry of the Agents of `uids`, whose restart another instance
     /// requested: that request is the restart now, whether or not its record still queues it
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8).
     pub(crate) fn drop_kept_restarts(&self, uids: &HashSet<InstanceUid>) {
         let _fleet = self.fleet.lock().expect("fleet lock");
@@ -1034,7 +1034,7 @@ impl AppState {
 
     /// Drops the put-back of `uid`'s restart kept for retry, if one is: what a request, a delivery
     /// and a forget of the Agent do
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8).
     pub(super) fn drop_kept_restart(&self, uid: &InstanceUid) {
         self.kept
@@ -1046,7 +1046,7 @@ impl AppState {
 
     /// Answers a report of an Agent whose record another instance forgot while this one wrote it:
     /// the Agent is dropped here too and its session ended, and the reply offers nothing
-    /// (ADR-0052 clause 10).
+    /// (ADR-0029 clause 10).
     ///
     /// Made after the report's write found no row, so what it reads is read before the fleet lock
     /// is taken: the re-key read back, and the Client Agents of the group the Agent leaves.
@@ -1133,14 +1133,14 @@ impl AppState {
 
     /// Writes the presence of the Agents this instance carries that moved since the last batch, in
     /// one batch naming `holder`, the instance id of the lease it serves under
-    /// (ADR-0052 clause 4): a heartbeat reaches the store at
+    /// (ADR-0029 clause 4): a heartbeat reaches the store at
     /// most once per batch and Agent. An Agent it holds and never carried under `holder`, one
     /// restored at startup among them, is written only once it is connected here, so the first
     /// batch writes the Agents carried and not the fleet; under a new holder the connected ones
     /// are written again. An Agent whose take's answer was lost and that disconnected since has its
     /// holder and count of takes read first, and its disconnect is written under that count where
     /// the row names `holder` and the Agent was not taken here again since it was looked at
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8). Read under the fleet lock and written after it is released, so no report waits
     /// for the batch; its answers are kept only of the Agents nothing was kept of anew meanwhile. A
     /// batch that fails is written again with the next one. Answers how many it wrote.
@@ -1234,9 +1234,9 @@ impl AppState {
 
     /// On a shared store, takes `uid` at once as connected here, naming this instance as its
     /// holder, so that no other instance forgets it as not connected while the next batch is due
-    /// (ADR-0052 clause 11), and so that an instance that
+    /// (ADR-0029 clause 11), and so that an instance that
     /// carried it before stops carrying it
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8): one write per connect, never per heartbeat. A take that makes the Agent's holder
     /// change more than ten times within a minute is logged as a likely duplicate. Without a lease
     /// nothing is written. One that fails is logged, and the next batch writes it, where no other
@@ -1304,7 +1304,7 @@ impl AppState {
 
     /// Stops carrying each Agent of `uids` this instance carries whose
     /// stored presence no longer names this instance as its holder: another instance took it
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 8). It is held as on a closed connection, and its disconnect is not written, since
     /// the row is the other instance's. An Agent the row still names is kept, so of two instances
     /// that take one Agent at once only the one the row does not name stops carrying it. The
@@ -1395,7 +1395,7 @@ impl AppState {
     }
 
     /// The Agents forgotten while connection `conn` carried them, taken once: its loop ends their
-    /// session (ADR-0052 clause 10).
+    /// session (ADR-0029 clause 10).
     pub fn take_forgotten(&self, conn: ConnId) -> Vec<InstanceUid> {
         self.forgotten
             .lock()

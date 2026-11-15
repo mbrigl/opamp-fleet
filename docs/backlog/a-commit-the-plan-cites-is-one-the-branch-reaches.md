@@ -9,7 +9,7 @@
   branch any more. Only the review of #173 caught it, once. That a hash resolves is not enough,
   since a rewritten commit stays in the object store; whether HEAD reaches it decides.
 - **A commit message implementing a superseded ADR.** Three commit messages named ADR-0025 instead
-  of ADR-0045, which superseded it (#173).
+  of ADR-0025, which superseded it (#173).
 
 **Idea.** Two checks, each with a self-test that builds its own repository fixture:
 

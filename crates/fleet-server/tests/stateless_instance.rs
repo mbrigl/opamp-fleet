@@ -410,7 +410,7 @@ fn instance_id() -> String {
     )
 }
 
-// Verifies: ADR-0023, ADR-0045
+// Verifies: ADR-0023, ADR-0025
 #[test]
 fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
     opamp::tls::install_ring_provider();
@@ -577,9 +577,9 @@ fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
 /// the Server before it takes its lease: no lease row and no audit chain is left for another
 /// instance to count as live or to close as lapsed
 /// (ADR-0023 clause 16,
-/// ADR-0045
+/// ADR-0025
 /// clause 2).
-// Verifies: ADR-0023, ADR-0045
+// Verifies: ADR-0023, ADR-0025
 #[test]
 fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
     opamp::tls::install_ring_provider();
@@ -653,9 +653,9 @@ fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
 /// An instance whose lease lapsed while a newer Server migrated the schema stops at its new lease
 /// as at a failed start: it prints the refusal, naming the version the schema needs and its own,
 /// and exits with status 1
-/// (ADR-0045
+/// (ADR-0025
 /// clause 16).
-// Verifies: ADR-0045
+// Verifies: ADR-0025
 #[test]
 fn an_instance_whose_lease_lapsed_on_a_newer_schema_exits_naming_both_versions() {
     opamp::tls::install_ring_provider();
@@ -1116,8 +1116,8 @@ fn blobs_to_s3_copies_an_entrys_artifact_into_the_bucket_and_checks_it() {
 /// `server audit-verify --config`, with no schema named, reads the record in the schema that is
 /// the role's default, where the Server wrote it: it lists the Server's chain and exits 0 while
 /// the record holds, and exits 1 naming the entry once a line is changed
-/// (ADR-0029 clause 5).
-// Verifies: ADR-0029
+/// (ADR-0028 clause 8).
+// Verifies: ADR-0028
 #[test]
 fn audit_verify_with_no_schema_named_reads_the_default_and_fails_where_the_record_does_not_hold() {
     opamp::tls::install_ring_provider();

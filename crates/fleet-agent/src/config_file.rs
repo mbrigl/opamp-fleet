@@ -52,7 +52,7 @@ impl ClientConfig {
         config.source = Some(redact_secrets(&text));
         config.path = Some(path.to_path_buf());
         // **Every directory this Client derives is made absolute here**, and this is the one place
-        // it can be done once. A Managed Process starts in its own directory (ADR-0051), so a path
+        // it can be done once. A Managed Process starts in its own directory (ADR-0018), so a path
         // the Client hands it — its program, a `--config` a plugin builds, a `${config_dir}` it
         // substitutes — is resolved by that process against a directory the Client has left.
         // `state_dir` defaults to the relative `client-state`, so leaving these relative would make
@@ -133,7 +133,7 @@ impl ClientConfig {
         }
     }
 
-    /// What this Client must hold before it connects (ADR-0040, ADR-0020): a client certificate —
+    /// What this Client must hold before it connects (ADR-0026, ADR-0020): a client certificate —
     /// the one the Server issued, or the one `[tls]` names, a bootstrap certificate included. It is
     /// the one proof the Server admits a peer by, so without it the Client refuses to start, naming
     /// what is missing.
@@ -153,7 +153,7 @@ impl ClientConfig {
     }
 
     /// Whether the state directory holds a certificate the Server issued, with its key — what
-    /// makes this Client a member of the fleet rather than a host still to enrol (ADR-0040). The
+    /// makes this Client a member of the fleet rather than a host still to enrol (ADR-0026). The
     /// questionnaire asks for a bootstrap pair only while this is `false` (ADR-0027 clause 16).
     #[must_use]
     pub fn is_enrolled(&self) -> bool {
@@ -161,7 +161,7 @@ impl ClientConfig {
             && self.state_dir.join(crate::tls::ISSUED_KEY_FILE).exists()
     }
 
-    /// The client certificate and key this Client presents on both transports (ADR-0040), or
+    /// The client certificate and key this Client presents on both transports (ADR-0026), or
     /// `None` when it has no identity to present.
     ///
     /// A pair the Server issued outranks the configured one, the same precedence persisted
@@ -258,7 +258,7 @@ pub(crate) fn absolute(path: &Path) -> PathBuf {
 /// only as the parent of a masked one comes out written as its own. A secret key is found wherever
 /// and however it is written (a table, a dotted or quoted key, an inline table, an array of tables)
 /// and its whole value is replaced, a multi-line string to its closing quotes, together with a
-/// comment beside it. A leftover `[auth]` section, which the Client ignores (ADR-0040 clause 3),
+/// comment beside it. A leftover `[auth]` section, which the Client ignores (ADR-0026 clause 3),
 /// has every value masked, whatever its keys are called. Text that does not parse cannot be taken
 /// apart, so it is reported as a placeholder — over-redaction is the cheap failure here, a leaked
 /// credential the expensive one.
@@ -361,7 +361,7 @@ pub(crate) fn read_held(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, Stri
 /// either, and a link at either name is replaced and never written through (ADR-0021 clause 11).
 /// The directory is synced after the rename, so an apply reported applied survives a power loss.
 /// The mode is the caller's: owner-only for an install or a `service config` (ADR-0020 clause
-/// 25), the operator's own for an apply (ADR-0051 clause 30).
+/// 25), the operator's own for an apply (ADR-0018 clause 30).
 pub(crate) fn replace(
     path: &Path,
     contents: &[u8],
@@ -382,7 +382,7 @@ mod tests {
     /// persists what it receives — so a credential value must never survive the redaction, while
     /// the operator's comments and layout must (they are half of what the file says). A leftover
     /// `[auth]` section is masked whole, whatever its keys are called.
-    /// Verifies: ADR-0051, ADR-0040
+    /// Verifies: ADR-0018, ADR-0026
     #[test]
     fn redaction_masks_credential_values_and_keeps_everything_else() {
         let text = "# the fleet endpoint\nendpoint = \"wss://fleet:4320/v1/opamp\"\n\n\
@@ -418,7 +418,7 @@ mod tests {
     /// A secret is masked whatever TOML spelling carries it: a multi-line string, basic or
     /// literal, must not leave its continuation lines behind, and a dotted key, a quoted key, an
     /// inline table or an array of tables hides it no better. What is not secret stays as written.
-    /// Verifies: ADR-0051, ADR-0050
+    /// Verifies: ADR-0018, ADR-0033
     #[test]
     fn redaction_masks_every_spelling_of_a_secret_value() {
         let spellings = [
@@ -464,7 +464,7 @@ mod tests {
     }
 
     /// Text that does not parse cannot be taken apart, so it is reported as a placeholder.
-    /// Verifies: ADR-0051, ADR-0050
+    /// Verifies: ADR-0018, ADR-0033
     #[test]
     fn redaction_replaces_text_that_does_not_parse_whole() {
         let redacted = redact_secrets("archive_key = \"\"\"\nleak\nnot = closed\n");
@@ -475,7 +475,7 @@ mod tests {
     /// The client identity is all a Client needs to start: a file naming one passes with no
     /// `[auth]`, and a file without one is refused, naming `[tls] cert_file` and `key_file` — the
     /// Server would refuse it in the handshake anyway.
-    /// Verifies: ADR-0040, ADR-0020, Q-1
+    /// Verifies: ADR-0026, ADR-0020, Q-1
     #[test]
     fn admission_needs_a_client_identity_and_nothing_else() {
         let dir = tempfile::tempdir().expect("tempdir");

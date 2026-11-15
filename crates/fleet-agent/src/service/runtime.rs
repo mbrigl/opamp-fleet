@@ -57,7 +57,7 @@ pub enum Exit {
     RestartForUpdate,
 }
 
-/// Starts Gateway Mode when `[gateway]` arms it (ADR-0048), or nothing when it does not.
+/// Starts Gateway Mode when `[gateway]` arms it (ADR-0016), or nothing when it does not.
 ///
 /// It runs as its own task rather than inside the transport loop: the downstream endpoint's
 /// lifetime is the process's, not one upstream connection's, and an Agent behind the Gateway must
@@ -205,7 +205,7 @@ fn start_log_file(config: &crate::config::ClientConfig) {
 /// reconstruct from the command line of a service they did not start.
 ///
 /// **The second line is the trust and the identity in force**, resolved through the same two
-/// accessors the transports build their TLS from (ADR-0012, ADR-0040) rather than read off the
+/// accessors the transports build their TLS from (ADR-0012, ADR-0026) rather than read off the
 /// configuration — so it states what *will* be presented, including a Server-issued certificate
 /// that no `supervisor.toml` mentions. Without it, a handshake that fails because the identity is
 /// not the one anybody assumed is diagnosed from the peer's error message, which is written by the
@@ -239,7 +239,7 @@ fn announce(config: &ClientConfig, config_path: &std::path::Path) {
 ///
 /// Its own function because it makes a claim worth a test: the certificate named here is whichever
 /// [`ClientConfig::client_identity`] resolves to, which prefers the **Server-issued** one in the
-/// state directory over anything `[tls]` names (ADR-0040). A line that reported the configured
+/// state directory over anything `[tls]` names (ADR-0026). A line that reported the configured
 /// certificate while the connection presented the issued one would be worse than no line at all.
 fn tls_posture(config: &ClientConfig) -> (String, String) {
     let trust = config.ca_file().map_or_else(
@@ -262,7 +262,7 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
 ///
 /// Without this, the net catches everything except the one failure a *new* version is most likely
 /// to bring: a file it refuses. A removed configuration key is exactly that
-/// ([ADR-0051](../../../../docs/adr/0051-supervisor-mode-and-its-kinds.md)),
+/// ([ADR-0018](../../../../docs/adr/0018-supervisor-mode-and-its-kinds.md)),
 /// and for some kinds there is no block both versions accept, so the cutover per host cannot be avoided — only caught.
 fn unreadable_config(spec: &RunSpec, error: String) -> Result<Exit, String> {
     let state_dir = recovery_state_dir(spec);
@@ -322,7 +322,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // A certificate swap a crash cut short is completed before the identity in force is read.
     crate::csr::recover(&config.state_dir)?;
     // Without a client certificate the Server refuses this Client; it says so and stops rather
-    // than retrying for ever (ADR-0040).
+    // than retrying for ever (ADR-0026).
     config
         .check_admission()
         .map_err(|e| format!("{}: {e}", spec.config_path.display()))?;
@@ -333,7 +333,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // file* — a log whose opening line is already about work in progress starts one step too late.
     announce(&config, &spec.config_path);
     // Once per start, not per reconnect: a leftover [auth] is ignored and nothing from it is sent
-    // (ADR-0040 clause 3).
+    // (ADR-0026 clause 3).
     if let Some(notice) = config.leftover_auth_notice() {
         tracing::warn!(config = %spec.config_path.display(), "{notice}");
     }
@@ -362,7 +362,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         None => supervisor::process::Spawner::Local,
     };
     let mut engine = supervisor::build_engine(&config, &shutdown, spawner)?;
-    // The floor of each Agent type (ADR-0035 clause 17): read from `state_dir` once, fetched from
+    // The floor of each Agent type (ADR-0034 clause 17): read from `state_dir` once, fetched from
     // the endpoint as it falls due, and held to by every Agent of this Client.
     let floors = Arc::new(crate::floors::FloorFile::open(
         &config.state_dir,
@@ -379,7 +379,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             .with_floors(agent_type, floors.clone()),
         );
     }
-    // There is no unsigned posture (ADR-0050, ADR-0019): without `[packages] verification_key` no
+    // There is no unsigned posture (ADR-0033, ADR-0019): without `[packages] verification_key` no
     // Agent of this Client takes packages, its own self-update included. Said once at startup, since
     // the Server only sees an Agent that declares no package capability.
     if config.package_key().is_none() {
@@ -400,7 +400,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         );
         crate::update::installer::clear_outcome(&config.state_dir);
     }
-    // Own telemetry (ADR-0054) is owned here rather than by a transport loop, because the
+    // Own telemetry (ADR-0017) is owned here rather than by a transport loop, because the
     // destinations outlive a connection: a reconnect must not tear the exporters down, and a
     // verified new offer is what replaces them.
     let telemetry = crate::telemetry::Telemetry::new();
@@ -409,7 +409,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     let mut system = sysinfo::System::new().ok();
     let sampling = engine.sampling_handle();
 
-    // Gateway Mode (ADR-0048), if armed: a downstream endpoint and an upstream pool, running
+    // Gateway Mode (ADR-0016), if armed: a downstream endpoint and an upstream pool, running
     // beside everything else. It is restarted when a verified offer moves this Client's endpoint,
     // since the pool dials that endpoint and would otherwise keep reaching for the old one.
     let mut gateway = spawn_gateway(&config, &shutdown);
@@ -424,7 +424,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             // And the Server hears about it. The line above just reported these settings APPLIED;
             // saying nothing here would have this Client claim, on every reconnect for the life of
             // the state directory, that a destination is in force which it refused to use
-            // (ADR-0054: refused *and reported*).
+            // (ADR-0017: refused *and reported*).
             let error = refused.join("; ");
             tracing::warn!(reason = %error, "not reporting own telemetry");
             engine.connection_settings_outcome(&stored.hash, Err(&error));
@@ -502,7 +502,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
 }
 
 /// Drives `transport` to its end, calling `sample` every `interval` while `reporting` says a
-/// destination is in force (ADR-0054).
+/// destination is in force (ADR-0017).
 ///
 /// `reporting` is asked on every tick, not once: a destination offered over the connection that is
 /// running comes into force halfway through `transport`. Asked once — as a `select!` precondition,
@@ -935,7 +935,7 @@ mod tests {
     }
 
     /// And it reports what will actually be presented: a Server-issued pair in the state directory
-    /// outranks the configured one (ADR-0040), so the line has to name the issued one — that is the
+    /// outranks the configured one (ADR-0026), so the line has to name the issued one — that is the
     /// whole reason it resolves the identity instead of printing `[tls] cert_file`.
     #[test]
     fn the_tls_line_names_the_issued_certificate_over_the_configured_one() {

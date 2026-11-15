@@ -2,7 +2,7 @@
 //! first certificate before its service is registered, with the bootstrap pair where it lies, or
 //! the identity a `bootstrap.p12` opened to, in memory (ADR-0027).
 //!
-//! Nothing here is a second enrolment. It is the Client's own upstream connection (ADR-0040) —
+//! Nothing here is a second enrolment. It is the Client's own upstream connection (ADR-0026) —
 //! the same CSR, the same pending key, the same acceptance of the offered certificate into the
 //! state directory — run with the Client's own Agent alone and ended the moment that certificate
 //! is stored. The instance identity it creates in the state directory is the one the service then
@@ -47,7 +47,7 @@ pub fn written(state_dir: &Path) -> Vec<PathBuf> {
 /// `config` is the configuration the service will run with, its `state_dir` the service's.
 /// `written` is what this run asked and wrote: the bootstrap identity it enrols with, an endpoint
 /// and trust it answered, which replace the file's, and an endpoint named over a kept file, which
-/// holds the file to it (ADR-0044).
+/// holds the file to it (ADR-0021).
 /// `roots` are the data root and the layout root. The CA file and the bootstrap pair are read
 /// once, before anything connects; one in a root or the state directory, which the service's
 /// account owns, is read through that directory, never through a link at its name.
@@ -169,7 +169,7 @@ async fn connect(mut config: ClientConfig, mut shutdown: Shutdown) -> Result<(),
 }
 
 /// `config` as the enrolment connects with it: what the run answered in place of what the file
-/// says (ADR-0044),
+/// says (ADR-0021),
 /// and the CA file and the bootstrap pair read once, before anything connects, never again by a
 /// path the account gave (ADR-0021 clause 11). `None` where `written` holds no bootstrap identity,
 /// and so nothing to enrol with.
@@ -198,7 +198,7 @@ fn prepare(
 
 /// Refuses the enrolment where `--endpoint` named, over a file the install kept, another endpoint
 /// than the file's: such a run answered nothing, and the file stands for the service
-/// (ADR-0044).
+/// (ADR-0021).
 ///
 /// # Errors
 /// Returns an error naming both endpoints.
@@ -215,7 +215,7 @@ pub fn holds_to_named(config: &ClientConfig, written: &Written) -> Result<(), St
 
 /// Puts what the run answered in place of what `config` read from the file: the endpoint, and the
 /// CA copy with the certificates written into it, or no CA where none was answered
-/// (ADR-0044).
+/// (ADR-0021).
 fn take_answered(config: &mut ClientConfig, answered: &Answered) {
     config.endpoint.clone_from(&answered.endpoint);
     let ca_file = answered.ca.as_ref().map(|(copy, _)| copy.clone());
@@ -748,7 +748,7 @@ mod tests {
     /// The run that answered enrols with its answers: a `supervisor.toml` rewritten after the
     /// write, to another endpoint and another CA, changes neither the endpoint the enrolment
     /// connects to nor the trust it connects with, and the rewritten CA is not read at all.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0021
     #[test]
     fn a_run_that_answered_enrols_with_its_answers_whatever_the_file_says_by_now() {
         let account = tempfile::tempdir().expect("account");
@@ -822,7 +822,7 @@ mod tests {
 
     /// A run that answered nothing takes the endpoint and the CA from the file: the residual the
     /// decision names.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0021
     #[test]
     fn a_run_that_answered_nothing_enrols_with_what_the_file_says() {
         let account = tempfile::tempdir().expect("account");
@@ -845,7 +845,7 @@ mod tests {
 
     /// `--endpoint` over a kept file that names another endpoint refuses the enrolment, naming
     /// both; where the two are the same, the run enrols with what the file says.
-    /// Verifies: ADR-0044
+    /// Verifies: ADR-0021
     #[test]
     fn an_endpoint_named_over_a_kept_file_that_names_another_refuses_the_enrolment() {
         let account = tempfile::tempdir().expect("account");

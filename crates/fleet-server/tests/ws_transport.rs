@@ -137,9 +137,9 @@ async fn a_config_change_is_pushed_without_the_agent_asking() {
     assert!(nothing.is_err(), "no redundant reconfiguration is pushed");
 }
 
-/// ADR-0032: the operator's role reaches the Agent in `AgentConfigObject.role`, verbatim, and a
+/// ADR-0031: the operator's role reaches the Agent in `AgentConfigObject.role`, verbatim, and a
 /// Configuration without one leaves the field unset.
-// Verifies: ADR-0032
+// Verifies: ADR-0031
 #[tokio::test]
 async fn a_configuration_role_reaches_the_agent_verbatim() {
     let server = spawn().await;
@@ -171,7 +171,7 @@ async fn a_configuration_role_reaches_the_agent_verbatim() {
 /// Each Deployment's Selector aims at a subset; every Configuration a Deployment holds is one named
 /// entry of the offered config map, and one Configuration may sit in several Deployments. An Agent
 /// whose Deployment did not change is left alone.
-/// Verifies: ADR-0049, G-9
+/// Verifies: ADR-0032, G-9
 #[tokio::test]
 async fn selectors_target_a_subset_and_compose_named_entries() {
     let server = spawn().await;
@@ -386,10 +386,10 @@ async fn a_duplicate_uid_on_a_second_connection_is_rekeyed() {
     panic!("the rekeyed clone never went down alone — or took the original with it");
 }
 
-/// Verifies: ADR-0048
+/// Verifies: ADR-0016
 #[tokio::test]
 async fn two_agents_share_one_connection() {
-    // The multiplexing provision of ADR-0048: n Agents over one connection, told apart by
+    // The multiplexing provision of ADR-0016: n Agents over one connection, told apart by
     // instance_uid alone.
     let server = spawn().await;
     let mut socket = connect(server.addr).await;
@@ -509,7 +509,7 @@ async fn a_session_past_its_burst_is_answered_unavailable_with_retry_info() {
 /// work. A session is told why it ends — the close code for a server going away — and it is over,
 /// its Agent marked disconnected, by the time `serve` returns.
 ///
-/// Verifies: ADR-0012, ADR-0052
+/// Verifies: ADR-0012, ADR-0029
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shutdown_closes_the_websocket_sessions_before_serve_returns() {
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -570,10 +570,10 @@ async fn forget_once_silent(server: &support::TestServer, uid: &InstanceUid) {
     }
 }
 
-/// Forgetting an Agent that went quiet ends its session (ADR-0052 clause 10): the socket that
+/// Forgetting an Agent that went quiet ends its session (ADR-0029 clause 10): the socket that
 /// carried it alone is closed, normally and saying why, and one that carries other Agents as well,
 /// as a Gateway's does, stays open and serves them.
-/// Verifies: ADR-0052
+/// Verifies: ADR-0029
 #[tokio::test]
 async fn forgetting_an_agent_ends_its_session() {
     // A zero budget makes an Agent silent once the clock passes its last report.
@@ -619,7 +619,7 @@ async fn forgetting_an_agent_ends_its_session() {
 
 /// A message that arrives while the instance's lease is lapsed by its clock — after a suspend of
 /// its host, before it has closed its listeners — is not answered; the one before was.
-/// Verifies: ADR-0045
+/// Verifies: ADR-0025
 #[tokio::test]
 async fn a_message_is_not_answered_while_the_lease_is_lapsed_by_its_clock() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -658,7 +658,7 @@ async fn a_message_is_not_answered_while_the_lease_is_lapsed_by_its_clock() {
 
 /// A push that falls due while the instance's lease is lapsed by its clock is not sent: a restart
 /// requested then stays queued for an instance that holds a lease.
-/// Verifies: ADR-0045
+/// Verifies: ADR-0025
 #[tokio::test]
 async fn nothing_is_pushed_while_the_lease_is_lapsed_by_its_clock() {
     use std::sync::atomic::{AtomicU64, Ordering};

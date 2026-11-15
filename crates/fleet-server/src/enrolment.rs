@@ -1,4 +1,4 @@
-//! Enrolment: how a host gets its first client certificate (ADR-0040 clause 17, ADR-0023 clause 8
+//! Enrolment: how a host gets its first client certificate (ADR-0026 clause 17, ADR-0023 clause 8
 //! and ADR-0027 clauses 9 and 10).
 //!
 //! A host enrols with a bootstrap certificate from a CA of its own. Such a connection is admitted
@@ -52,8 +52,8 @@ pub struct Request {
     pub instance_uid: Vec<u8>,
 }
 
-/// Who asked: the bootstrap certificate the request proves (ADR-0048 clause 22), and from where — the
-/// peer address of an enrolment connection, or the Gateway's host it came through (ADR-0048
+/// Who asked: the bootstrap certificate the request proves (ADR-0016 clause 22), and from where — the
+/// peer address of an enrolment connection, or the Gateway's host it came through (ADR-0016
 /// clause 11).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -228,7 +228,7 @@ pub enum DecisionError {
     NotFound,
     /// The bootstrap certificate the request came with is revoked; the request is withdrawn.
     Revoked,
-    /// The bootstrap certificate's subject cannot be carried into a host certificate (ADR-0048
+    /// The bootstrap certificate's subject cannot be carried into a host certificate (ADR-0016
     /// clause 23); the text names the attribute. Nothing is signed.
     Subject(String),
     /// The CA could not sign the request.
@@ -320,7 +320,7 @@ pub enum Took {
 /// filesystem adapter ([`FsEnrolmentStore`](crate::fs::FsEnrolmentStore)) keeps them in
 /// `enrolment.json`. Each act is one write that decides from what is stored, so the queue's bounds
 /// hold for every instance on one database
-/// (ADR-0045
+/// (ADR-0025
 /// clause 19). The acts' bodies here read and write the whole, for a store that is its only
 /// writer; a store that is shared answers each in one transaction of its own.
 pub trait EnrolmentStore: Send + Sync {
@@ -412,7 +412,7 @@ pub trait EnrolmentStore: Send + Sync {
     /// prepared (ADR-0023 clause 9). A request the store holds no longer waiting, or whose key it
     /// holds rejected, is answered [`Approval::NotWaiting`] before anything is signed, so of two
     /// instances approving one request one signs and records it and the other nothing
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 19). A store other instances share also refuses a request whose bootstrap
     /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
     /// leaves that to the list in memory. Such a store answers [`Approval::Deciding`] for a
@@ -517,7 +517,7 @@ pub trait EnrolmentStore: Send + Sync {
 
     /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
     /// `issuers`, and answers how many: what the revocation of a bootstrap certificate withdraws in
-    /// the queue every instance shares (ADR-0040 clause 28).
+    /// the queue every instance shares (ADR-0026 clause 28).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read or written.
@@ -925,7 +925,7 @@ impl Enrolment {
     /// Returns [`DecisionError::NotFound`] for an unknown, decided or expired id, and for a key
     /// that is rejected, here or in the store, [`DecisionError::Revoked`] when the request's
     /// bootstrap certificate is revoked, [`DecisionError::Subject`] when its subject cannot be
-    /// carried into the host certificate (ADR-0048 clause 23), [`DecisionError::Sign`] when the CA
+    /// carried into the host certificate (ADR-0016 clause 23), [`DecisionError::Sign`] when the CA
     /// or the register refuses the request, and [`DecisionError::Store`] when the decision could
     /// not be written; the request then still waits.
     ///
@@ -936,7 +936,7 @@ impl Enrolment {
     /// back: decided with the certificate signed here, the approval stands.
     ///
     /// The bootstrap certificate the request came with is checked against `revoked` under the same
-    /// lock that signs, so a revocation that lands before the approval always wins (ADR-0040
+    /// lock that signs, so a revocation that lands before the approval always wins (ADR-0026
     /// clause 28); such a request is withdrawn and answered [`DecisionError::Revoked`].
     pub fn approve(
         &self,
@@ -958,7 +958,7 @@ impl Enrolment {
             return Err(self.withdrawn(state, id));
         }
         // The bootstrap certificate's values, under the rules they were issued by, and never the
-        // request's (ADR-0027 clause 11 and ADR-0048 clause 23).
+        // request's (ADR-0027 clause 11 and ADR-0016 clause 23).
         let subject = entry.pending.requester.carried.clone().map_err(|e| {
             DecisionError::Subject(format!(
                 "the bootstrap certificate's subject cannot be carried into a host \
@@ -1184,7 +1184,7 @@ impl Enrolment {
     }
 
     /// Withdraws every waiting request whose bootstrap certificate `revoked` names, and answers how
-    /// many: a revoked certificate opens nothing, a request it carried included (ADR-0040
+    /// many: a revoked certificate opens nothing, a request it carried included (ADR-0026
     /// clause 28). A decided request is left: an approved one was signed and recorded already, and
     /// dropping it would revoke nothing — the connection of this certificate is refused, and only
     /// one holding the same key can collect it.
@@ -1212,7 +1212,7 @@ impl Enrolment {
 
     /// Withdraws every waiting request whose bootstrap certificate is `serial` under one of
     /// `issuers`, held here or by another instance in the store, and answers how many: what the
-    /// revocation of a bootstrap certificate does to the queue (ADR-0040 clause 28).
+    /// revocation of a bootstrap certificate does to the queue (ADR-0026 clause 28).
     pub fn withdraw_revoked(&self, issuers: &[String], serial: &str) -> usize {
         let named =
             |bootstrap: &CertId| bootstrap.serial == serial && issuers.contains(&bootstrap.issuer);
@@ -1256,7 +1256,7 @@ impl Enrolment {
     }
 
     /// Reads the window and its queue again from the store, as another instance changed them
-    /// (ADR-0045
+    /// (ADR-0025
     /// clauses 9 and 10), and wakes every connection waiting on them, so a request another instance
     /// approved is handed to the connection that asked. It reads under the lock, so no act of this
     /// instance's own lands between the read and the swap; the queue is bounded, so the read is
@@ -1566,7 +1566,7 @@ pub(crate) mod tests {
     /// Two instances on one store answer a request as the store holds it: one the other approved
     /// is handed out with its certificate, and one the other decided or withdrew is not found,
     /// however the first held it, and signs nothing.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[test]
     fn two_instances_on_one_store_answer_a_request_as_the_store_holds_it() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1786,7 +1786,7 @@ pub(crate) mod tests {
 
     /// A decision on a request another instance is deciding at this moment is answered so, and
     /// decides nothing: the request still waits here, to be decided once asked again.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[test]
     fn a_decision_on_a_request_another_instance_is_deciding_is_answered_so() {
         #[derive(Clone, Default)]
@@ -1824,7 +1824,7 @@ pub(crate) mod tests {
         assert!(!enrolment.is_rejected("a"));
     }
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn the_window_is_closed_by_default_and_bounded() {
         let (enrolment, clock) = enrolment();
@@ -1841,7 +1841,7 @@ pub(crate) mod tests {
         assert!(!enrolment.is_open(), "the window closes on its own");
     }
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn a_request_waits_for_an_operator_and_is_answered_once_decided() {
         let (enrolment, _) = enrolment();
@@ -1888,7 +1888,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn closing_the_window_expires_every_request() {
         let (enrolment, clock) = enrolment();
@@ -1905,7 +1905,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn the_queue_is_bounded() {
         let (enrolment, _) = enrolment();
@@ -2017,7 +2017,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn a_request_whose_bootstrap_certificate_is_revoked_is_withdrawn_unsigned() {
         let (enrolment, _clock) = enrolment();
@@ -2082,7 +2082,7 @@ pub(crate) mod tests {
         assert_eq!(enrolment.pending().len(), 1, "the request still waits");
     }
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn withdrawing_takes_only_the_waiting_requests_of_a_revoked_certificate() {
         let (enrolment, _clock) = enrolment();

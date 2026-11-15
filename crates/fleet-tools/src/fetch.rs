@@ -1,5 +1,5 @@
 //! `opamp-fleetctl package fetch` — turns an agent release into package artifacts this fleet can
-//! install, and optionally uploads them (ADR-0050, ADR-0053).
+//! install, and optionally uploads them (ADR-0033, ADR-0036).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
@@ -12,11 +12,11 @@
 //! Two rules shape what it produces:
 //!
 //! - **As published wherever possible.** An artifact that reaches the fleet unaltered is one whose
-//!   SHA-256 an operator can compare against the release page, and ADR-0050's line from author to
+//!   SHA-256 an operator can compare against the release page, and ADR-0033's line from author to
 //!   host stays unbroken. Every artifact is verified against the checksum *upstream* published
 //!   before anything else happens to it.
 //! - **Repacked only where it must be.** An agent whose upstream publishes no archive a Client can
-//!   install is repacked deterministically, from its own tree alone (ADR-0053). That is the one
+//!   install is repacked deterministically, from its own tree alone (ADR-0036). That is the one
 //!   place the bytes change, and the tool says so.
 //!
 //! Interactive by default; every prompt has a flag, so the same tool serves a pipeline:
@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 /// one turns out badly, few enough to read without scrolling.
 const SERIES_SHOWN: usize = 3;
 
-/// The member cap a tree package is held to (ADR-0050). Checked while packing rather than
+/// The member cap a tree package is held to (ADR-0033). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
 #[allow(
     dead_code,
@@ -73,7 +73,7 @@ pub struct Args {
     /// Which repack of this version it is, for an agent whose artifact this tool repacks: 1, the
     /// default, for the first, 2 and on for a later one of the same version. The second repack of
     /// 2.14.3 is uploaded as Package `2.14.4-0.r.2`, above the first and below upstream's next
-    /// release (ADR-0053 clause 28).
+    /// release (ADR-0036 clause 28).
     #[arg(long, value_name = "N", default_value_t = 1)]
     repack: u32,
 }
@@ -95,7 +95,7 @@ enum AgentKind {
 
 /// Everything that differs between one upstream project and the next, in one place.
 struct Source {
-    /// The Agent type a Supervisor reports and a package Set is built for (ADR-0050) — also this
+    /// The Agent type a Supervisor reports and a package Set is built for (ADR-0033) — also this
     /// tool's default package name.
     service_name: &'static str,
     /// The GitHub repository whose tags name the versions.
@@ -115,7 +115,7 @@ impl AgentKind {
             },
             // This repository's own releases. The Client is an Agent like any other (ADR-0019), so
             // the artifact that updates it is fetched the way every other agent's is — and by
-            // ADR-0039 it is named and packed like one too, which is what makes that possible.
+            // ADR-0038 it is named and packed like one too, which is what makes that possible.
             AgentKind::Supervisor => Source {
                 service_name: "supervisor",
                 repo: "mbrigl/opamp-fleet",
@@ -139,7 +139,7 @@ impl AgentKind {
     }
 
     /// What each project puts in front of the version in its tags: `v`, the `version/` this
-    /// project's release workflow creates them under (ADR-0038).
+    /// project's release workflow creates them under (ADR-0037).
     fn tag_prefix(self) -> &'static str {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib => "v",
@@ -155,7 +155,7 @@ impl AgentKind {
 
     /// What one upstream version is called on each side: the tag it is fetched under, in
     /// upstream's own spelling, and the Package version it is uploaded as, written as SemVer
-    /// (ADR-0035 clause 6) — `1.19` is fetched as `v1.19` and becomes Package `1.19.0`.
+    /// (ADR-0034 clause 6) — `1.19` is fetched as `v1.19` and becomes Package `1.19.0`.
     ///
     /// # Errors
     /// Returns the message to print when upstream's number cannot be written as SemVer.
@@ -165,7 +165,7 @@ impl AgentKind {
 
     /// Whether this tool repacks the agent's artifact, rather than uploading it as upstream
     /// publishes it: only then can one version have a later repack
-    /// (ADR-0053 clause 28).
+    /// (ADR-0036 clause 28).
     fn repacked(self) -> bool {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
@@ -221,7 +221,7 @@ impl AgentKind {
     /// they agree with the `[[supervisor]]` blocks in `config/supervisor.toml` down to the file names.
     fn default_configurations(self) -> &'static [DefaultConfiguration] {
         // Each is stated for the `service.name` its Collector reports, so a Deployment holding it
-        // fits it to that Agent type alone (ADR-0049); the Deployment's Selector does the aiming.
+        // fits it to that Agent type alone (ADR-0032); the Deployment's Selector does the aiming.
         match self {
             AgentKind::Otelcol => &[DefaultConfiguration {
                 name: "otelcol-conf",
@@ -234,14 +234,14 @@ impl AgentKind {
                 body: include_str!("../../../config/examples/otelcol-contrib-conf.yaml"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
-            // deliberately does not own (ADR-0051 admits only `[[supervisor]]` blocks), and none
+            // deliberately does not own (ADR-0018 admits only `[[supervisor]]` blocks), and none
             // of it has a default this tool could put on a Server.
             AgentKind::Supervisor => &[],
         }
     }
 }
 
-/// An upstream version written as a Package version (ADR-0035 clause 6): a number with fewer than
+/// An upstream version written as a Package version (ADR-0034 clause 6): a number with fewer than
 /// three numeric components is completed with `.0` (`1.19` becomes `1.19.0`), and a leading zero
 /// is dropped from a numeric component (`24.04.1` becomes `24.4.1`). Both keep upstream's order.
 ///
@@ -260,11 +260,11 @@ fn package_version(upstream: &str) -> Result<String, String> {
 }
 
 /// The Package version of the `repack`-th repack of one upstream version, whose Package version
-/// is `version` (ADR-0053 clause 28). The first is the version
+/// is `version` (ADR-0036 clause 28). The first is the version
 /// itself. A later one is `<major>.<minor>.<patch+1>-0.r.<n>`: a pre-release of the next patch, so
 /// it orders above the first repack and below upstream's next release, and its repack number is a
 /// numeric identifier, compared as a number. Build metadata would not do, since two versions that
-/// differ only in it compare equal (ADR-0035 clause 2), and the program keeps reporting the
+/// differ only in it compare equal (ADR-0034 clause 2), and the program keeps reporting the
 /// version it is, which the Server offers a Package only above.
 ///
 /// # Errors
@@ -316,7 +316,7 @@ struct DefaultConfiguration {
     /// The Configuration's name — also the file name its entry gets in the Supervisor's config
     /// directory, which is what the `[[supervisor]]` block has to name.
     name: &'static str,
-    /// The Agent type this is for (ADR-0049 clause 4); empty is every type.
+    /// The Agent type this is for (ADR-0032 clause 4); empty is every type.
     service_name: &'static str,
     body: &'static str,
 }
@@ -329,7 +329,7 @@ struct Download {
 
 /// One platform's artifact, planned before anything is downloaded.
 struct Plan {
-    /// The platform as *this fleet* names it (ADR-0050), which is what the upload path carries.
+    /// The platform as *this fleet* names it (ADR-0033), which is what the upload path carries.
     os: String,
     arch: String,
     /// What has to be fetched. Every one of them is verified before any of them is used.
@@ -342,7 +342,7 @@ struct Plan {
     /// what `[packages] self_update` has to say, since nothing supervises that one. Printed at the end,
     /// because it is the next thing an operator needs.
     ///
-    /// For a **wrapped** agent it is the `type` alone (ADR-0051): the Client's kind knows the
+    /// For a **wrapped** agent it is the `type` alone (ADR-0018): the Client's kind knows the
     /// program's name, where it sits in the tree, and how it is invoked, so this tool dictates no
     /// line for a host to transcribe. Those facts live in that agent's artifact document under
     /// `docs/artifacts/`, which the kind's own tests pin — the two ends of one artifact, kept in
@@ -368,13 +368,13 @@ enum ChecksumSource {
 /// What happens between the download and the artifact.
 enum Action {
     /// Nothing. The artifact is uploaded exactly as upstream published it, so the hash the fleet
-    /// verifies is the hash on the release page (ADR-0050).
+    /// verifies is the hash on the release page (ADR-0033).
     AsPublished,
 }
 
 impl Action {
     /// Whether the artifact is this tool's repack rather than what upstream published: every
-    /// action but [`AsPublished`](Self::AsPublished) is a kind's repack (ADR-0053).
+    /// action but [`AsPublished`](Self::AsPublished) is a kind's repack (ADR-0036).
     fn repacks(&self) -> bool {
         !matches!(self, Action::AsPublished)
     }
@@ -392,7 +392,7 @@ struct Release<'a> {
     )]
     tag: &'a str,
     /// The Package version the artifacts are uploaded as, a later repack's included — what a
-    /// repacked artifact is named by (ADR-0035 clause 6).
+    /// repacked artifact is named by (ADR-0034 clause 6).
     #[allow(dead_code, reason = "a kind that repacks names its artifact by it")]
     package_version: &'a str,
     /// The release's assets as `(name, url)`, empty for an agent that does not need them.
@@ -509,7 +509,7 @@ pub async fn run(args: Args) -> Result<(), String> {
             version = package_version
         );
         // Silent for an agent that has none — the Client's own configuration is its host's
-        // (ADR-0051), so there is nothing here to offer and nothing to apologise for.
+        // (ADR-0018), so there is nothing here to offer and nothing to apologise for.
         if !agent.default_configurations().is_empty() {
             eprintln!(
                 "  The default configuration ({}) is not uploaded either; an upload puts it there \
@@ -614,7 +614,7 @@ fn select_platforms<'p>(available: &'p [Plan], wanted: &[String]) -> Result<Vec<
                     .split_once('/')
                     .ok_or_else(|| format!("{w:?} is not an os/arch pair"))?;
                 // Folded as an asset's platform is, so the words an operator knows pick the
-                // artifact the menu names canonically (ADR-0050 clause 6).
+                // artifact the menu names canonically (ADR-0033 clause 6).
                 let os = fleet_core::platform::os_token(os)?;
                 let arch = fleet_core::platform::arch_token(arch)?;
                 available
@@ -806,7 +806,7 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
 }
 
 /// The platform an asset named `<prefix><os>_<arch>.tar.gz` is for, folded by the table an Agent's
-/// report and the Server's store fold through (ADR-0050 clause 6) — or `None` when the name has
+/// report and the Server's store fold through (ADR-0033 clause 6) — or `None` when the name has
 /// another shape or a token that cannot be canonical.
 fn platform_of(name: &str, prefix: &str) -> Option<(String, String)> {
     let (os, arch) = name
@@ -832,7 +832,7 @@ const SUPERVISOR_PLATFORMS: [(&str, &str); 5] = [
 ];
 
 /// This fleet's own Client, as its release publishes it: one `.tar.gz` per platform named
-/// `supervisor_<version>_<os>_<arch>` (ADR-0039), holding the binary under the name it is installed
+/// `supervisor_<version>_<os>_<arch>` (ADR-0038), holding the binary under the name it is installed
 /// as. Nothing is repacked — the artifact *is* the package, which is the point of packing the
 /// release with this project's own packer.
 ///
@@ -1002,13 +1002,13 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 }
 
 /// Packs a directory as a `.tar.gz` a Client can install as a tree — deterministically, with every
-/// link resolved, and with nothing from outside the tree (ADR-0053).
+/// link resolved, and with nothing from outside the tree (ADR-0036).
 ///
 /// Determinism is not tidiness: the fleet decides whether to distribute by content hash, so an
 /// artifact that differed by when it was packed would be a rollout nobody asked for. Times, owners
 /// and order are therefore fixed, exactly as `package pack` fixes them for one file.
 ///
-/// Links are resolved rather than carried because a tree package refuses them (ADR-0050): what a
+/// Links are resolved rather than carried because a tree package refuses them (ADR-0033): what a
 /// link names is not where it sits, which is the one thing a path check cannot judge. A link is
 /// resolved inside the tree alone, and one that leads out of it fails the pack before anything is
 /// written: following it would put the operator's own files into an artifact the operator then
@@ -1017,7 +1017,7 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 /// pointing at nothing inside the tree is dropped.
 ///
 /// The one exception is `kept`, the absolute links the kind names by their exact path in the tree
-/// and their exact target (ADR-0053 clause 27): each is packed
+/// and their exact target (ADR-0036 clause 27): each is packed
 /// as that link, read from the tree and never followed, and the Client creates exactly those. A
 /// link at a named path with another target leads out like any other.
 #[allow(
@@ -1354,7 +1354,7 @@ fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, S
     })
 }
 
-/// The mode to store, normalized (ADR-0053 clause 27):
+/// The mode to store, normalized (ADR-0036 clause 27):
 /// `0o755` for a file any execute bit is set on, `0o644` for every other, so no write bit beyond
 /// the owner's and no setuid, setgid or sticky bit upstream set reaches the signed artifact. Off
 /// Unix it is a decision rather than a reading: a tar written on Windows has no mode to carry, and
@@ -1383,8 +1383,8 @@ fn mode_of(meta: &std::fs::Metadata) -> u32 {
 // ── The Server ──────────────────────────────────────────────────────────────
 
 /// Creates the Set if it is not there and stores this platform's artifact as its entry
-/// (ADR-0050). Nothing is distributed by either call: a Set reaches an Agent only through a
-/// rollout act (ADR-0049), which stays the operator's.
+/// (ADR-0033). Nothing is distributed by either call: a Set reaches an Agent only through a
+/// rollout act (ADR-0032), which stays the operator's.
 async fn upload(
     client: &reqwest::Client,
     server: &str,
@@ -1425,8 +1425,8 @@ async fn upload(
 ///
 /// Two rules keep it from being a surprise. **An existing Configuration is never touched** — the
 /// name is asked for first, and one that answers is left exactly as the operator left it, edits and
-/// all. And **nothing is distributed**: saving only saves (ADR-0049), and a Configuration reaches an
-/// Agent only through a Deployment that holds it (ADR-0049), so the default reaches no Agent until
+/// all. And **nothing is distributed**: saving only saves (ADR-0032), and a Configuration reaches an
+/// Agent only through a Deployment that holds it (ADR-0032), so the default reaches no Agent until
 /// an operator reads it, puts it into a Deployment and presses that Deployment's rollout. That
 /// matters here, because these bodies are starting points with example values in them — a parent
 /// host to correct, a plugin path to confirm.
@@ -1484,8 +1484,8 @@ async fn put_json(client: &reqwest::Client, url: &str, body: String) -> Result<(
 /// Why an upload never came back with a status.
 ///
 /// The Server refuses some uploads *before* it reads a byte of the body — an identity nobody
-/// created, a Set already assigned and therefore immutable (ADR-0049), a store at its ceiling
-/// (ADR-0050). With hundreds of megabytes already in flight and no `Expect: 100-continue` to hold
+/// created, a Set already assigned and therefore immutable (ADR-0032), a store at its ceiling
+/// (ADR-0033). With hundreds of megabytes already in flight and no `Expect: 100-continue` to hold
 /// them back — HTTP's own remedy for exactly this, which this client does not speak — that
 /// response races the upload, the connection resets, and what arrives here is a transport error
 /// carrying no status at all. Reporting it as "cannot reach" would name the one thing that is not
@@ -1690,8 +1690,8 @@ mod tests {
     /// A later repack of one version is numbered as a pre-release of the next patch, so it orders
     /// above the first repack and below upstream's next release, its repack number compared as a
     /// number; the first keeps the version
-    /// (ADR-0053 clause 28).
-    /// Verifies: ADR-0053
+    /// (ADR-0036 clause 28).
+    /// Verifies: ADR-0036
     #[test]
     fn a_later_repack_orders_between_the_version_and_the_next_release() {
         use std::cmp::Ordering;
@@ -1775,9 +1775,9 @@ mod tests {
     }
 
     /// Upstream `1.19` is fetched under its own tag and named Package `1.19.0`, and a number that
-    /// cannot be written as SemVer is refused, naming it (ADR-0035 clause 6). How a number is
+    /// cannot be written as SemVer is refused, naming it (ADR-0034 clause 6). How a number is
     /// written is tested with `fleet_core::version::written_as_semver`.
-    /// Verifies: ADR-0035
+    /// Verifies: ADR-0034
     #[test]
     fn fetch_names_the_package_in_semver_and_fetches_upstreams_tag() {
         assert_eq!(
@@ -1853,8 +1853,8 @@ mod tests {
     /// An asset's platform folds through the one table both ends read, so a fetched artifact is
     /// stored under the Platform an Agent reports. A token the table has never heard of passes
     /// through, as the Server keeps it, and only one that cannot be a canonical token is passed
-    /// over (ADR-0050 clause 6).
-    /// Verifies: ADR-0050
+    /// over (ADR-0033 clause 6).
+    /// Verifies: ADR-0033
     #[test]
     fn an_asset_platform_folds_through_the_core_table() {
         let platform = |name: &str| platform_of(name, "otelcol_1.0.0_");
@@ -1883,8 +1883,8 @@ mod tests {
     }
 
     /// A platform asked for with `--platform` folds through the same table as an asset's, so
-    /// `macos/x86_64` picks the artifact the menu lists as `darwin/amd64` (ADR-0050 clause 6).
-    /// Verifies: ADR-0050
+    /// `macos/x86_64` picks the artifact the menu lists as `darwin/amd64` (ADR-0033 clause 6).
+    /// Verifies: ADR-0033
     #[test]
     fn a_platform_asked_for_folds_through_the_core_table() {
         let assets = vec![asset("otelcol_0.158.0_darwin_amd64.tar.gz")];
@@ -1938,9 +1938,9 @@ mod tests {
     }
 
     /// The release also carries the operator tool's archives, named like the Client's
-    /// (ADR-0053 clause 3); they are selected by stem, never by version and platform alone, so none
-    /// of them becomes the `supervisor` Package's entry for its platform (ADR-0039 clause 5).
-    // Verifies: ADR-0053
+    /// (ADR-0036 clause 3); they are selected by stem, never by version and platform alone, so none
+    /// of them becomes the `supervisor` Package's entry for its platform (ADR-0038 clause 5).
+    // Verifies: ADR-0036
     #[test]
     fn the_supervisor_passes_over_the_operator_tools_archives() {
         let assets = vec![
@@ -1954,7 +1954,7 @@ mod tests {
         assert_eq!(names, ["supervisor_1.2.3_linux_amd64.tar.gz"]);
     }
 
-    /// This project's own release is fetched like any other agent's (ADR-0039): the `.tar.gz` per
+    /// This project's own release is fetched like any other agent's (ADR-0038): the `.tar.gz` per
     /// platform is the package, the installers beside it are not, and the one `SHA256SUMS` the
     /// publish job writes is what every artifact is verified against.
     #[test]
@@ -2020,7 +2020,7 @@ mod tests {
             );
         }
 
-        // Nothing to seed beside it: the Client's configuration is its host's (ADR-0051).
+        // Nothing to seed beside it: the Client's configuration is its host's (ADR-0018).
         assert!(AgentKind::Supervisor.default_configurations().is_empty());
     }
 
@@ -2054,7 +2054,7 @@ mod tests {
     /// names left which one to directory-read order. A cycle is still not followed, and a link
     /// pointing at nothing is dropped.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang() {
@@ -2098,7 +2098,7 @@ mod tests {
     /// the root is the first ancestor of the walk, so a link right under it to `..` or to the root
     /// packs no second copy of the tree; each such link is packed as an empty directory.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_link_to_the_root_is_not_followed() {
@@ -2161,7 +2161,7 @@ mod tests {
     /// exception. The error names each such link by its path in the tree and its target, quoted,
     /// in the order of their paths, and only those.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_link_out_of_the_tree_fails_the_repack_naming_it() {
@@ -2222,7 +2222,7 @@ mod tests {
     /// A name from upstream reaches the operator's terminal quoted and escaped, so a control
     /// character in it cannot rewrite what the operator reads.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_link_out_of_the_tree_is_named_escaped() {
@@ -2249,7 +2249,7 @@ mod tests {
     /// read from outside the tree, so either, and a link to one, fails it, named, before anything
     /// is written.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_member_that_is_neither_file_nor_directory_fails_the_repack() {
@@ -2281,7 +2281,7 @@ mod tests {
     /// names far more than 10 000 members, and the repack stops at the cap instead of walking
     /// them all — without the bound, this walk would not end in any time a test waits.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_tree_whose_links_multiply_it_stops_at_the_member_cap() {
@@ -2308,7 +2308,7 @@ mod tests {
     /// A repack that fails while it writes takes back what it wrote, since half an artifact is one
     /// somebody might sign. A member the walk saw but that cannot be read is the failure here.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_repack_that_fails_while_writing_leaves_no_artifact() {
@@ -2337,7 +2337,7 @@ mod tests {
     /// through other links on the way, and one that names nothing inside the tree is dropped —
     /// however it climbs, as long as it does not climb out.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_link_inside_the_tree_is_packed_under_its_name() {
@@ -2399,7 +2399,7 @@ mod tests {
     /// A link the kind names by its exact path and target is packed as that link, never followed,
     /// and a Client installing the tree with the same kind creates it.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_link_the_kind_keeps_is_packed_as_that_link() {
@@ -2453,7 +2453,7 @@ mod tests {
     /// kind naming it, the named path with another target, an unnamed absolute link beside a kept
     /// one, and the kept link reached through a linked directory under another name.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_link_the_kind_does_not_keep_still_fails_the_repack() {
@@ -2499,7 +2499,7 @@ mod tests {
     /// A repack stores normalized modes: a file with any execute bit `0o755`, every other file
     /// `0o644`, a directory `0o755` — whatever write, setuid, setgid or sticky bits upstream set.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn a_repack_stores_normalized_modes() {
@@ -2554,7 +2554,7 @@ mod tests {
     /// The bytes of a repack are the tree's alone: the same tree packed twice, and a copy of it
     /// packed from elsewhere on the host, give the same artifact.
     ///
-    /// Verifies: ADR-0053
+    /// Verifies: ADR-0036
     #[cfg(unix)]
     #[test]
     fn the_same_tree_repacks_to_the_same_bytes() {
@@ -2610,7 +2610,7 @@ mod tests {
         );
     }
 
-    /// An upload the Server refuses before it reads the body — an assigned Set (ADR-0049), an
+    /// An upload the Server refuses before it reads the body — an assigned Set (ADR-0032), an
     /// unknown identity, a full store — leaves the operator with a transport error and no status:
     /// the refusal races a body already in flight and loses. What the operator must still be told
     /// is *why the Server said no*, never "cannot reach" about a Server that answered.
@@ -2706,7 +2706,7 @@ mod tests {
     /// Every *supervised* agent this tool can fetch carries a default Configuration, and each one
     /// is storable: the name follows the ADR-0020 grammar the Server enforces (which admits no dot,
     /// so no file extension), the body is not empty (the Server refuses an empty one), and it is
-    /// stated for its Agent type, so a Deployment holding it fits it to that type alone (ADR-0049).
+    /// stated for its Agent type, so a Deployment holding it fits it to that type alone (ADR-0032).
     ///
     /// This is the test that fails when a variant is added and its default is forgotten, which is
     /// the only way an agent could reach a Server with a package and nothing to run. The Client's
@@ -2718,7 +2718,7 @@ mod tests {
             let service_name = agent.source().service_name;
             if matches!(agent, AgentKind::Supervisor) {
                 // The one package nothing supervises. A Client reads `supervisor.toml` on its own
-                // host, and the fleet owns only the `[[supervisor]]` half of it (ADR-0051), so
+                // host, and the fleet owns only the `[[supervisor]]` half of it (ADR-0018), so
                 // there is no body this tool could put on a Server — and an offer needs none: the
                 // consent that admits this package is already in that file (ADR-0019).
                 assert!(

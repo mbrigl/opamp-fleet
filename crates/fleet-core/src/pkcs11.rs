@@ -1,5 +1,5 @@
 //! What the Server's token adapter and the operator program's alike do on a PKCS#11 token
-//! (ADR-0043, ADR-0053 clause 5), with `cryptoki`: the module loaded once per process, the slot of
+//! (ADR-0026, ADR-0036 clause 5), with `cryptoki`: the module loaded once per process, the slot of
 //! a token found by its label, the user logged in, the curve P-256 named as a key's
 //! `CKA_EC_PARAMS`, its point read, and the `r || s` a token signs with `CKM_ECDSA` written as the
 //! DER X.509 carries. Each program names its own setting in what it reports; the Server's pool of
@@ -158,7 +158,7 @@ mod tests {
 
     /// A P-256 `r || s` becomes the DER X.509 carries, a high bit padded with a zero and leading
     /// zeros dropped.
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0026
     #[test]
     fn a_raw_signature_becomes_der() {
         let mut raw = [0u8; 64];
@@ -174,7 +174,7 @@ mod tests {
     }
 
     /// The point is read with or without the `OCTET STRING` around it.
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0026
     #[test]
     fn the_point_is_read_wrapped_or_bare() {
         let mut bare = vec![0x04];

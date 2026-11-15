@@ -9,9 +9,7 @@ a store several instances share needs, each with a default for the store one Ser
 `fleet.rs`, 4 in `fleet/held.rs` and 4 in `fleet/placement.rs`.
 
 **Idea.** A narrower port that only the PostgreSQL store implements, which `AppState` holds where
-there is one. It supersedes ADR-0052 clause 2, which the backlog entry
-`the-next-normalization-restates-the-audit-record-and-the-enforcement.md` also rewords. The human
-parked it.
+there is one. It supersedes ADR-0029 clause 2. The human parked it.
 
 **Effort.** L.
 

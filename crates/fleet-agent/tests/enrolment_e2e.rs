@@ -1,4 +1,4 @@
-//! Enrolment and the renewals after it, end to end (ADR-0040 clauses 8 and 10 and ADR-0027 clauses 9 and 10): the real
+//! Enrolment and the renewals after it, end to end (ADR-0026 clauses 8 and 10 and ADR-0027 clauses 9 and 10): the real
 //! Client binary enrols with a bootstrap certificate over mutual TLS, an operator approves its
 //! request, and it renews what it was issued — each step costing the register exactly one
 //! certificate.
@@ -38,14 +38,14 @@ async fn past(state: &AppState, after: u64) {
 /// A host enrols with a bootstrap certificate and an operator's approval, and then renews, over the
 /// WebSocket transport: the approval issues one certificate and the renewal one more. The request
 /// proves the bootstrap certificate it is queued under.
-/// Verifies: ADR-0040, ADR-0048
+/// Verifies: ADR-0026, ADR-0016
 #[tokio::test]
 async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_websocket() {
     enrol_and_renew("wss").await;
 }
 
 /// The same over plain HTTP polling.
-/// Verifies: ADR-0040, ADR-0048
+/// Verifies: ADR-0026, ADR-0016
 #[tokio::test(flavor = "multi_thread")]
 async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_http() {
     enrol_and_renew("https").await;
@@ -53,7 +53,7 @@ async fn an_enrolment_and_a_renewal_each_issue_one_certificate_over_http() {
 
 /// With heartbeats off, the request still reaches the queue at once: it never waits for a message
 /// that would carry it, and the certificate is pushed to the host on approval.
-/// Verifies: ADR-0040
+/// Verifies: ADR-0026
 #[tokio::test]
 async fn an_enrolment_needs_no_heartbeat() {
     let served = Served::start(60).await;
@@ -247,7 +247,7 @@ async fn enrol_and_renew(scheme: &str) {
             .map(|pending| pending.id.clone())
     })
     .await;
-    // The request proves the bootstrap certificate it was queued under (ADR-0048).
+    // The request proves the bootstrap certificate it was queued under (ADR-0016).
     let csr = std::fs::read(state_dir.join(fleet_agent::tls::PENDING_CSR_FILE)).expect("csr");
     assert!(
         fleet_core::csr::requested_uri(

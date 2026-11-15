@@ -9,7 +9,9 @@
 
 A host becomes a Host by enrolment: it presents a bootstrap certificate, files a CSR, and waits
 until an operator approves it. Admission itself is by the client certificate the Server issues
-then ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)). This ADR governs the
+then
+([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+This ADR governs the
 bootstrap certificate from its issue to the host certificate it leads to, and the install that
 carries it onto a host.
 
@@ -84,13 +86,13 @@ find the bootstrap identity beside its program and enrol with it.
    `400`, naming it, so every Host has a customer and a site its Selectors can rely on. The other
    four are optional. Each may appear at most once. A key outside this set is answered `400`. The
    Server sets the common name by the rule of the fleet's certificate names
-   ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)), and the operator never does. The
+   ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)), and the operator never does. The
    order in the subject is C, ST, L, O, OU, organizationIdentifier, CN. The values describe and
    select through the effective description; they authorize nothing.
 
 2. **A bootstrap certificate's subject is the operator's choice per issue, and the host certificate
    carries it.** The common name of a bootstrap certificate follows the rule of the fleet's
-   certificate names ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)). Its other
+   certificate names ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)). Its other
    attributes are what the issuing request names (clause 1), not the bootstrap CA's; the
    organization behind the CA is read from its issuer. A host certificate carries the bootstrap
    certificate's values (clause 12, and the approval's copy of them in
@@ -100,11 +102,12 @@ find the bootstrap identity beside its program and enrol with it.
    `POST /api/v1/bootstrap-certificates` with a JSON body
    `{"subject": {…}, "validity_days": n, "password": "…"}` (`Content-Type: application/json`, as
    `POST /api/v1/revocations`; `validity_days` as
-   [ADR-0037](0037-the-operator-program-opamp-fleetctl.md) clause 14 bounds it), `password` required
+   [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clause 14 bounds it), `password` required
    — a request without it is answered `400`, naming it — makes a fresh ECDSA P-256 key and signs a
    certificate with the bootstrap CA's key. The certificate is `CA:FALSE`, `digitalSignature`,
    `clientAuth`, with a 16-byte random serial
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) and no subject alternative
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+   and no subject alternative
    name. The Server makes the PKCS#12 file of clause 4, records and keeps it as the record of issued
    bootstrap certificates states
    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
@@ -112,7 +115,7 @@ find the bootstrap identity beside its program and enrol with it.
    no `private_key_pem`. The key exists in plaintext only in the Server's memory while it issues; it
    leaves the Server only inside that file. A host that needs the pair as PEM takes it out of the
    file with `opamp-fleetctl pki p12-extract`
-   ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)).
+   ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)).
 
 4. **The file.** A `bootstrap.p12` holds one private key and the one bootstrap certificate it
    belongs to, and nothing else: neither the bootstrap CA, nor the server CA, nor any other
@@ -125,7 +128,7 @@ find the bootstrap identity beside its program and enrol with it.
    issued; a file issued before opens with the password it was issued under. The password is not
    stored, logged or audited anywhere, on the Server or on the host. It reaches the Server on the
    Operator plane, which beyond the loopback serves TLS only
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 
 6. **The server CA stays a file of its own.** `server-ca.pem` is the trust anchor written as
    `[tls] ca_file` and kept for every later connection and renewal, while the bootstrap identity
@@ -138,12 +141,13 @@ find the bootstrap identity beside its program and enrol with it.
    certificate whose revocation is on the list, and answers `204`. It answers `409` for a
    certificate that is not revoked — revoke it first — and `404` for a serial the record does not
    hold. It touches the revocation list not at all: the certificate stays refused at the handshake
-   for as long as it is valid ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+   for as long as it is valid
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
    A request that still carries it is shown as *not issued here*, as one with a certificate made
    elsewhere is. Lifting the revocation of a deleted certificate is still possible through
    `DELETE /api/v1/revocations/{id}` and lets it enrol again; the record does not list it again.
    The route is cross-site protected as every changing route of the plane is
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 
 8. **The Enrolments tab issues, lists, revokes and deletes bootstrap certificates.**
    - The tab issues one through the route of clause 3, with clause 1's six fields, the validity and
@@ -167,7 +171,8 @@ find the bootstrap identity beside its program and enrol with it.
 9. **An enrolment connection may only send a CSR, the CSR waits for an operator, and one bootstrap
    certificate holds at most a share of the queue.** It is admitted only while the window is open;
    outside a window it is answered `503`, which the throttle of failed handshakes per address
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) does not count, so hosts
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+   does not count, so hosts
    waiting for an operator cannot throttle the members behind the same address. The Server reads
    nothing from its messages but `connection_settings_request.opamp.certificate_request`: it
    creates no Agent record, assigns nothing and makes no offer but the issued certificate. A
@@ -181,7 +186,8 @@ find the bootstrap identity beside its program and enrol with it.
    beyond the share of its bootstrap certificate is audited once per certificate and window as
    `enrolment.refused` with the reason. A re-sent CSR that already has its entry is never refused
    by either bound. On approval the Server signs it
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) and offers the certificate
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+   and offers the certificate
    on that connection the way it offers any certificate; the Agent then reconnects with it. On
    rejection the CSR is answered `BadRequest`, and the connection is closed.
 
@@ -201,7 +207,7 @@ find the bootstrap identity beside its program and enrol with it.
       issued names that entry.
     - `POST /api/v1/enrolments/{id}/approve` and `POST /api/v1/enrolments/{id}/reject` decide one
       request. Both are body-less `POST` acts under the Operator plane's cross-site rule
-      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
       - An approval of an id no request waits under, unknown, decided or expired, is answered
         `404`.
       - A rejection of an id the queue does not hold is answered `204`, with the window open or
@@ -213,7 +219,8 @@ find the bootstrap identity beside its program and enrol with it.
     - The Client logs its request's public-key fingerprint, so an operator can match a pending
       request to a host.
     - Renewal by an Agent that holds a certificate from the client CA stays automatic
-      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) and never enters the
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+      and never enters the
       queue.
 
 11. **A certificate proves membership and its host, and carries its bootstrap certificate's
@@ -226,12 +233,13 @@ find the bootstrap identity beside its program and enrol with it.
         ([ADR-0016](0016-client-modes-and-the-gateway.md)) or from the certificate a renewal
         renews (clause 12);
       - the common name the rule of the fleet's certificate names derives
-        ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)).
+        ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)).
     - The Server signs a client-authentication leaf only — `CA:FALSE`, `digitalSignature`,
       `clientAuth`. It drops every requested SAN and puts in one of its own, the URI
       `urn:opamp-fleet:host:<id>`.
     - The CSR's subject is still searched for claims
-      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) and is never copied.
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+      and is never copied.
     - The host is minted when an operator approves an enrolment and carried on by every renewal
       ([ADR-0016](0016-client-modes-and-the-gateway.md)). A certificate an operator provisioned
       without one is given a host derived from its issuer and serial when it is first renewed.
@@ -542,7 +550,9 @@ find the bootstrap identity beside its program and enrol with it.
 
 ## Sources / Prior art
 
-- [ADR-0026](0026-admission-by-client-certificate-and-revocation.md) (admission, the Operator plane,
+-
+  [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  (admission, the Operator plane,
   revocation), [ADR-0016](0016-client-modes-and-the-gateway.md) (approval through a proved bootstrap
   certificate, renewal, enrolment through a Gateway),
   [ADR-0020](0020-the-installed-service-and-its-state.md) and
@@ -550,8 +560,8 @@ find the bootstrap identity beside its program and enrol with it.
   packages),
   [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   (the record of issued bootstrap certificates),
-  [ADR-0037](0037-the-operator-program-opamp-fleetctl.md) (certificate names, `pki p12-extract`),
-  [ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) (certificate names, `pki p12-extract`),
+  [ADR-0028](0028-the-audit-record.md)
   (the audit record).
 - RFC 7292, PKCS #12 v1.1: <https://www.rfc-editor.org/rfc/rfc7292>. RFC 8018, PKCS #5 v2.1
   (PBES2, PBKDF2): <https://www.rfc-editor.org/rfc/rfc8018>.

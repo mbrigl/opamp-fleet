@@ -1,7 +1,7 @@
 //! Package records in PostgreSQL (ADR-0023 clause 6): the PostgreSQL adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one row per Package and one per entry,
 //! each entry naming its artifact by hash, and each call one transaction on the rows it names
-//! (ADR-0045
+//! (ADR-0025
 //! clause 19). The bytes are the blob store's, with either.
 
 use std::collections::BTreeMap;
@@ -356,11 +356,11 @@ impl PgPackageBackend {
 }
 
 /// Holds the Package's row `FOR UPDATE` until the caller's transaction ends, and then counts the
-/// stored assignments that pin it, failing with `refusal` when any does (ADR-0049 clauses 12 and
+/// stored assignments that pin it, failing with `refusal` when any does (ADR-0032 clauses 12 and
 /// 13). A rollout holds the row of each Package it pins `FOR KEY SHARE` until its assignments are
 /// committed, so the count waits for it and sees them, and no rollout pins the Package until this
 /// transaction ends
-/// (ADR-0045
+/// (ADR-0025
 /// clause 19). Answers whether the Package is stored.
 async fn hold_unassigned(
     client: &impl GenericClient,
@@ -702,7 +702,7 @@ mod tests {
     /// A Package created with its entry through another instance between the two statements of
     /// `load` is read whole or not at all: the entries are read in the snapshot the Packages were,
     /// so none names a Package the read did not see, and the load does not fail.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[test]
     fn a_package_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
         let Some(test) = TestDatabase::named() else {
@@ -830,7 +830,7 @@ mod tests {
     /// On PostgreSQL an entry whose blob went while it was uploaded is refused as an invalid
     /// request and one for a Package that is not stored as not found, whatever the database
     /// wrote around the message: what the REST API answers `400` and `404`, as on the filesystem.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0033
     #[test]
     fn an_entry_refused_on_postgres_keeps_its_kind() {
         use crate::packages::Refusal;
@@ -885,7 +885,7 @@ mod tests {
     /// A deletion of a Package through B while a rollout through A that pins it has not yet
     /// committed waits for the rollout, and then refuses it from the assignment the rollout
     /// stored: the rollout holds the Package's row until it commits.
-    /// Verifies: ADR-0045, ADR-0049
+    /// Verifies: ADR-0025, ADR-0032
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_package_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};
@@ -1503,7 +1503,7 @@ mod tests {
     /// B deletes the one entry it holds of a blob; an entry written through A, which B has not
     /// read, names the same blob, and B's sweep keeps it: it reads the stored entries under the
     /// blob store's lock, not what B holds.
-    /// Verifies: ADR-0023, ADR-0045
+    /// Verifies: ADR-0023, ADR-0025
     #[test]
     fn a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names() {
         let Some(test) = TestDatabase::named() else {

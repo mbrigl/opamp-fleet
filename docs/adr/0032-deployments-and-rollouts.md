@@ -1,9 +1,9 @@
-# ADR-0033: A Deployment is the one thing aimed and rolled out, and a rollout pins what it releases
+# ADR-0032: A Deployment is the one thing aimed and rolled out, and a rollout pins what it releases
 
-- **Status:** ⚪ superseded by [ADR-0049](0049-deployments-and-rollouts.md)
-- **Date:** 2026-10-17
+- **Status:** 🟢 accepted
+- **Date:** 2026-10-29
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/fleet-server/src/configs.rs`, `crates/fleet-server/src/deployments.rs`, the assignments, rollout acts and deletions in `crates/fleet-server/src/fleet.rs`, the matching and offer functions of `crates/fleet-server/src/packages.rs`, the persisted assignment in `crates/fleet-server/src/agent_store.rs` and its adapters, the Configuration, Deployment, Package-deletion and rollout routes of `crates/fleet-server/src/api.rs` and the OpenAPI document, the Configurations, Deployments and Agents tabs of the bundled UI in `crates/fleet-server/static/index.html`, the Client's check of an offer for its own package, and every document that tells an operator how to aim or roll out a Configuration or a Package
+- **Applies to:** `crates/fleet-server/src/configs.rs`, `crates/fleet-server/src/deployments.rs`, the assignments, rollout acts and deletions in `crates/fleet-server/src/fleet.rs`, the matching and offer functions of `crates/fleet-server/src/packages.rs`, the persisted assignment in `crates/fleet-server/src/agent_store.rs` and its adapters, the Configuration, Deployment, Package-deletion and rollout routes of `crates/fleet-server/src/api.rs` and the OpenAPI document, the Configurations, Deployments and Agents tabs of the bundled UI in `crates/fleet-server/static/index.html`, the Client's check of an offer for its own package, the version of the installed Package a Supervisor reports in `crates/fleet-agent/src/supervisor/agent/description.rs` under its key in `crates/opamp/src/attributes.rs`, and every document that tells an operator how to aim or roll out a Configuration or a Package
 
 ## Context
 
@@ -36,13 +36,13 @@ Deployment, and an Agent in no Deployment is offered nothing. The human settled 
 - **One deletion rule:** a resource that an assignment pins cannot be deleted.
 
 *Which.* A Package fits an Agent by type and Platform and is aimed at it by a Deployment
-([ADR-0034](0034-packages-signatures-and-delivery.md)). Fit and aim alone would count Agents that
+([ADR-0033](0033-packages-signatures-and-delivery.md)). Fit and aim alone would count Agents that
 already run the version, propose it to Agents that need nothing, and let the act aim backwards
 under the same label as a forward one — the shape in which a compromised Server pushes a
 known-vulnerable build, and one the Client's own install already refuses, because an Ed25519
 signature carries no version ordering and an old release stays validly signed forever.
 
-An Agent reports two versions, and they can contradict each other.
+An Agent reports up to three versions, and they can contradict each other.
 `PackageStatus.agent_has_version` is derived from what an install once wrote — for the Client
 `<state_dir>/installed-package.json` — and that record outlives the binary it describes: a staged
 update that did not take, a host reinstalled from an older artifact, a state directory restored
@@ -50,6 +50,16 @@ beside a downgraded binary. The Baseline defines the field as *"the version of t
 the Agent **has**"*, which *"MUST be empty if the Agent does not have this package"* — a
 statement about the present. `service.version` is the running program's own statement about
 itself. Clients that do not report their own package version can state only the latter.
+
+And a Package's version need not be its program's. A repacked Package carries a version its program
+does not report
+([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
+clause 28): the second repack of an upstream 2.14.3 is Package `2.14.4-0.r.2`, and the program it
+installs still reports `2.14.3`. Held against that number, a host that installed the repack would
+stay a candidate for it: the reach count would count it, the fleet view propose it, and the bulk act
+choose it on every press. So a Supervisor-backed Agent's Supervisor reports a third version, that of
+the Package it installed, and that version decides where it is reported (clauses 14, 16, 17, 19 and
+25).
 
 Prior art draws the same line. In Elastic Fleet an Agent is enrolled in exactly one Agent policy,
 and the policy's revisions carry its configuration and a target version. Bindplane aims
@@ -84,10 +94,10 @@ Configuration, Package or Deployment that an assignment pins.
 3. **A Selector is equality, AND, over the effective description, and it aims a Deployment.**
    - It is a string-to-string map. An Agent matches when every pair equals a string-valued entry
      of its effective description, whose content
-     [ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md) clause 18 states.
+     [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) clause 18 states.
    - An array-valued attribute (`host.ip`) is displayed but never matched.
    - There are no set-based operators. They would extend the same field compatibly.
-   - A Deployment's Selector is never empty ([ADR-0034](0034-packages-signatures-and-delivery.md)),
+   - A Deployment's Selector is never empty ([ADR-0033](0033-packages-signatures-and-delivery.md)),
      so no Selector reaches every Agent by default.
 
 4. **The type is fitted inside the Deployment.**
@@ -97,12 +107,12 @@ Configuration, Package or Deployment that an assignment pins.
      type.
    - An Agent that reports no `service.name` receives no Configuration.
    - Packages are fitted by type and Platform as
-     [ADR-0034](0034-packages-signatures-and-delivery.md) says.
+     [ADR-0033](0033-packages-signatures-and-delivery.md) says.
 
 5. **A Deployment is a name, a Selector, Packages and Configurations.**
    - The name follows the grammar a Configuration's name follows. The Selector is clause 3's.
    - The Packages are at most one per Agent type
-     ([ADR-0034](0034-packages-signatures-and-delivery.md)).
+     ([ADR-0033](0033-packages-signatures-and-delivery.md)).
    - The Configurations are named, in any number. A Configuration may sit in several
      Deployments.
    - `PUT /api/v1/deployments/{name}` creates a Deployment with `{selector}`, `PUT …/selector`
@@ -117,7 +127,7 @@ Configuration, Package or Deployment that an assignment pins.
      content, fails startup naming it. Saving distributes nothing.
 
 6. **The assignment is per Agent, persisted, and pins one release.**
-   - Each Agent's record ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)) stores what
+   - Each Agent's record ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)) stores what
      its last rollout released to it:
      - the Deployment it was released through;
      - the Package pinned, if any;
@@ -151,7 +161,7 @@ Configuration, Package or Deployment that an assignment pins.
      another Deployment, or an Agent in no Deployment or in conflict, is `409`.
    - A rollout **replaces** the Agent's assignment. It pins two things as of the press: the
      Package the Deployment holds for the Agent's type, if it is a candidate by
-     [ADR-0035](0035-package-versions-high-water-mark-and-floor.md) and clauses 14–17; and every
+     [ADR-0034](0034-package-versions-high-water-mark-and-floor.md) and clauses 14–17; and every
      Configuration of the Deployment that fits the Agent's type, at its saved revision. A
      Configuration no longer in the Deployment leaves the Agent's map. The hash gates send only
      what changed.
@@ -167,7 +177,7 @@ Configuration, Package or Deployment that an assignment pins.
    - Two cases are refused (`409`) for every act, and nothing is released:
      - a Deployment holding no Package and no Configuration;
      - a Deployment in which an entry of a Package it holds carries no signature
-       ([ADR-0034](0034-packages-signatures-and-delivery.md)). The message names each such
+       ([ADR-0033](0033-packages-signatures-and-delivery.md)). The message names each such
        Package by its display name and the platforms it is unsigned for.
    - `POST /api/v1/configurations/{name}/rollout` does not exist (`404`). A bare Package or
      Configuration cannot be named in an act.
@@ -179,7 +189,7 @@ Configuration, Package or Deployment that an assignment pins.
 
 11. **A Deployment freezes nothing that a standing offer travels with.**
     - An assignment pins the Package and the revisions, and the signature is the entry's
-      ([ADR-0034](0034-packages-signatures-and-delivery.md)). So the Selector, the Packages and
+      ([ADR-0033](0033-packages-signatures-and-delivery.md)). So the Selector, the Packages and
       the Configurations of a Deployment stay editable in every state.
     - Swapping the version a Deployment holds, or the revision of a Configuration, shows as
       waiting for the Agents already released, and the next press moves them.
@@ -189,7 +199,7 @@ Configuration, Package or Deployment that an assignment pins.
     - Deleting a Configuration, a Package or a Deployment is refused (`409`) while any Agent's
       assignment names it. The message says how many Agents pin it.
     - The way to delete is to roll those Agents out through a Deployment without it, or to forget
-      them ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
+      them ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)).
     - A deleted Configuration or Package leaves every Deployment that held it.
     - Nothing recalls what an Agent installed: the protocol has no revert, and the Agent keeps
       running it. A rollout that drops a Configuration from an Agent's map and keeps another one
@@ -201,11 +211,14 @@ Configuration, Package or Deployment that an assignment pins.
     create the next version as a new Package and roll that out), and an upload is refused before
     its bytes are streamed. A Package assigned to nobody is freely editable.
 
-14. **What the Agent runs decides, in both directions.** Where the Agent reports a
-    `service.version` among its identifying attributes that parses as a version
-    ([ADR-0038](0038-the-products-version.md)), the Package's version must be **strictly
-    greater** than it by SemVer precedence, build metadata ignored. Equal does not match: a
-    Package the Agent already runs would reach it with nothing.
+14. **What the Agent runs decides, in both directions.** The version an Agent runs is the
+    version of the Package its Supervisor installed, where the Agent reports one that parses as a
+    version ([ADR-0037](0037-the-products-version.md)) under `supervisor.package.version` (clause
+    25), and otherwise the `service.version` among its identifying attributes, where it parses.
+    The Package's version must be **strictly greater** than the version the Agent runs by SemVer
+    precedence, build metadata ignored. Equal does not match: a Package the Agent already runs
+    would reach it with nothing. Where the Agent reports a `supervisor.package.version`, its
+    `service.version` is not consulted.
 
 15. **The claim is not consulted where the running version is.** A non-empty
     `agent_has_version` neither admits a Package the running version refuses nor refuses one it
@@ -214,15 +227,17 @@ Configuration, Package or Deployment that an assignment pins.
     is reachable in either direction.
 
 16. **Where the running version cannot be ordered, the claim is the whole test.** A
-    `service.version` that does not parse (`1.19`, `24.04.1`) says nothing at all. The Package is
+    `supervisor.package.version` or a `service.version` that does not parse (`1.19`, `24.04.1`)
+    says nothing at all. The Package is
     then held against the non-empty `agent_has_version` the Agent reports under the Package's
     wire key: strictly greater to match, and a claim that cannot itself be ordered **refuses** —
     the safe direction for a claim about that very Package: what cannot be ordered must not be
     installed over what is running.
 
-17. **An Agent that reports neither has nothing to be greater than** — the first rollout, matched
-    on fit and aim alone. An **empty** `agent_has_version` is that case, not an unorderable one:
-    it is how a Package offered, pending or downloading but not yet installed is reported.
+17. **An Agent that reports none of the three has nothing to be greater than** — the first
+    rollout, matched on fit and aim alone. An **empty** `agent_has_version` is that case, not an
+    unorderable one: it is how a Package offered, pending or downloading but not yet installed is
+    reported.
 
 18. **The Client applies the same rule to an offer it receives.** For the Package that carries the
     Client itself ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)), *already
@@ -233,8 +248,9 @@ Configuration, Package or Deployment that an assignment pins.
 19. **Every consumer of matching applies the same test.** The candidate resolution, the reach
     count and the rollout act test alike, so the count, the proposal and the press cannot
     disagree. A per-Agent refusal names the version it compared against and whether that was the
-    running version or the claim — and, where both were reported and disagreed, that the claim
-    was not consulted. The bulk act skips an Agent it would not move.
+    installed Package's version, the program's `service.version` or the claim — and, where a
+    claim was reported beside the version that decided, that the claim was not consulted. The
+    bulk act skips an Agent it would not move.
 
 20. **The assignment path is version-blind.** An offer composed from an assignment is never
     filtered by the version test: an offer is the Agent's desired state, and dropping an installed
@@ -243,7 +259,7 @@ Configuration, Package or Deployment that an assignment pins.
 
 21. **Rollback is not a rollout.** No act moves an Agent to an older version than it runs. An
     operator who wants an Agent back on its predecessor has the Agent's retention window
-    ([ADR-0034](0034-packages-signatures-and-delivery.md)) and, for the Client itself, the
+    ([ADR-0033](0033-packages-signatures-and-delivery.md)) and, for the Client itself, the
     pointer move of [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md); a bad
     version is otherwise taken back by publishing the old content as a new, greater version. A
     deliberate Server-driven downgrade is left undecided: it is a separate act with its own
@@ -283,11 +299,37 @@ Configuration, Package or Deployment that an assignment pins.
       *roll out* press, so the count beside a Deployment's press and the rows agree.
     - *Save*, *Upload* and *OK* never distribute.
 
+25. **A Supervisor reports the version of the Package it installed.**
+    - A Supervisor-backed Agent reports the non-identifying attribute `supervisor.package.version`
+      ([ADR-0017](0017-what-an-agent-reports-about-itself.md)
+      clause 5): the version of the Package whose program its Supervisor installed and starts,
+      from the record of the last install that survived its apply grace
+      ([ADR-0033](0033-packages-signatures-and-delivery.md)), restored when the Client starts.
+    - It reports none before its first install, and none once that record is dropped
+      ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 10). A failed
+      install and a rollback leave the record of the predecessor, which is what then runs.
+    - The Supervisor alone states it. The fold of a Managed Process's description drops every
+      `supervisor.*` key ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clause 8),
+      `[attributes]` refuses one at startup
+      ([ADR-0017](0017-what-an-agent-reports-about-itself.md)
+      clause 10), and the Server refuses a label in that namespace and ignores one already stored
+      ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)
+      clause 20), so neither a program nor the host's operator nor the Server's can state it.
+    - The Client Agent reports none: its `service.version` is its baked version, which is what
+      it runs, and its claim stays the record of clauses 15 and 18.
+    - It is the Package's version, not the program's. A repacked Package carries a version its
+      program does not report
+      ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
+      clause 28), and a Package carrying a program that numbers itself its own way (`1.19`)
+      carries one written as SemVer
+      ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 6). Held against
+      the Package's own version, a host that installed a Package is no candidate for it.
+
 **Out of scope:** a fleet-wide base Configuration, and any "everyone" Deployment; releasing only a
 Deployment's Configurations or only its Packages; parameters and blocks in a Configuration (G-18, a
 decision of its own); where Deployments, Configurations and assignments are stored
 ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md));
-what a Package and its entries are ([ADR-0034](0034-packages-signatures-and-delivery.md)); an opt-in
+what a Package and its entries are ([ADR-0033](0033-packages-signatures-and-delivery.md)); an opt-in
 convergence policy for Agents that appear later; a batched or paused progressive walk; an audit
 trail of who rolled out what (the operator plane has no per-operator identity); an operator override
 to re-install a version the test holds back; a Server-driven downgrade.
@@ -327,7 +369,7 @@ to re-install a version the test holds back; a Server-driven downgrade.
 - **A rollout option that releases only the Configurations or only the Packages.** The hash gates
   already send only what changed. The option can be added to the act without changing the model.
 - **A fleet-wide base Configuration, as an empty Selector or an implicit "everyone".** It brings
-  back the ranking between Deployments that [ADR-0034](0034-packages-signatures-and-delivery.md)
+  back the ranking between Deployments that [ADR-0033](0033-packages-signatures-and-delivery.md)
   removes. The human chose to solve such a need differently.
 - **Cascading deletion of Configurations and Packages through the assignments.** It is cheaper
   to use, but a deletion silently changes what running Agents receive. The protection a
@@ -343,6 +385,24 @@ to re-install a version the test holds back; a Server-driven downgrade.
 - **Let `Equal` match**, as a repair for a failed install. A failed install is not repaired by
   re-delivering bytes the Agent has; the assignment is in place and the Agent's own retention and
   rollback govern what follows. Every up-to-date Agent would be back in every count.
+- **Hold a Supervisor-backed Agent's Package against the `service.version` its Managed Process
+  reports, with no version of the installed Package.** One rule for every Agent and nothing more
+  for a Supervisor to report. But a repacked Package carries a version its program does not
+  report, so a host that installed `2.14.4-0.r.2` and runs a program reporting `2.14.3` stays a
+  candidate for it: the reach count counts it, the fleet view proposes it, and the bulk act
+  chooses it on every press. Rejected; the Supervisor reports `supervisor.package.version`, and
+  clause 14 holds a Package against it where it is reported (clause 25).
+- **Hold a Supervisor-backed Agent's Package against its claim (`agent_has_version`).** The
+  claim is the same field for the Client Agent, whose record clause 15 refuses to let decide.
+  Deciding by one field for one kind of Agent and not for the other makes two rules out of one
+  field the Baseline defines alike for both. An attribute of its own is the Supervisor's
+  statement, and one rule reads it wherever it is reported (clause 25).
+- **Strip a repack's pre-release before comparing** (`2.14.4-0.r.2` read as `2.14.3`). The Server
+  would carry the operator tool's numbering rule, and a program that numbers itself `1.19` would
+  still give it nothing to compare.
+- **Report the Package's version as `service.version`.** That is the program's own statement
+  ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clause 4) and the version the fleet view
+  shows; overwriting it hides what the program says it is.
 - **Compare against `agent_has_version` alone.** Cannot reach a Client that reports no package
   version, and believes a claim the Agent's own program contradicts.
 - **The lower of the two versions, and never move under a claim.** Refuses a Package below a
@@ -440,8 +500,16 @@ to re-install a version the test holds back; a Server-driven downgrade.
   Collector reporting `0.98.0` while its status claims `2.0.0` matches a Package at `1.5.0`. What
   limits it is that nothing moves on its own. Conversely, a program self-reporting a number above
   its Package is unreachable by that Package's number until the Package is re-created at the
-  program's number ([ADR-0035](0035-package-versions-high-water-mark-and-floor.md)). For a
-  program that reports no `service.version`, the claim decides.
+  program's number ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md)). Both arise
+  only before a Supervisor's first install, while no `supervisor.package.version` is reported, and
+  for the Client Agent. Before it, for a program that reports no `service.version` that can be
+  ordered, the claim decides.
+- Positive: a later repack of a version moves a host forward once. Once installed, the host
+  reports the repack's version and is no candidate for it again.
+- Negative / trade-offs: the installed Package's version comes from a record, as the claim does.
+  The record and the program live in the Supervisor's own directory and change together, so it
+  names a Package the host does not run only where someone replaced the program there by hand,
+  until the next install.
 - Negative / trade-offs: a program already running a version cannot be replaced by the fleet's
   Package of that same version; adopting it means publishing under the next version.
 - Follow-ups: an opt-in convergence policy for late Agents; a progressive walk; a diff view between
@@ -488,6 +556,7 @@ to re-install a version the test holds back; a Server-driven downgrade.
   `a_claim_the_running_program_denies_no_longer_holds_the_set_back`,
   `a_claim_above_the_set_no_longer_holds_it_back_either`,
   `a_program_version_nothing_can_order_leaves_the_set_reaching`,
+  `the_installed_package_version_decides_over_the_program_version`,
   `the_aggregate_hash_is_per_agent_and_follows_the_assignment`.
 - [`crates/fleet-server/tests/rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs):
   `a_configuration_waits_until_it_is_rolled_out`, `an_agent_that_appears_later_waits`,
@@ -511,6 +580,7 @@ to re-install a version the test holds back; a Server-driven downgrade.
   [`http_transport.rs`](../../crates/fleet-server/tests/http_transport.rs):
   `a_selector_aims_a_configuration_at_part_of_the_fleet`.
 - [`crates/fleet-agent/src/supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs):
-  `the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash`;
+  `the_clients_own_offer_is_settled_by_the_version_it_runs_not_by_a_recorded_hash`,
+  `a_supervisor_reports_the_version_of_the_package_it_installed`;
   [`crates/fleet-agent/src/update/installer.rs`](../../crates/fleet-agent/src/update/installer.rs):
   `install_refuses_a_downgrade`.

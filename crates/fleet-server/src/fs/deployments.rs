@@ -1,4 +1,4 @@
-//! Deployments on the filesystem (ADR-0050): the default adapter behind
+//! Deployments on the filesystem (ADR-0033): the default adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -129,7 +129,7 @@ struct DeploymentMeta {
     selector: BTreeMap<String, String>,
     #[serde(default)]
     packages: Vec<PackageRefMeta>,
-    /// The Configurations it holds, by name (ADR-0049). Absent in a file that holds none.
+    /// The Configurations it holds, by name (ADR-0032). Absent in a file that holds none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     configurations: Vec<String>,
 }
@@ -197,7 +197,7 @@ mod tests {
     }
 
     /// The whole store survives a reopen.
-    /// Verifies: ADR-0050, ADR-0049
+    /// Verifies: ADR-0033, ADR-0032
     #[test]
     fn a_deployment_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(
             canary.configurations.iter().collect::<Vec<_>>(),
             ["base"],
-            "the Configurations it holds survive too (ADR-0049)"
+            "the Configurations it holds survive too (ADR-0032)"
         );
 
         assert!(reopened.delete("canary").expect("delete"));
@@ -233,7 +233,7 @@ mod tests {
 
     /// A file this Server did not write fails the open, naming it. A channel that silently vanished
     /// would withdraw nothing and offer nothing, and say neither.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0033
     #[test]
     fn an_unreadable_file_fails_the_open_and_names_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -257,7 +257,7 @@ mod tests {
 
     /// The store is owner-only, and so is every file in it: a Selector says which hosts a fleet
     /// operator considers a channel, which is not another local user's business.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0033
     #[cfg(unix)]
     #[test]
     fn the_store_and_its_files_are_owner_only() {

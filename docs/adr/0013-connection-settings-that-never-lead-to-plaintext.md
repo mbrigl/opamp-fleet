@@ -8,7 +8,8 @@
 ## Context
 
 The Agent plane admits by client certificate alone
-([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), as the
+([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)),
+as the
 [specification](../SPECIFICATION.md) asks. There is no fleet credential for the Server to offer or
 for the Client to send: an offered credential, or an offered header on the OpAMP connection, has
 nothing on the Server that reads it.
@@ -84,7 +85,8 @@ message would be an error.
    section fails at startup. A credential key (`bearer_token_file`, `username`, `password_file`,
    or the inline `bearer_token` or `password`) is refused at startup with a message naming the
    key: the Agent plane admits by client certificate alone
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), so an offered credential
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)),
+   so an offered credential
    would be one nothing reads. The OpAMP settings the Server offers carry no `headers`.
 
 2. **One message, one SHA-256 hash, offered on mismatch.** The Server composes the OpAMP settings
@@ -94,7 +96,8 @@ message would be an error.
    destination only to an Agent declaring the matching signal
    ([ADR-0017](0017-what-an-agent-reports-about-itself.md)). With only telemetry to offer, that is
    the whole offer, with no `opamp` block. A certificate issued in answer to a CSR
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)) travels as the standing
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+   travels as the standing
    OpAMP settings plus that certificate, under a hash of its own.
 
 3. **The Server declares `OffersConnectionSettings` whenever it can offer anything:** a
@@ -134,7 +137,9 @@ message would be an error.
    swallowed. A telemetry-only offer is applied in place; its acknowledgement rides the reports
    already owed, and the transport loop carries on. The headers of a telemetry destination are an
    OTLP receiver's, not admission: they stay as ADR-0017 has them, still offered only on member
-   connections ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), and clause 8
+   connections
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)),
+   and clause 8
    does not reach them.
 
 7. **One offer, one acknowledgement.** A single `connection_settings_status` answers each offer,
@@ -153,7 +158,8 @@ message would be an error.
    `ProxyConnectionSettings` has nothing on this Client to configure. Both are Development
    upstream. Offered `headers` on the OpAMP connection are refused on merit too: the Agent plane
    reads no `Authorization` and admits by client certificate alone
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), so an applied header would
+   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)),
+   so an applied header would
    be a value the Server plants on every connection of the fleet, persisted and sent upstream with
    no reader on this Server, and carried to whatever endpoint a later offer moves the fleet to.
    [`CONFORMANCE.md`](../CONFORMANCE.md) records the three refusals.
@@ -175,7 +181,7 @@ message would be an error.
 10. **An offered heartbeat replaces the configured interval.** A non-zero
     `heartbeat_interval_seconds` becomes the heartbeat period on WebSocket and the polling interval
     on plain HTTP. The Server judges staleness by the heartbeat it offered
-    ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
+    ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)).
 
 11. **Settings are connection-scoped; offers are per Agent.** Over one connection carrying n Agents
     ([ADR-0016](0016-client-modes-and-the-gateway.md)), the Server offers to each, and the Client
@@ -220,7 +226,8 @@ message would be an error.
 **Out of scope:**
 
 - How the Agent plane admits, and how it treats a Client of an older version that still sends
-  `Authorization` ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+  `Authorization`
+  ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
 - Plaintext that an operator writes into `supervisor.toml` themselves. It stays allowed on a
   loopback IP literal ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)).
 - The audit entries an offer leaves.
@@ -233,7 +240,8 @@ message would be an error.
 ## Alternatives considered
 
 - **Keeping an optional offered credential.** The Agent plane reads none
-  ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)); an offered credential
+  ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md));
+  an offered credential
   would be a secret the Server keeps, sends and the fleet persists, for no check anywhere.
 - **Honouring offered `headers` other than `Authorization`.** No header has a reader on this
   Server, and a generic pass-through would let a Server, or whoever can make one send an offer,

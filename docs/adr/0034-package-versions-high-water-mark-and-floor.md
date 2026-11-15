@@ -1,4 +1,4 @@
-# ADR-0035: Package versions, the high-water mark, and the floor
+# ADR-0034: Package versions, the high-water mark, and the floor
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-26
@@ -8,7 +8,7 @@
 ## Context
 
 A package signature covers the Agent type, the version and the artifact's SHA-256
-(`fleet_core::package::statement`, [ADR-0034](0034-packages-signatures-and-delivery.md) clause 52).
+(`fleet_core::package::statement`, [ADR-0033](0033-packages-signatures-and-delivery.md) clause 52).
 It binds an artifact to its own version, but it says nothing about how that version orders against
 another, and it never expires. A build the operator signed once stays validly signed forever,
 including a build with a flaw that became known later. Whatever stops a downgrade must therefore be
@@ -36,11 +36,11 @@ The forces:
   ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)).
 - **An honest Server does not move an Agent backwards.** A rollout reaches an Agent only when it
   moves the Agent forward, rollback is not a rollout, and a deliberate Server-driven downgrade is
-  left undecided ([ADR-0033](0033-deployments-and-rollouts.md)). That rule binds an honest Server;
+  left undecided ([ADR-0032](0032-deployments-and-rollouts.md)). That rule binds an honest Server;
   the refusal that counts is the Client's.
 - **The one move to an older version takes no offer.** When an apply fails within the apply grace,
   the Supervisor renames the predecessor back over the live program
-  ([ADR-0034](0034-packages-signatures-and-delivery.md) clause 59).
+  ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 59).
 - **A mark knows only what this host installed.** An old build the operator signed under a version
   above the current mark, such as a long-ago pre-release of a later version (`2.0.0-rc.1` while
   the fleet runs `1.9.4`), is taken by a host that never ran anything newer. What closes that gap
@@ -64,13 +64,13 @@ highest floor the operator signed for that type.
    version and says a Package version is SemVer, for example `1.19.0` for upstream's `1.19`. A
    Package that the store already holds under a version that is a token but not SemVer is read as
    clause 3 says; it does not fail the store's opening
-   ([ADR-0034](0034-packages-signatures-and-delivery.md) clause 8). A Package has no name of its
+   ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 8). A Package has no name of its
    own, no Selector and no kind. Its entries carry their signatures
-   ([ADR-0034](0034-packages-signatures-and-delivery.md) clause 18). Creating a Package that exists
+   ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 18). Creating a Package that exists
    is the same request arriving twice.
 
 2. **One predicate decides what is SemVer, in the internal crate.** A version is SemVer when
-   `fleet_core::version::parse` accepts it ([ADR-0038](0038-the-products-version.md)) and no
+   `fleet_core::version::parse` accepts it ([ADR-0037](0037-the-products-version.md)) and no
    numeric pre-release identifier has a leading zero. The Server, `opamp-fleetctl` and the Client
    all call this predicate, and none of them has a second copy. Two versions are ordered by
    `precedence`, build metadata ignored. Two builds of one release compare equal.
@@ -80,26 +80,26 @@ highest floor the operator signed for that type.
    and the SemVer rule. Such a Package is never a candidate (clause 5). Every write to it is
    answered `400` with the same text as clause 1: an entry, a signature, and adding it to a
    Deployment. It may be deleted like any other Package once nothing pins it
-   ([ADR-0033](0033-deployments-and-rollouts.md), deleting what an assignment pins). An assignment
+   ([ADR-0032](0032-deployments-and-rollouts.md), deleting what an assignment pins). An assignment
    that already pins it stays in force, and its offer still goes out
-   ([ADR-0033](0033-deployments-and-rollouts.md), the pin of what an Agent installed). The Client
+   ([ADR-0032](0032-deployments-and-rollouts.md), the pin of what an Agent installed). The Client
    refuses that offer (clause 7), and the fleet view shows the reason the Agent reports.
    `server migrate` carries such a Package over as it reads it. The operator republishes the
    content under a SemVer version, signs it again, and rolls that out.
 
 4. **`opamp-fleetctl package sign` signs only a SemVer version.** It refuses a `--version`, and a
-   signing-file entry ([ADR-0034](0034-packages-signatures-and-delivery.md) clause 20), whose
+   signing-file entry ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 20), whose
    version is not SemVer. It does so before it reads the key, and names the version. The
    operator's key therefore never signs a version that a Client would refuse.
 
 5. **A Package becomes a candidate when its version is SemVer, it fits, it is aimed at the Agent,
    and it moves the Agent forward.** A Package whose version is not SemVer (clause 3) is nobody's
    candidate, whatever the Agent reports. Fit is
-   [ADR-0034](0034-packages-signatures-and-delivery.md) clause 14's, mandatory, and comes first
-   after that. The version test ([ADR-0033](0033-deployments-and-rollouts.md)) runs *with* the fit:
+   [ADR-0033](0033-packages-signatures-and-delivery.md) clause 14's, mandatory, and comes first
+   after that. The version test ([ADR-0032](0032-deployments-and-rollouts.md)) runs *with* the fit:
    a Package it holds back is nobody's candidate and appears in no count and no proposal. A
    per-Agent refusal of a non-SemVer Package names the version and the SemVer rule, as the version
-   reasoning of a refused per-Agent act does ([ADR-0033](0033-deployments-and-rollouts.md)).
+   reasoning of a refused per-Agent act does ([ADR-0032](0032-deployments-and-rollouts.md)).
 
 6. **A Package is numbered in the space its program numbers itself, written as SemVer.** For a
    program that self-reports an orderable version (the Client and any OpAMP-aware Managed
@@ -137,9 +137,9 @@ highest floor the operator signed for that type.
    [ADR-0020](0020-the-installed-service-and-its-state.md)), so no purge can delete it, even where
    an operator places `supervisor_dir` at `state_dir` itself. The mark rises when a Supervisor
    reports a package `Installed`, that is, once its program has survived the apply grace
-   ([ADR-0034](0034-packages-signatures-and-delivery.md) clause 58). It never falls. It does not
+   ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 58). It never falls. It does not
    move on `InstallFailed`, and it does not move on the rollback of
-   [ADR-0034](0034-packages-signatures-and-delivery.md) clause 59.
+   [ADR-0033](0033-packages-signatures-and-delivery.md) clause 59.
 
 9. **The mark is seeded at every start from what is installed.** At startup, each Supervisor's
    installed-package record with a SemVer version raises its Agent type's mark to at least that
@@ -152,7 +152,7 @@ highest floor the operator signed for that type.
     a warning that names the Supervisor and the version, and deletes the record. Nothing enters
     the mark from it. The program in `program/` keeps running. The Agent then reports no
     `agent_has_version` for the package, so a rollout of the SemVer republish reaches it as a first
-    rollout ([ADR-0033](0033-deployments-and-rollouts.md)).
+    rollout ([ADR-0032](0032-deployments-and-rollouts.md)).
 
 11. **A mark file that cannot be read refuses every Supervisor package.** A file that exists but
     does not parse, or that maps a type to a value that is not SemVer, is never read as empty.
@@ -167,7 +167,7 @@ highest floor the operator signed for that type.
     clause 9 seeds the mark again from those records. Then the operator starts the Client.
     Deleting the whole file resets the marks of every type that no remaining record names. The
     recommended path needs no host access: publish the old content as a new, greater version
-    ([ADR-0033](0033-deployments-and-rollouts.md)).
+    ([ADR-0032](0032-deployments-and-rollouts.md)).
 
 13. **A removed Supervisor is purged, and its Agent type's high-water mark stays.** Removal is keyed
     by name: only a name absent from the new set is removed, while a changed block keeps its
@@ -235,7 +235,7 @@ highest floor the operator signed for that type.
     runs below the floor, naming both versions, and takes the next offer at or above the floor. The
     Client's own Agent reports no such health: its version is the running build's, and its next
     update at or above the floor replaces it. The rollback of
-    [ADR-0034](0034-packages-signatures-and-delivery.md) clause 59 puts back the installed
+    [ADR-0033](0033-packages-signatures-and-delivery.md) clause 59 puts back the installed
     predecessor whatever the floor says, since it takes no offer, and the health then says so too.
 
 20. **Only the host lowers a floor.** No Server route, no offer, no delivered Supervisor block and
@@ -257,9 +257,9 @@ highest floor the operator signed for that type.
 22. **One program, two command trees.** `opamp-fleetctl package` holds `fetch`, `pack`, `sha256`,
     `sign`, `keygen` and `public-key`, each with the options and output it has, and `floor` as
     clause 14 states it. `opamp-fleetctl pki` holds `init`, `server-cert`, `bootstrap-ca`, `status`
-    and `p12-extract` as [ADR-0037](0037-the-operator-program-opamp-fleetctl.md) states them.
+    and `p12-extract` as [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) states them.
     `opamp-fleetctl --version` prints the version every binary of this project prints
-    ([ADR-0038](0038-the-products-version.md)). No other program name exists for any of these
+    ([ADR-0037](0037-the-products-version.md)). No other program name exists for any of these
     commands: no alias, no wrapper, no symlink.
 
 23. **The layout of `data_dir` is fixed, and no other is read.** With `store = "fs"`, under
@@ -267,11 +267,11 @@ highest floor the operator signed for that type.
 
     | Path | One file per | Domain |
     |---|---|---|
-    | `configurations/<name>.json` | Configuration, with its retained revisions | Configurations ([ADR-0033](0033-deployments-and-rollouts.md)) |
+    | `configurations/<name>.json` | Configuration, with its retained revisions | Configurations ([ADR-0032](0032-deployments-and-rollouts.md)) |
     | `deployments/<name>.json` | Deployment | Deployments |
-    | `packages/<agent_type>@<version>.json` | Package: identity and entries, no bytes | Packages ([ADR-0034](0034-packages-signatures-and-delivery.md)) |
+    | `packages/<agent_type>@<version>.json` | Package: identity and entries, no bytes | Packages ([ADR-0033](0033-packages-signatures-and-delivery.md)) |
     | `blobs/<sha256>` | artifact, with the filesystem blob store | Blobs ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)) |
-    | `agents/<instance_uid>.json` | Agent: report, assignment, labels | Fleet ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)) |
+    | `agents/<instance_uid>.json` | Agent: report, assignment, labels | Fleet ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)) |
     | `hosts/<host>.json` | Host | Hosts |
     | `certificates/<issuer>-<serial>.json` | certificate the Server signed | Certificate register |
     | `revocations.json` | the revocation list | Revocations |
@@ -296,14 +296,14 @@ highest floor the operator signed for that type.
     the one before the write.
 
 **Out of scope:** a deliberate downgrade driven by the Server, which
-[ADR-0033](0033-deployments-and-rollouts.md) leaves undecided; a list of withdrawn builds by hash;
+[ADR-0032](0032-deployments-and-rollouts.md) leaves undecided; a list of withdrawn builds by hash;
 an expiry or a signing time in the package statement; rotating the package key; a floor per Platform
 or per Deployment; the floors in the bundled UI, beyond what the REST API serves; a Server that
 withholds a floor, which delays it until the Client reaches one that serves it; raising the mark
 from a version that a Managed Process reports about itself, as opposed to one this Client installed;
 an operator command that lowers a mark; reporting the mark to the Server; the Gateway refusing to
 cache a non-SemVer offer, which the Client's refusal decides, as the Client's signature check
-decides the rest ([ADR-0034](0034-packages-signatures-and-delivery.md) clause 19).
+decides the rest ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 19).
 
 ## Alternatives considered
 
@@ -351,7 +351,7 @@ decides the rest ([ADR-0034](0034-packages-signatures-and-delivery.md) clause 19
   it, known or not. Not taken; it stays possible beside a floor.
 - **A signing time in every package statement and a signed cut-off date.** It would also catch
   builds whose version nobody remembers, but it changes the package statement
-  ([ADR-0034](0034-packages-signatures-and-delivery.md) clause 52), and every signature the fleet
+  ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 52), and every signature the fleet
   holds would have to be made again. Rejected.
 - **Rotating the package key.** It removes every old signature at once, and with it every good one.
   It is a fleet-wide operation with no counterpart in the Client. Rejected as the way to withdraw
@@ -360,7 +360,8 @@ decides the rest ([ADR-0034](0034-packages-signatures-and-delivery.md) clause 19
   reserved name. It needs no route, but it gives a protocol field a second meaning that another
   OpAMP implementation would read as a package. Rejected.
 - **A `CustomMessage`.** It is `[Development]` in the Baseline and not implemented here
-  ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md) rejects it for the revocation
+  ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+  rejects it for the revocation
   list for the same reason). Rejected.
 - **A floor file on the host alone.** It needs no Server, but every host would need configuration
   management the fleet does not have. Rejected.

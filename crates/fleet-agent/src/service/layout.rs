@@ -11,7 +11,7 @@
 //!
 //! The directory name is Elastic Agent's `<component>-<version>-<hash>` scheme: always the bare
 //! version base and the commit short-hash, never the pre-release — whether a directory holds a
-//! release or a dev build is answered by the manifest inside it, which records the full ADR-0038
+//! release or a dev build is answered by the manifest inside it, which records the full ADR-0037
 //! version string and the binary's SHA-256 (what a future self-update verifies against). The
 //! service's program is `<root>/current/supervisor`, so switching versions never
 //! re-registers the service.
@@ -191,7 +191,7 @@ impl Layout {
     }
 }
 
-/// The version-directory name for a full ADR-0038 version string:
+/// The version-directory name for a full ADR-0037 version string:
 /// `supervisor-<MAJOR.MINOR.PATCH>-<hash>` — never the pre-release (ADR-0021).
 #[must_use]
 pub fn version_dir_name(full_version: &str) -> String {

@@ -2,7 +2,7 @@
 #
 # Seeds one minimal test Configuration per example supervisor from config/supervisor.toml, each
 # stated for the Agent type that should receive it and held by a Deployment of that name whose
-# Selector aims at it (ADR-0049) — a Configuration has no Selector of its own:
+# Selector aims at it (ADR-0032) — a Configuration has no Selector of its own:
 #
 #   otelcol-contrib-conf  →  type otelcol-contrib, deployment otelcol-contrib
 #                            (selector service.name = otelcol-contrib; opampextension, self-reporting)
@@ -17,7 +17,7 @@
 #   scripts/seed_test_configs.sh [server-url]
 #       PUTs each Configuration to a running Server's REST API, puts it into its Deployment and
 #       rolls the Deployment out — the act that assigns it to the Agents the Deployment claims
-#       (ADR-0049); a PUT alone reaches nobody.
+#       (ADR-0032); a PUT alone reaches nobody.
 #       (default server-url: https://127.0.0.1:4321). The Operator plane serves TLS (ADR-0012); the
 #       CA curl trusts is $SEED_CACERT, or .dev-pki/offline/server-ca.pem when scripts/dev-pki.sh
 #       made one.
@@ -128,7 +128,7 @@ if [ "$mode" = enrol ]; then
 fi
 
 # seed <name> <file> <service_name> <deployment> <selector-json>
-#   service_name   the Agent type this Configuration is for (ADR-0049); it fits the Configuration
+#   service_name   the Agent type this Configuration is for (ADR-0032); it fits the Configuration
 #                  to the Agents of its Deployment that report it
 #   deployment     the Deployment that holds it; its Selector aims it
 #   selector-json  the Deployment's Selector, equality pairs as a JSON object, never empty

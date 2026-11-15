@@ -1,4 +1,4 @@
-//! The listeners' TLS material (ADR-0012, ADR-0040), read from the files `[tls]`,
+//! The listeners' TLS material (ADR-0012, ADR-0026), read from the files `[tls]`,
 //! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (ADR-0008).
 //!
 //! What is the Server's here is which material and why. The Agent plane requires a client
@@ -22,7 +22,7 @@ pub struct PlaneTls {
     pub agent: ServerTls,
     pub operator: ServerTls,
     pub issuers: Issuers,
-    /// The CAs whose certificates can be revoked (ADR-0040 clause 27).
+    /// The CAs whose certificates can be revoked (ADR-0026 clause 27).
     pub authorities: Vec<Authority>,
 }
 
@@ -39,7 +39,7 @@ pub struct Issuers {
     bootstrap: Vec<Ca>,
 }
 
-/// What the certificate a connection carries makes it (ADR-0040).
+/// What the certificate a connection carries makes it (ADR-0026).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Peer {
     /// A certificate from the client CA: a member of the fleet.
@@ -48,7 +48,7 @@ pub enum Peer {
     Enrolling {
         subject: String,
         /// The values an approval carries into the host certificate, or why its subject breaks
-        /// the rules they are issued by (ADR-0048 clause 23).
+        /// the rules they are issued by (ADR-0016 clause 23).
         carried: Box<Result<SubjectValues, String>>,
         /// SHA-256 of the certificate, hex.
         fingerprint: String,
@@ -74,7 +74,7 @@ impl Issuers {
     }
 
     /// What a bootstrap certificate (DER) an enrolment request proves says about itself
-    /// (ADR-0048 clauses 21 and 22), when a CA of `bootstrap_ca_file` issued it directly — named as its
+    /// (ADR-0016 clauses 21 and 22), when a CA of `bootstrap_ca_file` issued it directly — named as its
     /// issuer and signed with its key — and it passes what the handshake checks of one: a leaf
     /// (no `CA:TRUE`) whose extended key usage, where it names one, includes `clientAuth`, valid
     /// now. The proof carries no chain, so a certificate below an intermediate cannot be told from
@@ -412,8 +412,8 @@ mod tests {
 
     /// A bootstrap certificate issued through an intermediate is still no member: with a bootstrap
     /// CA configured, membership is a certificate issued directly by the client CA, and nothing
-    /// else (ADR-0040 clause 17).
-    /// Verifies: ADR-0040
+    /// else (ADR-0026 clause 17).
+    /// Verifies: ADR-0026
     #[test]
     fn a_certificate_not_issued_by_the_client_ca_only_enrols() {
         let (client_der, client_subject, client_key) = ca("client CA", None);
@@ -448,8 +448,8 @@ mod tests {
 
     /// An intermediate below the bootstrap CA that copies the client CA's name issues nothing a
     /// member holds: membership is what the client CA's key signed, not a name an issuer can
-    /// take (ADR-0040 clause 17).
-    /// Verifies: ADR-0040
+    /// take (ADR-0026 clause 17).
+    /// Verifies: ADR-0026
     #[test]
     fn an_intermediate_named_like_the_client_ca_only_enrols() {
         let (client_der, _, client_key) = ca("client CA", None);
@@ -480,8 +480,8 @@ mod tests {
 
     /// Through a Gateway a proven bootstrap certificate is checked as the handshake checks one on
     /// an enrolment connection: issued directly by the bootstrap CA, no CA itself, an extended key
-    /// usage that includes `clientAuth` where it names one, and valid now (ADR-0048 clause 21).
-    /// Verifies: ADR-0048
+    /// usage that includes `clientAuth` where it names one, and valid now (ADR-0016 clause 21).
+    /// Verifies: ADR-0016
     #[test]
     fn a_proven_bootstrap_certificate_is_checked_as_the_handshake_checks_it() {
         use rcgen::ExtendedKeyUsagePurpose as Eku;

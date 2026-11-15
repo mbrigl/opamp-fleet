@@ -11,7 +11,7 @@
 #
 # fleet-agent is linted without any wrapped Supervisor kind and with each one alone, and tested
 # without any: the default build carries every kind, so only these show that a build leaving one
-# out still compiles and refuses the kind as unknown (ADR-0051 clause 2).
+# out still compiles and refuses the kind as unknown (ADR-0018 clause 2).
 #
 # The fuzz targets of fuzz/ are a workspace of their own, so --workspace never compiles them. They
 # are checked here on the stable toolchain, into the workspace's target directory, so a change to a

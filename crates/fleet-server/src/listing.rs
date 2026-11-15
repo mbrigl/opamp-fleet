@@ -1,5 +1,5 @@
 //! The lists that grow with the fleet, read a page at a time
-//! (ADR-0031):
+//! (ADR-0030):
 //! the filters, the order, the opaque cursor, and what an Agent's record gives the queries to
 //! search and sort by.
 //!
@@ -223,7 +223,7 @@ pub struct Derived {
     pub service_name: String,
     /// Every reported key outside the Server's `fleet.` space, with the value a Selector matches,
     /// `None` where the first value reported is no string or an empty one: the key is taken, and
-    /// no label can stand in for it (ADR-0052 clause 18).
+    /// no label can stand in for it (ADR-0029 clause 18).
     pub reported: BTreeMap<String, Option<String>>,
     /// `host.id=…` or `host.name=…`, empty when neither is reported.
     pub machine: String,
@@ -267,7 +267,7 @@ pub fn derive(source: &Source<'_>) -> Derived {
         description if !description.is_empty() => description,
         _ => lookup(&non_identifying, attributes::OS_TYPE),
     };
-    // The Platform the offer reads (ADR-0050 clause 14): what an upload is keyed by.
+    // The Platform the offer reads (ADR-0033 clause 14): what an upload is keyed by.
     let platform = crate::packages::Platform::reported(source.description)
         .map(|platform| platform.tag())
         .unwrap_or_default();
@@ -428,7 +428,7 @@ pub struct Candidate<'a> {
     pub holder: Option<&'a str>,
     /// The Host it last arrived over.
     pub host: Option<&'a str>,
-    /// What a Selector is matched against (ADR-0052 clause 18).
+    /// What a Selector is matched against (ADR-0029 clause 18).
     pub effective: Option<&'a AgentDescription>,
     pub own: &'a BTreeMap<String, String>,
     pub inherited: &'a BTreeMap<String, String>,
@@ -498,7 +498,7 @@ mod tests {
 
     /// Pages follow each other without a gap or a repeat, ties broken by the tiebreak, in either
     /// direction, and the last page names no next one.
-    /// Verifies: ADR-0031
+    /// Verifies: ADR-0030
     #[test]
     fn pages_follow_each_other_in_a_stable_order() {
         let entries = || {
@@ -537,7 +537,7 @@ mod tests {
 
     /// The search text carries the platform the offer reads: folded through the core's table, and
     /// read from the identifying attributes where the non-identifying ones do not carry it.
-    /// Verifies: ADR-0031, ADR-0050
+    /// Verifies: ADR-0030, ADR-0033
     #[test]
     fn the_search_finds_an_agent_under_its_canonical_platform() {
         let search = |identifying: &[(&str, &str)], non_identifying: &[(&str, &str)]| {

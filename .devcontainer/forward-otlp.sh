@@ -8,7 +8,7 @@
 # stack's PostgreSQL, the database a development Server may keep its records in (ADR-0023 clause 25),
 # reached with `[database.postgres] tls = false`, which the loopback alone allows.
 #
-# The detour is ADR-0054's: the Client sends own telemetry in plaintext to a loopback IP literal
+# The detour is ADR-0017's: the Client sends own telemetry in plaintext to a loopback IP literal
 # and nowhere else — not to host.docker.internal, not to a private address, not even to the name
 # `localhost`. So a server.toml offering `http://127.0.0.1:4318/v1/logs` reaches the Collector
 # from inside the container exactly as it does on the host. The hop to the host stays on this

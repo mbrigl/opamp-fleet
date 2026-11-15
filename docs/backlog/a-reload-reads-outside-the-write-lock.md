@@ -26,7 +26,7 @@ entries.
 **Idea.** Each of the three reloads reads outside the write lock and swaps, as `reload_ledger` does.
 Any such change must keep the guarantee that no write of the instance's own is lost between the
 read and the swap. `retain_only` collects outside the lock, and the list is shared rather than
-copied. Reading the register by what a notice names contradicts ADR-0045 clause 12 ("Caches are
+copied. Reading the register by what a notice names contradicts ADR-0025 clause 12 ("Caches are
 read again, not updated"), so that part needs a superseding ADR through `propose-adr` first.
 
 **From.** Ticket 01 of `fleet-at-scale-costs`, the part the human did not keep in the ticket

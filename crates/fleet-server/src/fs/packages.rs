@@ -1,4 +1,4 @@
-//! The package store's metadata on the filesystem (ADR-0050, ADR-0023): the default adapter behind
+//! The package store's metadata on the filesystem (ADR-0033, ADR-0023): the default adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one JSON file per Package under
 //! `<data_dir>/packages/`, its entries inside, each naming its artifact by hash. The bytes are the
 //! blob store's.
@@ -89,7 +89,7 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Package, String> {
             .map(hex::decode)
             .transpose()
             .map_err(|e| format!("invalid signature in {}: {e}", path.display()))?;
-        // Held to the length a write is held to (ADR-0050 clause 18).
+        // Held to the length a write is held to (ADR-0033 clause 18).
         if let Some(signature) = &signature {
             if signature.len() != crate::packages::ED25519_SIGNATURE_LEN {
                 return Err(format!(
@@ -213,7 +213,7 @@ struct EntryMeta {
     /// The SHA-256 of the artifact, lowercase hex: the blob's name, and what the Agent verifies.
     sha256: String,
     size: u64,
-    /// The operator's Ed25519 signature over this entry, hex (ADR-0050); absent while unsigned.
+    /// The operator's Ed25519 signature over this entry, hex (ADR-0033); absent while unsigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signature_hex: Option<String>,
 }

@@ -271,7 +271,7 @@ fn copy(from: &Path, target: Target<'_>, database: &Database) -> Result<Report, 
     let mut report = Report::default();
     // No audit entry is copied: the files stay where they are as the closed archive, and its last
     // entry is recorded for the first chain to name as its predecessor
-    // (ADR-0029 clause 6).
+    // (ADR-0028 clause 9).
     let audit = from.join(fs::AUDIT);
     let archive = super::audit::archive_checked(&audit)?;
     let archive_end = archive.map(|archive| {
@@ -1329,7 +1329,7 @@ mod tests {
     /// as its predecessor; `audit-verify --archive` checks the link over the untouched archive and
     /// fails, naming the predecessor, once the archive's last entry was changed or removed;
     /// without `--archive` the predecessor is reported as not checked.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0028
     #[test]
     fn the_first_chain_names_the_archive_and_audit_verify_checks_the_link() {
         let Some(test) = TestDatabase::named() else {
@@ -1459,7 +1459,7 @@ mod tests {
 
     /// A file record that ends in a torn line stops the copy, naming the file, before anything is
     /// written: its end could never be verified as the first chain's predecessor.
-    /// Verifies: ADR-0029
+    /// Verifies: ADR-0028
     #[test]
     fn a_copy_refuses_an_audit_record_that_ends_in_a_torn_line() {
         let Some(test) = TestDatabase::named() else {

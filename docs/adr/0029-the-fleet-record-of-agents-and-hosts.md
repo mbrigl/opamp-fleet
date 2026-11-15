@@ -1,7 +1,7 @@
-# ADR-0030: The fleet record of Agents and Hosts
+# ADR-0029: The fleet record of Agents and Hosts
 
-- **Status:** ⚪ superseded by [ADR-0052](0052-the-fleet-record-of-agents-and-hosts.md)
-- **Date:** 2026-11-02
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-14
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-server/src/fleet.rs, crates/fleet-server/src/agent_store.rs and its adapters, crates/fleet-server/src/labels.rs, the host register in crates/fleet-server/src/revocation.rs and its adapters, the /api/v1/agents and /api/v1/hosts routes of crates/fleet-server/src/api.rs, stale_after_secs and [database] presence_interval_secs in server.toml, the Hosts and Agents tabs of the bundled UI in crates/fleet-server/static/index.html, and every document that tells an operator what a Host is, when it ends, or how labels and Selectors work
 
@@ -29,7 +29,7 @@ Gateway it is the Gateway's. A plain-HTTP Agent has no socket to close. Silence 
 only from an Agent that promised to report periodically, which is what `ReportsHeartbeat` is.
 
 **What "forget" can mean.** A client certificate is issued to a Host, never to an Agent
-([ADR-0026](0026-admission-by-client-certificate-and-revocation.md));
+([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md));
 nothing the Server holds can stop one Agent from connecting again. And a re-offered configuration is
 not free: the Collector plugin restarts its Managed Process when a configuration arrives, so
 dropping the gates of a live Agent bounces its process.
@@ -72,7 +72,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    (`sequence_num`, capabilities, description, health, effective configuration, remote-config,
    connection-settings, and package statuses, available components), the transport of the last
    report, `last_seen_ms`, a queued restart (`restart_pending`), the assignments rollout acts
-   wrote ([ADR-0033](0033-deployments-and-rollouts.md)), its labels and the Host it last arrived
+   wrote ([ADR-0032](0032-deployments-and-rollouts.md)), its labels and the Host it last arrived
    over (clauses 16 and 21), and the runtime facts `connected` and the owning connection.
    `GET /api/v1/agents` returns the records as `AgentView`s.
 
@@ -80,9 +80,10 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    fleet logic knows about persistence, and its surface is the access pattern:
    - `load()` — every record, once, at startup, for a Server that holds the fleet in memory;
    - `get(uid)` — one record, for an instance that holds only the Agents it carries;
-   - `get_many(uids)` — the records of several Agents in one read, for an instance that reads
-     again under its fleet lock what another instance changed, so the lock waits for one round
-     trip however many records changed;
+   - `get_many(uids)` — the records of several Agents in one read: under the fleet lock where an
+     instance reads again what another instance changed, so the lock waits for one round trip
+     however many records changed, and before that lock where a take-up reads the Agents a notice
+     names;
    - `query(only)` — every stored record with its presence, or the records of the uids `only`
      names, in the order of their `instance_uid`: what the Operator plane reads where the fleet is
      not in memory;
@@ -114,7 +115,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      stored count of takes is still the one it comes with, so it never undoes a take made since,
      by this instance or another;
    - `take(uid, holder, last_seen_ms)` — the take at a connecting report of
-     [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
      clause 8: names `holder`, raises the record's count of takes by one and answers it, answers
      the holder it replaced and whether this change of holder is the eleventh within a minute,
      counted on the database's clock, and announces the take where it replaced another instance,
@@ -160,7 +161,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    holding instance — in one batch every `[database] presence_interval_secs` (default 30, from 10 to
    60), so a heartbeat reaches the database at most once per interval and Agent. A change of the
    holding instance and a disconnect are written in the next batch, except as
-   [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+   [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
    clause 8 says. On graceful shutdown every record and every presence is flushed, so an ordinary
    restart restores current values; on PostgreSQL the flush writes only the records of the Agents
    this instance heard report, and of those only the ones whose stored holder is this instance, or
@@ -264,7 +265,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
       fetch what is offered to any Agent.
     - A certificate that names no host speaks for no Agent and fetches nothing.
     - A Client whose Server signs CSRs holds a host certificate after its first connection
-      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
       An operator who provisions certificates by hand names the host with that SAN URI.
     - In addition, each Agent record names the Host it last arrived over: its own Host on a
       direct connection, the Gateway's Host behind a Gateway. This is for the fleet view and for
@@ -274,7 +275,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
       only hosts whose certificate names a host (`urn:opamp-fleet:host:<id>`).
     - A request that presents no certificate at all exists only behind `Admission::open`, which
       serves tests and loopback development and which no Server configuration serves
-      ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)).
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
       Such a request is not tested for an offer, just as it is not tested at admission.
 
 17. **`PUT /api/v1/agents/{instance_uid}/labels` sets an Agent's labels, whole.** Body
@@ -308,8 +309,18 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
     - The grouping behind a Gateway rests on what Agents report. It places Agents for convenience
       inside the trust the Gateway already has, and it never decides admission.
 
-20. **`fleet.*` is reserved, and a label never overrides a reported attribute or a Host value.**
-    - A label whose key starts with `fleet.` is refused (`400`).
+20. **`fleet.*` and `supervisor.*` are reserved, and a label never overrides a reported attribute
+    or a Host value.**
+    - A label whose key starts with `fleet.` is refused (`400`), naming the key.
+    - A label whose key starts with `supervisor.` is refused (`400`), naming the key, the same way.
+      That space is a Supervisor's own statement: the kinds its Client carries and the version of
+      the Package it installed
+      ([ADR-0017](0017-what-an-agent-reports-about-itself.md)
+      clauses 5 and 10). A label there would let a Selector match an Agent as if it stated one.
+    - A label the record already holds in either space is ignored: it enters no effective
+      description (clause 18), so no Selector and no package match reads it, no Agent inherits it
+      (clause 19), and the fleet row lists it in `ignored_labels`. The next label set put without
+      it removes it.
     - A label whose key the Agent reports is refused (`409`), naming it. If an Agent starts
       reporting a key it was labelled with before, the reported value wins, and the label is
       listed in `shadowed_labels` on the fleet row rather than dropped in silence.
@@ -325,7 +336,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 
 22. **A label change moves what is proposed, never what is offered.** Setting labels changes
     which Configurations and Deployments are candidates for the Agent; nothing reaches it until a
-    rollout act ([ADR-0033](0033-deployments-and-rollouts.md)).
+    rollout act ([ADR-0032](0032-deployments-and-rollouts.md)).
 
 23. **The bundled UI puts each remedy beside its diagnosis.** A stale Agent shows a *Stale* pill
     beside its connection pill. The forget action is offered on every row, not pre-filtered by
@@ -444,10 +455,18 @@ which approvals and provisioned certificates already limit.
   fact, while the Server already keeps the labels in the record (clause 21). The record carries the
   labels and the Host the Agent last arrived over, and no separate label store exists (clauses 1, 3
   and 21).
+- **Reserve `fleet.` alone, and match every label the record holds.** A label in the
+  `supervisor.` space would then be set like any other and matched where the Agent reports no such
+  key. That space is a Supervisor's own statement: the kinds its Client carries and the version of
+  the Package it installed
+  ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clauses 5 and 10). A label there would
+  let a Selector or a package match take an Agent for one that states a kind or a version it never
+  stated. Rejected; clause 20 refuses such a label as it refuses one in `fleet.`, and ignores one
+  the record already holds in either space rather than match it.
 - **Every record loaded at startup and answered from memory with any store, connectedness never
   persisted, and the port's writes whole records.** It holds while one Server is the store's only
   writer. Where several instances serve one fleet
-  ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)),
+  ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)),
   an instance would answer from a copy another instance has changed, would not know which instance
   carries an Agent, and a whole-record write would undo an act committed through another instance.
   Rejected; clauses 2, 3, 4, 6 and 8 read and write per call on PostgreSQL and persist an Agent's
@@ -486,7 +505,7 @@ which approvals and provisioned certificates already limit.
 - [opamp-go](https://github.com/open-telemetry/opamp-go) example server — keeps its agent map in
   memory and offers no persistence design to follow.
 - On the host a certificate names, renewal, and that a Gateway hides its downstream certificates:
-  [ADR-0026](0026-admission-by-client-certificate-and-revocation.md);
+  [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md);
   [ADR-0018](0018-supervisor-mode-and-its-kinds.md) on `supervisor.kind.*`;
   [ADR-0017](0017-what-an-agent-reports-about-itself.md): `host.name`, `host.id`, `host.ip` and
   `host.mac` are reported attributes.
@@ -498,8 +517,8 @@ which approvals and provisioned certificates already limit.
 - Positive: the fleet view survives a restart, including the Agents not reporting, shown honestly
   as disconnected; restored gates mean a reconnecting Agent's compressed report is accepted and
   nothing that already runs is re-offered; a queued restart survives.
-- Positive: storage is a deployment choice behind a trait of six operations, and tests get an
-  in-memory fake for free.
+- Positive: storage is a deployment choice behind one trait shaped by the access pattern, and
+  tests get an in-memory fake for free.
 - Positive: the fleet view stops asserting what it does not know — gatewayed, polling, and wedged
   Agents become visible by one rule — and a decommissioned host's row can be removed.
 - Positive: a rollout ring is a Server-side decision, one API call instead of an edit and a
@@ -545,6 +564,7 @@ which approvals and provisioned certificates already limit.
   `a_queued_restart_survives_a_restart`, `forgetting_an_agent_releases_its_binding`,
   `a_direct_agent_matches_its_hosts_values_and_none_it_reports_itself`,
   `a_supervisor_agent_inherits_its_client_agents_labels_below_its_own`,
+  `a_stored_label_in_the_supervisors_space_matches_nothing`,
   `behind_a_gateway_agents_sharing_a_host_id_inherit_unless_ambiguous`,
   `a_client_agent_rekeyed_without_a_description_keeps_its_group_inheriting`,
   `forgetting_an_agent_removes_its_labels_and_a_rekey_keeps_them`.
@@ -558,6 +578,7 @@ which approvals and provisioned certificates already limit.
   `a_label_is_matched_like_a_reported_attribute`, `a_label_never_overrides_what_the_agent_reports`,
   `an_agent_that_reported_nothing_can_still_be_labelled`,
   `empty_keys_and_values_and_fleet_keys_are_refused`,
+  `a_stored_label_in_the_supervisors_space_is_ignored`,
   `the_effective_description_takes_each_key_from_the_first_source_that_has_it`.
 - [`revocation.rs`](../../crates/fleet-server/src/revocation.rs) unit tests:
   `an_approval_writes_the_host_before_its_first_report`,
@@ -575,6 +596,7 @@ which approvals and provisioned certificates already limit.
   `a_silent_agent_is_forgotten_and_returns_as_a_stranger`,
   `forgetting_what_is_not_there_is_reported`, `a_label_moves_an_agent_into_a_rollout_ring`,
   `a_label_may_not_restate_what_the_agent_reports`, `a_label_in_the_fleet_space_is_refused`,
+  `a_label_in_the_supervisors_space_is_refused`,
   `forgetting_an_agent_removes_its_labels`, `the_ui_lists_hosts_and_marks_inherited_labels`;
   [`mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs):
   `an_approval_writes_the_host_before_its_first_report`,
@@ -583,7 +605,7 @@ which approvals and provisioned certificates already limit.
   `a_label_aims_a_set_at_part_of_the_fleet`.
 - `get` and `query` of clause 2 and clauses 3, 4, 6 and 8 as they stand here are verified by the
   tests
-  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   names, and `query` on PostgreSQL by
   [`postgres/agents.rs`](../../crates/fleet-server/src/postgres/agents.rs)
   `the_query_reads_the_stored_presence_and_opening_reads_the_assignments_alone`.
@@ -601,10 +623,15 @@ which approvals and provisioned certificates already limit.
   - That a restart requested while another is delivered stays pending is decided on the filesystem
     store by [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
     `a_restart_requested_while_a_delivery_clears_one_stays_queued`, which carries the marker of
-    [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md).
+    [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md).
     Across two instances on PostgreSQL,
     [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
     `a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it` decides
     that a request stays queued until the carrying instance sends it, and that one made after the
-    send is queued again. No test races a request through one instance against a delivery through
-    another.
+    send is queued again.
+    [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
+    `a_restart_requested_through_one_instance_while_another_delivers_one_stays_until_sent` races
+    a request through one instance against a delivery through another. It decides that the
+    request is not lost, whether it comes before or after the delivery's clear. It carries the
+    markers of this ADR and of
+    [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md).

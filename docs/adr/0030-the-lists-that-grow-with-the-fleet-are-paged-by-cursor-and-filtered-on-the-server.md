@@ -1,4 +1,4 @@
-# ADR-0031: The lists that grow with the fleet are paged by cursor and filtered on the Server
+# ADR-0030: The lists that grow with the fleet are paged by cursor and filtered on the Server
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-07
@@ -8,7 +8,7 @@
 ## Context
 
 `GET /api/v1/agents` answers the Agents the Server knows as a JSON array of `AgentView`s
-([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md) clause 1). The bundled UI shows them in
+([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) clause 1). The bundled UI shows them in
 a table it refreshes every two seconds: one text field matches a substring across names, status,
 OS, platform, versions, attributes, labels, capabilities and package statuses, and the column
 headers sort by name, connection, health, configuration status, version, OS, sequence number and
@@ -31,11 +31,11 @@ repeats entries; a cursor that names the last entry read does not, and costs the
 page.
 
 The REST API is the fleet's stable contract (G-5), versioned by path
-([ADR-0032](0032-configurations-and-the-rest-api.md) clause 7). Scripts and external UIs read these
+([ADR-0031](0031-configurations-and-the-rest-api.md) clause 7). Scripts and external UIs read these
 arrays. Whatever pages them must not change what such a client receives while the list is
 small enough to send whole, and must not cut a list short without the client noticing.
 
-This ADR adds to [ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md) and changes none of its
+This ADR adds to [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) and changes none of its
 clauses: its clause 1 says what an Agent's entry is and not how many a response holds, and its port
 gains two reads beside those of its clause 2 (clause 9 here).
 
@@ -46,7 +46,7 @@ over a stable order, with filters the Server applies, while a request that asks 
 answered with the whole array up to a bound.
 
 1. **A page holds the entries the whole list holds, in the same shape.** `GET /api/v1/agents`
-   answers the records as `AgentView`s, as [ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)
+   answers the records as `AgentView`s, as [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)
    clause 1 decides, and the other three lists answer the entries they answer whole. Paging changes
    how many entries a response holds, never what an entry is.
 
@@ -92,12 +92,12 @@ answered with the whole array up to a bound.
      field searches, except the Configurations a rollout would release to the Agent, which follow
      from the Deployments and not from its record; `selector`, `key=value` pairs separated by commas
      that an Agent matches as a Deployment's Selector matches it
-     ([ADR-0033](0033-deployments-and-rollouts.md)): against its effective description, the Host's
+     ([ADR-0032](0032-deployments-and-rollouts.md)): against its effective description, the Host's
      subject values, what it reported, its own labels and its Client Agent's labels, as
-     [ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md) clause 18 builds it from the Agent's
+     [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) clause 18 builds it from the Agent's
      record; `connected` and `stale`, `true` or `false`; `service_name`; and on PostgreSQL `holder`,
      an instance id, or `none` for the Agents no instance with a live lease holds
-     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
      clause 13). On the filesystem store there is no holder, and `holder` is answered `400`.
    - Hosts take `q` over the host id and its subject values, and `gateway`, `true` or `false`.
      Certificates and revocations take `q` over subject, serial and host.
@@ -126,7 +126,7 @@ answered with the whole array up to a bound.
    - Each row also keeps a SHA-256 digest over the columns its derived ones come from. A row
      whose digest does not match them was written without its derived columns: before they
      existed, or by the release before, which serves on the same schema
-     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
      clause 16) and does not write them. Before `query_page` reads, the instance derives such
      rows again from their records, in batches, and writes them, so the answer is the same while
      two releases share the database, but for a small window. The deriving commits each batch in
@@ -141,7 +141,7 @@ answered with the whole array up to a bound.
    - `GET /api/v1/agents/attributes` reads the distinct pairs and types from those columns.
 
 9. **The port of the fleet record gains two reads, `query_page` and `reported_values`.** Beside the
-   operations of [ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md) clause 2, which it leaves
+   operations of [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) clause 2, which it leaves
    as they are, `AgentStore` answers `query_page(filter, sort, cursor, limit)`: the records that
    match `filter`, with their presence, in the order of clause 5 after the position `cursor` names,
    at most `limit` of them, and the number that match.
@@ -149,7 +149,7 @@ answered with the whole array up to a bound.
      REST API does not offer: the Host an Agent last arrived over (that ADR's clause 1). Through it
      an instance reads the Agents behind a Gateway, among them the Client Agent whose labels an
      Agent behind it inherits
-     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
      clause 8), and the check of a Gateway's package download reads the Agents that arrived over
      the Gateway's Host rather than the whole fleet.
    - On PostgreSQL it is a read beside `get` and `query`, the reads
@@ -171,7 +171,7 @@ an export of the whole fleet; the audit record, which the REST API does not serv
 - **A paged envelope on the same route** (`{"items": […], "next_cursor": …}`), as Google's API
   guidelines shape it. It is the clearest shape, but every client that reads the array breaks
   on the next release, at any fleet size. Rejected.
-- **A new path, `/api/v2`, for the paged lists.** It follows the path versioning of ADR-0032
+- **A new path, `/api/v2`, for the paged lists.** It follows the path versioning of ADR-0031
   clause 7, but doubles the routes and the document for four lists whose entries do not change,
   and leaves `/api/v1` unbounded. Rejected.
 - **Always page, with a default `limit`.** A script that reads the array would silently get
@@ -216,7 +216,7 @@ an export of the whole fleet; the audit record, which the REST API does not serv
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0031`:
+Tests that carry `Verifies: ADR-0030`:
 
 - Three Agents read with `limit=2` arrive as two pages that together hold each exactly once, the
   first with `Link: …; rel="next"` and the second without, both with `X-Total-Count: 3`.

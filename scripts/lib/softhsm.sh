@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # A SoftHSM2 token directory for the tests of the keys on a PKCS#11 token
-# (ADR-0043
-# clause 7). Sourced by scripts/check-rust.sh and scripts/check-store.sh.
+# (ADR-0026
+# clause 39). Sourced by scripts/check-rust.sh and scripts/check-store.sh.
 
 # The text a test that needs a token prints when none is named.
 SOFTHSM_SKIPPED="skipped: no PKCS#11 token"
