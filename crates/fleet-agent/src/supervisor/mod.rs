@@ -19,6 +19,7 @@ pub mod restart;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use opamp::attributes::SUPERVISOR_KIND_PREFIX;
 use tokio::sync::{mpsc, watch};
 use tracing::{info, warn};
 
@@ -114,7 +115,7 @@ fn kinds() -> Vec<Box<dyn Plugin>> {
 fn kind_attributes(mut attributes: BTreeMap<String, String>) -> BTreeMap<String, String> {
     for plugin in kinds() {
         attributes.insert(
-            format!("supervisor.kind.{}", plugin.kind()),
+            format!("{SUPERVISOR_KIND_PREFIX}{}", plugin.kind()),
             "true".to_string(),
         );
     }

@@ -13,6 +13,12 @@
 # without any: the default build carries every kind, so only these show that a build leaving one
 # out still compiles and refuses the kind as unknown (ADR-0051 clause 2).
 #
+# The fuzz targets of fuzz/ are a workspace of their own, so --workspace never compiles them. They
+# are checked here on the stable toolchain, into the workspace's target directory, so a change to a
+# function a target calls fails the required checks and not only the Fuzz workflow (specification
+# Q-2, ADR-0008 clause 15). The check compiles libFuzzer's C++ sources, which needs a C++ compiler;
+# the fuzzing itself needs nightly and runs in .github/workflows/fuzz.yml.
+#
 # Needs the Rust toolchain of rust-toolchain.toml, and SoftHSM2 for the tests of the keys on a
 # token; the Dev Container provides both.
 #
@@ -67,3 +73,4 @@ for feature in "" "${kinds[@]}"; do
   cargo clippy -p fleet-agent --all-targets --locked --no-default-features --features "$feature" -- -D warnings
 done
 cargo test -p fleet-agent --locked --no-default-features
+cargo check --manifest-path fuzz/Cargo.toml --locked --target-dir "${CARGO_TARGET_DIR:-target}"

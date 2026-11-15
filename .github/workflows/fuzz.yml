@@ -21,6 +21,9 @@ permissions:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
+    # The schedule fuzzes a target for fifteen minutes after its nightly build; a hang fails as a
+    # timeout rather than holding the runner for the platform's six hours.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

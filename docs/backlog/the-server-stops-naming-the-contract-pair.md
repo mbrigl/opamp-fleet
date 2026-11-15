@@ -1,6 +1,13 @@
-# Ticket: The Server stops naming the contract pair in its SQL
+# The Server stops naming the contract pair in its SQL
 
-## What to build
+**Kind:** schema, release; decision deferred.
+
+**Decided.** The human deferred release X until after the next normalization (2026-11-15). The
+columns stay until then. How ADR-0023 clause 22 reads on `SET DEFAULT`, and that removal moves to
+release X+1, is settled then by an ADR against the restated record. Until then no release drops the
+columns: a 0.8.2 instance beside it would fail, as below.
+
+**What was ticketed.**
 
 The contract pair is the Deployments' mirror columns `packages` and `configurations` and the
 Hosts' `instance_uids` arrays. The first step shipped in 0.8.1 and 0.8.2: no release writes the
@@ -56,7 +63,7 @@ The release after X drops the columns; the backlog entry
 
 **Effort.** S.
 
-## Acceptance criteria
+**Its acceptance criteria.**
 
 - [ ] Given a database migrated by release X, when the schema is read, then each column of the
   contract pair has its default, and the migration names 0.8.1 as the oldest Server.
@@ -70,7 +77,7 @@ The release after X drops the columns; the backlog entry
 - [ ] Given a live lease of 0.8.0, when an instance of release X starts, then it refuses to start.
 - [ ] Given the store checks, when they run, then they pass.
 
-## Read first
+**Its reading.**
 
 - Touches: `crates/fleet-server/src/postgres/schema.rs`,
   `crates/fleet-server/src/postgres/deployments.rs`, `crates/fleet-server/src/postgres/ledger.rs`,
@@ -78,12 +85,12 @@ The release after X drops the columns; the backlog entry
   `crates/fleet-server/src/fleet.rs`, `crates/fleet-server/tests/instances.rs`
 - ADR-0023 clause 22; ADR-0045 clause 16.
 
-## Blocked by
-
-- None (can start immediately)
-
-## Mode
+**Its mode.**
 
 with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap on
 open unattended work at zero. Its migration ships only in a release the human cuts, and the reading
 of ADR-0023 clause 22 is the human's.
+
+**From.** Ticket
+`docs/plan/the-contract-pair-is-removed/01-the-server-stops-naming-the-contract-pair.md`, moved to
+the backlog on the human's decision of 2026-11-15.

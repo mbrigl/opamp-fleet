@@ -13,8 +13,9 @@ artifact", is spread over three files.
 **Idea.** Two entry points, one for a member and one for a tree, take a request with the program
 path, the kept links and the key. Each dispatches on the format inside `archive`, and the format
 functions become private. The operator tool's tests call the tree entry instead of
-`extract_tree_tar_gz`. Work it after revision-2026-11-15 ticket 08 decides whether the kept links
-stay, since they are part of the request.
+`extract_tree_tar_gz`. The kept links are part of the request, and they stay: the
+human decided so on 2026-11-15
+(`docs/backlog/what-the-core-repack-added-without-a-caller-is-used-by-a-kind.md`).
 
 **From.** The design revision of 2026-11-15, ticket 07, moved to the backlog by the human
 (2026-11-15).

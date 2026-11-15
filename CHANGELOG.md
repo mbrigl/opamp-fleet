@@ -34,6 +34,14 @@ once its tag exists.
 
 ### Changed
 
+- **An instance on PostgreSQL takes up the Agents a notice names in one read**
+  ([ADR-0045](docs/adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  clauses 8 and 9). When another instance changes the records of Agents this instance holds, it
+  read them one database round trip per Agent before it took them up; a rollout over many Agents
+  cost as many round trips. It now reads them in one, then reads again under its lock only those
+  that changed meanwhile.
+  **What to do:** nothing.
+
 - **A Supervisor reports the version of the Package it installed, and the Server holds the next
   Package against it**
   ([ADR-0049](docs/adr/0049-deployments-and-rollouts.md) clauses 14 and
@@ -106,6 +114,17 @@ once its tag exists.
   the blobs are on S3.
 
 ### Fixed
+
+- **The fleet search finds an Agent under the platform its package is offered for**
+  ([ADR-0031](docs/adr/0031-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+  clause 6, [ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md) clauses 6 and 14). The
+  search text held `os.type` and `host.arch` as reported, and only from the non-identifying
+  attributes. An Agent that reports `linux` and `x86_64` is now found by `linux-amd64`, and an
+  Agent that reports its platform only among its identifying attributes by its platform too. A
+  search for `linux-x86_64` no longer finds it; `x86_64` still does. The OS column of the Agents
+  tab still shows the pair as reported. On PostgreSQL, an Agent's search text takes the new
+  platform with the next write of its record.
+  **What to do:** nothing.
 
 - **`opamp-fleetctl package fetch` names a platform as the Server does**
   ([ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md) clause 6). The tool kept a

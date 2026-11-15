@@ -1053,6 +1053,17 @@ echo "Decided by $(adr_id 1) clause 0." >> "$d/README.md"
 expect fail "clause 0, below the Decision's first" "$d" \
   "README.md:6: $(adr_id 1) clause 0 is cited, and its Decision has 3"
 
+# A fence inside the Decision holds a '## ' line and numbered lines: neither ends the section nor
+# counts as a clause, so the clause after the fence is the third. Read the fence as text and the
+# count is 5; let its heading end the section and it is 2.
+d="$(repo clause-fenced)"
+clauses "$d" 1 2
+printf '\n~~~markdown\n## Example\n\n3. x\n4. x\n~~~\n\n3. **Clause 3.** We will.\n' \
+  >> "$d/docs/adr/0001-decision.md"
+echo "Decided by $(adr_id 1) clause 4." >> "$d/README.md"
+expect fail "a numbered line or a heading inside a fence in the Decision is no clause" "$d" \
+  "README.md:6: $(adr_id 1) clause 4 is cited, and its Decision has 3"
+
 d="$(repo clause-separators)"
 clauses "$d" 1 3
 mkdir -p "$d/src"
