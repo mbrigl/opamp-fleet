@@ -97,14 +97,19 @@ has agreed the cut.
    superseded or rejected ADR chose, and why it did not stand, becomes an alternative of the new
    ADR that governs its topic. The header follows the mechanics.
 2. Write the clause table for the hand-off: each clause of each old ADR, in its own words
-   shortened to a line, with the new ADR and the section that carry it.
+   shortened to a line, with the new ADR, the section, and the clause number that carry it.
 3. Delete the old files, and rewrite both tables of the index.
 4. Write the ADR map, one line per old file, `OLD NEW`: a dead ADR maps to the new file of its
    final successor, or to `-` where it has none. Apply it with `remap.sh` and rewrite by hand
    what it lists as left.
-5. Make the tests cite the new numbers where `remap.sh` did not reach, and update
+5. Re-cite every clause citation outside `docs/adr/` by the clause table. `remap.sh` moves the
+   ADR identifier of `ADR-0021 clause 25`, never the number after `clause`, so each citation of
+   an old ADR's clause is rewritten by hand to the new clause number. Check 18 of
+   [`scripts/check-docs.sh`](../../../scripts/check-docs.sh) catches only a number beyond the new
+   Decision's clauses.
+6. Make the tests cite the new numbers where `remap.sh` did not reach, and update
    [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) where the cut changed what it cites.
-6. Run `scripts/check-all.sh`.
+7. Run `scripts/check-all.sh`.
 
 ## 6. Review and hand-off
 

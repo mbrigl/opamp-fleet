@@ -19,7 +19,7 @@ skimmed. The design revision drops what prevented nothing
   them itself, never from the template's own ADRs, scripts, or numbers, so it holds in a derived
   project and after a normalization.
 - **A comment that relies on a decision names its clause** — `ADR-0021 clause 25`, not the ADR
-  alone, so that a normalization's map can move it.
+  alone, so that a normalization can re-cite it by its clause table.
 - **A test waits for its event, never for a time** — a test waits for what it needs to see, under a
   deadline only a defect reaches. A sleep or a timed budget that holds on an idle host fails on a
   loaded one, and a race the test meant to provoke goes unprovoked on a fast one. A wait that
