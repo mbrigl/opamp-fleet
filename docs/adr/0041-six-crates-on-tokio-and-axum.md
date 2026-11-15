@@ -1,4 +1,4 @@
-# ADR-draft-six-crates-on-tokio-and-axum: Six crates in one Cargo workspace on tokio and axum, the whole OpAMP communication layer in the publishable `opamp` crate reading WebSocket frames itself, two internal shared crates chosen by who shares the code, an operator tool that depends on neither end, and a strict parse of the configuration
+# ADR-0041: Six crates in one Cargo workspace on tokio and axum, the whole OpAMP communication layer in the publishable `opamp` crate reading WebSocket frames itself, two internal shared crates chosen by who shares the code, an operator tool that depends on neither end, and a strict parse of the configuration
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-15
@@ -14,7 +14,7 @@ depending on the Client, for four items: `archive`, the unpackers and the 7z Uni
 following a link; `config_init::read_password_file`, which reads a password file as the Client's own
 setup does; and `tls::pkcs12_identity`, which opens a bootstrap PKCS#12 file as the Client's install
 does
-([ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)
+([ADR-0043](0043-the-operator-program-opamp-fleetctl.md)
 clauses 5 and 24). A test held the tool to that list.
 
 For those four items `opamp-fleetctl` linked the whole Client. Of the 282 crates the tool linked on
@@ -71,7 +71,7 @@ does not link. **How does
 a test reach the Client?** Cargo hands a test a helper binary's path
 (`CARGO_BIN_EXE_<name>`) only in an integration test, and an integration test links only a
 package's library. **Where do operator tools live?** `opamp-fleetctl`, the operator tool
-([ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)),
+([ADR-0043](0043-the-operator-program-opamp-fleetctl.md)),
 runs on an operator's machine and shares a few items with the Client: the 7z Unix-mode convention,
 the unpackers, the no-follow reader, the password-file reader and the PKCS#12 reader.
 
@@ -250,13 +250,13 @@ parse.
       file means is known.
     - `fleet-core`: `version`, the version helper ([ADR-0037](0037-the-products-version.md));
       `platform`, the platform alias table
-      ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md));
+      ([ADR-0039](0039-packages-signatures-and-delivery.md));
       `package`, the statements a package signature and a floor signature cover, which the operator
       tool signs and the Client verifies
       ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md)); `ending`, the rule that says
       when a certificate is ending, as plain date arithmetic without a dependency, and `naming`,
       what a certificate is called, which the Server and the operator tool apply alike
-      ([ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md));
+      ([ADR-0043](0043-the-operator-program-opamp-fleetctl.md));
       `pkcs12`, the bootstrap
       certificate's file
       ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md));
@@ -268,16 +268,16 @@ parse.
       [ADR-0022](0022-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
     - `fleet-util`: `archive`, the unpackers of a package's artifact and the 7z Unix-mode
       convention, which the operator tool packs by and the Client installs by
-      ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md));
+      ([ADR-0039](0039-packages-signatures-and-delivery.md));
       `tree`, the links a kind's tree package keeps, which the operator tool packs and the Client
       creates
-      ([ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md));
+      ([ADR-0043](0043-the-operator-program-opamp-fleetctl.md));
       `nofollow`, the file operations that follow no link
-      ([ADR-draft-the-accounts-the-service-runs-under](draft-the-accounts-the-service-runs-under.md));
+      ([ADR-0042](0042-the-accounts-the-service-runs-under.md));
       `password`, with `read_password_file`, which reads the first line of a password file; and
       `identity`, with `BootstrapIdentity`, a certificate and its key as PEM, and `pem_block`,
       which writes one PEM block in a buffer wiped on drop
-      ([ADR-draft-secrets-in-memory-are-wiped-on-drop](draft-secrets-in-memory-are-wiped-on-drop.md));
+      ([ADR-0040](0040-secrets-in-memory-are-wiped-on-drop.md));
       and `identity::pkcs12`, whose `open` opens a `BootstrapIdentity` from a bootstrap PKCS#12
       file
       ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
@@ -307,7 +307,7 @@ parse.
     only inside the crate that declares them.
 
 22. **The operator tool is its own crate, depending on neither end.** `crates/fleet-tools`
-    produces `opamp-fleetctl` (ADR-draft-the-operator-program-opamp-fleetctl) and has no library.
+    produces `opamp-fleetctl` (ADR-0043) and has no library.
     - Its `[dependencies]` must not name `fleet-agent` or `fleet-server`, in any target table.
     - It uses `opamp::tls`, the items of `fleet-core` and the items of `fleet-util` clause 17 names
       rather than restating them. It reads the operator's PKCS#12 file and its password file with
@@ -351,7 +351,7 @@ the operator tools.
   stay true while the code moved. Rejected: an item would have two paths in use, and an ADR's
   *Applies to* would name a shim instead of the code it governs.
 - **Hold `[dev-dependencies]` to the same rule.** Rejected: the end-to-end tests of
-  ADR-draft-the-operator-program-opamp-fleetctl run the real Server and the real Client in-process.
+  ADR-0043 run the real Server and the real Client in-process.
   `CARGO_BIN_EXE_opamp-fleetctl` resolves only inside the crate that declares the binary
   (clause 21), so those tests cannot move to another crate.
 - **A name that says what the crate holds, such as `fleet-files`.** Not chosen: the human chose
@@ -492,10 +492,10 @@ the operator tools.
 - Negative / trade-offs: a sixth crate, and a crate boundary inside code the Client calls from
   about fifteen modules. Every change to `fleet-util` recompiles the Client and the tool.
 - Negative / trade-offs: the move restates four ADRs that name the moved files by path
-  ([ADR-draft-secrets-in-memory-are-wiped-on-drop](draft-secrets-in-memory-are-wiped-on-drop.md),
-  [ADR-draft-the-accounts-the-service-runs-under](draft-the-accounts-the-service-runs-under.md),
-  [ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md),
-  [ADR-draft-the-operator-program-opamp-fleetctl](draft-the-operator-program-opamp-fleetctl.md)).
+  ([ADR-0040](0040-secrets-in-memory-are-wiped-on-drop.md),
+  [ADR-0042](0042-the-accounts-the-service-runs-under.md),
+  [ADR-0039](0039-packages-signatures-and-delivery.md),
+  [ADR-0043](0043-the-operator-program-opamp-fleetctl.md)).
   The backlog entries that name those paths move with them.
 - Negative / trade-offs: a crate named `fleet-util` reads as a place for anything. Clause 16 and its
   test hold it to what the Client and the tool share.

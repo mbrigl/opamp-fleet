@@ -1,4 +1,4 @@
-# ADR-draft-the-accounts-the-service-runs-under: The accounts the service runs under
+# ADR-0042: The accounts the service runs under
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-15
@@ -824,7 +824,7 @@ run answered.
     One knob moves state and program together. Staging beside `program/` makes a raw artifact's
     install a rename on one filesystem. The directory is `program/`, not `bin/`, because it holds
     a whole tree for a multi-file package
-    ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md)).
+    ([ADR-0039](0039-packages-signatures-and-delivery.md)).
     Moving `supervisor_dir` on a running host leaves the old tree behind and migrates nothing; each
     Supervisor then registers as a new Agent.
 
@@ -1444,7 +1444,7 @@ run answered.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-draft-the-accounts-the-service-runs-under`:
+Tests that carry `Verifies: ADR-0042`:
 
 - `crates/fleet-agent/src/service/manager.rs` (clauses 7, 8, 17):
   - `the_system_unit_is_the_clients_own_text`: the rendered unit holds `Description=<PRODUCT_NAME>`,
@@ -1680,7 +1680,7 @@ Tests that carry `Verifies: ADR-draft-the-accounts-the-service-runs-under`:
   `the_endpoint_dialog_names_the_identity_and_no_credential`.
 - `crates/fleet-agent/src/supervisor/mod.rs`:
   `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (clause 25). The archive tests of
-  [ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md),
+  [ADR-0039](0039-packages-signatures-and-delivery.md),
   `a_tree_keeps_the_modes_the_archive_carried`
   among them, cover the modes of clause 23.
 - `crates/fleet-agent/src/config_init.rs` and `crates/fleet-agent/src/service/enrol.rs`

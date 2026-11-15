@@ -1,4 +1,4 @@
-# ADR-draft-the-operator-program-opamp-fleetctl: The operator program `opamp-fleetctl`
+# ADR-0043: The operator program `opamp-fleetctl`
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-15
@@ -71,7 +71,7 @@ The forces:
 - **The operator's own machine comes first.** It is where an operator works before any Server
   exists. Whoever holds the package signing key and can make an offer runs code on every host it
   reaches, which is why the Client installs only what a key the operator holds has signed
-  ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md));
+  ([ADR-0039](0039-packages-signatures-and-delivery.md));
   the server CA's key is kept off the
   Server host for a like reason. A program that makes those keys is a program for the operator's
   machine, and the binary that serves the fleet has no use for it.
@@ -97,7 +97,7 @@ The forces:
 - **Where an upstream publishes no artifact a Client can run as published,** the operator program
   unpacks it on the operator's host and repacks the tree before it is signed. A tree package
   carries no link but those its kind keeps
-  ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md)),
+  ([ADR-0039](0039-packages-signatures-and-delivery.md)),
   so the repack
   dereferences links: a linked directory is packed under the linked name with its contents,
   because that name is one the agent uses (a tree may reach its Perl library through
@@ -126,7 +126,7 @@ Five more forces bear on the repack, the reading of a certificate's end and the 
 - **The reading of a certificate's end has a natural home in `fleet-core`.** `fleet-core` carries
   `x509-parser` and `time` for `x509` and `csr`. The file stays each program's to read, through
   `opamp::tls`, the one reader of a certificate's PEM
-  ([ADR-draft-six-crates-on-tokio-and-axum](draft-six-crates-on-tokio-and-axum.md)
+  ([ADR-0041](0041-six-crates-on-tokio-and-axum.md)
   clause 17). The core `ending` stays plain
   date arithmetic without a dependency, as that clause describes it; the reading is its adapter
   `ending::read`.
@@ -151,7 +151,7 @@ upstream that signs with OpenPGP.
 
 1. **The crate builds exactly this program.** `crates/fleet-tools` has no library and one binary,
    `opamp-fleetctl`, and keeps the dependency direction of
-   [ADR-draft-six-crates-on-tokio-and-axum](draft-six-crates-on-tokio-and-axum.md):
+   [ADR-0041](0041-six-crates-on-tokio-and-axum.md):
    it uses the items of the internal crates `fleet-core` and `fleet-util`, it depends on neither
    end, and nothing depends on it. The program is `src/main.rs`, which parses the command line,
    with one module per command tree, `src/package.rs` and `src/pki.rs`; the release fetcher behind
@@ -222,7 +222,7 @@ upstream that signs with OpenPGP.
    the operator: `server-ca.pem` and `server-ca-key.pem`; the package signing key, an Ed25519 key in
    PKCS#8 as `package keygen` writes it, as `package-signing-key.pk8`, and its public half in hex as
    `package-signing-key.pub`
-   ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md)); and
+   ([ADR-0039](0039-packages-signatures-and-delivery.md)); and
    `supervisor.toml.fragment` naming `server-ca.pem` in `[tls] ca_file`, `bootstrap.pem` and
    `bootstrap-key.pem` under `--host-path` in `cert_file` and `key_file`, where a host puts the pair
    the Server issues it, and the public half in `[packages] verification_key`. No key of the server
@@ -407,7 +407,7 @@ upstream that signs with OpenPGP.
       at that path and not through a linked directory, whose target is byte for byte that one is
       kept. It is packed with mode `0o777`, read from the tree and never followed, so nothing of
       the operator's host is read through it, and the Client creates exactly those links
-      ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md)
+      ([ADR-0039](0039-packages-signatures-and-delivery.md)
       clause 57). A link at a named path with another target, and every link the kind does not
       name, leads out and fails the repack as the bullet above states.
       The shared rule is `fleet_util::tree::is_kept`.
@@ -415,7 +415,7 @@ upstream that signs with OpenPGP.
     - **A link leading back up the tree is not followed,** the root of the tree included: a link to
       a directory the walk is already inside is packed as that name and not descended into.
     - The member cap a tree package has
-      ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md)) is
+      ([ADR-0039](0039-packages-signatures-and-delivery.md)) is
       checked while packing.
 
     Repacking the same release therefore yields the same bytes and the same hash on any
@@ -496,7 +496,7 @@ installer; provenance of the release's assets
 fleet through the Operator plane beyond the upload `package fetch` makes; writing the extracted key
 encrypted, extracting files other than the bootstrap form, and making a PKCS#12 file with the tool;
 how the Client applies a tar's modes, which
-[ADR-draft-the-accounts-the-service-runs-under](draft-the-accounts-the-service-runs-under.md)
+[ADR-0042](0042-the-accounts-the-service-runs-under.md)
 clause 23 states; a kind's own removal, before packing, of links it knows upstream leaves behind (as
 an AppImage's repack removes `.DirIcon`), which each kind states where it is decided; hard links,
 which are files of the tree; the trust in the extracted tree's origin, which the hash of what was
@@ -515,7 +515,7 @@ which `gpgv` cannot know of.
   package signing key and the server CA's key are kept away from, and the archive writers and the
   release fetcher would be linked into the binary that faces the fleet — attack surface with no use
   in serving, since the Server never creates or opens an artifact
-  ([ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md)).
+  ([ADR-0039](0039-packages-signatures-and-delivery.md)).
   With the operator tool published, the
   one argument for it — no second binary to obtain — is gone; the version both share is the
   release's.
@@ -724,7 +724,7 @@ which `gpgv` cannot know of.
   on the bootstrap CA, the crates issuance adds, the `bootstrap.p12` file and its reader;
   [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) on the planes; `docs/SPECIFICATION.md` on
   how an Agent obtains its certificate;
-  [ADR-draft-packages-signatures-and-delivery](draft-packages-signatures-and-delivery.md) on why
+  [ADR-0039](0039-packages-signatures-and-delivery.md) on why
   a package is signed by a key the operator holds and what a tree package may carry;
   [ADR-0020](0020-the-installed-service-and-its-state.md) on the member a package artifact carries;
   [ADR-0038](0038-releases-attestations-and-the-server-image.md) on the release, its naming and its
@@ -789,7 +789,7 @@ which `gpgv` cannot know of.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-draft-the-operator-program-opamp-fleetctl`:
+Tests that carry `Verifies: ADR-0043`:
 
 - `pki init` writes exactly the files of clause 7 into the two directories: the bootstrap CA's key
   into `--server-dir`, no server-CA key and no package signing key into it,

@@ -1,4 +1,4 @@
-# ADR-draft-secrets-in-memory-are-wiped-on-drop: The secrets the application crates hold in memory are wiped when they are dropped, with `zeroize`
+# ADR-0040: The secrets the application crates hold in memory are wiped when they are dropped, with `zeroize`
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-15
@@ -52,8 +52,8 @@ What the crates around the secrets do, read in the locked sources:
   as a `String`. Neither names `zeroize`.
 
 `opamp::tls::Identity` carries the key as PEM into every connection
-([ADR-draft-six-crates-on-tokio-and-axum](draft-six-crates-on-tokio-and-axum.md)
-clause 4). ADR-draft-six-crates-on-tokio-and-axum clause 3 lists the
+([ADR-0041](0041-six-crates-on-tokio-and-axum.md)
+clause 4). ADR-0041 clause 3 lists the
 dependencies each feature of `opamp` adds, and `zeroize` is not among them.
 
 ## Decision
@@ -64,7 +64,7 @@ a `bootstrap.p12` while the Client reads it, and the Supervisor Endpoint token) 
 buffer from the moment it is read or made until it is dropped.
 
 1. **One dependency, default features.** `zeroize` is pinned once in `[workspace.dependencies]`
-   ([ADR-draft-six-crates-on-tokio-and-axum](draft-six-crates-on-tokio-and-axum.md)
+   ([ADR-0041](0041-six-crates-on-tokio-and-axum.md)
    clause 11) with its default `alloc` feature
    and no derive, and named by `fleet-core`, `fleet-util`, `fleet-agent`, `fleet-server` and
    `fleet-tools` where they hold a secret. It pulls no TLS or crypto backend, so the rule of
@@ -85,7 +85,7 @@ buffer from the moment it is read or made until it is dropped.
 
 **Out of scope:** `opamp`. Wiping the key `opamp::tls::Identity` carries adds `zeroize` to both
 features of the publishable crate and changes a public field's type, which changes
-ADR-draft-six-crates-on-tokio-and-axum clause 3, supersedes ADR-draft-six-crates-on-tokio-and-axum,
+ADR-0041 clause 3, supersedes ADR-0041,
 and is its own decision. Also out of scope: locking secret pages against swap (`mlock`), excluding
 them from core dumps, and the ciphertext the Server keeps of a bootstrap certificate, which lies on
 disk under `config_dir` anyway.
@@ -132,8 +132,8 @@ disk under `config_dir` anyway.
 - Negative / trade-offs: the signatures that carry a secret inside the application crates take
   and return `Zeroizing` types.
 - Follow-ups: wiping `opamp::tls::Identity`'s key, which changes
-  ADR-draft-six-crates-on-tokio-and-axum clause 3 and so supersedes
-  ADR-draft-six-crates-on-tokio-and-axum; keeping secret pages out of swap and core dumps.
+  ADR-0041 clause 3 and so supersedes
+  ADR-0041; keeping secret pages out of swap and core dumps.
 
 ## Enforcement
 
