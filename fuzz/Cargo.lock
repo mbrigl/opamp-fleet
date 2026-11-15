@@ -1024,6 +1024,7 @@ dependencies = [
 name = "fleet-core"
 version = "0.8.3"
 dependencies = [
+ "cryptoki",
  "der 0.8.3",
  "git2",
  "hex",

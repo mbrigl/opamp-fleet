@@ -36,7 +36,7 @@ fuzz_target!(|data: &[u8]| {
     }
     let program = Path::new("bin/agent");
     let _ = match archive::detect(&artifact) {
-        Ok(archive::Kind::TarGz) => archive::extract_tree_tar_gz(&artifact, program, &dest).map(drop),
+        Ok(archive::Kind::TarGz) => archive::extract_tree_tar_gz(&artifact, program, &[], &dest).map(drop),
         Ok(archive::Kind::Zip) => archive::extract_tree_zip(&artifact, program, &dest).map(drop),
         Ok(archive::Kind::SevenZ) => archive::extract_tree_7z(&artifact, program, &dest, None).map(drop),
         _ => Ok(()),
