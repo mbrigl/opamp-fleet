@@ -4460,6 +4460,11 @@ pub struct AgentView {
     pub service_build: String,
     /// The reported `os.description` (e.g. "Ubuntu 24.04.2 LTS"), falling back to `os.type`.
     pub os: String,
+    /// The platform this Agent is offered packages for, `os.type`-`host.arch` as the offer reads
+    /// and folds them (`linux-amd64`), an identifying copy standing in for a non-identifying one;
+    /// empty when it reports neither, so it is offered no package. The fleet search finds the
+    /// Agent by this value.
+    pub platform: String,
     /// Every reported identifying attribute — what a Selector can match on (ADR-0031).
     pub identifying_attributes: BTreeMap<String, String>,
     /// Every reported non-identifying attribute — Selectors match these too.
@@ -4805,6 +4810,9 @@ impl AgentView {
                 description if !description.is_empty() => description,
                 _ => lookup(&non_identifying, attributes::OS_TYPE),
             },
+            platform: Platform::reported(record.description.as_ref())
+                .map(|p| p.tag())
+                .unwrap_or_default(),
             identifying_attributes: identifying,
             non_identifying_attributes: non_identifying,
             matched_configurations,
@@ -8325,6 +8333,52 @@ mod tests {
         if state.set_labels(uid, set).is_err() {
             panic!("labels refused");
         }
+    }
+
+    /// The view names the platform an Agent is offered packages for as the offer reads it: folded
+    /// to the canonical tokens, an identifying copy standing in, empty when it reports neither. The
+    /// Agents tab shows it and the fleet search finds the Agent by it (ADR-0030, ADR-0031).
+    /// Verifies: ADR-0030, ADR-0031
+    #[test]
+    fn the_view_names_the_platform_the_offer_reads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let none = crate::revocation::SubjectValues::default;
+        let (raw, identifying, silent) = (
+            InstanceUid([0xc1; 16]),
+            InstanceUid([0xc2; 16]),
+            InstanceUid([0xc3; 16]),
+        );
+        let service = [("service.name", "otelcol")];
+        let in_identifying = [
+            ("service.name", "otelcol"),
+            ("os.type", "macos"),
+            ("host.arch", "aarch64"),
+        ];
+        report_listed(
+            &state,
+            "h1",
+            none(),
+            raw,
+            1,
+            0,
+            &service,
+            &[("os.type", "linux"), ("host.arch", "x86_64")],
+        );
+        report_listed(
+            &state,
+            "h2",
+            none(),
+            identifying,
+            1,
+            0,
+            &in_identifying,
+            &[],
+        );
+        report_listed(&state, "h3", none(), silent, 1, 0, &service, &[]);
+        assert_eq!(view(&state, &raw).platform, "linux-amd64");
+        assert_eq!(view(&state, &identifying).platform, "darwin-arm64");
+        assert_eq!(view(&state, &silent).platform, "");
     }
 
     /// An Agent on a direct connection carries its Host's subject values as `fleet.host.*`; an

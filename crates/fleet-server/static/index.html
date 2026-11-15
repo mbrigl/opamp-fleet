@@ -718,12 +718,12 @@
         if (a.remote_config_status === "APPLIED") return `<span class="pill green">Applied</span>`;
         return `<span class="pill gray">Unset</span>`;
       }
-      // The platform this agent reports, `os.type`-`host.arch` — the exact pair a package artifact
-      // is stored under, so it can be read off a row and typed into the packages form. Empty when
-      // the agent reports neither, which is also why it would be offered no package at all.
+      // The platform this agent is offered packages for, as the Server reads and folds it: the pair
+      // a package artifact is stored under, so it can be read off a row, typed into the packages
+      // form, and searched for. Empty when the agent reports neither, which is also why it would
+      // be offered no package at all.
       function platformOf(a) {
-        const n = a.non_identifying_attributes || {};
-        return n["os.type"] && n["host.arch"] ? `${n["os.type"]}-${n["host.arch"]}` : "";
+        return a.platform || "";
       }
       // The host's addresses (ADR-0017), first of each on the row: the row answers "which host is
       // this" at a glance, while the full lists stay in the details chips below and in the

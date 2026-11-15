@@ -122,8 +122,10 @@ once its tag exists.
   attributes. An Agent that reports `linux` and `x86_64` is now found by `linux-amd64`, and an
   Agent that reports its platform only among its identifying attributes by its platform too. A
   search for `linux-x86_64` no longer finds it; `x86_64` still does. The OS column of the Agents
-  tab still shows the pair as reported. On PostgreSQL, an Agent's search text takes the new
-  platform with the next write of its record.
+  tab shows the same platform, so what a row shows is what finds it, and an Agent that reports
+  its platform only among its identifying attributes no longer shows "no platform reported".
+  `GET /api/v1/agents` names it in the new field `platform`, empty when the Agent reports none.
+  On PostgreSQL, an Agent's search text takes the new platform with the next write of its record.
   **What to do:** nothing.
 
 - **`opamp-fleetctl package fetch` names a platform as the Server does**

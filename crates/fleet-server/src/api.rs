@@ -560,6 +560,11 @@ struct AgentResponse {
     service_build: String,
     /// The reported `os.description` (e.g. "Ubuntu 24.04.2 LTS"), falling back to `os.type`.
     os: String,
+    /// The platform this Agent is offered packages for, `os.type`-`host.arch` as the offer reads
+    /// and folds them (`linux-amd64`), an identifying copy standing in for a non-identifying one;
+    /// empty when it reports neither, so it is offered no package. The fleet search finds the
+    /// Agent by this value.
+    platform: String,
     /// Every reported identifying attribute — what a Selector can match on (ADR-0031).
     identifying_attributes: BTreeMap<String, String>,
     /// Every reported non-identifying attribute — Selectors match these too.
@@ -705,6 +710,7 @@ impl From<fleet::AgentView> for AgentResponse {
             service_version: view.service_version,
             service_build: view.service_build,
             os: view.os,
+            platform: view.platform,
             identifying_attributes: view.identifying_attributes,
             non_identifying_attributes: view.non_identifying_attributes,
             matched_configurations: view.matched_configurations,
