@@ -34,6 +34,14 @@ once its tag exists.
 
 ### Changed
 
+- **An instance on PostgreSQL takes up the Agents a notice names in one read**
+  ([ADR-0045](docs/adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  clauses 8 and 9). When another instance changes the records of Agents this instance holds, it
+  read them one database round trip per Agent before it took them up; a rollout over many Agents
+  cost as many round trips. It now reads them in one, then reads again under its lock only those
+  that changed meanwhile.
+  **What to do:** nothing.
+
 - **A Supervisor reports the version of the Package it installed, and the Server holds the next
   Package against it**
   ([ADR-0049](docs/adr/0049-deployments-and-rollouts.md) clauses 14 and

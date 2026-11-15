@@ -137,14 +137,14 @@
 #      goes on from, as a date does, is not one. A citation wrapped over two lines is joined, the
 #      comment marker of the second line and a backslash ending the first dropped. Each number,
 #      both ends of a range included, lies between 1 and the count of the Decision's numbered
-#      items ('N. ' at the start of a line, outside fenced code, where a '## ' line ends no
-#      section either). A citation of a superseded or rejected ADR fails
-#      outside docs/adr/, whose ADRs keep the past they were written against, and outside
-#      CHANGELOG.md, which records what held when each entry was written. So does a citation of a
-#      place instead of a clause, which a normalization's clause table cannot follow: 'point',
-#      'paragraph', 'line', 'rule', 'item', 'bullet', 'step', 'section' or the section sign before
-#      a number, after an identifier. An identifier that names no ADR is check 5's. Superseded and
-#      rejected ADRs are not read, nor is the template.
+#      items ('N. ' at the start of a line, outside fenced code, where a '## ' line ends no section
+#      either). A citation of a superseded or rejected ADR fails outside docs/adr/, whose ADRs keep
+#      the past they were written against, and outside CHANGELOG.md, which records what held when
+#      each entry was written. So does a citation of a place instead of a clause, which a
+#      normalization's clause table cannot follow: 'point', 'paragraph', 'line', 'rule', 'item',
+#      'bullet', 'step', 'section' or the section sign before a number, after an identifier. An
+#      identifier that names no ADR is check 5's. Superseded and rejected ADRs are not read, nor is
+#      the template.
 #
 # Checks 5 and 6 read every text file of the repository, not a list of documentation extensions:
 # docs/adr/README.md states that code may reference an ADR number, so a verifier restricted to
