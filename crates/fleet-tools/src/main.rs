@@ -122,7 +122,7 @@ mod tests {
     /// `sign` has two forms and no mixture of them: the artifact form names the type, the version
     /// and the file; the signing-file form names the file alone, since the type and version are in
     /// it. A mixture would leave a reader guessing which statement got signed.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn sign_takes_an_artifact_or_a_signing_file_and_never_both() {
         let parse = |args: &[&str]| {

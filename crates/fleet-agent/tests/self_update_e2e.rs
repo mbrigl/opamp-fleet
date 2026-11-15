@@ -27,14 +27,14 @@ use std::time::Duration;
 use fleet_server::fleet::{AgentView, AppState, PackageOffering};
 use fleet_server::packages::{PackageStore, Platform};
 
-/// The Platform this test's Client will report about itself (ADR-0039) — the Server offers only
+/// The Platform this test's Client will report about itself (ADR-0033) — the Server offers only
 /// the artifact that fits the machine, so a self-update test has to store one for this one.
 fn this_host() -> Platform {
     Platform::new(std::env::consts::OS, std::env::consts::ARCH).expect("this host has a platform")
 }
 
 // What the Client exits with to ask its service manager for a restart, and its file name inside a
-// version directory. Imported rather than restated (ADR-0040 clause 21): a copied constant is a
+// version directory. Imported rather than restated (ADR-0008 clause 21): a copied constant is a
 // correctness risk that no comment can remove.
 use fleet_agent::service::layout::BINARY_FILENAME as CLIENT_BINARY;
 use fleet_agent::update::EXIT_RESTART_FOR_UPDATE;
@@ -78,7 +78,7 @@ fn ring_holding(
     ring_holding_signed(state, id, Some((&this_host(), signature)))
 }
 
-/// The same with the signature given — where a signature lives (ADR-0039).
+/// The same with the signature given — where a signature lives (ADR-0033).
 fn ring_holding_signed(
     state: &fleet_server::fleet::AppState,
     id: &fleet_server::packages::PackageId,
@@ -93,7 +93,7 @@ fn ring_holding_signed(
     deployments
         .put_package("stable", id, true)
         .expect("package into the ring");
-    // The signature is the entry's own (ADR-0039).
+    // The signature is the entry's own (ADR-0033).
     if let Some((platform, bytes)) = signature {
         state
             .packages()
@@ -487,7 +487,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
     // The Client's own Agent reports the constant type `supervisor` (ADR-0017, ADR-0020), and a Set
-    // reaches only Agents of its type — the type is part of its identity (ADR-0039). Its name is
+    // reaches only Agents of its type — the type is part of its identity (ADR-0033). Its name is
     // the same string, which is what the consent below is narrowed to.
     let set = fleet_server::packages::PackageId::new("supervisor", version).expect("package id");
     store.create(&set).expect("create package");
@@ -804,7 +804,7 @@ async fn a_set_at_the_running_version_reaches_nobody() {
 
 /// A self-update whose signature does not verify against `[packages] verification_key` fails with
 /// `InstallFailed` naming the signature, nothing is staged, and the Client keeps running the
-/// version it runs. The Server never offers an unsigned Package (ADR-0039), so a signature over
+/// version it runs. The Server never offers an unsigned Package (ADR-0033), so a signature over
 /// other bytes is the case that reaches the Client.
 /// Verifies: ADR-0019
 #[tokio::test]

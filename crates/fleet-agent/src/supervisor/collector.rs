@@ -18,7 +18,7 @@ use tracing::debug;
 use crate::supervisor::ports::{parse_settings, Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
 
-/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0040.
+/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
 ///
 /// `binary` is not among them: the core takes it out and resolves it (ADR-0018), and what arrives
 /// here is [`SupervisorContext::program`].
@@ -133,7 +133,7 @@ impl Plugin for CollectorPlugin {
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
             retain_previous: ctx.retain_previous,
-            // A package (ADR-0039) swaps this Collector's program — one file, or a whole tree.
+            // A package (ADR-0033) swaps this Collector's program — one file, or a whole tree.
             install: Some(install),
             archive_key: ctx.archive_key,
             // The Collector states its version on `--version`, so even one without the

@@ -357,7 +357,7 @@ impl AgentStorage for Storage {
         write_private(&self.dir.join(CONFIG_PB_FILE), &config.encode_to_vec())
     }
 
-    /// The installed package (ADR-0039), if one survived a previous run.
+    /// The installed package (ADR-0033), if one survived a previous run.
     fn load_package(&self) -> Option<InstalledPackage> {
         let bytes = crate::nofollow::read(
             &self.dir.join(PACKAGE_FILE),

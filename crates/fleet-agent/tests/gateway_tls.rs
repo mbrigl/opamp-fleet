@@ -543,7 +543,7 @@ async fn a_gateway_without_tls_on_loopback_does_not_start() {
 /// the mutual-TLS handshake and then never finishes its request headers is hung up on, as the
 /// Server's Agent plane does (`connection_setup.rs`). The handshake bound is 10 seconds; closing well
 /// inside it shows the header bound did the work.
-/// Verifies: ADR-0040, ADR-0016
+/// Verifies: ADR-0008, ADR-0016
 #[tokio::test]
 async fn a_downstream_connection_that_never_finishes_its_headers_is_hung_up_on() {
     use std::io::{Read as _, Write as _};
@@ -592,7 +592,7 @@ async fn a_downstream_connection_that_never_finishes_its_headers_is_hung_up_on()
 /// A Gateway serves on its download route only what it relayed an offer of: the Server behind it
 /// serves the artifact, and the Gateway, which relayed no offer of it, answers `404`
 /// (ADR-0016 clause 15).
-/// Verifies: ADR-0039
+/// Verifies: ADR-0033
 #[tokio::test]
 async fn the_gateway_serves_no_artifact_it_relayed_no_offer_for() {
     let dir = tempfile::tempdir().expect("tempdir");

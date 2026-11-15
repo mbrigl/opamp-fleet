@@ -1,5 +1,5 @@
 //! What every certificate this project makes gets, by the Server's client and bootstrap CAs and by
-//! the operator tool alike (ADR-0040 clause 18, ADR-0036 clause 5): a random serial, a life that
+//! the operator tool alike (ADR-0008 clause 18, ADR-0036 clause 5): a random serial, a life that
 //! starts a little before it is signed, the shape of a leaf by its role, and the authority that
 //! signs it, loaded from a CA's certificate and its key file.
 

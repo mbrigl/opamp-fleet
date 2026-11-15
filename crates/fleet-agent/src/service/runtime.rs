@@ -379,7 +379,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             .with_floors(agent_type, floors.clone()),
         );
     }
-    // There is no unsigned posture (ADR-0039, ADR-0019): without `[packages] verification_key` no
+    // There is no unsigned posture (ADR-0033, ADR-0019): without `[packages] verification_key` no
     // Agent of this Client takes packages, its own self-update included. Said once at startup, since
     // the Server only sees an Agent that declares no package capability.
     if config.package_key().is_none() {

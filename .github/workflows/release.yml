@@ -10,7 +10,7 @@ name: Release
 # version as any build does; this workflow decides the number and types the tag.
 #
 # The artifacts are packed by this project's own `opamp-fleetctl package pack`, so each Client archive
-# is also a valid package artifact for a fleet self-update (ADR-0039, ADR-0019) — the file an operator
+# is also a valid package artifact for a fleet self-update (ADR-0033, ADR-0019) — the file an operator
 # downloads is the file they hand the Server. The operator tool's archives are not packages of the
 # fleet: they are downloaded, never uploaded (ADR-0036 clause 4).
 #
@@ -472,7 +472,7 @@ jobs:
         run: |
           set -euo pipefail
           # The archive already has its checksum, from the packer's own stdout — that one is the
-          # content hash an Agent verifies (ADR-0039) and is not recomputed here.
+          # content hash an Agent verifies (ADR-0033) and is not recomputed here.
           for f in "$STEM".deb "$STEM".rpm "$STEM".msi; do
             [ -f "$f" ] || continue
             sha256sum "$f" > "$f.sha256"
@@ -870,12 +870,12 @@ jobs:
 
           Upload **all** of them into **one** Package, identified by the Agent type \`supervisor\` and
           this release's version, with one entry per platform. The Server offers each Agent the entry
-          built for the machine it reported (ADR-0039), so a mixed fleet updates from one Package.
+          built for the machine it reported (ADR-0033), so a mixed fleet updates from one Package.
           Each file is named \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0038), and the last two
           fields are exactly the pair an Agent reports as \`os.type\` and \`host.arch\`, so the upload
           reads them out of the name. Then put the Package in a Deployment, sign every entry with your
           package signing key, and roll it out; nothing reaches the fleet before that last call
-          (ADR-0039). The Deployment below reaches the hosts whose \`channel\` is \`stable\`: set it in a
+          (ADR-0033). The Deployment below reaches the hosts whose \`channel\` is \`stable\`: set it in a
           host's \`[attributes]\`, or as a Server label with \`PUT /api/v1/agents/<uid>/labels\`. The
           signatures come from the operator tool above:
 
@@ -896,7 +896,7 @@ jobs:
           \`\`\`
 
           Each Client archive holds the Client under the name it is installed as, so it needs no repacking:
-          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0039).
+          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0033).
 
           Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
           executable mode, so there is no \`chmod +x\` step. This is also the install path on macOS,

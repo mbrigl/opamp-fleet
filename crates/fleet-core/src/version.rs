@@ -16,7 +16,7 @@
 //!
 //! This lives in `fleet-core` rather than in either end: the Client writes these strings and the
 //! Server displays them, so one implementation keeps the two from drifting. It is this project's
-//! grammar, not OpAMP's, which is why it is not in the `opamp` crate (ADR-0040).
+//! grammar, not OpAMP's, which is why it is not in the `opamp` crate (ADR-0008).
 //!
 //! [`current`] is the other half of that: the version *this build* reports. `build.rs` computes it
 //! and bakes it in, and every surface on either end reads it here rather than `CARGO_PKG_VERSION`,

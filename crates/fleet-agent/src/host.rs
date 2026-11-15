@@ -211,7 +211,7 @@ fn cpu_model() -> Option<&'static str> {
         .as_deref()
 }
 
-/// The host's name (`host.name`) — read once. ADR-0039 twice offers a Selector on this attribute
+/// The host's name (`host.name`) — read once. ADR-0033 twice offers a Selector on this attribute
 /// as the way to pin one host to one artifact, so a fleet that does not report it cannot be aimed
 /// at a machine at all.
 pub(crate) fn host_name() -> Option<&'static str> {

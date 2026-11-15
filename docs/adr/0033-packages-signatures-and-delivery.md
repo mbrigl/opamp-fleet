@@ -1,11 +1,18 @@
 # ADR-0033: Packages, signatures, and delivery
 
-- **Status:** ⚪ superseded by [ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)
-- **Date:** 2026-10-28
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/fs/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, signature, Deployment-package and download routes of `crates/fleet-server/src/api.rs` with the handler `download_package`, the package limits and the `[packages]` section of `server.toml` in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, the `download.refused` audit entry, the platform table in `crates/fleet-core/src/platform.rs` and `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI in `crates/fleet-server/static/index.html`, the signing file `opamp-fleet-signing-v1`, the `package sign` command of `opamp-fleetctl` in `crates/fleet-tools/src/package.rs` and `crates/fleet-tools/src/signing.rs`, the Gateway's package cache in `crates/fleet-agent/src/gateway/` and its directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs`, `crates/fleet-agent/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the `member` a kind states in `KindDefaults` in `crates/fleet-agent/src/supervisor/ports.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, the kept-link rule in `crates/fleet-core/src/tree.rs`, and every document that tells an operator how to add, sign or deliver an artifact
 
 ## Context
+
+The platform table of clause 6 folds the spellings of a 32-bit ARM build onto `arm32`. A Collector
+release names that build `linux_armv7`, and `opamp-fleetctl package fetch` reads its token through
+the same table. No Agent reports `armv7`: Go's `GOARCH` and Rust's `std::env::consts::ARCH` both
+say `arm`, and the semantic conventions' `host.arch` value is `arm32`. Without the fold, the
+artifact is uploaded, listed and never offered, and nothing says so. `armv6` is not folded: an
+`armv7` build does not run on an ARMv6 host.
 
 The [specification](../SPECIFICATION.md) puts security before convenience (Strategy *Security
 before convenience*, **Q-1** *Secure by default*): software is installed only when it is signed
@@ -185,13 +192,14 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
    an `os.type` value (`linux`, `darwin`, `windows`, …) and a `host.arch` value (`amd64`, `arm64`,
    …). One table in the shared crate canonicalises **both** sides before they are compared, what
    is uploaded and what an Agent reports: `macos`, `osx` → `darwin`; `win`, `win32`, `win64` →
-   `windows`; `x86_64`, `x64`, `x86-64` → `amd64`; `aarch64` → `arm64`. Anything else is
+   `windows`; `x86_64`, `x64`, `x86-64` → `amd64`; `aarch64` → `arm64`; `arm`, `armv7` →
+   `arm32`. Anything else is
    lower-cased and passed through, so a platform the table has never heard of is still served; a
    canonical token must match `[a-z0-9_]{1,16}`, which keeps it a safe file-name component. The
    API answers with the canonical pair, so a typo shows in the response. The table is
    compatibility, not translation; nothing this project produces needs it:
-   - the Client reports `host.arch` as `amd64`/`arm64` and `os.type` as `darwin`, mapping Rust's
-     constants, so a Supervisor and a Collector's `opampextension` report the same string;
+   - the Client reports `host.arch` as `amd64`/`arm64`/`arm32` and `os.type` as `darwin`, mapping
+     Rust's constants, so a Supervisor and a Collector's `opampextension` report the same string;
    - the release artifacts carry the same two tokens in their file names (the file-name format is
      [ADR-0038](0038-releases-attestations-and-the-server-image.md)'s), so the upload of a release
      is a loop over the Client's archives with `os` and `arch` read straight out of each name.
@@ -812,6 +820,19 @@ reproducible tree mode for `opamp-fleetctl package pack`.
 
 ## Alternatives considered
 
+- **Fold `armv7` onto `arm`, the token an Agent reports.** The smallest change, and every Agent
+  reporting `arm` would match. Rejected: clause 6 spells a Platform the semantic conventions' way,
+  and their `host.arch` value for a 32-bit ARM build is `arm32`; `arm` is folded onto it as well.
+- **Leave the table without a fold for a 32-bit ARM build.** The table as it stood until
+  2026-11-15: an unknown token passes through, so a Collector's `linux_armv7` asset is stored under
+  `linux/armv7`. Rejected: it is uploaded, listed and never offered, since no Agent reports
+  `armv7`, and nothing says so.
+- **Fold `armv6` onto `arm32` too.** One token for every 32-bit ARM build. Rejected: an `armv7`
+  build does not run on an ARMv6 host, and an Agent reporting `arm` does not say which it is; an
+  `armv6` artifact stays under its own token.
+- **Leave the table as it was, and have `package fetch` pass an `armv7` asset over.** As the tool
+  did before it read the shared table. Rejected: a 32-bit ARM host in the fleet could then never be
+  offered the Collector's build.
 - **Leave the platform or the type to the operator's aim.** `os.type`/`host.arch`/`service.name`
   pairs already filter at zero cost. Rejected: opt-in, and forgetting it installs a foreign binary
   on every host of every other platform or type. A rule that is only right when remembered is not
@@ -1086,6 +1107,11 @@ reproducible tree mode for `opamp-fleetctl package pack`.
 
 ## Sources / Prior art
 
+- OpenTelemetry semantic conventions, attribute registry, `host.arch`
+  (<https://opentelemetry.io/docs/specs/semconv/registry/attributes/host/>, read 2026-11-15): the
+  well-known values `amd64`, `arm32`, `arm64`, `ia64`, `ppc32`, `ppc64`, `s390x`, `x86`.
+- `open-telemetry/opentelemetry-collector-releases` v0.165.0: the assets
+  `otelcol_0.165.0_linux_armv7.tar.gz` beside `linux_arm64` and `linux_386`.
 - [OpAMP specification § Packages
   (`v0.19.0`)](https://github.com/open-telemetry/opamp-spec/blob/v0.19.0/specification.md),
   also [§ Packages, Downloadable Packages, Code
@@ -1351,7 +1377,8 @@ marker citing this decision ([ADR-0002](0002-decisions-verified-by-tests.md)).
   `a_store_in_an_older_layout_refuses_to_open_and_names_what_is_in_the_way`.
 - `crates/fleet-core/src/platform.rs`: `folds_the_spellings_this_project_does_not_control`,
   `what_rust_calls_this_machine_folds_onto_a_canonical_token`,
-  `an_unknown_token_passes_through_unchanged`.
+  `an_unknown_token_passes_through_unchanged`, `a_32_bit_arm_build_is_spelled_arm32` (clause 6:
+  `arm` and `armv7` fold onto `arm32`, `armv6` passes through).
 - `crates/fleet-server/tests/packages.rs`: `an_uploaded_set_is_offered_downloaded_and_gated`,
   `the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_plane`,
   `no_offer_without_the_capability`, `an_entry_needs_its_set_first`,

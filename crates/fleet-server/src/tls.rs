@@ -1,5 +1,5 @@
 //! The listeners' TLS material (ADR-0012, ADR-0026), read from the files `[tls]`,
-//! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (ADR-0040).
+//! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (ADR-0008).
 //!
 //! What is the Server's here is which material and why. The Agent plane requires a client
 //! certificate in the handshake, verified against the client CA and, while `[enrolment]` is set,

@@ -3,9 +3,13 @@
 **Kind:** structure, decision taken.
 
 **Decided.** The human keeps the mechanisms (2026-11-15). The kinds that call them land after the
-next normalization of the ADR record, so their drafts are written once against the restated record:
+normalization of 2026-11-15 (#185), so their drafts are written once against the restated record:
 glpi uses the repack, the kept links and the version probe; icinga2 the repack, `gpgv` and the
-version probe; telegraf only `gpgv`. Until then the `#[allow(dead_code)]` markers stand.
+version probe; telegraf only `gpgv`. The normalization has landed, and the rebased branches
+`feat/glpi`, `feat/icinga2` and `feat/telegraf` cite its record. A second normalization of the same
+day gave the two superseding ADRs the numbers of those they superseded; each branch takes that
+normalization's map, in the message of its record commit, when it is next rebased. Until the first
+of them merges, the `#[allow(dead_code)]` markers stand.
 
 **What was ticketed.**
 
@@ -13,7 +17,7 @@ The core repack (#179, 834010bff) added mechanisms that no kind on `main` calls.
 of them, so none is dead by mistake:
 
 - **The kept-link chain** (clause 57 of
-  ADR-0039). `KindDefaults::tree_links`
+  ADR-0033). `KindDefaults::tree_links`
   (`crates/fleet-agent/src/supervisor/ports.rs`, near line 423) is `&[]` for every kind. The empty
   list still runs through `install_target`, `InstallTarget::Tree`, `stage_tree` and
   `archive::extract_tree_tar_gz`'s kept-link checks for every tree package. `KeptLink` values are
@@ -44,7 +48,7 @@ unseen (#179, bd1b5bbe1). The human chooses one:
 - remove the plumbing, which changes the ADRs that decide it through a superseding ADR
   (`propose-adr`).
 
-The choice must be settled before the next normalization of the ADR record.
+The choice was settled before the normalization of 2026-11-15: the mechanisms stay.
 
 **Effort.** The decision is S; the removal is M.
 
@@ -64,7 +68,7 @@ The choice must be settled before the next normalization of the ADR record.
 - Touches: `crates/fleet-agent/src/supervisor/`, `crates/fleet-agent/src/archive.rs`,
   `crates/fleet-tools/src/fetch.rs`, `crates/fleet-tools/src/gpgv.rs`,
   `crates/fleet-core/src/tree.rs`, `crates/fleet-core/src/version.rs`, `scripts/check-rust.sh`
-- ADR-0039 clause 57, ADR-0036 clauses 27 to 29, ADR-0018
+- ADR-0033 clause 57, ADR-0036 clauses 27 to 29, ADR-0018
   (the kinds), ADR-0034 clause 6.
 
 **Its mode.**

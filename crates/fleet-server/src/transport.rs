@@ -3,7 +3,7 @@
 //! `/v1/opamp` serves the whole protocol: a request carrying the protobuf `Content-Type` is the
 //! plain-HTTP transport, a WebSocket upgrade is the other — exactly the detection the Baseline
 //! describes. The communication is `opamp::server`'s, shared with the Gateway and the Supervisor
-//! Endpoint (ADR-0040); what is the Server's is the [`Fleet`] handler, which hands every decoded
+//! Endpoint (ADR-0008); what is the Server's is the [`Fleet`] handler, which hands every decoded
 //! report to the same [`AppState::process`], so transport is carriage, never semantics.
 
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ use crate::throttle::Throttle;
 use crate::tls::{Issuers, Peer};
 
 /// The endpoint path the Baseline names as the default, and the protobuf media type it requires —
-/// both from the shared crate, because the Gateway serves the same endpoint (ADR-0040).
+/// both from the shared crate, because the Gateway serves the same endpoint (ADR-0008).
 pub use opamp::endpoint::{OPAMP_PATH, PROTOBUF_CONTENT_TYPE};
 
 /// What a peer must prove to reach `/v1/opamp` (ADR-0026 clauses 1 and 6): a client certificate the

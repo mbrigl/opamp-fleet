@@ -188,7 +188,7 @@ pub struct Pinned {
 /// ([`FsConfigBackend`](crate::fs::FsConfigBackend)) is what the composition root wires.
 pub trait ConfigBackend: Send + Sync {
     /// Every persisted Configuration, once, when the store opens. One that cannot be read fails
-    /// loudly and names where it is — never silently ignored (ADR-0040's principle).
+    /// loudly and names where it is — never silently ignored (ADR-0008's principle).
     fn load(&self) -> Result<Vec<Configuration>, String>;
 
     /// Creates a Configuration or replaces its saved revision, in one step. No retained revision

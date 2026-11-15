@@ -1,6 +1,6 @@
 [package]
 name = "fleet-core"
-description = "What the Server and the Client of OpAMP Fleet implement identically, beyond the protocol (ADR-0040)"
+description = "What the Server and the Client of OpAMP Fleet implement identically, beyond the protocol (ADR-0008)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

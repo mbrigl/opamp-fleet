@@ -14,7 +14,9 @@ once its tag exists.
 > rest — is not backfilled here; it is in the git log and in the ADRs. The first four releases were
 > all cut on 2026-08-09, so the dates below say less than the order does.
 
-## [0.8.3]
+## [0.8.4]
+
+## [0.8.3] - 2026-11-15
 
 ### Added
 
@@ -145,7 +147,7 @@ once its tag exists.
   ARM build is spelled `arm32`, the semantic conventions' `host.arch` value, on both sides: a
   Collector's `linux_armv7` asset is listed as `linux/arm32` and offered to an Agent that reports
   `arm`, and a Client on 32-bit ARM reports `arm32`
-  ([ADR-0039](docs/adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)
+  ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)
   clause 6). `armv6` keeps its own name. **What to do:** nothing, unless a Package holds an entry
   uploaded as `linux/arm` or `linux/armv7`. Such an entry is served as `linux/arm32`, but it can
   no longer be removed or signed on its own, and of two such entries in one Package only one is

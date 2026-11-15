@@ -218,7 +218,7 @@ pub struct Answers {
     /// The questionnaire always asks for it there; `None` for a loopback `ws://` / `http://`
     /// endpoint, or where no question was put — a packaged install.
     pub ca_file: Option<PathBuf>,
-    /// The hex Ed25519 key packages are verified against (ADR-0039); `None` takes no package until
+    /// The hex Ed25519 key packages are verified against (ADR-0033); `None` takes no package until
     /// one is set.
     pub verification_key: Option<String>,
     /// `[packages] self_update` (ADR-0019): whether the Server may replace this Client's own
@@ -728,7 +728,7 @@ pub fn ask(
         )?)
     };
 
-    // Without it nothing is installed, the Client's own updates included (ADR-0039); an empty
+    // Without it nothing is installed, the Client's own updates included (ADR-0033); an empty
     // answer is allowed and said so. A key the file holds is the default, so Enter keeps it and a
     // single `-` is how it is removed.
     let mut prompt = Input::<String>::new().allow_empty(true);

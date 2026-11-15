@@ -1,5 +1,5 @@
 //! One OpAMP server endpoint, for every surface that speaks the Server side of the protocol
-//! (ADR-0040). Behind the `server` feature.
+//! (ADR-0008). Behind the `server` feature.
 //!
 //! This crate carries the communication and nothing else: it tells a WebSocket upgrade from a
 //! plain-HTTP exchange as the specification describes, applies the media type, gzip and the
@@ -268,7 +268,7 @@ fn peer_of(extensions: &Extensions) -> Option<SocketAddr> {
 }
 
 /// The WebSocket upgrade, answered here and taken over through hyper, so that `opamp` reads the
-/// frames itself and can judge a message by its data (ADR-0040 clause 5).
+/// frames itself and can judge a message by its data (ADR-0008 clause 5).
 async fn upgrade<H: Handler>(
     State(endpoint): State<Arc<Endpoint<H>>>,
     mut request: Request,

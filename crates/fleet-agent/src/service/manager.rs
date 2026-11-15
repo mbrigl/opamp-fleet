@@ -32,7 +32,7 @@ const RESTART_POLICY: RestartPolicy = RestartPolicy::OnFailure {
 
 /// Read by [`windows_config`](super::windows_config) so both platforms wait the same before a
 /// restart — and by the service smoke test, which has to outwait it before it may conclude that a
-/// killed service is not coming back (ADR-0040 widens visibility by need).
+/// killed service is not coming back (ADR-0008 widens visibility by need).
 pub const RESTART_DELAY_SECS: u32 = 5;
 
 /// The name the service is registered under — the same on every platform (ADR-0021), and the

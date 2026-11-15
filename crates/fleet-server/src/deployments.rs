@@ -1,7 +1,7 @@
-//! Deployments (ADR-0039, ADR-0032): what reaches a channel of hosts, and the only thing rolled out.
+//! Deployments (ADR-0033, ADR-0032): what reaches a channel of hosts, and the only thing rolled out.
 //!
 //! A Package is what an Agent type runs at a version, with each artifact's signature on its entry
-//! (ADR-0039), and a Configuration is content (ADR-0032) — neither has an aim or an act of its
+//! (ADR-0033), and a Configuration is content (ADR-0032) — neither has an aim or an act of its
 //! own. A Deployment carries a **name**, a **Selector** over the channel it addresses, **one
 //! Package per Agent type**, and **any number of Configurations**. The Selector matching lives
 //! here, because a Deployment is the one thing a Selector aims.
@@ -9,7 +9,7 @@
 //! Two rules give the object its shape, and both are refusals:
 //!
 //! **An Agent belongs to at most one Deployment.** Where two match, that is a conflict and the
-//! Agent is offered nothing new — not the most specific, not the newest, none. ADR-0039's
+//! Agent is offered nothing new — not the most specific, not the newest, none. ADR-0033's
 //! specificity ranking is withdrawn with no successor: it decided "which artifact does this host
 //! get" by a computation across every stored object, which is an answer no operator could read off
 //! anything. A refusal that names both Deployments is worse for nobody and legible to everyone.
@@ -53,7 +53,7 @@ pub fn matches(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Deployment {
     /// The operator's name for this channel. The one human-chosen label in the model, which is why
-    /// it keeps the ADR-0020 grammar a Package gave up (ADR-0039).
+    /// it keeps the ADR-0020 grammar a Package gave up (ADR-0033).
     pub name: String,
     /// Equality pairs that must all match an attribute the Agent reported, labels included
     /// (ADR-0032 clause 3). **Never empty** — see the module note.
@@ -175,7 +175,7 @@ pub fn deployment_for<'a>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     /// Adds a Package, or replaces the one held for its Agent type when `replace` is set; without
-    /// it a type already held by another Package is refused (ADR-0039 clause 25).
+    /// it a type already held by another Package is refused (ADR-0033 clause 25).
     PutPackage { id: PackageId, replace: bool },
     /// Removes a Package the Deployment holds; one it does not hold is `NotFound`.
     RemovePackage(PackageId),
@@ -281,7 +281,7 @@ impl Member {
 pub trait DeploymentBackend: Send + Sync {
     /// Every persisted Deployment, once, when the store opens. One that cannot be read fails the
     /// open and names where it is: a channel that silently vanished would withdraw nothing and
-    /// offer nothing, and say neither (ADR-0040's principle).
+    /// offer nothing, and say neither (ADR-0008's principle).
     fn load(&self) -> Result<Vec<Deployment>, String>;
 
     /// Creates a Deployment without members, or replaces the Selector of the one stored, in one
@@ -321,7 +321,7 @@ pub fn pinned(name: &str, pinning: usize) -> String {
     )
 }
 
-/// The Deployments (ADR-0039), held in memory and persisted through a [`DeploymentBackend`].
+/// The Deployments (ADR-0033), held in memory and persisted through a [`DeploymentBackend`].
 pub struct DeploymentStore {
     backend: Box<dyn DeploymentBackend>,
     deployments: RwLock<BTreeMap<String, Deployment>>,
@@ -412,7 +412,7 @@ impl DeploymentStore {
     }
 
     /// Adds a Package to a Deployment, or replaces the one held for its Agent type when `replace`
-    /// is set. Without `replace`, a type already held is refused by name (ADR-0039 clause 25),
+    /// is set. Without `replace`, a type already held is refused by name (ADR-0033 clause 25),
     /// decided from what the store holds.
     pub fn put_package(
         &self,
@@ -608,8 +608,8 @@ pub(crate) mod tests {
 
     /// An Agent belongs to at most one Deployment. Two claiming it is the conflict, and the
     /// message names **both** — a rollout that silently never starts is worse than one that says
-    /// why (ADR-0039 clause 28).
-    /// Verifies: ADR-0039
+    /// why (ADR-0033 clause 28).
+    /// Verifies: ADR-0033
     #[test]
     fn two_deployments_matching_one_agent_are_a_conflict_that_names_them() {
         let memory = Memory::default();
@@ -635,8 +635,8 @@ pub(crate) mod tests {
     }
 
     /// Specificity does not break the tie, and that is the decision — not an oversight: neither
-    /// Selector wins by being narrower (ADR-0039 clause 28).
-    /// Verifies: ADR-0039
+    /// Selector wins by being narrower (ADR-0033 clause 28).
+    /// Verifies: ADR-0033
     #[test]
     fn a_narrower_selector_does_not_win_over_a_wider_one() {
         let memory = Memory::default();
@@ -656,8 +656,8 @@ pub(crate) mod tests {
     }
 
     /// An Agent no channel claims waits, and that is not an error: after a fresh enrolment it is the
-    /// ordinary state (ADR-0039 clause 27).
-    /// Verifies: ADR-0039
+    /// ordinary state (ADR-0033 clause 27).
+    /// Verifies: ADR-0033
     #[test]
     fn an_agent_no_ring_claims_is_not_a_conflict() {
         let memory = Memory::default();
@@ -676,7 +676,7 @@ pub(crate) mod tests {
 
     /// An empty Selector is refused, and the message says what to write instead. It is the channel
     /// that collides with every other, and it is what a forgotten field looks like.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn a_deployment_must_name_the_ring_it_aims_at() {
         let memory = Memory::default();
@@ -702,7 +702,7 @@ pub(crate) mod tests {
 
     /// One Package per Agent type, refused at the write rather than puzzled over at resolution —
     /// and the refusal names what is already held.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn a_deployment_holds_one_package_per_agent_type() {
         let memory = Memory::default();
@@ -738,8 +738,8 @@ pub(crate) mod tests {
     }
 
     /// Removing a Package takes it out of the channel, and only that: the Deployment holds no
-    /// signature of its own to leave behind (ADR-0039). A Package it does not hold is `NotFound`.
-    /// Verifies: ADR-0039
+    /// signature of its own to leave behind (ADR-0033). A Package it does not hold is `NotFound`.
+    /// Verifies: ADR-0033
     #[test]
     fn removing_a_package_takes_it_out_of_the_channel() {
         let memory = Memory::default();
@@ -762,7 +762,7 @@ pub(crate) mod tests {
 
     /// Editing the Selector is not editing the bytes: a Deployment's aim stays writable, and
     /// changing it keeps everything the channel holds.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn the_selector_stays_editable_and_keeps_what_the_ring_holds() {
         let memory = Memory::default();

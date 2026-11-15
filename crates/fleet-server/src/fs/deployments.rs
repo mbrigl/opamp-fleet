@@ -1,4 +1,4 @@
-//! Deployments on the filesystem (ADR-0039): the default adapter behind
+//! Deployments on the filesystem (ADR-0033): the default adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -197,7 +197,7 @@ mod tests {
     }
 
     /// The whole store survives a reopen.
-    /// Verifies: ADR-0039, ADR-0032
+    /// Verifies: ADR-0033, ADR-0032
     #[test]
     fn a_deployment_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -233,7 +233,7 @@ mod tests {
 
     /// A file this Server did not write fails the open, naming it. A channel that silently vanished
     /// would withdraw nothing and offer nothing, and say neither.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn an_unreadable_file_fails_the_open_and_names_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -257,7 +257,7 @@ mod tests {
 
     /// The store is owner-only, and so is every file in it: a Selector says which hosts a fleet
     /// operator considers a channel, which is not another local user's business.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[cfg(unix)]
     #[test]
     fn the_store_and_its_files_are_owner_only() {

@@ -1,11 +1,19 @@
 # ADR-0008: Five crates in one Cargo workspace on tokio and axum, the whole OpAMP communication layer in the publishable `opamp` crate reading WebSocket frames itself, an internal shared crate by measurement, and a strict parse of the configuration
 
-- **Status:** ⚪ superseded by [ADR-0040](0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)
-- **Date:** 2026-10-10
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
-- **Applies to:** Cargo.toml, `crates/opamp/` (its manifest and `[features]`, `build.rs`, `src/`, `LICENSE`, `NOTICE` and `README.md`), crates/fleet-core/, every OpAMP connection and listener of `crates/fleet-server/` and `crates/fleet-agent/` (the Server's two planes, the Client's upstream connection and its verification probe, the Gateway's downstream endpoint and upstream pool, the Supervisor Endpoint), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, the Client's `Session` in `crates/fleet-agent/src/transport/`, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, the strict parse of server.toml and supervisor.toml, the per-feature lint in `scripts/check-rust.sh` and `README.md`, and every new crate, module placement or dependency
+- **Applies to:** Cargo.toml, `crates/opamp/` (its manifest and `[features]`, `build.rs`, `src/`, `LICENSE`, `NOTICE` and `README.md`), crates/fleet-core/, every OpAMP connection and listener of `crates/fleet-server/` and `crates/fleet-agent/` (the Server's two planes, the Client's upstream connection and its verification probe, the Gateway's downstream endpoint and upstream pool, the Supervisor Endpoint), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, the Client's `Session` in `crates/fleet-agent/src/transport/`, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, the strict parse of server.toml and supervisor.toml, the per-feature lint in `scripts/check-rust.sh` and `README.md`, and every new crate, module placement or dependency, and every `fleet_agent::` path the code of `crates/fleet-tools/src/` names
 
 ## Context
+
+The operator tool reuses code of the Client rather than restating it. `opamp-fleetctl pki` opens
+the operator's PKCS#12 file and its password file with two functions of the Client:
+`fleet_agent::nofollow::read_privileged`, which reads a file a privileged step names without
+following a link, and `fleet_agent::config_init::read_password_file`, which reads a password file
+as the Client's own setup does. `fleet_agent::tls::pkcs12_identity`, beside them, is named by
+[ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 5 and 24. Without a test of what
+the tool takes from the Client, that list grows unseen; it did once, by these two functions.
 
 The [specification](../SPECIFICATION.md) fixes the language (both ends in Rust) and the
 deployables: one Server (Linux only, API-first, with a rudimentary bundled UI, G-5) and one Client
@@ -255,11 +263,16 @@ configuration to a strict parse.
 22. **The operator tool is its own crate, depending on the Client.** `crates/fleet-tools`
     produces `opamp-fleetctl` (ADR-0036) and has no library. The arrow points one way:
     `fleet-tools` uses `fleet_agent::archive`, `opamp::tls` and the items of `fleet-core` clause 17
-    names rather than restating them, and its tests open what the tool produces with the Client's
-    own unpacker. Nothing in `fleet-agent`, `fleet-server` or `opamp` depends on `fleet-tools`.
-    Tool-only dependencies (the 7z writer, release listing) are declared there, so
-    `cargo build -p fleet-agent` does not build them. The code that makes the fleet's certificate
-    authorities lives there too; no end runs it.
+    names rather than restating them. Of the Client, the tool's own code under
+    `crates/fleet-tools/src/` uses only `fleet_agent::archive`, `fleet_agent::tls::pkcs12_identity`,
+    and `fleet_agent::nofollow::read_privileged` with its `Named`, and
+    `fleet_agent::config_init::read_password_file`, which read the operator's PKCS#12 file and its
+    password file as the Client reads its own; a test fails on any other `fleet_agent::` path and
+    names it. Its integration tests may run the Client itself, and its tests open what the tool
+    produces with the Client's own unpacker. Nothing in `fleet-agent`, `fleet-server` or `opamp`
+    depends on `fleet-tools`. Tool-only dependencies (the 7z writer, release listing) are declared
+    there, so `cargo build -p fleet-agent` does not build them. The code that makes the fleet's
+    certificate authorities lives there too; no end runs it.
 
 23. **A configuration that does not parse fails startup, loudly.** Every setting has a documented
     default; unknown keys are rejected (`deny_unknown_fields`, or the equivalent strict parse for a
@@ -277,6 +290,14 @@ the operator tools.
 
 ## Alternatives considered
 
+- **The operator tool stops using the two functions.** It would read the PKCS#12 file and the
+  password file with code of its own. Rejected: two readers of one secret file that must agree on
+  links, modes and size bounds drift apart, and the Client's are the ones its tests hold.
+- **Name the functions without a test.** Rejected: a list no test checks grows unseen.
+- **Name only `fleet_agent::archive` of the Client in clause 22, beside `opamp::tls` and the items
+  of `fleet-core`, with no test.** The clause as it stood until 2026-11-15. Rejected: the tool's
+  code already used the two readers above, so the clause no longer said what the tool takes from
+  the Client.
 - **axum's WebSocket, judged by the bytes the connection reads.** A Ping between two fragments of
   a message looks like progress, so a message stays open for ever; treating control frames as no
   progress closes a peer that only pings. TLS records and the bytes read with the upgrade request
@@ -428,6 +449,10 @@ the operator tools.
   [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml): `release-build` (clauses 15, 21).
   The workspace manifest lists the five members, and Cargo refuses a dependency cycle, so
   `fleet-agent` cannot come to depend on `fleet-tools` (clause 22).
+- `crates/fleet-tools/tests/client_items.rs`
+  `the_operator_tool_uses_only_the_client_items_its_adr_names` reads the code under
+  `crates/fleet-tools/src/` and fails on a `fleet_agent::` path outside clause 22's list, naming
+  the path and its file (clause 22).
 - The test
   [`crates/fleet-agent/tests/supervisor_process.rs`](../../crates/fleet-agent/tests/supervisor_process.rs)
   spawns `stub_agent` through `CARGO_BIN_EXE_stub_agent`, and

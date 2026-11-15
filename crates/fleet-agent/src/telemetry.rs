@@ -86,7 +86,7 @@ const SCOPE: &str = "opamp-fleet-client";
 ///   instance name and identity stays `service.instance.id` (ADR-0017) — that is a statement about
 ///   *identity*, not about what the telemetry is worth carrying. Without it every series at the
 ///   receiving end is a uuid the operator cannot place against the fleet view they searched by.
-/// - `os.type` and `host.arch` are the two halves this project calls a platform (ADR-0039), and
+/// - `os.type` and `host.arch` are the two halves this project calls a platform (ADR-0033), and
 ///   `os.description` is the readable form of the first. They sit on the Resource rather than on
 ///   each sample because they are a property of the *host*: this Client samples its own process and
 ///   the Managed Processes it holds the pids of, so every Agent in one export runs on the machine
@@ -1101,7 +1101,7 @@ mod tests {
     }
 
     /// The platform travels with the telemetry, because a series that cannot be placed on an
-    /// operating system and an architecture (ADR-0039) cannot be read against a fleet whose Agents
+    /// operating system and an architecture (ADR-0033) cannot be read against a fleet whose Agents
     /// do not all run the same one. It sits on the Resource: every Agent in one export runs on the
     /// host this Resource describes, so per-sample it would be a constant repeated on every point.
     /// Verifies: ADR-0017
