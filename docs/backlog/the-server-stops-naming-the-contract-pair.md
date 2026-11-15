@@ -1,11 +1,11 @@
 # The Server stops naming the contract pair in its SQL
 
-**Kind:** schema, release; decision deferred.
+**Kind:** schema, release; decision due.
 
-**Decided.** The human deferred release X until after the next normalization (2026-11-15). The
-columns stay until then. How ADR-0023 clause 22 reads on `SET DEFAULT`, and that removal moves to
-release X+1, is settled then by an ADR against the restated record. Until then no release drops the
-columns: a 0.8.2 instance beside it would fail, as below.
+**Decided.** The human deferred release X until after the normalization of 2026-11-15, which
+landed with #185. Nothing blocks it now but the decisions below. How ADR-0023 clause 22 reads on
+`SET DEFAULT`, and that removal moves to release X+1, is settled by an ADR against the restated
+record. Until then no release drops the columns: a 0.8.2 instance beside it would fail, as below.
 
 **What was ticketed.**
 
@@ -46,7 +46,7 @@ The oldest Server is 0.8.1, not 0.8.0. A Server of 0.8.0 still reads an array fo
 arrays. Every migration on `main` names 0.8.0 or older, so X's is the first to name 0.8.1. An
 instance of X therefore refuses to start beside a live lease of 0.8.0.
 
-The human decides these questions first, before the next normalization of the ADR record:
+The human decides these questions first:
 
 - whether `SET DEFAULT` on an existing column counts as a migration that "only adds" under ADR-0023
   clause 22; the alternative `DROP NOT NULL` does not, and it breaks 0.8.1 and 0.8.2 as said

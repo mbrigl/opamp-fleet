@@ -3,9 +3,11 @@
 **Kind:** structure, decision taken.
 
 **Decided.** The human keeps the mechanisms (2026-11-15). The kinds that call them land after the
-next normalization of the ADR record, so their drafts are written once against the restated record:
+normalization of 2026-11-15 (#185), so their drafts are written once against the restated record:
 glpi uses the repack, the kept links and the version probe; icinga2 the repack, `gpgv` and the
-version probe; telegraf only `gpgv`. Until then the `#[allow(dead_code)]` markers stand.
+version probe; telegraf only `gpgv`. The normalization has landed, and the rebased branches
+`feat/glpi`, `feat/icinga2` and `feat/telegraf` cite the restated record. Until the first of them
+merges, the `#[allow(dead_code)]` markers stand.
 
 **What was ticketed.**
 
@@ -44,7 +46,7 @@ unseen (#179, bd1b5bbe1). The human chooses one:
 - remove the plumbing, which changes the ADRs that decide it through a superseding ADR
   (`propose-adr`).
 
-The choice must be settled before the next normalization of the ADR record.
+The choice was settled before the normalization of 2026-11-15: the mechanisms stay.
 
 **Effort.** The decision is S; the removal is M.
 
