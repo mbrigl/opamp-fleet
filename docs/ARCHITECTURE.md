@@ -112,10 +112,11 @@ Five crates in one workspace
   ([ADR-0041](adr/0041-six-crates-on-tokio-and-axum.md)):
   the unpackers of a package's artifact and the 7z Unix-mode convention (`archive`), the links a
   kind's tree package keeps, which `opamp-fleetctl` packs and the Client creates (`tree`), though
-  no kind on `main` states one yet, the file operations that follow no link (`nofollow`), the
-  reader of a password file (`password`), and a bootstrap identity as PEM (`identity`), opened from
-  a PKCS#12 file by the adapter `identity::pkcs12`. A test decides from who names a module whether
-  it belongs here or in `fleet-core`.
+  no kind on `main` states one yet, the file operations that follow no link (`nofollow`), whose
+  Unix `*at` system calls, wrapped once in `nofollow::at`, the Client's work by directory handle
+  calls too, the reader of a password file (`password`), and a bootstrap identity as PEM
+  (`identity`), opened from a PKCS#12 file by the adapter `identity::pkcs12`. A test decides from
+  who names a module whether it belongs here or in `fleet-core`.
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the
   effective description Selectors match (`labels`), packages and Deployments, the Agent plane, and
   the Operator plane, whose credential check is `credentials`.
@@ -351,12 +352,12 @@ no module.
   `supervisor::ports`, so a Supervisor a Supervisor-set apply starts later starts its program
   the same way, and a Supervisor it purges has the same `Spawner` remove first what its
   programs wrote under their own account, in the directory the purge first moved aside to a name
-  no Supervisor carries. What the Client changes where the process account
-  writes, it reaches through `storage::handle`, one directory handle at a time from a root of its
-  own — the state directory, the Supervisors' root, a Supervisor's directory — beneath which no
-  link is followed. On Windows that is `win32::files`, which sets a DACL on one handle at a time
-  and walks a tree itself, never into a link, with the ACE inheritance rules in `win32::acl`; the
-  install's hand-over and its take-over of the data root walk the same way.
+  no Supervisor carries. What the Client changes where the process account writes, it reaches
+  through `storage::handle`, on top of `fleet_util::nofollow::at`, one directory handle at a time
+  from a root of its own — the state directory, the Supervisors' root, a Supervisor's directory —
+  beneath which no link is followed. On Windows that is `win32::files`, which sets a DACL on one
+  handle at a time and walks a tree itself, never into a link, with the ACE inheritance rules in
+  `win32::acl`; the install's hand-over and its take-over of the data root walk the same way.
   `supervisor::agent`, an Agent's decisions, names four more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, `HighWaterMarks`, which
   `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares

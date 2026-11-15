@@ -513,25 +513,18 @@ fn socket_dir(dir: &Path, uid: u32, gid: u32) -> Result<(), String> {
     use std::os::fd::AsRawFd as _;
     let failed = |e: std::io::Error| format!("cannot prepare {}: {e}", dir.display());
     let (parent, name) = socket_parent(dir).map_err(failed)?;
-    // SAFETY: a valid descriptor and a NUL-terminated name.
-    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
-        let e = std::io::Error::last_os_error();
-        if e.kind() != std::io::ErrorKind::AlreadyExists {
-            return Err(failed(e));
-        }
+    match fleet_util::nofollow::at::mkdir(parent.as_raw_fd(), &name, 0o700) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(failed(e)),
+        _ => {}
     }
-    let handle =
-        crate::storage::handle::open(parent.as_raw_fd(), &name, crate::storage::handle::DIRECTORY)
-            .map_err(failed)?;
-    // SAFETY: a valid descriptor, held across both calls.
-    if unsafe { libc::fchown(handle.as_raw_fd(), uid, gid) } != 0 {
-        return Err(failed(std::io::Error::last_os_error()));
-    }
-    // SAFETY: as above.
-    if unsafe { libc::fchmod(handle.as_raw_fd(), 0o750) } != 0 {
-        return Err(failed(std::io::Error::last_os_error()));
-    }
-    Ok(())
+    let handle = fleet_util::nofollow::at::open(
+        parent.as_raw_fd(),
+        &name,
+        fleet_util::nofollow::at::DIRECTORY,
+    )
+    .map_err(failed)?;
+    std::os::unix::fs::fchown(&handle, Some(uid), Some(gid)).map_err(failed)?;
+    fleet_util::nofollow::at::fchmod(&handle, 0o750).map_err(failed)
 }
 
 /// The parent of the socket's directory, held, and the directory's name in it. The parent must be
@@ -550,10 +543,10 @@ fn socket_parent(dir: &Path) -> std::io::Result<(std::os::fd::OwnedFd, std::ffi:
         ));
     };
     let c = |bytes: &[u8]| std::ffi::CString::new(bytes).map_err(std::io::Error::other);
-    let held = handle::open(
+    let held = fleet_util::nofollow::at::open(
         libc::AT_FDCWD,
         &c(parent.as_os_str().as_bytes())?,
-        handle::DIRECTORY,
+        fleet_util::nofollow::at::DIRECTORY,
     )?;
     let st = handle::fstat(&held)?;
     let own = handle::own();
@@ -1821,7 +1814,6 @@ fn launchd_loaded(label: &str) -> Result<bool, String> {
 /// Returns what was left in place, and why.
 #[cfg(all(unix, any(target_os = "macos", test)))]
 fn remove_socket_dir(socket: &Path) -> Result<(), String> {
-    use crate::storage::handle;
     use std::os::fd::AsRawFd as _;
     use std::os::unix::ffi::OsStrExt as _;
     let Some(dir) = socket.parent() else {
@@ -1829,15 +1821,16 @@ fn remove_socket_dir(socket: &Path) -> Result<(), String> {
     };
     let left =
         |path: &Path, e: std::io::Error| format!("{} was left in place: {e}", path.display());
-    let gone = |result: libc::c_int| match result {
-        0 => Ok(()),
-        _ => match std::io::Error::last_os_error() {
-            e if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            e => Err(e),
-        },
+    let gone = |result: std::io::Result<()>| match result {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
     };
     let (parent, name) = socket_parent(dir).map_err(|e| left(socket, e))?;
-    let held = match handle::open(parent.as_raw_fd(), &name, handle::DIRECTORY) {
+    let held = match fleet_util::nofollow::at::open(
+        parent.as_raw_fd(),
+        &name,
+        fleet_util::nofollow::at::DIRECTORY,
+    ) {
         Ok(held) => held,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(left(socket, e)),
@@ -1848,12 +1841,9 @@ fn remove_socket_dir(socket: &Path) -> Result<(), String> {
         .transpose()
         .map_err(|e| left(socket, std::io::Error::other(e)))?
         .ok_or_else(|| left(socket, std::io::Error::other("names no file")))?;
-    // SAFETY: a valid descriptor and a NUL-terminated name; unlinkat(2) follows no link at it.
-    gone(unsafe { libc::unlinkat(held.as_raw_fd(), file.as_ptr(), 0) })
-        .map_err(|e| left(socket, e))?;
-    // SAFETY: as above; only an empty directory is removed.
-    gone(unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) })
-        .map_err(|e| left(dir, e))
+    // unlinkat(2) follows no link at the name; only an empty directory is removed.
+    gone(fleet_util::nofollow::at::unlink(held.as_raw_fd(), &file)).map_err(|e| left(socket, e))?;
+    gone(fleet_util::nofollow::at::rmdir(parent.as_raw_fd(), &name)).map_err(|e| left(dir, e))
 }
 
 /// The installed service, implementing the [`ServiceControl`] seam.

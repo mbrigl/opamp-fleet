@@ -477,7 +477,7 @@ impl InstallTarget {
     /// group and written by the Client alone (ADR-0042 clause 21).
     pub fn prepare(
         &self,
-        group: Option<crate::storage::ProcessAccountGroup>,
+        group: Option<crate::supervisor::ports::ProcessAccountGroup>,
     ) -> Result<(), String> {
         let dir = match self {
             InstallTarget::Binary { path, .. } => path.parent().map(std::path::Path::to_path_buf),
@@ -525,7 +525,7 @@ impl InstallTarget {
         &self,
         artifact: &std::path::Path,
         archive_key: Option<&str>,
-        group: Option<crate::storage::ProcessAccountGroup>,
+        group: Option<crate::supervisor::ports::ProcessAccountGroup>,
     ) -> Result<Staged, String> {
         let single = |path: &std::path::Path, member: Option<&str>| {
             let temp = stage_executable(artifact, path, member, archive_key)?;
@@ -769,7 +769,7 @@ pub struct Runner {
     /// The process account's primary group, where a process account is registered: the
     /// directories the Managed Process writes into and the preflight's staging belong to it
     /// (ADR-0042 clause 21).
-    pub process_account_group: Option<crate::storage::ProcessAccountGroup>,
+    pub process_account_group: Option<crate::supervisor::ports::ProcessAccountGroup>,
     /// The Supervisor's own directory (ADR-0018): beneath it, no link is followed on the way to a
     /// directory the Managed Process writes into.
     pub supervisor_dir: PathBuf,
@@ -2149,7 +2149,7 @@ fn stage_tree(
     program_path: &std::path::Path,
     links: &[fleet_util::tree::KeptLink],
     archive_key: Option<&str>,
-    group: Option<crate::storage::ProcessAccountGroup>,
+    group: Option<crate::supervisor::ports::ProcessAccountGroup>,
 ) -> Result<PathBuf, String> {
     let staging = root.join(".staging");
     // A previous attempt that died between unpacking and the rename would leave this behind.
@@ -2228,7 +2228,7 @@ fn data_root<'a>(
 /// account is registered.
 fn share_staged(
     staging: &std::path::Path,
-    group: Option<crate::storage::ProcessAccountGroup>,
+    group: Option<crate::supervisor::ports::ProcessAccountGroup>,
 ) -> Result<(), String> {
     #[cfg(unix)]
     if let Some(group) = group {
@@ -2236,8 +2236,14 @@ fn share_staged(
         use std::os::fd::OwnedFd;
         use std::os::unix::fs::OpenOptionsExt as _;
         let shared = if std::fs::symlink_metadata(staging).is_ok_and(|meta| meta.is_dir()) {
-            handle::open_beneath(staging, staging, handle::DIRECTORY, None, handle::own())
-                .and_then(|tree| handle::share_tree(&tree, group, staging))
+            handle::open_beneath(
+                staging,
+                staging,
+                fleet_util::nofollow::at::DIRECTORY,
+                None,
+                handle::own(),
+            )
+            .and_then(|tree| handle::share_tree(&tree, group, staging))
         } else {
             std::fs::OpenOptions::new()
                 .read(true)
@@ -2331,7 +2337,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let staged = dir.path().join("agent.exe.new");
         std::fs::write(&staged, b"MZ").expect("staged");
-        let group = crate::storage::ProcessAccountGroup(crate::win32::LOCAL_SERVICE);
+        let group = crate::supervisor::ports::ProcessAccountGroup(crate::win32::LOCAL_SERVICE);
         share_staged(&staged, Some(group)).expect("shared");
         let program = dir.path().join("program");
         std::fs::create_dir(&program).expect("program/");
@@ -3585,7 +3591,7 @@ mod tests {
             (meta.mode() & 0o7777, meta.gid())
         };
         // SAFETY: getegid(2) cannot fail and touches no memory.
-        let group = crate::storage::ProcessAccountGroup(unsafe { libc::getegid() });
+        let group = crate::supervisor::ports::ProcessAccountGroup(unsafe { libc::getegid() });
         let dir = tempfile::tempdir().expect("tempdir");
         let artifact = dir.path().join("downloaded");
         std::fs::write(&artifact, "#!/bin/sh\nexit 0\n").expect("a bare program");
@@ -3657,7 +3663,7 @@ mod tests {
         #[cfg(unix)]
         {
             // SAFETY: getegid(2) cannot fail and touches no memory.
-            let group = crate::storage::ProcessAccountGroup(unsafe { libc::getegid() });
+            let group = crate::supervisor::ports::ProcessAccountGroup(unsafe { libc::getegid() });
             let dir = tempfile::tempdir().expect("tempdir");
             let supervisor = dir.path().join("supervisors").join("agent");
             std::fs::create_dir_all(&supervisor).expect("mkdir");
@@ -3682,7 +3688,7 @@ mod tests {
     async fn a_link_on_the_way_to_a_data_directory_fails_the_start() {
         use std::os::unix::fs::PermissionsExt as _;
         // SAFETY: getegid(2) cannot fail and touches no memory.
-        let group = crate::storage::ProcessAccountGroup(unsafe { libc::getegid() });
+        let group = crate::supervisor::ports::ProcessAccountGroup(unsafe { libc::getegid() });
         let dir = tempfile::tempdir().expect("tempdir");
         let supervisor = dir.path().join("supervisors").join("agent");
         std::fs::create_dir_all(&supervisor).expect("mkdir");
@@ -3721,7 +3727,7 @@ mod tests {
     /// A group of this test's account other than its effective one, as the process account's group
     /// is to the Client: `None` where the account is in no other group.
     #[cfg(unix)]
-    fn another_group() -> Option<crate::storage::ProcessAccountGroup> {
+    fn another_group() -> Option<crate::supervisor::ports::ProcessAccountGroup> {
         // SAFETY: getegid(2) cannot fail and touches no memory.
         let own = unsafe { libc::getegid() };
         let mut groups = vec![0 as libc::gid_t; 256];
@@ -3731,7 +3737,7 @@ mod tests {
         groups[..count]
             .iter()
             .find(|gid| **gid != own)
-            .map(|gid| crate::storage::ProcessAccountGroup(*gid))
+            .map(|gid| crate::supervisor::ports::ProcessAccountGroup(*gid))
     }
 
     /// Where a process account is registered, every member of an unpacked package is given to its

@@ -826,7 +826,7 @@ mod tests {
 
         let shared = tempfile::tempdir().expect("tempdir");
         let mut config = two_of_a_type(shared.path());
-        config.process_account_group = Some(crate::storage::ProcessAccountGroup(gid));
+        config.process_account_group = Some(crate::supervisor::ports::ProcessAccountGroup(gid));
         let _engine = build_engine(&config, &shutdown, Spawner::Local).expect("build");
         assert_eq!(mode(&config.state_dir), (0o710, gid));
         assert_eq!(mode(&config.supervisors_root()), (0o710, gid));

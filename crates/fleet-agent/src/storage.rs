@@ -470,7 +470,7 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub use crate::supervisor::ports::ProcessAccountGroup;
+use crate::supervisor::ports::ProcessAccountGroup;
 
 /// How a directory the Client creates is shared with the process account's group (ADR-0042
 /// clause 21).
@@ -537,7 +537,7 @@ pub(crate) fn create_shared_dir(
         let made = handle::open_beneath(
             root,
             dir,
-            handle::DIRECTORY,
+            fleet_util::nofollow::at::DIRECTORY,
             Some(&traversed),
             handle::own(),
         )
@@ -643,17 +643,15 @@ fn grant(root: &Path, dir: &Path, group: ProcessAccountGroup, shared: Shared) ->
 pub(crate) mod handle {
     use std::ffi::{CStr, CString, OsStr};
     use std::io;
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _, OwnedFd, RawFd};
+    use std::os::fd::{AsRawFd as _, IntoRawFd as _, OwnedFd, RawFd};
     use std::os::unix::ffi::OsStrExt as _;
     use std::path::{Component, Path, PathBuf};
 
     use tracing::warn;
 
-    use super::ProcessAccountGroup;
+    use fleet_util::nofollow::at::{self, lstat_at, open, DIRECTORY};
 
-    /// A directory, opened as one and never through a link.
-    pub(crate) const DIRECTORY: libc::c_int =
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    use super::ProcessAccountGroup;
 
     /// A directory passed through on the way to another, never through a link, opened with no
     /// right to read it, only to search it. Every walk opens each directory it passes this way:
@@ -680,18 +678,6 @@ pub(crate) mod handle {
     const FILE: libc::c_int =
         libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
 
-    /// `name` in `dir`, opened with `flags`; the last component never follows a link where
-    /// `flags` says `O_NOFOLLOW`.
-    pub(crate) fn open(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
-        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; no `O_CREAT`, so no mode.
-        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `openat` returned a new descriptor that nothing else owns.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-
     /// What `handle` holds, as the kernel sees it.
     pub(crate) fn fstat(handle: &OwnedFd) -> io::Result<libc::stat> {
         let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -700,25 +686,6 @@ pub(crate) mod handle {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: `fstat` succeeded and filled it.
-        Ok(unsafe { st.assume_init() })
-    }
-
-    /// The entry `name` in `dir` itself, a link as a link.
-    pub(crate) fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
-        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: a valid descriptor, a NUL-terminated name and room for one `stat`.
-        let rc = unsafe {
-            libc::fstatat(
-                dir,
-                name.as_ptr(),
-                st.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `fstatat` succeeded and filled it.
         Ok(unsafe { st.assume_init() })
     }
 
@@ -946,13 +913,14 @@ pub(crate) mod handle {
         let Some(made) = made.filter(|_| error.raw_os_error() == Some(libc::ENOENT)) else {
             return Err(error);
         };
-        // SAFETY: a valid descriptor and a NUL-terminated name.
-        if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } == 0 {
-            // Opened as `flags` says of links: one swapped in since is refused here too.
-            let read = (DIRECTORY & !libc::O_NOFOLLOW) | (flags & libc::O_NOFOLLOW);
-            made(&open(dir.as_raw_fd(), name, read)?)?;
-        } else if io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
-            return Err(io::Error::last_os_error());
+        match at::mkdir(dir.as_raw_fd(), name, 0o700) {
+            Ok(()) => {
+                // Opened as `flags` says of links: one swapped in since is refused here too.
+                let read = (DIRECTORY & !libc::O_NOFOLLOW) | (flags & libc::O_NOFOLLOW);
+                made(&open(dir.as_raw_fd(), name, read)?)?;
+            }
+            Err(e) if e.raw_os_error() != Some(libc::EEXIST) => return Err(e),
+            Err(_) => {}
         }
         open(dir.as_raw_fd(), name, flags)
     }
@@ -967,14 +935,9 @@ pub(crate) mod handle {
         let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
         let st = lstat_at(dir.as_raw_fd(), name).map_err(named)?;
         if !is(&st, libc::S_IFDIR) {
-            // SAFETY: a valid descriptor and a NUL-terminated name.
-            if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-                return Err(named(io::Error::last_os_error()));
-            }
-            return Ok(());
+            return at::unlink(dir.as_raw_fd(), name).map_err(named);
         }
-        // SAFETY: geteuid(2) cannot fail and touches no memory.
-        if st.st_uid == unsafe { libc::geteuid() } && mode(&st) & 0o700 != 0o700 {
+        if st.st_uid == own() && mode(&st) & 0o700 != 0o700 {
             // By name, as the directory may not be readable yet: an entry this account owns, in a
             // directory it writes, which only this account could have swapped.
             // SAFETY: a valid descriptor and a NUL-terminated name.
@@ -996,28 +959,14 @@ pub(crate) mod handle {
             }
         }
         drop(inner);
-        // SAFETY: a valid descriptor and a NUL-terminated name.
-        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-            return Err(named(io::Error::last_os_error()));
-        }
-        Ok(())
+        at::rmdir(dir.as_raw_fd(), name).map_err(named)
     }
 
     /// Gives what `handle` holds to `group` at `mode`: the group first, since a change of group
     /// may clear the set-group-ID bit the mode sets.
     pub(crate) fn share(handle: &OwnedFd, group: ProcessAccountGroup, mode: u32) -> io::Result<()> {
-        // SAFETY: a valid descriptor; `uid_t::MAX` (-1) leaves the owner as it is.
-        if unsafe { libc::fchown(handle.as_raw_fd(), libc::uid_t::MAX, group.0) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // The mode is at most `0o7777`, which every `mode_t` holds.
-        #[allow(clippy::cast_possible_truncation)]
-        let mode = mode as libc::mode_t;
-        // SAFETY: a valid descriptor.
-        if unsafe { libc::fchmod(handle.as_raw_fd(), mode) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        std::os::unix::fs::fchown(handle, None, Some(group.0))?;
+        at::fchmod(handle, mode)
     }
 
     /// The names in `dir`, read from the handle, without `.` and `..`.

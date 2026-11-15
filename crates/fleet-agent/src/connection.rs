@@ -67,7 +67,7 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
 /// directory stays passed through by it (ADR-0042 clause 21).
 pub fn store(
     state_dir: &Path,
-    group: Option<crate::storage::ProcessAccountGroup>,
+    group: Option<crate::supervisor::ports::ProcessAccountGroup>,
     settings: &ConnectionSettingsOffers,
 ) -> std::io::Result<()> {
     // Never through a link at the directory's name or the file's: an install enrols as root in a

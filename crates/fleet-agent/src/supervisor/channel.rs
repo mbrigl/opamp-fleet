@@ -1127,9 +1127,15 @@ pub(crate) fn purge(
         let reached = parents
             .iter()
             .try_fold(top.try_clone().map_err(at)?, |parent, name| {
-                handle::open(parent.as_raw_fd(), name, handle::SEARCH)
+                fleet_util::nofollow::at::open(parent.as_raw_fd(), name, handle::SEARCH)
             })
-            .and_then(|parent| handle::open(parent.as_raw_fd(), last, handle::DIRECTORY));
+            .and_then(|parent| {
+                fleet_util::nofollow::at::open(
+                    parent.as_raw_fd(),
+                    last,
+                    fleet_util::nofollow::at::DIRECTORY,
+                )
+            });
         let result = match reached {
             Ok(shared) => remove_own(&shared, &path),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1154,14 +1160,18 @@ fn remove_own(dir: &std::os::fd::OwnedFd, path: &Path) -> Result<(), String> {
     let mut first = None;
     for name in handle::entries(dir).map_err(|e| format!("{}: {e}", path.display()))? {
         let child = path.join(std::ffi::OsStr::from_bytes(name.as_bytes()));
-        let result = match handle::lstat_at(dir.as_raw_fd(), &name) {
+        let result = match fleet_util::nofollow::at::lstat_at(dir.as_raw_fd(), &name) {
             Ok(st) if st.st_uid == me => match handle::remove_tree_at(dir, &name, &child) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.to_string()),
                 _ => Ok(()),
             },
             Ok(st) if handle::is(&st, libc::S_IFDIR) => {
                 // A directory of the Client's it may not read holds nothing of its own.
-                match handle::open(dir.as_raw_fd(), &name, handle::DIRECTORY) {
+                match fleet_util::nofollow::at::open(
+                    dir.as_raw_fd(),
+                    &name,
+                    fleet_util::nofollow::at::DIRECTORY,
+                ) {
                     Ok(inner) => remove_own(&inner, &child),
                     Err(_) => Ok(()),
                 }
