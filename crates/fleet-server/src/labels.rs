@@ -25,14 +25,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use opamp::attributes::SUPERVISOR_KIND_PREFIX;
 use opamp::proto::AgentDescription;
 
 /// The key prefix only the Server fills (ADR-0052 clause 20).
 pub const RESERVED_PREFIX: &str = "fleet.";
-
-/// The attribute prefix only a Client's own Agent reports (ADR-0051 clause 18), which recognises
-/// it as the Client Agent (ADR-0052 clause 19).
-pub const CLIENT_KIND_PREFIX: &str = "supervisor.kind.";
 
 /// Whether a label key is in a space no label may speak in: the Server's `fleet.` or a Supervisor's
 /// `supervisor.` (ADR-0052 clause 20).
@@ -240,7 +237,7 @@ pub fn is_client_agent(description: Option<&AgentDescription>) -> bool {
         description
             .non_identifying_attributes
             .iter()
-            .any(|kv| kv.key.starts_with(CLIENT_KIND_PREFIX))
+            .any(|kv| kv.key.starts_with(SUPERVISOR_KIND_PREFIX))
     })
 }
 

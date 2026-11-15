@@ -31,6 +31,10 @@ pub const SERVICE_VERSION: &str = "service.version";
 /// of the Package a Supervisor installed — which neither a Managed Process nor an operator's
 /// `[attributes]` may state (ADR-0054 clauses 8 and 10).
 pub const SUPERVISOR_PREFIX: &str = "supervisor.";
+/// The prefix of the kinds a Client's own Agent reports, one `supervisor.kind.<kind> = "true"` per
+/// kind its build carries (ADR-0051 clause 18). Only the Client Agent reports a key under it, and
+/// the Server recognises the Client Agent by it (ADR-0052 clause 19).
+pub const SUPERVISOR_KIND_PREFIX: &str = "supervisor.kind.";
 /// The version of the Package a Supervisor installed for its Managed Process — the Supervisor's
 /// statement, never the process's (ADR-0054 clause 8) — and what a Package is held against
 /// where it is reported (ADR-0049 clauses 14 and 25).
@@ -179,5 +183,15 @@ mod tests {
             string_value(std::slice::from_ref(&kv), OS_TYPE),
             Some("linux")
         );
+    }
+
+    /// The kind prefix is the wire spelling both ends share, and it sits inside the Supervisor's
+    /// namespace, so refusing every `supervisor.*` key of `[attributes]` also refuses a forged kind
+    /// (ADR-0054 clause 10, ADR-0052 clause 19).
+    // Verifies: ADR-0054
+    #[test]
+    fn the_kind_prefix_lies_in_the_supervisors_namespace() {
+        assert_eq!(SUPERVISOR_KIND_PREFIX, "supervisor.kind.");
+        assert!(SUPERVISOR_KIND_PREFIX.starts_with(SUPERVISOR_PREFIX));
     }
 }
