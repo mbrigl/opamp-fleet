@@ -408,12 +408,13 @@ impl AppState {
     /// its queued restart are taken into what is held, its group is placed again for its labels,
     /// and one the store no longer holds, forgotten through another instance, is dropped. The
     /// WebSocket loops are woken, so a connected Agent is offered what it was released, or sent the
-    /// restart requested, at once. The records are read before the fleet lock is taken, so no
-    /// report waits for the read; one that differs from what is held is read again under the lock
-    /// and taken up from that read, since an act of this instance made after the first read, which
-    /// it never hears announced, wrote the store and what is held together under that lock. That
-    /// second read is one read of every record that differs, so the lock is held for one round
-    /// trip however many differ.
+    /// restart requested, at once. The records are read before the fleet lock is taken, in one
+    /// read of all of them, so no report waits for the read and a take-up of many Agents costs one
+    /// round trip, not one per Agent; one that differs from what is held is read again under the
+    /// lock and taken up from that read, since an act of this instance made after the first read,
+    /// which it never hears announced, wrote the store and what is held together under that lock.
+    /// That second read is one read of every record that differs, so the lock is held for one
+    /// round trip however many differ.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read; what is held is then kept.
@@ -432,23 +433,22 @@ impl AppState {
                 .copied()
                 .collect()
         };
-        let stored: Vec<(InstanceUid, Option<PersistedAgent>)> = held
-            .into_iter()
-            .map(|uid| Ok((uid, self.agent_store.get(&uid)?)))
-            .collect::<Result<_, String>>()?;
+        if held.is_empty() {
+            return Ok(());
+        }
+        let stored = self.agent_store.get_many(&held)?;
         let mut fleet = self.fleet.lock().expect("fleet lock");
-        let differing: Vec<InstanceUid> = stored
+        let differing: Vec<InstanceUid> = held
             .into_iter()
-            .filter(|(uid, persisted)| {
+            .filter(|uid| {
                 fleet.get(uid).is_some_and(|record| {
-                    persisted.as_ref().is_none_or(|persisted| {
+                    stored.get(uid).is_none_or(|persisted| {
                         record.assignment != persisted.assignment
                             || record.restart_pending != persisted.restart_pending
                             || record.labels != persisted.labels
                     })
                 })
             })
-            .map(|(uid, _)| uid)
             .collect();
         if differing.is_empty() {
             return Ok(());

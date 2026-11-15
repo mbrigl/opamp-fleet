@@ -25,7 +25,9 @@ one:
 
   ADR-0052 clause 2 also says `get_many` reads under the fleet lock. `take_up_restarts` in
   `crates/fleet-server/src/fleet/held.rs` calls it under the Agents' own locks without that lock,
-  for the Agents a notice names (183f49ca8); `catch_up` calls it under both.
+  for the Agents a notice names (183f49ca8); `catch_up` calls it under both. `take_up_agents` in
+  the same file calls it once before the fleet lock, for its first read of the Agents a notice
+  names, and once under it, for the records that differ (ticket fleet-at-scale-costs/01).
 
 **Idea.** The next normalization merges the four audit ADRs into one new ADR, names the three tests,
 drops the three sentences and says how `get_many` reads. A superseding ADR through `propose-adr`

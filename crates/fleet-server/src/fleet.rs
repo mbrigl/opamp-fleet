@@ -8941,8 +8941,8 @@ mod tests {
         inner: Box<dyn AgentStore>,
         failing_gets: Arc<AtomicU64>,
         after_get: Arc<Mutex<Option<Act>>>,
-        gets: Arc<AtomicU64>,
-        batched_gets: Arc<AtomicU64>,
+        /// What runs once after a batched read of records, before it is answered.
+        after_get_many: Arc<Mutex<Option<Act>>>,
         loads: Arc<AtomicU64>,
         whole_queries: Arc<AtomicU64>,
         failing_rekeys: Arc<std::sync::atomic::AtomicBool>,
@@ -8997,8 +8997,7 @@ mod tests {
                 inner,
                 failing_gets: Arc::new(AtomicU64::new(0)),
                 after_get: Arc::new(Mutex::new(None)),
-                gets: Arc::new(AtomicU64::new(0)),
-                batched_gets: Arc::new(AtomicU64::new(0)),
+                after_get_many: Arc::new(Mutex::new(None)),
                 loads: Arc::new(AtomicU64::new(0)),
                 whole_queries: Arc::new(AtomicU64::new(0)),
                 failing_rekeys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -9036,7 +9035,6 @@ mod tests {
             if failing {
                 return Err("the read is held back".to_string());
             }
-            self.gets.fetch_add(1, Ordering::SeqCst);
             let got = self.inner.get(uid);
             let after = self.after_get.lock().expect("hook lock").take();
             if let Some(after) = after {
@@ -9049,8 +9047,12 @@ mod tests {
             uids: &[InstanceUid],
         ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
             probed(&self.probe, "get_many", None);
-            self.batched_gets.fetch_add(1, Ordering::SeqCst);
-            self.inner.get_many(uids)
+            let got = self.inner.get_many(uids);
+            let after = self.after_get_many.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            got
         }
         fn query(
             &self,
@@ -10531,7 +10533,7 @@ mod tests {
         assert_eq!(view(&a, &labelled).labels["tier"], "edge", "held as stored");
     }
 
-    /// A label change made on A after A's take-up read the record, before it took the fleet lock,
+    /// A label change made on A after A's take-up read the records, before it took the fleet lock,
     /// is not undone by what that read found: what differs is read again under the lock. A never
     /// hears its own announcement, so nothing else would correct it.
     /// Verifies: ADR-0045
@@ -10544,7 +10546,7 @@ mod tests {
         let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
             database.clone(),
         )));
-        let after_get = hooked.after_get.clone();
+        let after_get_many = hooked.after_get_many.clone();
         let a = Arc::new(on_postgres(&database, Box::new(hooked)));
         let b = on_postgres(
             &database,
@@ -10554,12 +10556,25 @@ mod tests {
         a.process(report(&uid, 1), Transport::Http, None);
         label(&b, &uid, &[("tier", "edge")]);
 
-        // A's take-up reads B's labels; then an operator sets other labels through A.
+        // A's take-up reads B's labels in its first read; then an operator sets other labels
+        // through A.
         let on_a = Arc::downgrade(&a);
-        *after_get.lock().expect("hook lock") = Some(Box::new(move || {
-            label(&on_a.upgrade().expect("A"), &uid, &[("tier", "core")]);
+        *after_get_many.lock().expect("hook lock") = Some(Box::new(move || {
+            let a = on_a.upgrade().expect("A");
+            // Another thread tries the fleet lock, so a first read under it fails here rather
+            // than deadlocking on the label.
+            let held = a.clone();
+            let locked = std::thread::spawn(move || held.fleet.try_lock().is_err())
+                .join()
+                .expect("tried");
+            assert!(!locked, "the first read comes before the fleet lock");
+            label(&a, &uid, &[("tier", "core")]);
         }));
         a.take_up_agents(&HashSet::from([uid])).expect("take up");
+        assert!(
+            after_get_many.lock().expect("hook lock").is_none(),
+            "the act came after the first read"
+        );
         assert_eq!(view(&a, &uid).labels["tier"], "core", "A's own act stays");
     }
 
@@ -10599,8 +10614,9 @@ mod tests {
         );
     }
 
-    /// What differs is read again under the fleet lock in one read, however many records differ:
-    /// the lock is held for one round trip, not one per record.
+    /// A take-up reads the records of the Agents it holds in one read before the fleet lock, and
+    /// what differs again under the lock in one read, however many records differ: neither read
+    /// takes one round trip per record.
     /// Verifies: ADR-0045
     #[test]
     fn a_take_up_reads_again_what_differs_in_one_read() {
@@ -10611,8 +10627,8 @@ mod tests {
         let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
             database.clone(),
         )));
-        let (gets, batched_gets) = (hooked.gets.clone(), hooked.batched_gets.clone());
-        let a = on_postgres(&database, Box::new(hooked));
+        let probe = hooked.probe.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
         let b = on_postgres(
             &database,
             Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
@@ -10622,24 +10638,31 @@ mod tests {
             a.process(report(uid, 1), Transport::Http, None);
             label(&b, uid, &[("tier", "edge")]);
         }
-        let (gets_before, batched_before) = (
-            gets.load(Ordering::SeqCst),
-            batched_gets.load(Ordering::SeqCst),
-        );
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (reads, on) = (reads.clone(), Arc::downgrade(&a));
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, _| {
+                if call != "get" && call != "get_many" {
+                    return;
+                }
+                // Whether the fleet lock is held at the read: another thread tries it.
+                let a = on.upgrade().expect("A");
+                let locked = std::thread::spawn(move || a.fleet.try_lock().is_err())
+                    .join()
+                    .expect("tried");
+                reads.lock().expect("reads").push((call, locked));
+            }));
+        }
 
         a.take_up_agents(&HashSet::from(uids)).expect("take up");
+        *probe.lock().expect("hook lock") = None;
         for uid in &uids {
             assert_eq!(view(&a, uid).labels["tier"], "edge", "{uid} taken up");
         }
         assert_eq!(
-            gets.load(Ordering::SeqCst) - gets_before,
-            3,
-            "one read of each before the lock"
-        );
-        assert_eq!(
-            batched_gets.load(Ordering::SeqCst) - batched_before,
-            1,
-            "and one read of all three under it"
+            reads.lock().expect("reads").clone(),
+            [("get_many", false), ("get_many", true)],
+            "one read of all three before the lock, and one under it"
         );
     }
 
