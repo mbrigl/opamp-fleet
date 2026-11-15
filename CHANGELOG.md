@@ -113,7 +113,9 @@ once its tag exists.
   platform it had no name for, such as `linux/s390x`. It now folds an asset's platform through the
   table the Server stores an entry under, and offers a platform the table does not know under its
   own name.
-  **What to do:** nothing. A release with such assets now lists them in the platform menu.
+  **What to do:** nothing. A release with such assets now lists them in the platform menu. A
+  `linux/armv7` entry is offered to no Agent yet, because an Agent reports that machine as `arm`;
+  do not fetch it.
 
 - **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
   ([ADR-0045](docs/adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
