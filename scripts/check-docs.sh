@@ -137,7 +137,8 @@
 #      goes on from, as a date does, is not one. A citation wrapped over two lines is joined, the
 #      comment marker of the second line and a backslash ending the first dropped. Each number,
 #      both ends of a range included, lies between 1 and the count of the Decision's numbered
-#      items ('N. ' at the start of a line). A citation of a superseded or rejected ADR fails
+#      items ('N. ' at the start of a line, outside fenced code, where a '## ' line ends no
+#      section either). A citation of a superseded or rejected ADR fails
 #      outside docs/adr/, whose ADRs keep the past they were written against, and outside
 #      CHANGELOG.md, which records what held when each entry was written. So does a citation of a
 #      place instead of a clause, which a normalization's clause table cannot follow: 'point',
@@ -1402,9 +1403,10 @@ check_named_sections() {
 }
 
 # Check 18 (see the header). DECISION_CLAUSES holds, for each ADR's key, the count of its
-# Decision's numbered items, read once. One awk pass over every file that names an ADR prints each
-# citation as file, line, the key, the word cited by ('clause' or a place), and its numbers, a
-# range as 'N-M'; a line is read joined to the next, as in check 17.
+# Decision's numbered items outside fenced code (ADR_FENCE_AWK), read once. One awk pass over
+# every file that names an ADR prints each citation as file, line, the key, the word cited by
+# ('clause' or a place), and its numbers, a range as 'N-M'; a line is read joined to the next, as
+# in check 17.
 declare -A DECISION_CLAUSES=()
 check_clause_citations() {
   local files=() f
@@ -1419,10 +1421,11 @@ check_clause_citations() {
     while IFS=$'\x1f' read -r f n; do
       adr_key_of "$f"
       DECISION_CLAUSES["$ADR_KEY"]="$n"
-    done < <(awk '
-      FNR == 1 { if (NR > 1) printf "%s\037%d\n", file, n; file = FILENAME; n = 0; d = 0 }
-      /^## / { d = ($0 ~ /^## Decision[[:space:]]*$/); next }
-      d && /^[0-9]+\. / { n++ }
+    done < <(awk "$ADR_FENCE_AWK"'
+      FNR == 1 { if (NR > 1) printf "%s\037%d\n", file, n; file = FILENAME; n = 0; d = 0; fence_c = "" }
+      { f = fenced($0) }
+      !f && /^## / { d = ($0 ~ /^## Decision[[:space:]]*$/); next }
+      d && !f && /^[0-9]+\. / { n++ }
       END { if (NR) printf "%s\037%d\n", file, n }
     ' "${ADR_LIST[@]}")
   fi
