@@ -267,13 +267,10 @@ pub fn derive(source: &Source<'_>) -> Derived {
         description if !description.is_empty() => description,
         _ => lookup(&non_identifying, attributes::OS_TYPE),
     };
-    let platform = match (
-        non_identifying.get("os.type"),
-        non_identifying.get("host.arch"),
-    ) {
-        (Some(os), Some(arch)) if !os.is_empty() && !arch.is_empty() => format!("{os}-{arch}"),
-        _ => String::new(),
-    };
+    // The Platform the offer reads (ADR-0050 clause 14): what an upload is keyed by.
+    let platform = crate::packages::Platform::reported(source.description)
+        .map(|platform| platform.tag())
+        .unwrap_or_default();
     let config = match source.remote_config_status.map(|s| s.status) {
         Some(s) if s == RemoteConfigStatuses::Applied as i32 => "APPLIED",
         Some(s) if s == RemoteConfigStatuses::Applying as i32 => "APPLYING",
@@ -536,6 +533,57 @@ mod tests {
         let last = page(four(), false, Some(&next), 2);
         assert_eq!(last.entries, [2, 3]);
         assert_eq!(last.next, None, "a full last page names no next one");
+    }
+
+    /// The search text carries the platform the offer reads: folded through the core's table, and
+    /// read from the identifying attributes where the non-identifying ones do not carry it.
+    /// Verifies: ADR-0031, ADR-0050
+    #[test]
+    fn the_search_finds_an_agent_under_its_canonical_platform() {
+        let search = |identifying: &[(&str, &str)], non_identifying: &[(&str, &str)]| {
+            let attrs = |pairs: &[(&str, &str)]| {
+                pairs
+                    .iter()
+                    .map(|(k, v)| attributes::string_attr(k, v))
+                    .collect()
+            };
+            let description = AgentDescription {
+                identifying_attributes: attrs(identifying),
+                non_identifying_attributes: attrs(non_identifying),
+            };
+            derive(&Source {
+                uid: &InstanceUid::default(),
+                description: Some(&description),
+                health: None,
+                remote_config_status: None,
+                package_statuses: None,
+                capabilities: 0,
+                transport: Transport::WebSocket,
+            })
+            .search
+        };
+        let reported = search(
+            &[("service.name", "otelcol")],
+            &[("os.type", "linux"), ("host.arch", "x86_64")],
+        );
+        assert!(
+            reported.lines().any(|line| line == "linux-amd64"),
+            "{reported}"
+        );
+        let identifying_only = search(
+            &[
+                ("service.name", "otelcol"),
+                ("os.type", "macos"),
+                ("host.arch", "aarch64"),
+            ],
+            &[],
+        );
+        assert!(
+            identifying_only.lines().any(|line| line == "darwin-arm64"),
+            "{identifying_only}"
+        );
+        let unreported = search(&[("service.name", "otelcol")], &[("os.type", "linux")]);
+        assert!(!unreported.contains("linux-"), "{unreported}");
     }
 
     /// A Selector parameter is written as a Deployment's Selector is.

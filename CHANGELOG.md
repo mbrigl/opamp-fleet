@@ -107,6 +107,17 @@ once its tag exists.
 
 ### Fixed
 
+- **The fleet search finds an Agent under the platform its package is offered for**
+  ([ADR-0031](docs/adr/0031-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+  clause 6, [ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md) clauses 6 and 14). The
+  search text held `os.type` and `host.arch` as reported, and only from the non-identifying
+  attributes. An Agent that reports `linux` and `x86_64` is now found by `linux-amd64`, and an
+  Agent that reports its platform only among its identifying attributes by its platform too. A
+  search for `linux-x86_64` no longer finds it; `x86_64` still does. The OS column of the Agents
+  tab still shows the pair as reported. On PostgreSQL, an Agent's search text takes the new
+  platform with the next write of its record.
+  **What to do:** nothing.
+
 - **`opamp-fleetctl package fetch` names a platform as the Server does**
   ([ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md) clause 6). The tool kept a
   platform table of its own: it passed over an asset named `osx`, `win64` or `x64`, and every
