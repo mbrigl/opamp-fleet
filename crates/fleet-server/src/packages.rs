@@ -53,8 +53,8 @@ impl Platform {
     /// but lowercase letters, digits, and `_`.
     pub fn new(os: &str, arch: &str) -> Result<Self, String> {
         Ok(Platform {
-            os: token(os, "os", fleet_core::platform::canonical_os)?,
-            arch: token(arch, "arch", fleet_core::platform::canonical_arch)?,
+            os: fleet_core::platform::os_token(os)?,
+            arch: fleet_core::platform::arch_token(arch)?,
         })
     }
 
@@ -84,25 +84,6 @@ impl Platform {
     pub fn tag(&self) -> String {
         format!("{}-{}", self.os, self.arch)
     }
-}
-
-fn token(raw: &str, what: &str, canonicalise: fn(&str) -> &str) -> Result<String, String> {
-    let lowered = raw.trim().to_ascii_lowercase();
-    // The spelling table is the Client's too (ADR-0008): what an Agent reports and what an artifact
-    // is stored under have to fold onto the same token, or the offer misses.
-    let canonical = canonicalise(&lowered).to_string();
-    if canonical.is_empty() || canonical.len() > 16 {
-        return Err(format!("{what} {raw:?} must be 1–16 characters"));
-    }
-    if !canonical
-        .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-    {
-        return Err(format!(
-            "{what} {raw:?} may hold only lowercase letters, digits, and '_'"
-        ));
-    }
-    Ok(canonical)
 }
 
 /// A Package's Agent type or version as it may appear in its identity (ADR-0050): a bounded token

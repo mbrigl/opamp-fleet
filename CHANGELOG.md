@@ -107,6 +107,16 @@ once its tag exists.
 
 ### Fixed
 
+- **`opamp-fleetctl package fetch` names a platform as the Server does**
+  ([ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md) clause 6). The tool kept a
+  platform table of its own: it passed over an asset named `osx`, `win64` or `x64`, and every
+  platform it had no name for, such as `linux/s390x`. It now folds an asset's platform through the
+  table the Server stores an entry under, and offers a platform the table does not know under its
+  own name. `--platform macos/x86_64` now picks the artifact listed as `darwin/amd64`.
+  **What to do:** nothing. A release with such assets now lists them in the platform menu. A
+  `linux/armv7` entry is offered to no Agent yet, because an Agent reports that machine as `arm`;
+  do not fetch it.
+
 - **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
   ([ADR-0045](docs/adr/0045-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clauses 8 and 9). On PostgreSQL, an instance that placed an Agent before another instance bound
