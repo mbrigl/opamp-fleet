@@ -39,7 +39,7 @@ use crate::supervisor::process::{
 use opamp::client::Backoff;
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup
-/// (ADR-0040 clause 23).
+/// (ADR-0008 clause 23).
 ///
 /// `binary` is not among them: the core takes it out and resolves it (ADR-0018 clause 21), and what
 /// arrives here is [`SupervisorContext::program`].

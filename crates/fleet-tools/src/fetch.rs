@@ -2348,7 +2348,7 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
 /// Copies `from`, a file or directory of the tree `root` was unpacked into, to `to`, resolving
 /// every link inside that tree alone (ADR-0036 clause 27): a link that leads out of it fails the
 /// repack naming it, one that names nothing inside it is left out, and the copy carries no link
-/// (ADR-0039 clause 57).
+/// (ADR-0033 clause 57).
 fn copy_from_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
     let inside = from
         .strip_prefix(root)
