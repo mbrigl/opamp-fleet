@@ -2373,8 +2373,15 @@ $ curl --cacert ca.pem -X PUT --data-binary @otelcol-contrib_0.109.0_linux_amd64
 
 Platform spellings are accepted and stored canonically, so the tokens off an upstream release's
 file name work as they are: `macos` and `osx` mean `darwin`, `x86_64` and `x64` mean `amd64`,
-`aarch64` means `arm64`. An `os`/`arch` this Server has never heard of is stored as given rather
-than refused — the fleet may run a system nobody here anticipated.
+`aarch64` means `arm64`, and `arm` and `armv7` mean `arm32`, the 32-bit ARM build; `armv6` is
+not folded, since an ARMv7 build does not run on it. An `os`/`arch` this Server has never heard of
+is stored as given rather than refused — the fleet may run a system nobody here anticipated.
+
+An entry an older Server stored under a spelling this one folds, such as `linux/arm`, is served
+under the folded platform, but it cannot be removed or signed on its own, and of two such
+spellings in one Package only one is served: the one stored under the folded spelling, else the
+first in order. The Server names each such entry in its log at startup. Delete the Package and
+upload it again, and its entries are stored under the folded spelling.
 
 **Every artifact is uploaded.** The Server holds what it offers and sends no request for a package
 anywhere; a Client fetches from its own Server's origin alone (see

@@ -131,10 +131,17 @@ once its tag exists.
   platform table of its own: it passed over an asset named `osx`, `win64` or `x64`, and every
   platform it had no name for, such as `linux/s390x`. It now folds an asset's platform through the
   table the Server stores an entry under, and offers a platform the table does not know under its
-  own name. `--platform macos/x86_64` now picks the artifact listed as `darwin/amd64`.
-  **What to do:** nothing. A release with such assets now lists them in the platform menu. A
-  `linux/armv7` entry is offered to no Agent yet, because an Agent reports that machine as `arm`;
-  do not fetch it.
+  own name. `--platform macos/x86_64` now picks the artifact listed as `darwin/amd64`. A 32-bit
+  ARM build is spelled `arm32`, the semantic conventions' `host.arch` value, on both sides: a
+  Collector's `linux_armv7` asset is listed as `linux/arm32` and offered to an Agent that reports
+  `arm`, and a Client on 32-bit ARM reports `arm32`
+  ([ADR-0039](docs/adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)
+  clause 6). `armv6` keeps its own name. **What to do:** nothing, unless a Package holds an entry
+  uploaded as `linux/arm` or `linux/armv7`. Such an entry is served as `linux/arm32`, but it can
+  no longer be removed or signed on its own, and of two such entries in one Package only one is
+  served. The Server names each at startup; delete that Package and upload it again, and its
+  entries are stored under `arm32`. A release with such assets now lists them in the platform
+  menu.
 
 - **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
   ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)

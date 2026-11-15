@@ -86,6 +86,62 @@ impl Platform {
     }
 }
 
+/// What a stored entry's platform says when the store holds it under a spelling the table now
+/// folds, as `linux/arm` from before `arm32`: a single entry can then not be removed or signed by
+/// its platform, and a second spelling of the same platform hides one of them. `None` for an
+/// entry stored under its canonical tokens. `hidden` says another stored entry of the Package
+/// folded onto the same platform first.
+pub(crate) fn stored_spelling_warning(
+    id: &PackageId,
+    stored_os: &str,
+    stored_arch: &str,
+    platform: &Platform,
+    hidden: bool,
+) -> Option<String> {
+    if stored_os == platform.os && stored_arch == platform.arch && !hidden {
+        return None;
+    }
+    let canonical = format!("{}/{}", platform.os, platform.arch);
+    let stored = format!("{stored_os}/{stored_arch}");
+    Some(if hidden {
+        format!(
+            "package {id}: the stored entry {stored} folds onto {canonical}, which another entry of \
+             the Package holds already, so it is not served; delete the Package and upload its \
+             artifacts again"
+        )
+    } else {
+        format!(
+            "package {id}: the entry stored as {stored} is served as {canonical}, but it cannot be \
+             removed or signed on its own; delete the Package and upload it again, and its entry is \
+             stored as {canonical}"
+        )
+    })
+}
+
+/// Logs [`stored_spelling_warning`] once per process for each entry, since a store is read again
+/// on every notice.
+pub(crate) fn warn_stored_spelling(
+    id: &PackageId,
+    stored_os: &str,
+    stored_arch: &str,
+    platform: &Platform,
+    hidden: bool,
+) {
+    static WARNED: std::sync::OnceLock<Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+    let Some(warning) = stored_spelling_warning(id, stored_os, stored_arch, platform, hidden)
+    else {
+        return;
+    };
+    let warned = WARNED.get_or_init(Mutex::default);
+    if warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(warning.clone())
+    {
+        tracing::warn!("{warning}");
+    }
+}
+
 /// A Package's Agent type or version as it may appear in its identity (ADR-0039): a bounded token
 /// that embeds losslessly in file names and URLs. `@` is excluded so the Package directory name —
 /// `<agent_type>@<version>` — parses back unambiguously, exactly the trick ADR-0039 played for
@@ -1732,6 +1788,27 @@ fn aggregate_hash(set: &Package, entry: &Entry) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An entry stored under a spelling the table now folds is named with the way out, and one a
+    /// second spelling hides says so; one stored under its canonical tokens is not named
+    /// (ADR-0039 clause 6).
+    /// Verifies: ADR-0039
+    #[test]
+    fn an_entry_stored_under_an_older_spelling_is_named() {
+        let id = PackageId::new("otelcol", "0.140.0").expect("id");
+        let arm32 = Platform::new("linux", "arm").expect("platform");
+        assert_eq!(arm32.arch, "arm32");
+        assert!(stored_spelling_warning(&id, "linux", "arm32", &arm32, false).is_none());
+        let folded = stored_spelling_warning(&id, "linux", "arm", &arm32, false).expect("named");
+        assert!(folded.contains("otelcol@0.140.0"), "{folded}");
+        assert!(
+            folded.contains("linux/arm is served as linux/arm32"),
+            "{folded}"
+        );
+        assert!(folded.contains("delete the Package"), "{folded}");
+        let hidden = stored_spelling_warning(&id, "linux", "armv7", &arm32, true).expect("named");
+        assert!(hidden.contains("not served"), "{hidden}");
+    }
 
     fn linux() -> Platform {
         Platform::new("linux", "amd64").expect("platform")

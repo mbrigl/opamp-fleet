@@ -77,6 +77,8 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Package, String> {
         return Err(super::misnamed(path, "identity"));
     }
     let mut entries = BTreeMap::new();
+    let mut stored: BTreeMap<Platform, (String, String)> = BTreeMap::new();
+    let mut hidden: Vec<(Platform, (String, String))> = Vec::new();
     for entry in meta.entries {
         let platform = Platform::new(&entry.os, &entry.arch)
             .map_err(|e| format!("invalid platform in {}: {e}", path.display()))?;
@@ -100,6 +102,20 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Package, String> {
                 ));
             }
         }
+        // Of two spellings that fold onto one platform, the one stored under the canonical
+        // spelling is served, else the first in the file, as the database store chooses.
+        let spelling = (entry.os.clone(), entry.arch.clone());
+        let canonical =
+            |(os, arch): &(String, String)| *os == platform.os && *arch == platform.arch;
+        match stored.get(&platform).cloned() {
+            Some(held) if !(canonical(&spelling) && !canonical(&held)) => {
+                hidden.push((platform, spelling));
+                continue;
+            }
+            Some(held) => hidden.push((platform.clone(), held)),
+            None => {}
+        }
+        stored.insert(platform.clone(), spelling);
         entries.insert(
             platform.clone(),
             Entry {
@@ -109,6 +125,13 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Package, String> {
                 signature,
             },
         );
+    }
+    // Named once the choice is made, so an entry is never said to be served and then not.
+    for (platform, (os, arch)) in &stored {
+        crate::packages::warn_stored_spelling(&id, os, arch, platform, false);
+    }
+    for (platform, (os, arch)) in &hidden {
+        crate::packages::warn_stored_spelling(&id, os, arch, platform, true);
     }
     Ok(Package { id, entries })
 }
@@ -235,5 +258,59 @@ impl PackageMeta {
                 })
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Package an older Server stored with a `linux/arm` and a `linux/armv7` entry opens: both
+    /// spellings fold onto `linux/arm32`, the first is served under it, and the second is not, so
+    /// nothing fails the start and nothing serves the wrong bytes under one platform
+    /// (ADR-0039 clause 6).
+    /// Verifies: ADR-0039
+    #[test]
+    fn entries_stored_under_an_older_spelling_open_folded() {
+        let hash = |c: char| c.to_string().repeat(64);
+        let text = serde_json::json!({
+            "agent_type": "otelcol",
+            "version": "0.140.0",
+            "entries": [
+                {"os": "linux", "arch": "arm", "sha256": hash('a'), "size": 1},
+                {"os": "linux", "arch": "armv7", "sha256": hash('b'), "size": 2},
+                {"os": "linux", "arch": "amd64", "sha256": hash('c'), "size": 3},
+            ],
+        })
+        .to_string();
+        let package = parse("otelcol@0.140.0", Path::new("otelcol@0.140.0.json"), &text)
+            .expect("an older spelling opens");
+        let arm32 = Platform::new("linux", "arm32").expect("platform");
+        assert_eq!(package.entries.len(), 2);
+        assert_eq!(
+            package.entries[&arm32].size, 1,
+            "the first spelling is served"
+        );
+        assert!(package
+            .entries
+            .contains_key(&Platform::new("linux", "amd64").expect("platform")));
+
+        // An entry stored as `linux/arm32`, as 0.8.2 passed it through, wins over an older one.
+        let text = serde_json::json!({
+            "agent_type": "otelcol",
+            "version": "0.141.0",
+            "entries": [
+                {"os": "linux", "arch": "arm", "sha256": hash('a'), "size": 1},
+                {"os": "linux", "arch": "arm32", "sha256": hash('b'), "size": 2},
+            ],
+        })
+        .to_string();
+        let package = parse("otelcol@0.141.0", Path::new("otelcol@0.141.0.json"), &text)
+            .expect("both spellings open");
+        assert_eq!(package.entries.len(), 1);
+        assert_eq!(
+            package.entries[&arm32].size, 2,
+            "the canonical spelling is served"
+        );
     }
 }

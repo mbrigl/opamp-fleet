@@ -26,6 +26,10 @@ const ARCH_ALIASES: &[(&str, &str)] = &[
     ("x86-64", "amd64"),
     ("x64", "amd64"),
     ("aarch64", "arm64"),
+    // A 32-bit ARM build: what Go and Rust call it, and what a Collector release names it.
+    // `armv6` is not folded, since an `armv7` build does not run on an ARMv6 host.
+    ("arm", "arm32"),
+    ("armv7", "arm32"),
 ];
 
 /// The canonical `os.type` for a spelling of it — the input unchanged when the table has never
@@ -157,8 +161,21 @@ mod tests {
         for os in ["linux", "darwin", "windows"] {
             assert_eq!(canonical_os(os), os);
         }
-        for arch in ["amd64", "arm64"] {
+        for arch in ["amd64", "arm64", "arm32"] {
             assert_eq!(canonical_arch(arch), arch);
         }
+    }
+
+    /// A Collector release names its 32-bit ARM build `armv7`, an Agent reports `arm`, and the
+    /// semantic conventions say `arm32`: all three meet there, so the build is offered to the host
+    /// it runs on. `armv6` keeps its own token (ADR-0039
+    /// clause 6).
+    /// Verifies: ADR-0039
+    #[test]
+    fn a_32_bit_arm_build_is_spelled_arm32() {
+        assert_eq!(arch_token("armv7").as_deref(), Ok("arm32"));
+        assert_eq!(arch_token("arm").as_deref(), Ok("arm32"));
+        assert_eq!(arch_token("ARMv7").as_deref(), Ok("arm32"));
+        assert_eq!(arch_token("armv6").as_deref(), Ok("armv6"));
     }
 }
