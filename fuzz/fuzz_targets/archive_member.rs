@@ -18,12 +18,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(mut out) = std::fs::File::create(&out_path) else {
         return;
     };
-    let _ = match archive::detect(&artifact) {
-        Ok(archive::Kind::TarGz) => archive::extract_tar_gz(&artifact, "agent", &mut out),
-        Ok(archive::Kind::Zip) => archive::extract_zip(&artifact, "agent", &mut out),
-        Ok(archive::Kind::SevenZ) => archive::extract_7z(&artifact, "agent", &mut out, None),
-        _ => Ok(0),
-    };
+    let _ = archive::extract(&artifact, "agent", &mut out, None);
     let mut names: Vec<_> = std::fs::read_dir(work.path())
         .into_iter()
         .flatten()

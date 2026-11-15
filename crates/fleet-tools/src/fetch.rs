@@ -2073,7 +2073,7 @@ mod tests {
         let dest = dir.path().join("unpacked");
         std::fs::create_dir_all(&dest).expect("create");
         let summary =
-            fleet_util::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &[], &dest)
+            fleet_util::archive::extract_tree(&artifact, Path::new("AppRun"), &[], &dest, None)
                 .expect("the packed tree is one a Client installs");
 
         assert_eq!(
@@ -2359,7 +2359,7 @@ mod tests {
 
         let dest = dir.path().join("unpacked");
         std::fs::create_dir_all(&dest).expect("create");
-        fleet_util::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &[], &dest)
+        fleet_util::archive::extract_tree(&artifact, Path::new("AppRun"), &[], &dest, None)
             .expect("the packed tree is one a Client installs");
         assert_eq!(
             std::fs::read(dest.join("bin/agent")).expect("the linked file"),
@@ -2441,7 +2441,7 @@ mod tests {
 
         let dest = dir.path().join("unpacked");
         std::fs::create_dir_all(&dest).expect("create");
-        fleet_util::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &[LOADER], &dest)
+        fleet_util::archive::extract_tree(&artifact, Path::new("AppRun"), &[LOADER], &dest, None)
             .expect("the Client installs the tree with the kind's link");
         assert_eq!(
             std::fs::read_link(dest.join("runtime/lib64/ld-linux-x86-64.so.2")).expect("link"),

@@ -2163,28 +2163,19 @@ fn stage_tree(
     created.map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
 
     let unpack = |staging: &std::path::Path| -> Result<(), String> {
-        let summary = match fleet_util::archive::detect(artifact)? {
-            fleet_util::archive::Kind::Raw => {
-                let program = staging.join(program_path);
-                if let Some(parent) = program.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-                }
-                std::fs::copy(artifact, &program)
-                    .map_err(|e| format!("cannot write {}: {e}", program.display()))?;
-                info!(artifact = %artifact.display(), program = %program_path.display(), "the package is a bare program; placed it where the tree expects it");
-                return Ok(());
+        if fleet_util::archive::detect(artifact)? == fleet_util::archive::Kind::Raw {
+            let program = staging.join(program_path);
+            if let Some(parent) = program.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
             }
-            fleet_util::archive::Kind::TarGz => {
-                fleet_util::archive::extract_tree_tar_gz(artifact, program_path, links, staging)?
-            }
-            fleet_util::archive::Kind::SevenZ => {
-                fleet_util::archive::extract_tree_7z(artifact, program_path, staging, archive_key)?
-            }
-            fleet_util::archive::Kind::Zip => {
-                fleet_util::archive::extract_tree_zip(artifact, program_path, staging)?
-            }
-        };
+            std::fs::copy(artifact, &program)
+                .map_err(|e| format!("cannot write {}: {e}", program.display()))?;
+            info!(artifact = %artifact.display(), program = %program_path.display(), "the package is a bare program; placed it where the tree expects it");
+            return Ok(());
+        }
+        let summary =
+            fleet_util::archive::extract_tree(artifact, program_path, links, staging, archive_key)?;
         info!(archive = %artifact.display(), files = summary.files, bytes = summary.bytes, skipped = summary.skipped, "unpacked the package tree");
         Ok(())
     };

@@ -317,6 +317,59 @@ pub fn detect(path: &Path) -> Result<Kind, String> {
     Ok(Kind::Raw)
 }
 
+/// Extracts the member called `member` from the archive at `archive`, writing it to `out`, in
+/// whatever container [`detect`] finds. `key` opens an encrypted `.7z` (`[packages] archive_key`);
+/// the other containers are never encrypted and ignore it.
+///
+/// # Errors
+/// Returns an error when `archive` is no archive but the program itself — the caller installs a
+/// [`Kind::Raw`] artifact as it is — or as the container's own reader refuses it: no such member,
+/// one held twice, a member past the limit, or a wrong or missing key.
+pub fn extract(
+    archive: &Path,
+    member: &str,
+    out: &mut File,
+    key: Option<&str>,
+) -> Result<u64, String> {
+    match detect(archive)? {
+        Kind::TarGz => extract_tar_gz(archive, member, out),
+        Kind::SevenZ => extract_7z(archive, member, out, key),
+        Kind::Zip => extract_zip(archive, member, out),
+        Kind::Raw => Err(not_an_archive(archive)),
+    }
+}
+
+/// Extracts the archive at `archive` **whole** into `dest` (ADR-0039), in whatever container
+/// [`detect`] finds, dropping the directory prefix the match of `program_path` sits under. Only a
+/// `.tar.gz` keeps a link, and only one `kept` names (ADR-0039 clause 57); a `.7z` or a `.zip`
+/// keeps none. `key` opens an encrypted `.7z`.
+///
+/// # Errors
+/// Returns an error when `archive` is no archive but the program itself, or as the container's
+/// own reader refuses it: no or several members matching `program_path`, a member this Client will
+/// not write, the size or member bounds, or a wrong or missing key.
+pub fn extract_tree(
+    archive: &Path,
+    program_path: &Path,
+    kept: &[KeptLink],
+    dest: &Path,
+    key: Option<&str>,
+) -> Result<TreeSummary, String> {
+    match detect(archive)? {
+        Kind::TarGz => extract_tree_tar_gz(archive, program_path, kept, dest),
+        Kind::SevenZ => extract_tree_7z(archive, program_path, dest, key),
+        Kind::Zip => extract_tree_zip(archive, program_path, dest),
+        Kind::Raw => Err(not_an_archive(archive)),
+    }
+}
+
+fn not_an_archive(archive: &Path) -> String {
+    format!(
+        "{} is the program itself, not an archive",
+        archive.display()
+    )
+}
+
 /// Extracts the member called `member` from the `.7z` at `archive`, writing it to `out`. `key`
 /// opens an encrypted archive (`[packages] archive_key`); `None` is for one that is not encrypted.
 ///
@@ -326,7 +379,7 @@ pub fn detect(path: &Path) -> Result<Kind, String> {
 /// # Errors
 /// Returns an error when the archive cannot be opened — a wrong or missing key lands here — holds
 /// no such member, or the member exceeds the limit.
-pub fn extract_7z(
+fn extract_7z(
     archive: &Path,
     member: &str,
     out: &mut File,
@@ -401,7 +454,7 @@ fn extract_7z_within(
 /// # Errors
 /// Returns an error when the archive cannot be read, holds no such member, or the member exceeds
 /// [`MAX_UNPACKED_BYTES`].
-pub fn extract_tar_gz(archive: &Path, member: &str, out: &mut File) -> Result<u64, String> {
+fn extract_tar_gz(archive: &Path, member: &str, out: &mut File) -> Result<u64, String> {
     extract_tar_gz_within(archive, member, out, MAX_UNPACKED_BYTES)
 }
 
@@ -501,7 +554,7 @@ fn skipped(member: &Path, summary: &mut TreeSummary) {
 /// Returns an error when the archive cannot be read, holds no or several members matching
 /// `program_path`, carries a member this Client will not write, or exceeds the size or member
 /// bounds.
-pub fn extract_tree_tar_gz(
+fn extract_tree_tar_gz(
     archive: &Path,
     program_path: &Path,
     kept: &[KeptLink],
@@ -796,7 +849,7 @@ fn list_tar_gz(archive: &Path, limit: u64) -> Result<Listing, String> {
 ///
 /// # Errors
 /// As [`extract_tree_tar_gz`], plus a wrong or missing `key`.
-pub fn extract_tree_7z(
+fn extract_tree_7z(
     archive: &Path,
     program_path: &Path,
     dest: &Path,
@@ -908,7 +961,7 @@ fn list_7z(
 /// # Errors
 /// Returns an error when the archive cannot be read, holds no such member, holds it encrypted, or
 /// the member exceeds the limit.
-pub fn extract_zip(archive: &Path, member: &str, out: &mut File) -> Result<u64, String> {
+fn extract_zip(archive: &Path, member: &str, out: &mut File) -> Result<u64, String> {
     extract_zip_within(archive, member, out, MAX_UNPACKED_BYTES)
 }
 
@@ -963,7 +1016,7 @@ fn extract_zip_within(
 /// # Errors
 /// As [`extract_tree_tar_gz`], plus an encrypted member — encryption is the `.7z` format's job
 /// (ADR-0039), and a zip travels as its author published it or not at all.
-pub fn extract_tree_zip(
+fn extract_tree_zip(
     archive: &Path,
     program_path: &Path,
     dest: &Path,
@@ -2262,6 +2315,48 @@ mod tests {
     }
 
     // ── Zip (ADR-0039 clause 62) ──────────────────────────────────────────────────────────
+
+    /// The two entry points open every container by what `detect` finds, the key reaching an
+    /// encrypted `.7z`, and refuse the program itself as no archive.
+    #[test]
+    fn the_entry_points_choose_the_container_themselves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let members: &[(&str, &[u8])] = &[("pkg/bin/agent", b"the-program")];
+        let archives = [
+            (tar_gz(dir.path(), members), None),
+            (seven_z(dir.path(), members, Some("s3cret")), Some("s3cret")),
+            (zip_archive(dir.path(), members), None),
+        ];
+        for (n, (archive, key)) in archives.iter().enumerate() {
+            let out_path = dir.path().join(format!("member-{n}"));
+            let mut out = File::create(&out_path).expect("create");
+            assert_eq!(
+                extract(archive, "agent", &mut out, *key),
+                Ok(11),
+                "{archive:?}"
+            );
+            assert_eq!(std::fs::read(&out_path).expect("read"), b"the-program");
+
+            let tree = dir.path().join(format!("tree-{n}"));
+            std::fs::create_dir_all(&tree).expect("create");
+            let summary =
+                extract_tree(archive, Path::new("bin/agent"), &[], &tree, *key).expect("the tree");
+            assert_eq!(summary.files, 1, "{archive:?}");
+            assert_eq!(
+                std::fs::read(tree.join("bin/agent")).expect("read"),
+                b"the-program"
+            );
+        }
+
+        let raw = dir.path().join("agent");
+        std::fs::write(&raw, b"the-program").expect("write");
+        let mut out = File::create(dir.path().join("out")).expect("create");
+        let refused = extract(&raw, "agent", &mut out, None).expect_err("no archive");
+        assert!(refused.contains("not an archive"), "{refused}");
+        let refused =
+            extract_tree(&raw, Path::new("agent"), &[], dir.path(), None).expect_err("no archive");
+        assert!(refused.contains("not an archive"), "{refused}");
+    }
 
     /// Builds a `.zip` holding `members` — (path inside the archive, contents). A name ending in
     /// `/` becomes a directory entry, the way zip spells one.
