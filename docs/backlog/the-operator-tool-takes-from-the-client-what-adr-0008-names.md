@@ -1,6 +1,6 @@
 # The operator tool takes from the Client only what an ADR names
 
-**Kind:** ADR text, decision taken
+**Kind:** ADR text, decision taken.
 
 **Decided.** The human chose that a superseding ADR names both functions, with the allowlist test
 (2026-11-15). It is proposed after the next normalization, against the restated ADR that carries
@@ -36,6 +36,11 @@ This must be settled before the next normalization of the ADR record.
 
 - Touches: `crates/fleet-tools/src/pki.rs`, `crates/fleet-core/tests/dependency_direction.rs`
 - ADR-0008 clause 22; ADR-0053 clauses 5 and 24.
+
+**Its mode.**
+
+with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap
+on open unattended work at zero. It may need a superseding ADR, which only the human decides.
 
 **From.** Ticket
 `docs/plan/revision-2026-11-15/04-the-operator-tool-takes-from-the-client-what-adr-0008-names.md`,

@@ -1,6 +1,6 @@
-# What the core repack added without a caller is used by a kind or taken out
+# What the core repack added without a caller is used by a kind
 
-**Kind:** structure, decision taken
+**Kind:** structure, decision taken.
 
 **Decided.** The human keeps the mechanisms (2026-11-15). The kinds that call them land after the
 next normalization of the ADR record, so their drafts are written once against the restated record:
@@ -64,6 +64,12 @@ The choice must be settled before the next normalization of the ADR record.
   `crates/fleet-tools/src/fetch.rs`, `crates/fleet-tools/src/gpgv.rs`,
   `crates/fleet-core/src/tree.rs`, `crates/fleet-core/src/version.rs`, `scripts/check-rust.sh`
 - ADR-0050 clause 57, ADR-0053 clauses 27 to 29, ADR-0051 (the kinds), ADR-0035 clause 6.
+
+**Its mode.**
+
+with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap
+on open unattended work at zero. The choice is about scope, and a removal changes accepted ADRs;
+both are the human's.
 
 **From.** Ticket
 `docs/plan/revision-2026-11-15/08-what-the-core-repack-added-without-a-caller-is-used-or-taken-out.md`,

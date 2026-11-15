@@ -1,6 +1,6 @@
 # The Server stops naming the contract pair in its SQL
 
-**Kind:** schema, release; decision deferred
+**Kind:** schema, release; decision deferred.
 
 **Decided.** The human deferred release X until after the next normalization (2026-11-15). The
 columns stay until then. How ADR-0023 clause 22 reads on `SET DEFAULT`, and that removal moves to
@@ -84,6 +84,12 @@ The release after X drops the columns; the backlog entry
   `crates/fleet-server/src/postgres/mod.rs`, `crates/fleet-server/src/postgres/agents.rs`,
   `crates/fleet-server/src/fleet.rs`, `crates/fleet-server/tests/instances.rs`
 - ADR-0023 clause 22; ADR-0045 clause 16.
+
+**Its mode.**
+
+with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap on
+open unattended work at zero. Its migration ships only in a release the human cuts, and the reading
+of ADR-0023 clause 22 is the human's.
 
 **From.** Ticket
 `docs/plan/the-contract-pair-is-removed/01-the-server-stops-naming-the-contract-pair.md`, moved to
