@@ -39,7 +39,7 @@ use fleet_agent::service::{ServiceControl, ServiceLevel, ServiceState};
 use fleet_server::fleet::{AgentView, AppState};
 
 /// The operator's name for this Agent — written as `name` in the `supervisor.toml` below and
-/// reported as `service.instance.name` (ADR-0017), which is what the fleet view is searched by.
+/// reported as `service.instance.name` (ADR-0054), which is what the fleet view is searched by.
 /// Deliberately not `service.name`: that carries the Agent *type*, which for this Client is always
 /// `supervisor` (ADR-0020).
 ///

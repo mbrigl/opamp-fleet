@@ -1,6 +1,6 @@
-//! The supervision `Runner` (ADR-0046) across everything it does *to a host*: spawn and watchdog,
-//! the health-gated apply, the binary swap and its rollback (ADR-0034), and the tree install
-//! (ADR-0034).
+//! The supervision `Runner` (ADR-0051) across everything it does *to a host*: spawn and watchdog,
+//! the health-gated apply, the binary swap and its rollback (ADR-0050), and the tree install
+//! (ADR-0050).
 //!
 //! An integration test rather than a unit test, and that is the reason ADR-0008 exists: these cases
 //! need the supervision core **and** a real program to spawn, and Cargo hands a test the path of a
@@ -304,7 +304,7 @@ async fn apply(harness: &Harness, hash: &[u8]) {
                 config_hash: hash.to_vec(),
                 ..Default::default()
             },
-            // The apply's span (ADR-0017). The core opens a real one; a test drives the Runner
+            // The apply's span (ADR-0054). The core opens a real one; a test drives the Runner
             // directly, so what it hands over is the span it is already running in.
             span: tracing::Span::current(),
         })
@@ -382,7 +382,7 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs(via: Via) 
 both!(the_directories_an_agent_writes_into_are_made_before_it_runs);
 
 /// A program named by a **relative** path starts, though the process begins in its own directory
-/// (ADR-0046).
+/// (ADR-0051).
 ///
 /// `Command` does `chdir` *before* `exec` on Unix, so a relative program is resolved against the
 /// directory it was just moved into: `<dir>/<dir>/<program>`, which is nothing. The Client's own
@@ -444,9 +444,13 @@ async fn the_probe_reports_a_version_description() {
     probe_version(
         Spawner::Local,
         "test".to_string(),
-        stub_agent(),
-        vec!["--version".to_string()],
-        None,
+        VersionProbe {
+            program: stub_agent(),
+            args: vec!["--version".to_string()],
+            working_dir: None,
+            parse: None,
+            env: Vec::new(),
+        },
         EventSender::new(0, event_tx),
     )
     .await;
@@ -463,9 +467,13 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         Spawner::Local,
         "test".to_string(),
-        PathBuf::from("nonexistent-definitely-not-here"),
-        vec![],
-        None,
+        VersionProbe {
+            program: PathBuf::from("nonexistent-definitely-not-here"),
+            args: vec![],
+            working_dir: None,
+            parse: None,
+            env: Vec::new(),
+        },
         EventSender::new(0, event_tx.clone()),
     )
     .await;
@@ -474,9 +482,13 @@ async fn a_failing_or_versionless_probe_stays_silent() {
     probe_version(
         Spawner::Local,
         "test".to_string(),
-        stub_agent(),
-        vec!["--exit-code".to_string(), "0".to_string()],
-        None,
+        VersionProbe {
+            program: stub_agent(),
+            args: vec!["--exit-code".to_string(), "0".to_string()],
+            working_dir: None,
+            parse: None,
+            env: Vec::new(),
+        },
         EventSender::new(0, event_tx),
     )
     .await;
@@ -530,12 +542,14 @@ async fn a_swapped_binary_is_probed_again_for_its_version(via: Via) {
 
     let mut harness = runner(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         Some(VersionProbe {
             program: binary.clone(),
             args: vec!["--version".to_string()],
+            working_dir: None,
             parse: None,
+            env: Vec::new(),
         }),
         || None, // an unconfigured Collector: nothing runs, the version is still owed
     );
@@ -885,7 +899,7 @@ fn the_second_service_does_not_listen_while_it_is_traced() {
     assert!(!socket.exists(), "it listened while it was traced");
 }
 
-// ── Reload and uninstall (ADR-0046) ──────────────────────────────────────────
+// ── Reload and uninstall (ADR-0051) ──────────────────────────────────────────
 
 /// The pid the spawn reported — how these tests tell a kept process from a fresh one.
 #[cfg(unix)]
@@ -943,7 +957,7 @@ async fn wait_until_started(marker: &Path) {
 
 /// The Managed Process finds the Supervisor Endpoint's token in its environment, and no block's
 /// `env` can put another one in its place.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 async fn the_managed_process_is_handed_the_endpoint_token(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("running");
@@ -990,7 +1004,55 @@ async fn the_managed_process_is_handed_the_endpoint_token(via: Via) {
 }
 both!(the_managed_process_is_handed_the_endpoint_token);
 
-/// A kind that declared a reload applies a configuration in place (ADR-0046): the process is
+/// A Managed Process whose kind declares that it gets no Supervisor Endpoint token, because it never
+/// connects to the endpoint, finds none in its environment: its Runner holds an empty one, which is
+/// not set.
+/// Verifies: ADR-0048
+async fn a_managed_process_whose_kind_declares_no_token_finds_none(via: Via) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("running");
+    let program = stub_agent();
+    let marker_arg = marker.display().to_string();
+    let (event_tx, _events) = mpsc::channel(64);
+    let (_commands, command_rx) = mpsc::channel(16);
+    let (_shutdown_tx, shutdown) = shutdown_channel();
+    let runner = Runner {
+        endpoint_token: zeroize::Zeroizing::default(),
+        name: "test".to_string(),
+        // timed: the bound a stop is given, not a wait
+        stop_timeout: Duration::from_secs(5),
+        apply_grace: Duration::ZERO,
+        retain_previous: Duration::ZERO,
+        install: None,
+        archive_key: None,
+        version_probe: None,
+        preflight: None,
+        reload_signal: None,
+        spawner: Spawner::Local,
+        process_account_group: None,
+        supervisor_dir: std::env::temp_dir(),
+        events: EventSender::new(0, event_tx),
+        commands: command_rx,
+        build: Box::new(move || {
+            Some(ProcessSpec {
+                program: program.clone(),
+                args: vec!["--touch".to_string(), marker_arg.clone()],
+                env: Vec::new(),
+                working_dir: None,
+                own_process_group: false,
+                ensure_dirs: Vec::new(),
+            })
+        }),
+    };
+    let (task, _service) = launch(via, runner, shutdown);
+    wait_until_started(&marker).await;
+    let text = std::fs::read_to_string(&marker).expect("marker");
+    assert!(!text.contains("token="), "{text}");
+    task.abort();
+}
+both!(a_managed_process_whose_kind_declares_no_token_finds_none);
+
+/// A kind that declared a reload applies a configuration in place (ADR-0051): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
 #[cfg(unix)]
@@ -1041,10 +1103,10 @@ both!(
     a_declared_reload_applies_without_a_restart
 );
 
-/// `reload-or-restart` (ADR-0046): a process that dies on its reload signal — the stub without
+/// `reload-or-restart` (ADR-0051): a process that dies on its reload signal — the stub without
 /// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
 /// files, and the apply is acknowledged from that restart rather than failed.
-// Verifies: ADR-0046
+// Verifies: ADR-0051
 #[cfg(unix)]
 async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead(via: Via) {
     let mut harness = runner_full(
@@ -1075,9 +1137,9 @@ both!(
     a_process_that_dies_on_the_reload_signal_is_restarted_instead
 );
 
-/// The generic uninstall (ADR-0046): the graceful stop plus the answer, which is the adapter's
+/// The generic uninstall (ADR-0051): the graceful stop plus the answer, which is the adapter's
 /// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
-/// coming last is what lets the core purge the directory only after the kind is done (ADR-0046).
+/// coming last is what lets the core purge the directory only after the kind is done (ADR-0051).
 async fn an_uninstall_stops_the_process_answers_and_exits(via: Via) {
     let mut harness = start(via, || Some(spec(&stub_agent())));
     let health = next_health(&mut harness.events).await;
@@ -1276,21 +1338,21 @@ async fn apply_config_restarts_and_acknowledges(via: Via) {
 }
 both!(apply_config_restarts_and_acknowledges);
 
-// ── The binary swap (ADR-0034) ───────────────────────────────────────────────
+// ── The binary swap (ADR-0050) ───────────────────────────────────────────────
 
 /// A Runner that swaps one file and runs whatever is at it.
 fn binary_harness(via: Via, binary: &Path, apply_grace: Duration) -> Harness {
     let program = binary.to_path_buf();
     runner(
         via,
-        Some(InstallTarget::Binary(binary.to_path_buf())),
+        Some(InstallTarget::binary(binary.to_path_buf())),
         apply_grace,
         None,
         move || Some(spec(&program)),
     )
 }
 
-/// ADR-0046 clause 54: a package is *proved to run* before it replaces what runs. The check fails here, so
+/// ADR-0051 clause 54: a package is *proved to run* before it replaces what runs. The check fails here, so
 /// nothing is swapped and — the point of the whole exercise — the running process is never stopped
 /// for an artifact that could never have worked. Before this, the sequence was stop, swap, fail to
 /// start, roll back, restart: an outage bought for nothing.
@@ -1308,7 +1370,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs(vi
     let program = binary.clone();
     let mut harness = runner_full(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         Duration::ZERO,
         None,
@@ -1317,6 +1379,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs(vi
         Some(Preflight {
             args: vec!["--exit-code".to_string(), "1".to_string()],
             env: Vec::new(),
+            working_dir: None,
         }),
         None,
         move || {
@@ -1360,7 +1423,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs(vi
 }
 both!(a_package_that_cannot_run_here_is_refused_without_stopping_what_runs);
 
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn apply_package_swaps_the_binary_and_acknowledges_installed(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1392,9 +1455,9 @@ async fn apply_package_swaps_the_binary_and_acknowledges_installed(via: Via) {
 }
 both!(apply_package_swaps_the_binary_and_acknowledges_installed);
 
-/// The case ADR-0034 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
+/// The case ADR-0050 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
 /// Supervisor takes the member named after its own binary and installs that.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1439,7 +1502,7 @@ both!(a_package_delivered_as_a_tar_gz_is_unpacked_and_installed);
 /// not installed yet, and the Server delivers it. A plugin with nothing to run — a Collector
 /// awaiting its configuration — must not turn that into a failed install, which would delete the
 /// binary that was just put in place.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("otelcol"));
@@ -1454,7 +1517,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds(via: V
     // No configuration yet, so the plugin has nothing to run.
     let mut harness = runner(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         None,
         || None,
@@ -1475,7 +1538,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds(via: V
 }
 both!(an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds);
 
-// Verifies: ADR-0034, G-10
+// Verifies: ADR-0050, G-10
 async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1504,10 +1567,10 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails(via: Via) {
 }
 both!(a_package_that_will_not_stay_up_is_rolled_back_and_fails);
 
-/// ADR-0034: a *first* install that will not start has nothing to roll back to, so it is **kept**
+/// ADR-0050: a *first* install that will not start has nothing to roll back to, so it is **kept**
 /// rather than discarded — the verified binary stays in `program/`. Discarding it would empty the
 /// directory and set the Server re-offering the same artifact in a loop.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn a_first_install_that_will_not_start_is_kept_not_discarded(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1522,7 +1585,7 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded(via: Via) {
     // Not rolled back to nothing: the verified program is still there.
     assert!(
         binary.exists(),
-        "the first install is kept, not discarded (ADR-0034)"
+        "the first install is kept, not discarded (ADR-0050)"
     );
     assert_eq!(
         std::fs::read(&binary).expect("read"),
@@ -1535,10 +1598,10 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded(via: Via) {
 }
 both!(a_first_install_that_will_not_start_is_kept_not_discarded);
 
-/// ADR-0034: a program that keeps failing to start is **held** after a few tries, not restarted
+/// ADR-0050: a program that keeps failing to start is **held** after a few tries, not restarted
 /// forever — the loop that hammered the Server with re-downloads is bounded. A held Supervisor
 /// reports it plainly.
-// Verifies: ADR-0034
+// Verifies: ADR-0050
 async fn a_program_that_keeps_crashing_is_held_not_looped(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1584,11 +1647,11 @@ async fn offer_package(harness: &Harness, dir: &Path, bytes: &[u8], version: &st
         .expect("send");
 }
 
-/// ADR-0034 clause 60: a failed package is a failed start like any other. Where the predecessor it
+/// ADR-0050 clause 60: a failed package is a failed start like any other. Where the predecessor it
 /// is rolled back to will not start either, the Supervisor holds after three failed starts in a
 /// row — the package's and two of the predecessor's — rather than granting the predecessor three
 /// of its own after the package's.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_too(via: Via) {
     use fleet_agent::supervisor::restart::MAX_CRASH_RESTARTS;
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1633,9 +1696,9 @@ async fn a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_to
 }
 both!(a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_too);
 
-/// ADR-0034 clause 59: the predecessor a failed package is rolled back to is started once, and
+/// ADR-0050 clause 59: the predecessor a failed package is rolled back to is started once, and
 /// that process stays; no second respawn replaces it while it runs.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn a_failed_package_starts_its_predecessor_exactly_once(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1683,9 +1746,9 @@ async fn a_failed_package_starts_its_predecessor_exactly_once(via: Via) {
 }
 both!(a_failed_package_starts_its_predecessor_exactly_once);
 
-/// ADR-0034: a successful update does not delete the version it superseded — it is retained for the
+/// ADR-0050: a successful update does not delete the version it superseded — it is retained for the
 /// window, with a marker recording the deadline, so an operator has a fallback.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn a_successful_update_keeps_the_previous_version_for_the_window(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1699,7 +1762,7 @@ async fn a_successful_update_keeps_the_previous_version_for_the_window(via: Via)
     let program = binary.clone();
     let mut harness = runner_retaining(
         via,
-        Some(InstallTarget::Binary(binary.clone())),
+        Some(InstallTarget::binary(binary.clone())),
         Duration::from_millis(200),
         Duration::from_secs(3600), // keep the predecessor an hour
         None,
@@ -1731,7 +1794,7 @@ async fn a_successful_update_keeps_the_previous_version_for_the_window(via: Via)
 }
 both!(a_successful_update_keeps_the_previous_version_for_the_window);
 
-// ── The tree install (ADR-0034) ──────────────────────────────────────────────
+// ── The tree install (ADR-0050) ──────────────────────────────────────────────
 
 /// Writes a `.tar.gz` holding `members` — (path inside the archive, contents).
 fn tar_gz(path: &Path, members: &[(String, Vec<u8>)]) {
@@ -1751,7 +1814,7 @@ fn tar_gz(path: &Path, members: &[(String, Vec<u8>)]) {
 }
 
 /// A release-shaped `.tar.gz`: the program and a library it "loads", under one version-named
-/// wrapper directory (ADR-0034).
+/// wrapper directory (ADR-0050).
 fn tree_release(path: &Path, wrapper: &str, program: &Path, library: &[u8]) {
     tar_gz(
         path,
@@ -1774,6 +1837,7 @@ fn tree_harness(via: Via, root: &Path) -> Harness {
         Some(InstallTarget::Tree {
             root: root.to_path_buf(),
             program_path: inside,
+            links: &[],
         }),
         GATE_GRACE,
         None,
@@ -1781,9 +1845,9 @@ fn tree_harness(via: Via, root: &Path) -> Harness {
     )
 }
 
-/// The case ADR-0034 exists for: an agent that is a program *plus* what it loads, arriving with
+/// The case ADR-0050 exists for: an agent that is a program *plus* what it loads, arriving with
 /// nothing on the host first — and then being replaced the same way.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn a_tree_package_lands_whole_and_replaces_the_one_before_it(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("program");
@@ -1838,7 +1902,7 @@ both!(a_tree_package_lands_whole_and_replaces_the_one_before_it);
 
 /// The health gate, one level up: a tree whose program will not stay up puts the *whole* previous
 /// tree back — libraries included, since half of each would run nothing.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn a_tree_that_will_not_stay_up_is_rolled_back_whole(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("program");
@@ -1884,7 +1948,7 @@ both!(a_tree_that_will_not_stay_up_is_rolled_back_whole);
 
 /// The archive names a member the configuration does not — refused, with the old tree left exactly
 /// where it was.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("program");
@@ -1923,7 +1987,7 @@ async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing(vi
 }
 both!(a_tree_missing_the_configured_program_is_refused_and_changes_nothing);
 
-// ── The trace an install leaves (ADR-0017) ───────────────────────────────────
+// ── The trace an install leaves (ADR-0054) ───────────────────────────────────
 
 /// Every span this test binary's subscriber saw: its id, the parent the registry gave it, and its
 /// name. Enough to answer the one question worth asking of the instrumentation — *what hangs off
@@ -1987,14 +2051,14 @@ fn descendants_of(recorded: &Recorded, root: &tracing::span::Id) -> Vec<String> 
     names
 }
 
-/// ADR-0017's central mechanical claim: an install is **one** trace, although it is begun by the
+/// ADR-0054's central mechanical claim: an install is **one** trace, although it is begun by the
 /// task that downloaded the artifact and finished by the Supervisor's own.
 ///
 /// The span travels with the command through the Port; if it did not, each phase would open a trace
 /// of its own and "which phase failed" — the question the dashboard is built around — would have no
 /// span to answer with. Asserted against the real Runner swapping a real program, because the hand
 /// -over is the thing under test and a mock of it would test the mock.
-/// Verifies: ADR-0017
+/// Verifies: ADR-0054
 #[tokio::test]
 async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
     let recorded = recorder();
@@ -2119,7 +2183,7 @@ mod an_apply_while_the_second_service_is_away {
         preflight: Option<Preflight>,
     ) -> Away {
         let binary = dir.path().join("agent");
-        let install = InstallTarget::Binary(binary.clone());
+        let install = InstallTarget::binary(binary.clone());
         on_target(
             dir,
             install,
@@ -2364,7 +2428,7 @@ mod an_apply_while_the_second_service_is_away {
     }
 
     /// [`a_package_waits_staged_while_the_service_is_away_and_is_swapped_in_once_it_is_back`] for a
-    /// package that is a tree (ADR-0034 clause 56): staged beside what runs and kept, the whole
+    /// package that is a tree (ADR-0050 clause 56): staged beside what runs and kept, the whole
     /// previous tree in place while the service is away, and swapped in whole once it is back —
     /// here it survives its grace and is `Installed`.
     /// Verifies: ADR-0021
@@ -2384,6 +2448,7 @@ mod an_apply_while_the_second_service_is_away {
         let install = InstallTarget::Tree {
             root: root.clone(),
             program_path: inside.clone(),
+            links: &[],
         };
         let mut away = on_target(
             dir,
@@ -2469,10 +2534,10 @@ mod an_apply_while_the_second_service_is_away {
         shut_down(away).await;
     }
 
-    /// The predecessor a successful update retained (ADR-0034 clause 61) outlasts the retries a
+    /// The predecessor a successful update retained (ADR-0050 clause 61) outlasts the retries a
     /// package that waits for the second service makes: one that does not reach the service sets
     /// nothing aside. The swap once the service is back replaces it, as any next update does.
-    /// Verifies: ADR-0034, ADR-0021
+    /// Verifies: ADR-0050, ADR-0021
     #[tokio::test]
     async fn a_retained_predecessor_outlasts_the_retries_while_a_package_waits() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2536,7 +2601,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A configuration whose retry reaches the second service but whose program does not start —
     /// it is not there — is `FAILED`, as the apply itself would have been, and is not started
-    /// again: a respawn is for a program that ran and exited within the grace (ADR-0034 clause 60), and a start that did not happen has nothing to respawn.
+    /// again: a respawn is for a program that ran and exited within the grace (ADR-0050 clause 60), and a start that did not happen has nothing to respawn.
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_retry_whose_program_does_not_start_fails_the_configuration_and_respawns_nothing() {
@@ -2635,10 +2700,10 @@ mod an_apply_while_the_second_service_is_away {
     }
 
     /// A restart command while a configuration and a package wait for the second service respawns
-    /// on the current files and does no more (ADR-0046 clause 8): its start, though it reaches the
+    /// on the current files and does no more (ADR-0051 clause 8): its start, though it reaches the
     /// service, acknowledges nothing and swaps nothing in. The retry it makes due at once does
     /// both, with a start of its own that is gated.
-    /// Verifies: ADR-0046, ADR-0021
+    /// Verifies: ADR-0051, ADR-0021
     #[tokio::test]
     async fn a_restart_while_something_waits_only_respawns_and_the_retry_decides() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -2680,8 +2745,8 @@ mod an_apply_while_the_second_service_is_away {
 
     /// The second service goes during a package's apply grace, and the predecessor the package
     /// would be taken back out for cannot be put back — it is gone. The package stays live and is
-    /// reported `InstallFailed`: `program/` is never left empty (ADR-0034 clause 59).
-    /// Verifies: ADR-0034, ADR-0021
+    /// reported `InstallFailed`: `program/` is never left empty (ADR-0050 clause 59).
+    /// Verifies: ADR-0050, ADR-0021
     #[tokio::test]
     async fn a_package_whose_predecessor_cannot_be_put_back_stays_live() {
         let (mut away, service) = running(&stub_agent(), Duration::from_secs(3)).await;
@@ -2880,7 +2945,7 @@ mod an_apply_while_the_second_service_is_away {
             stop_timeout: Duration::from_secs(5),
             apply_grace: Duration::from_millis(500),
             retain_previous: Duration::ZERO,
-            install: Some(InstallTarget::Binary(binary.clone())),
+            install: Some(InstallTarget::binary(binary.clone())),
             archive_key: None,
             version_probe: None,
             preflight: None,
@@ -2942,6 +3007,7 @@ mod an_apply_while_the_second_service_is_away {
         let preflight = Preflight {
             args: vec!["--version".to_string()],
             env: Vec::new(),
+            working_dir: None,
         };
         let mut away = on_with(
             dir,
@@ -2965,7 +3031,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A package that waited for the second service without its preflight is refused by the
     /// preflight that runs once the service is back, before anything is stopped: it is reported
-    /// failed, and what ran stays in place (ADR-0021 clause 18, ADR-0046 clause 54).
+    /// failed, and what ran stays in place (ADR-0021 clause 18, ADR-0051 clause 54).
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_package_whose_preflight_found_the_service_away_is_refused_once_it_is_back() {
@@ -2977,6 +3043,7 @@ mod an_apply_while_the_second_service_is_away {
         let preflight = Preflight {
             args: vec!["--exit-code".to_string(), "3".to_string()],
             env: Vec::new(),
+            working_dir: None,
         };
         let mut away = on_with(
             dir,

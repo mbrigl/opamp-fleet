@@ -38,8 +38,11 @@ Reading them first is cheaper than discovering them at rollout time.
   program. Only `.7z` may be encrypted; an encrypted `.zip` is refused rather than opened. A
   `.tar.gz` is the right container for a tree that runs on Unix, because it is the one that
   carries file modes.
-- **The member name must match the configured program.** The Client looks inside the archive for
-  the file name its `[[supervisor]]` block names, wherever the archive keeps it.
+- **The member is one regular file of the configured program's name.** The Client looks inside
+  the archive for the file name its `[[supervisor]]` block names, wherever the archive keeps it,
+  or, for a kind that names where its archive holds the program, for that place. Only a regular
+  file counts, never a directory or a link, and an archive holding the program more than once is
+  refused, naming each place.
 
 ## 1. Configure the Supervisor
 
@@ -88,9 +91,9 @@ to push.
 
 ## 2. Build the artifact
 
-**For the Collector this step and the next two are one command.**
-[`opamp-fleetctl package fetch`](tools.md#package-fetch) knows where the OpenTelemetry Collector
-(`otelcol`, `otelcol-contrib`) publishes, and asks what it cannot
+**For an agent `package fetch` knows, this step and the next two are one command.**
+[`opamp-fleetctl package fetch`](tools.md#package-fetch) knows where each publishes, the
+OpenTelemetry Collector (`otelcol`, `otelcol-contrib`) among them, and asks what it cannot
 know — which agent, which of the last five versions, which platforms, and where to upload:
 
 ```console
@@ -414,7 +417,7 @@ only moves forward.
 | `InstallFailed`, "holds no member named …" | The archive's member name does not match the configured program. The error lists what the archive *does* hold; repack with `--program-name`. |
 | `InstallFailed`, "holds no member at …" | A tree package whose `program_path` names nothing in the archive. The error lists what it holds — check the path from its end, not from the archive root. |
 | `InstallFailed`, "matches N members" | `program_path` is ambiguous; write more of the path. |
-| `InstallFailed`, "climbs out" / "is an absolute path" / "not a file or a directory" | The archive carries a member this Client will not write — a `..` path, an absolute one, or a link. Nothing was unpacked and the running tree is untouched. |
+| `InstallFailed`, "climbs out" / "is an absolute path" / "not a file or a directory" / "its kind does not name" | The archive carries a member this Client will not write — a `..` path, an absolute one, or a link other than one the kind names by its exact path and target. Nothing was unpacked and the running tree is untouched. |
 | An agent shows a package version it is not running | Its record outlived the binary it describes — a version switch that did not take effect, or an older Client reinstalled on top of the state. The fleet reads what the agent reports *running* beside the claim and offers that version again; the Client drops such a record when it starts. |
 | The agent stops starting right after a successful install | The artifact was some container the Client does not open — not gzip, 7z, or zip — so it was installed as if it *were* the program. Repack as `.tar.gz`. |
 | `InstallFailed`, "holds an encrypted member" | An encrypted `.zip`. Encryption is the `.7z` format's job, where `[packages] archive_key` opens it; repack, or publish the zip unencrypted. |

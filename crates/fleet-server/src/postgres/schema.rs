@@ -460,7 +460,7 @@ CREATE TABLE leases (
 /// no two Hosts hold one
 /// (ADR-0045
 /// clause 19). It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
-/// Host is bound none (ADR-0030 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
+/// Host is bound none (ADR-0052 clause 16); an `instance_uid` two such Hosts' arrays hold fails the
 /// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
 /// walk down its chain finds an entry's renewals by the index on the predecessor.
 const HOST_BINDINGS: &str = r"
@@ -570,10 +570,10 @@ CREATE TABLE audit_archive (
 );
 ";
 
-/// Where each Agent is connected (ADR-0030 clause 3): whether
+/// Where each Agent is connected (ADR-0052 clause 3): whether
 /// a connection carries it, and the instance that holds that connection, by the id of its lease.
 /// Each instance writes them for the Agents it carries in batches
-/// (ADR-0030 clause 4); a holder without a live lease reads as
+/// (ADR-0052 clause 4); a holder without a live lease reads as
 /// disconnected, whatever `connected` says (clause 6).
 const AGENT_PRESENCE: &str = r"
 ALTER TABLE agents ADD COLUMN connected boolean NOT NULL DEFAULT false;

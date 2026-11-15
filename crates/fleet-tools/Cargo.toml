@@ -1,6 +1,6 @@
 [package]
 name = "fleet-tools"
-description = "opamp-fleetctl, the OpAMP Fleet operator tool: package artifacts and the fleet's certificates (ADR-0047)"
+description = "opamp-fleetctl, the OpAMP Fleet operator tool: package artifacts and the fleet's certificates (ADR-0053)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 # One binary, `opamp-fleetctl`, and no library: nothing in this workspace depends on this crate —
-# the arrow points the other way (ADR-0047 clause 1, ADR-0008).
+# the arrow points the other way (ADR-0053 clause 1, ADR-0008).
 [[bin]]
 name = "opamp-fleetctl"
 path = "src/main.rs"
@@ -24,13 +24,13 @@ opamp = { workspace = true, features = ["client"] }
 fleet-agent = { path = "../fleet-agent" }
 # The PKCS#11 primitives the Server and the operator program share (ADR-0043).
 fleet-core = { workspace = true, features = ["pkcs11"] }
-# ADR-0034: `pack` writes the containers a Client can open, so it needs the *writers* — `compress`
+# ADR-0050: `pack` writes the containers a Client can open, so it needs the *writers* — `compress`
 # for 7z, and the gzip/tar pair for `.tar.gz` and for the tree `opamp-fleetctl package fetch`
 # repacks.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 flate2.workspace = true
 tar.workspace = true
-# ADR-0034: package signatures are raw Ed25519 over the artifact bytes; `keygen`/`sign` produce
+# ADR-0050: package signatures are raw Ed25519 over the artifact bytes; `keygen`/`sign` produce
 # exactly what the Client verifies.
 ring.workspace = true
 sha2.workspace = true
@@ -41,12 +41,12 @@ hex.workspace = true
 # Client needs the same crate for its interactive install (ADR-0020), so this is one workspace
 # dependency serving two crates rather than a second prompt library.
 dialoguer.workspace = true
-# ADR-0047: the `pki` commands make the fleet's certificates with rcgen, on the dates `time` speaks,
+# ADR-0053: the `pki` commands make the fleet's certificates with rcgen, on the dates `time` speaks,
 # and read a CA's subject with x509-parser — the crates the Server's client CA uses.
 rcgen.workspace = true
 # `pki token-init` and `pki bootstrap-ca --pkcs11-module` make keys on the Server's PKCS#11 token
 # through the wrapper the Server signs with
-# (ADR-0047 clause 5).
+# (ADR-0053 clause 5).
 cryptoki.workspace = true
 time.workspace = true
 x509-parser.workspace = true
@@ -59,7 +59,7 @@ reqwest.workspace = true
 rustls.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
-# ADR-0034: the signing file is read strictly — unknown fields refused — which derive states in
+# ADR-0050: the signing file is read strictly — unknown fields refused — which derive states in
 # one line per type rather than in hand-written checks over a `serde_json::Value`.
 serde.workspace = true
 # ADR-0014: the passwords and keys these tools read and write are held in buffers wiped on drop.
@@ -68,6 +68,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-# ADR-0047: the end-to-end test runs the real Server and the real Client in-process on what
+# ADR-0053: the end-to-end test runs the real Server and the real Client in-process on what
 # `pki init` wrote, reading the fragments as their configuration files are read.
 fleet-server = { path = "../fleet-server" }

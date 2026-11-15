@@ -1,11 +1,11 @@
 //! The shared child runner every plugin drives — the generic implementation of the whole
-//! lifecycle vocabulary (ADR-0046): spawn, watch, restart with backoff, apply a new
+//! lifecycle vocabulary (ADR-0051): spawn, watch, restart with backoff, apply a new
 //! configuration by respawning — or, when the plugin declared a reload mechanism, in place —
 //! stop gracefully within the budget, and answer an uninstall before the core purges. Plus the
 //! version probe a plugin uses to learn a Managed Process's own version, run at startup and
 //! after every swap.
 //!
-//! Mirrors the reference `opampsupervisor` (ADR-0046): SIGTERM → bounded wait → kill on Unix,
+//! Mirrors the reference `opampsupervisor` (ADR-0051): SIGTERM → bounded wait → kill on Unix,
 //! `Child::kill` on Windows (which has no SIGTERM equivalent), and exponential backoff for a
 //! process that keeps exiting.
 
@@ -32,7 +32,7 @@ pub struct ProcessSpec {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     /// Where the process starts. `None` means **the directory the program lives in**, which the
-    /// spawn resolves (ADR-0046): a single-file package's `program/`, a tree package's tree root —
+    /// spawn resolves (ADR-0051): a single-file package's `program/`, a tree package's tree root —
     /// the latter being exactly what some agents' own Windows launchers do by hand. Before
     /// that rule the process inherited whatever directory the service manager left this Client in,
     /// typically `/`: a default nobody chose. A kind that needs another directory still names one.
@@ -54,7 +54,7 @@ pub struct ProcessSpec {
     /// outside `program/` precisely because a package swap replaces that whole.
     pub ensure_dirs: Vec<PathBuf>,
     /// Start the process as the leader of its own process group, so the bounded stop can signal
-    /// the **group** rather than one pid (ADR-0046 clause 53). A daemon that runs a worker of its
+    /// the **group** rather than one pid (ADR-0051 clause 53). A daemon that runs a worker of its
     /// own, as an umbrella process does, otherwise leaves that worker orphaned and running when the
     /// stop escalates to a kill, holding the very state directory and port the Supervisor manages.
     /// Off by default: a process with no children of its own gains nothing from it.
@@ -71,7 +71,7 @@ pub struct Launch {
     /// In order; a later entry for the same key wins.
     pub env: Vec<(String, String)>,
     /// The Supervisor Endpoint's token, set as [`ENDPOINT_TOKEN_ENV`] after every entry of
-    /// [`Launch::env`], so none can replace it (ADR-0016). Held in a `Zeroizing` buffer; the
+    /// [`Launch::env`], so none can replace it (ADR-0048). Held in a `Zeroizing` buffer; the
     /// copies the spawn and the program keep are beyond this code's reach (ADR-0014 clause 4).
     #[serde(with = "zeroizing_token")]
     pub endpoint_token: Option<zeroize::Zeroizing<String>>,
@@ -249,7 +249,7 @@ fn spawn_local(launch: &Launch) -> std::io::Result<Child> {
     // If the runner is dropped without a graceful stop, take the process along.
     command.kill_on_drop(true);
     // Its own process group, so `stop` can signal the group and leave no worker behind
-    // (ADR-0046). Unix-only: what Windows offers instead is a job object, which the stop
+    // (ADR-0051). Unix-only: what Windows offers instead is a job object, which the stop
     // there does not use yet.
     #[cfg(unix)]
     if launch.own_process_group {
@@ -356,7 +356,7 @@ struct Parked {
 struct Supervision {
     /// The Managed Process, while one runs.
     child: Option<ManagedChild>,
-    /// Consecutive start failures, and when the current process started (ADR-0034): together they
+    /// Consecutive start failures, and when the current process started (ADR-0050): together they
     /// stop a program that keeps crashing from being restarted forever. A process that runs
     /// stably clears the streak; a command (config, package, restart) resets it.
     policy: RestartPolicy,
@@ -420,7 +420,7 @@ impl ManagedChild {
     }
 
     /// Sends `signal` to the process — with `group`, to its whole process group where it leads
-    /// one (ADR-0046). Nothing to do once it has been waited for.
+    /// one (ADR-0051). Nothing to do once it has been waited for.
     async fn signal(&self, signal: i32, group: bool) -> Result<(), String> {
         match self {
             ManagedChild::Local(child) => {
@@ -447,7 +447,7 @@ impl InstallTarget {
     /// What the Managed Process is spawned from.
     fn live(&self) -> PathBuf {
         match self {
-            InstallTarget::Binary(path) => path.clone(),
+            InstallTarget::Binary { path, .. } => path.clone(),
             InstallTarget::Tree { root, .. } => root.join(crate::config::TREE_DIR),
         }
     }
@@ -455,7 +455,7 @@ impl InstallTarget {
     /// Where the thing being replaced is kept until the new one has proved itself.
     fn backup(&self) -> PathBuf {
         match self {
-            InstallTarget::Binary(path) => path.with_extension("rollback"),
+            InstallTarget::Binary { path, .. } => path.with_extension("rollback"),
             InstallTarget::Tree { root, .. } => {
                 root.join(format!("{}.rollback", crate::config::TREE_DIR))
             }
@@ -480,7 +480,7 @@ impl InstallTarget {
         group: Option<crate::storage::ProcessAccountGroup>,
     ) -> Result<(), String> {
         let dir = match self {
-            InstallTarget::Binary(path) => path.parent().map(std::path::Path::to_path_buf),
+            InstallTarget::Binary { path, .. } => path.parent().map(std::path::Path::to_path_buf),
             InstallTarget::Tree { root, .. } => Some(root.clone()),
         };
         let Some(dir) = dir else {
@@ -502,7 +502,7 @@ impl InstallTarget {
         let (live, backup) = (self.live(), self.backup());
         // A rename never lands on an occupied name: Windows refuses it outright, and a directory
         // rename would nest rather than replace. This also clears any *retained* predecessor
-        // (ADR-0034) and its marker — each Supervisor keeps only the immediately previous version.
+        // (ADR-0050) and its marker — each Supervisor keeps only the immediately previous version.
         self.drop_backup();
         match std::fs::rename(&live, &backup) {
             Ok(()) => Ok(true),
@@ -513,7 +513,7 @@ impl InstallTarget {
 
     /// Unpacks the verified artifact **beside** what runs, without touching it.
     ///
-    /// Splitting this from [`commit`](Self::commit) is what buys the preflight of ADR-0046 clause 54: the
+    /// Splitting this from [`commit`](Self::commit) is what buys the preflight of ADR-0051 clause 54: the
     /// staged program can be proved to run *before* the running one is stopped, so a package that
     /// could never have worked costs no downtime at all.
     ///
@@ -527,24 +527,29 @@ impl InstallTarget {
         archive_key: Option<&str>,
         group: Option<crate::storage::ProcessAccountGroup>,
     ) -> Result<Staged, String> {
-        match self {
-            InstallTarget::Binary(path) => {
-                let temp = stage_executable(artifact, path, archive_key)?;
-                if let Err(e) = share_staged(&temp, group) {
-                    let _ = std::fs::remove_file(&temp);
-                    return Err(e);
-                }
-                Ok(Staged {
-                    root: temp
-                        .parent()
-                        .map(std::path::Path::to_path_buf)
-                        .unwrap_or_default(),
-                    program: temp.clone(),
-                    temp,
-                })
+        let single = |path: &std::path::Path, member: Option<&str>| {
+            let temp = stage_executable(artifact, path, member, archive_key)?;
+            if let Err(e) = share_staged(&temp, group) {
+                let _ = std::fs::remove_file(&temp);
+                return Err(e);
             }
-            InstallTarget::Tree { root, program_path } => {
-                let staging = stage_tree(artifact, root, program_path, archive_key, group)?;
+            Ok(Staged {
+                root: temp
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_default(),
+                program: temp.clone(),
+                temp,
+            })
+        };
+        match self {
+            InstallTarget::Binary { path, member } => single(path, *member),
+            InstallTarget::Tree {
+                root,
+                program_path,
+                links,
+            } => {
+                let staging = stage_tree(artifact, root, program_path, links, archive_key, group)?;
                 Ok(Staged {
                     program: staging.join(program_path),
                     root: staging.clone(),
@@ -569,7 +574,7 @@ impl InstallTarget {
     }
 
     /// Puts back what ran before. Where nothing is there to put back, what is live stays, so a
-    /// failed rollback never empties `program/` (ADR-0034 clause 59).
+    /// failed rollback never empties `program/` (ADR-0050 clause 59).
     fn restore(&self) -> Result<(), String> {
         let (live, backup) = (self.live(), self.backup());
         if let Err(e) = std::fs::symlink_metadata(&backup) {
@@ -583,7 +588,7 @@ impl InstallTarget {
     /// Takes a package that was swapped in back out to its staged name, and puts back what ran
     /// before it (ADR-0021 clause 17). On an error what was live is live again: where the package
     /// cannot be taken out it stays, and where what ran before cannot be put back the package is
-    /// put back, so `program/` is never left empty (ADR-0034 clause 59).
+    /// put back, so `program/` is never left empty (ADR-0050 clause 59).
     fn take_back(&self, staged: &Staged, has_backup: bool) -> Result<(), String> {
         let live = self.live();
         std::fs::rename(&live, &staged.temp)
@@ -599,7 +604,7 @@ impl InstallTarget {
         Ok(())
     }
 
-    /// The marker beside a retained backup (ADR-0034): a sibling file holding the Unix-seconds
+    /// The marker beside a retained backup (ADR-0050): a sibling file holding the Unix-seconds
     /// deadline after which the backup may be swept. A file even for a tree, whose backup is a
     /// directory, so a restart can find the deadline without opening the tree.
     fn backup_marker(&self) -> PathBuf {
@@ -608,7 +613,7 @@ impl InstallTarget {
         PathBuf::from(raw)
     }
 
-    /// Keeps the backup and records when it may be deleted (ADR-0034). Persisted, so the deadline
+    /// Keeps the backup and records when it may be deleted (ADR-0050). Persisted, so the deadline
     /// survives a Client restart the way the self-update outcome marker does (ADR-0019).
     ///
     /// The marker is the Client's alone, `0600`, though it stands in `program/`, which the process
@@ -627,7 +632,7 @@ impl InstallTarget {
         let _ = std::fs::remove_file(self.backup_marker());
     }
 
-    /// Deletes a retained backup whose deadline has passed (ADR-0034). Best-effort; returns whether
+    /// Deletes a retained backup whose deadline has passed (ADR-0050). Best-effort; returns whether
     /// it removed one. An unreadable or absent marker leaves an unretained backup alone — only a
     /// backup this Runner deliberately retained carries a marker, and a marker whose value will not
     /// parse is treated as expired rather than kept forever.
@@ -648,7 +653,7 @@ impl InstallTarget {
     /// failure than report the one it is already reporting.
     fn remove(&self, path: &std::path::Path) {
         match self {
-            InstallTarget::Binary(_) => {
+            InstallTarget::Binary { .. } => {
                 let _ = std::fs::remove_file(path);
             }
             InstallTarget::Tree { .. } => {
@@ -661,11 +666,11 @@ impl InstallTarget {
 /// What an unpacked, not-yet-installed package looks like on disk.
 ///
 /// It exists so the two halves of an install — unpack beside, then rename over — can be separated
-/// by a check (ADR-0046).
+/// by a check (ADR-0051).
 #[derive(Debug, Clone)]
 pub struct Staged {
-    /// The staged tree's root, or the staged file's directory. `${staged}` in a
-    /// [`Preflight`]'s environment resolves to this.
+    /// The staged tree's root, or the staged file's directory. [`STAGED`] in a [`Preflight`]
+    /// resolves to this.
     root: PathBuf,
     /// The program itself, inside the staged tree.
     program: PathBuf,
@@ -678,57 +683,84 @@ pub struct Staged {
 /// The check is a start, because a start is the definition of "does this run here": it catches a
 /// library the host does not have and a libc too old for the build in one go, and the dynamic
 /// linker's own message — *"version `GLIBC_2.39' not found"* — is what the fleet gets told
-/// (ADR-0046). Whatever is run must be cheap and must not touch state; `--version` is the shape.
+/// (ADR-0051). Whatever is run must be cheap and must not touch state; `--version` is the shape.
+///
+/// [`STAGED`] resolves to the staged tree's root wherever it appears — in an argument, in a value
+/// of the environment, in the working directory — so a tree carrying its own libraries, or a
+/// program that is handed paths into its own tree, is checked against **those** rather than
+/// against the ones the running version happens to leave behind
+/// (ADR-0051 clause 57).
 pub struct Preflight {
     pub args: Vec<String>,
-    /// Environment for the check. `${staged}` in a value resolves to the staged tree's root, so a
-    /// tree carrying its own libraries is checked against **those** rather than against the ones
-    /// the running version happens to leave behind.
+    /// Environment for the check.
     pub env: Vec<(String, String)>,
+    /// Where the check starts. `None` inherits, as the version probe does; a kind whose program
+    /// needs its tree root names `Some(STAGED)`, as it names the live root for the start.
+    pub working_dir: Option<String>,
 }
+
+/// What a [`Preflight`] writes for the staged tree's root, which nobody knows before the package
+/// is staged.
+pub const STAGED: &str = "${staged}";
+
+/// The health status while `build` yields no process. It carries no reason of its own — the Runner
+/// does not know why — so a kind that does may add one on its way to the core (ADR-0051).
+pub const AWAITING_CONFIGURATION: &str = "awaiting configuration";
 
 /// How to ask a Managed Process for its own version — the program to run and the arguments that
 /// make it print one. `None` on a Runner whose plugin has no such convention.
+#[derive(Clone)]
 pub struct VersionProbe {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// Where the probe starts; `None` inherits. A kind whose program needs its tree root to run at
+    /// all names it here as it does for the start, or the probe asks a program that is not the
+    /// one the Supervisor runs (ADR-0051 clause 57).
+    pub working_dir: Option<PathBuf>,
     /// How to read a version out of what the program printed. `None` is [`find_semver`], the strict
     /// Semantic Versioning read. A program whose version banner is not SemVer, such as
     /// `r2.14.6-1`, would report none at all, so a kind that knows its program's convention says
-    /// so here (ADR-0046).
+    /// so here (ADR-0051).
     pub parse: Option<fn(&str) -> Option<String>>,
+    /// Environment for the probe, empty by default. A kind whose start hands its program an
+    /// environment it needs to run at all — a tree's own library path — hands the probe the same,
+    /// or the probe asks a program that cannot start
+    /// (ADR-0051 clause 57).
+    pub env: Vec<(String, String)>,
 }
 
 /// The adapter task driving one Managed Process. The plugin supplies `build`: the current
 /// [`ProcessSpec`], or `None` while the process should not run (a Collector before any
 /// configuration arrived).
 /// The environment variable a Managed Process finds the Supervisor Endpoint's token in
-/// (ADR-0016): an `opampextension` presents it as `Authorization: Bearer ${env:OPAMP_SUPERVISOR_TOKEN}`.
+/// (ADR-0048): an `opampextension` presents it as `Authorization: Bearer ${env:OPAMP_SUPERVISOR_TOKEN}`.
 pub const ENDPOINT_TOKEN_ENV: &str = "OPAMP_SUPERVISOR_TOKEN";
 
 pub struct Runner {
     pub name: String,
-    /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0016); wiped when it is
-    /// dropped (ADR-0014).
+    /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0048); wiped when it is
+    /// dropped (ADR-0014). Empty where the kind declares that its program gets no token, because
+    /// it never connects to the Supervisor Endpoint, and an empty one is not set
+    /// (ADR-0048 clause 28).
     pub endpoint_token: zeroize::Zeroizing<String>,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
-    /// (ADR-0046's health-gated acknowledgement); zero acknowledges on start.
+    /// (ADR-0051's health-gated acknowledgement); zero acknowledges on start.
     pub apply_grace: Duration,
-    /// What an `ApplyPackage` swap replaces (ADR-0034) — one file, or a whole tree (ADR-0034).
+    /// What an `ApplyPackage` swap replaces (ADR-0050) — one file, or a whole tree (ADR-0050).
     /// `None` for a plugin with nothing swappable, which then reports a package `InstallFailed`.
     pub install: Option<InstallTarget>,
-    /// How long the version a successful update supersedes is kept before deletion (ADR-0034), so
+    /// How long the version a successful update supersedes is kept before deletion (ADR-0050), so
     /// an operator has a fallback window. Zero deletes it on success.
     pub retain_previous: Duration,
-    /// Opens an encrypted `.7z` artifact (ADR-0034); `None` when no key is configured.
+    /// Opens an encrypted `.7z` artifact (ADR-0050); `None` when no key is configured.
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
-    /// How to prove a staged package runs before it replaces what does (ADR-0046 clause 54). `None` proves
+    /// How to prove a staged package runs before it replaces what does (ADR-0051 clause 54). `None` proves
     /// nothing in advance: the swap is the first thing that finds out.
     pub preflight: Option<Preflight>,
-    /// The signal that makes the running process re-read its configuration in place (ADR-0046);
+    /// The signal that makes the running process re-read its configuration in place (ADR-0051);
     /// `None` — the generic behaviour — applies a configuration by restarting. A reload that
     /// fails, or a process that dies on it, falls back to the restart (`reload-or-restart`).
     pub reload_signal: Option<i32>,
@@ -738,7 +770,7 @@ pub struct Runner {
     /// directories the Managed Process writes into and the preflight's staging belong to it
     /// (ADR-0021 clause 21).
     pub process_account_group: Option<crate::storage::ProcessAccountGroup>,
-    /// The Supervisor's own directory (ADR-0046): beneath it, no link is followed on the way to a
+    /// The Supervisor's own directory (ADR-0051): beneath it, no link is followed on the way to a
     /// directory the Managed Process writes into.
     pub supervisor_dir: PathBuf,
     pub events: EventSender,
@@ -757,7 +789,7 @@ impl Runner {
             parked: None,
         };
         // Clear any predecessor whose retention window already elapsed while the Client was down
-        // (ADR-0034) — the deadline is wall-clock, so a restart is exactly when one may have passed.
+        // (ADR-0050) — the deadline is wall-clock, so a restart is exactly when one may have passed.
         self.sweep_backup();
         // What runs today, before it runs: a Collector without the opampextension never reports
         // its own version, and one that is not configured yet never even starts.
@@ -795,7 +827,7 @@ impl Runner {
                         }
                         continue;
                     }
-                    // What a restart command started acknowledges nothing (ADR-0046 clause 8).
+                    // What a restart command started acknowledges nothing (ADR-0051 clause 8).
                     stop(&mut s.child, self.stop_timeout, &self.name).await;
                     let started = tokio::select! {
                         started = self.spawn_if_due(&mut s.waiting) => started,
@@ -807,7 +839,7 @@ impl Runner {
                 }
                 command = self.commands.recv() => match command {
                     Some(ProcessCommand::ApplyConfig { config, span }) => {
-                        s.policy.fresh_chance(); // a new configuration (ADR-0034)
+                        s.policy.fresh_chance(); // a new configuration (ADR-0050)
                         s.backoff.reset();
                         // A configuration still owed its acknowledgement is superseded by this
                         // one, whose status the Agent reports from now on.
@@ -821,7 +853,7 @@ impl Runner {
                             }
                             continue;
                         }
-                        // In place first (ADR-0046): a kind that declared a reload keeps its
+                        // In place first (ADR-0051): a kind that declared a reload keeps its
                         // process — and its in-flight state — across the change; anything short
                         // of a survived grace falls back to the restart below.
                         match self
@@ -867,10 +899,10 @@ impl Runner {
                             self.discard(&superseded);
                         }
                         // Unpack beside what runs and prove it starts, *before* anything is
-                        // stopped (ADR-0046): a package that could never have run costs no
+                        // stopped (ADR-0051): a package that could never have run costs no
                         // downtime, and the reason it could not is the linker's own.
                         //
-                        // The install's trace came with the command (ADR-0017): every phase below
+                        // The install's trace came with the command (ADR-0054): every phase below
                         // runs inside it, so the download that started it and the rollback that may
                         // end it are one trace across two tasks.
                         let prepared = self.stage_and_check(&staged).instrument(span.clone()).await;
@@ -886,7 +918,7 @@ impl Runner {
                                 continue;
                             }
                         };
-                        s.policy.fresh_chance(); // a new package (ADR-0034)
+                        s.policy.fresh_chance(); // a new package (ADR-0050)
                         s.backoff.reset();
                         let (staged, checked) = prepared;
                         let package = Parked { staged, checked, version, hash, span };
@@ -902,13 +934,13 @@ impl Runner {
                             break;
                         }
                     }
-                    // A respawn on the current files, and nothing more (ADR-0046 clause 8): it
+                    // A respawn on the current files, and nothing more (ADR-0051 clause 8): it
                     // acknowledges no configuration and swaps in no package that waits for the
                     // second service. Unless it found the service away, the retry for what waits
                     // is due at once (ADR-0021 clause 17).
                     Some(ProcessCommand::Restart) => {
                         stop(&mut s.child, self.stop_timeout, &self.name).await;
-                        s.policy.fresh_chance(); // an operator restart (ADR-0034)
+                        s.policy.fresh_chance(); // an operator restart (ADR-0050)
                         s.backoff.reset();
                         s.child = self.spawn_if_due(&mut s.waiting).await;
                         if s.child.is_some() {
@@ -919,10 +951,10 @@ impl Runner {
                         }
                     }
                     Some(ProcessCommand::Uninstall) => {
-                        // Retired for good (ADR-0046): the generic uninstall is exactly the
+                        // Retired for good (ADR-0051): the generic uninstall is exactly the
                         // graceful stop — nothing the generic Runner installs lives outside the
                         // Supervisor's directory, and that directory is the core's to purge
-                        // (ADR-0046) once this answer is out.
+                        // (ADR-0051) once this answer is out.
                         stop(&mut s.child, self.stop_timeout, &self.name).await;
                         self.events
                             .send(ProcessEvent::Uninstalled { result: Ok(()) })
@@ -956,7 +988,7 @@ impl Runner {
                         )))
                         .await;
                     // A process that had been up a while is ordinary supervision, not a start loop:
-                    // its exit clears the streak (ADR-0034). One that keeps exiting quickly does not,
+                    // its exit clears the streak (ADR-0050). One that keeps exiting quickly does not,
                     // so it is held after a few tries rather than restarted forever.
                     s.policy.exited(Instant::now());
                     if self.respawn_or_hold(&mut s, &mut shutdown).await {
@@ -976,8 +1008,8 @@ impl Runner {
     }
 
     /// Unpacks the artifact beside what runs and — when the plugin said how — proves the staged
-    /// program starts. Nothing that runs is touched here; that is the whole point (ADR-0046).
-    /// The `stage` phase of an install's trace (ADR-0017); the preflight below is its own child.
+    /// program starts. Nothing that runs is touched here; that is the whole point (ADR-0051).
+    /// The `stage` phase of an install's trace (ADR-0054); the preflight below is its own child.
     ///
     /// Beside the staged package: whether the preflight ran. One that did not reach the second
     /// service proves nothing either way, and the package waits for the service unchecked
@@ -1006,7 +1038,7 @@ impl Runner {
         }
     }
 
-    /// Runs the plugin's preflight on `staged`, where it has one (ADR-0046 clause 54).
+    /// Runs the plugin's preflight on `staged`, where it has one (ADR-0051 clause 54).
     async fn check(&self, staged: &Staged) -> Preflighted {
         match &self.preflight {
             Some(preflight) => run_preflight(&self.spawner, &self.name, staged, preflight).await,
@@ -1021,7 +1053,7 @@ impl Runner {
         }
     }
 
-    /// Swaps a staged package in, starts it and gates it (ADR-0034), and reports the outcome;
+    /// Swaps a staged package in, starts it and gates it (ADR-0050), and reports the outcome;
     /// a package that fails is rolled back to its predecessor, which is started again.
     ///
     /// Swapped in only once the second service is reached (ADR-0021 clause 17): until then the
@@ -1065,7 +1097,7 @@ impl Runner {
             span,
         } = package;
         // Swap the binary, restart, and health-gate on the apply grace — a binary that will not
-        // stay up is rolled back to the bytes it replaced (ADR-0034).
+        // stay up is rolled back to the bytes it replaced (ADR-0050).
         stop(&mut s.child, self.stop_timeout, &self.name).await;
         let swapped = self
             .swap_and_gate(staged, &version, &mut s.child, &mut s.waiting, shutdown)
@@ -1118,7 +1150,7 @@ impl Runner {
                         result: Err(error),
                     })
                     .await;
-                // The package's start failed, and counts as a failed start (ADR-0034 clause 60):
+                // The package's start failed, and counts as a failed start (ADR-0050 clause 60):
                 // what runs now — the predecessor, rolled back, or a first install kept in place
                 // — is started again once, unless the streak holds it, and stays supervised
                 // exactly as after a failed ApplyConfig. That start, not the package's, decides
@@ -1204,7 +1236,7 @@ impl Runner {
     }
 
     /// Swaps the staged artifact over the binary, respawns, and health-gates on the apply grace,
-    /// rolling the binary back on failure (ADR-0034). The process is already stopped. On success
+    /// rolling the binary back on failure (ADR-0050). The process is already stopped. On success
     /// `child` holds the running process; on failure the previous binary is restored (and the
     /// caller respawns it). The second service was reached just before; where it has gone by the
     /// start, or goes during the grace, the package is taken back out to its staged name and what
@@ -1310,13 +1342,13 @@ impl Runner {
         self.conclude(target, has_backup, outcome)
     }
 
-    /// Concludes a swap on its gate's `outcome` (ADR-0034): rolls back to the predecessor after a
+    /// Concludes a swap on its gate's `outcome` (ADR-0050): rolls back to the predecessor after a
     /// failure, keeps it for the retention window after a success.
     fn conclude(&self, target: &InstallTarget, has_backup: bool, outcome: GraceOutcome) -> Swapped {
         match (&outcome, has_backup) {
             // Roll back to what ran before, so the next respawn is the old, known one.
             (GraceOutcome::Failed(_), true) => {
-                // A phase of its own in the trace (ADR-0017): a rollback is the part of a failed
+                // A phase of its own in the trace (ADR-0054): a rollback is the part of a failed
                 // install an operator most wants timed, and its own failure is the one that leaves
                 // a host with no program at all.
                 let _rollback = tracing::info_span!("rollback").entered();
@@ -1327,14 +1359,14 @@ impl Runner {
                 }
             }
             // No predecessor: a first install with nothing behind it. It is *not* rolled back
-            // (ADR-0034) — the verified program stays in place, reported InstallFailed, so a first
+            // (ADR-0050) — the verified program stays in place, reported InstallFailed, so a first
             // package that will not start does not empty `program/` and set the Server re-offering
             // it in a loop. Discarding it here would make that loop turn.
             (GraceOutcome::Failed(_), false) => {
                 warn!(supervisor = %self.name, "the first install would not start; kept in place, not rolled back (nothing to roll back to)");
             }
             // Applied: the predecessor is no longer what runs, but it is kept for the retention
-            // window (ADR-0034) so an operator has a fallback, then swept once its deadline passes.
+            // window (ADR-0050) so an operator has a fallback, then swept once its deadline passes.
             (_, true) => self.retain_backup(target),
             (_, false) => {}
         }
@@ -1357,12 +1389,12 @@ impl Runner {
 
     /// Takes in a program just started — by an apply, by the retry after the second service was
     /// not reached, or after a failed package — and, where a configuration is owed its
-    /// acknowledgement, gates it and settles it (ADR-0046's health-gated acknowledgement): applying
+    /// acknowledgement, gates it and settles it (ADR-0051's health-gated acknowledgement): applying
     /// means running on the new files and surviving the apply grace. A start that did not reach
     /// the service leaves it owed (ADR-0021 clause 17). Returns `true` when shutdown was requested
     /// meanwhile.
     ///
-    /// Only a program that ran and exited within the grace is started again (ADR-0034 clause 60):
+    /// Only a program that ran and exited within the grace is started again (ADR-0050 clause 60):
     /// a start that did not happen — the program is not there, or cannot be executed — has
     /// already said why in its health, and starting the same files again would only say so once
     /// more.
@@ -1407,12 +1439,12 @@ impl Runner {
         let exited_in_grace = ran && result.is_err();
         self.settle(config, result).await;
         // Stay supervised: a flaky-but-valid configuration is retried with backoff — but not
-        // forever (ADR-0034): a configuration that will not start is held after a few tries
+        // forever (ADR-0050): a configuration that will not start is held after a few tries
         // rather than spun on.
         exited_in_grace && self.respawn_or_hold(s, shutdown).await
     }
 
-    /// Keeps the version a successful update superseded, or drops it now (ADR-0034). With retention
+    /// Keeps the version a successful update superseded, or drops it now (ADR-0050). With retention
     /// off it is deleted at once; otherwise the backup stays and a marker records the deadline
     /// `now + retain_previous`, swept once it passes.
     fn retain_backup(&self, target: &InstallTarget) {
@@ -1429,7 +1461,7 @@ impl Runner {
         );
     }
 
-    /// Deletes a retained predecessor whose deadline has passed (ADR-0034). Called at startup and on
+    /// Deletes a retained predecessor whose deadline has passed (ADR-0050). Called at startup and on
     /// a periodic tick, so the window is honoured whether or not the Client restarts within it.
     fn sweep_backup(&self) {
         if let Some(target) = &self.install {
@@ -1440,7 +1472,7 @@ impl Runner {
     }
 
     /// Respawns after a start failure — or, once the [`RestartPolicy`] says the process keeps
-    /// failing to stay up, **holds** it down instead of spinning (ADR-0034). A held Supervisor
+    /// failing to stay up, **holds** it down instead of spinning (ADR-0050). A held Supervisor
     /// reports unhealthy and waits: the next configuration, package, or restart is a fresh chance
     /// and resets the streak. Returns `true` when shutdown was requested mid-wait.
     ///
@@ -1469,7 +1501,7 @@ impl Runner {
         }
     }
 
-    /// Holds the program down after `failures` failed starts in a row, and says so (ADR-0034
+    /// Holds the program down after `failures` failed starts in a row, and says so (ADR-0050
     /// clause 60): it is not started again until a new configuration, package, or restart. A
     /// configuration owed its acknowledgement — held after the package that was to be its start
     /// failed — is no longer waited for: no start comes to decide it, so it is `FAILED`
@@ -1493,7 +1525,7 @@ impl Runner {
     }
 
     /// The `gate` phase: the apply-grace health gate a configuration apply and a package swap
-    /// share (ADR-0046). A freshly started process must survive `apply_grace` to count as applied;
+    /// share (ADR-0051). A freshly started process must survive `apply_grace` to count as applied;
     /// exiting within it fails, and so does a process that never started. `child` is left holding
     /// the running process on success.
     #[instrument(name = "gate", skip_all, fields(supervisor = %self.name))]
@@ -1547,7 +1579,7 @@ impl Runner {
         }
     }
 
-    /// The in-place apply (ADR-0046): sends the declared reload signal to the running process,
+    /// The in-place apply (ADR-0051): sends the declared reload signal to the running process,
     /// which must then survive the apply grace — the same standard the restart path holds a
     /// fresh process to, and the only outside-observable evidence a reload leaves. Everything
     /// short of that is `NotApplied`, and the caller restarts on the new files instead
@@ -1615,9 +1647,7 @@ impl Runner {
             tokio::spawn(probe_version(
                 self.spawner.clone(),
                 self.name.clone(),
-                probe.program.clone(),
-                probe.args.clone(),
-                probe.parse,
+                probe.clone(),
                 self.events.clone(),
             ));
         }
@@ -1672,7 +1702,7 @@ impl Runner {
         let Some(spec) = (self.build)() else {
             self.events
                 .send(ProcessEvent::Health(unhealthy(
-                    "awaiting configuration".to_string(),
+                    AWAITING_CONFIGURATION.to_string(),
                     String::new(),
                 )))
                 .await;
@@ -1699,8 +1729,8 @@ impl Runner {
                 )));
             }
         }
-        // The program's own directory where nothing else was said (ADR-0046). A bare relative
-        // name — which ADR-0046's path rule does not produce — yields an empty parent, and an
+        // The program's own directory where nothing else was said (ADR-0051). A bare relative
+        // name — which ADR-0051's path rule does not produce — yields an empty parent, and an
         // empty `current_dir` fails the spawn, so that case keeps inheriting as it did.
         let derived = spec
             .program
@@ -1717,7 +1747,7 @@ impl Runner {
             Some(_) => crate::config_file::absolute(&spec.program),
             None => spec.program.clone(),
         };
-        // Set after every entry of `env`, so no block's `env` can replace it (ADR-0016); a
+        // Set after every entry of `env`, so no block's `env` can replace it (ADR-0048); a
         // `Zeroizing` copy until the spawn hands it on (ADR-0014).
         let endpoint_token = (!self.endpoint_token.is_empty()).then(|| self.endpoint_token.clone());
         let launch = Launch {
@@ -1783,13 +1813,13 @@ fn why_unreached(error: &std::io::Error) -> &'static str {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often a running Supervisor re-checks whether a retained predecessor's window has passed
-/// (ADR-0034). Coarse on purpose: the window is measured in hours to a day, and the startup sweep
+/// (ADR-0050). Coarse on purpose: the window is measured in hours to a day, and the startup sweep
 /// covers a Client that was down when a deadline elapsed.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 
-/// Runs `<program> <args>` once and reports the Managed Process's version as a Description
-/// event, if the output contains one. Best effort by design: a missing binary, a hang, or
-/// versionless output is logged and otherwise ignored — probing must never break supervision.
+/// Runs the probe's `<program> <args>` once and reports the Managed Process's version as a
+/// Description event, if the output contains one. Best effort by design: a missing binary, a hang,
+/// or versionless output is logged and otherwise ignored — probing must never break supervision.
 ///
 /// A later self-report through the Supervisor Endpoint replaces the probed value.
 ///
@@ -1798,17 +1828,22 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 pub async fn probe_version(
     spawner: Spawner,
     supervisor: String,
-    program: PathBuf,
-    args: Vec<String>,
-    parse: Option<fn(&str) -> Option<String>>,
+    probe: VersionProbe,
     events: EventSender,
 ) {
+    let VersionProbe {
+        program,
+        args,
+        working_dir,
+        parse,
+        env,
+    } = probe;
     let launch = Launch {
         program: program.clone(),
         args,
-        env: Vec::new(),
+        env,
         endpoint_token: None,
-        working_dir: None,
+        working_dir,
         own_process_group: false,
     };
     let output = match spawner.output(&supervisor, &launch).await {
@@ -1872,7 +1907,7 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
         }
         warn!(supervisor = %name, "process ignored SIGTERM; killing it");
         // The group too, so a worker the child spawned does not survive the escalation and go on
-        // holding what the Supervisor manages (ADR-0046 clause 53). `Child::kill` below only reaps the one.
+        // holding what the Supervisor manages (ADR-0051 clause 53). `Child::kill` below only reaps the one.
         let _ = c.signal(libc::SIGKILL, true).await;
     }
     #[cfg(not(unix))]
@@ -1881,7 +1916,7 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
     info!(supervisor = %name, "process stopped");
 }
 
-/// Runs a plugin's preflight against a staged package (ADR-0046 clause 54).
+/// Runs a plugin's preflight against a staged package (ADR-0051 clause 54).
 ///
 /// Bounded like the version probe, because this is the same shape of question asked of a program
 /// nobody has run yet. The message on failure is the program's own — a linker error names the
@@ -1898,21 +1933,21 @@ async fn run_preflight(
     staged: &Staged,
     preflight: &Preflight,
 ) -> Preflighted {
+    let root = staged.root.to_string_lossy();
+    let resolve = |value: &str| value.replace(STAGED, &root);
     let launch = Launch {
         program: staged.program.clone(),
-        args: preflight.args.clone(),
+        args: preflight.args.iter().map(|arg| resolve(arg)).collect(),
         env: preflight
             .env
             .iter()
-            .map(|(key, value)| {
-                (
-                    key.clone(),
-                    value.replace("${staged}", &staged.root.to_string_lossy()),
-                )
-            })
+            .map(|(key, value)| (key.clone(), resolve(value)))
             .collect(),
         endpoint_token: None,
-        working_dir: None,
+        working_dir: preflight
+            .working_dir
+            .as_deref()
+            .map(|dir| PathBuf::from(resolve(dir))),
         own_process_group: false,
     };
     let output = match spawner.output(supervisor, &launch).await {
@@ -1961,7 +1996,7 @@ enum Preflighted {
 /// Leading a group is what a plugin asks for with [`ProcessSpec::own_process_group`], so the test
 /// is the fact rather than a flag threaded through the Runner: a child whose process group id is
 /// its own pid is a group the Supervisor created for it, and everything in it descends from the
-/// process it started. Anything else is signalled alone (ADR-0046).
+/// process it started. Anything else is signalled alone (ADR-0051).
 #[cfg(unix)]
 fn signal_child(pid: u32, signal: i32) {
     let pid = pid as libc::pid_t;
@@ -1972,7 +2007,7 @@ fn signal_child(pid: u32, signal: i32) {
     }
 }
 
-/// The result of an in-place reload attempt (ADR-0046).
+/// The result of an in-place reload attempt (ADR-0051).
 enum Reloaded {
     /// Signalled and survived the grace — applied, the process kept running.
     Applied,
@@ -1984,27 +2019,27 @@ enum Reloaded {
 }
 
 /// `SIGHUP` where the platform has signals, `None` where it has none — the reload a kind declares
-/// for an agent that re-reads its configuration on `SIGHUP` (ADR-0046). Off Unix the Runner then
+/// for an agent that re-reads its configuration on `SIGHUP` (ADR-0051). Off Unix the Runner then
 /// applies by restarting, so one block serves every platform.
 #[cfg(unix)]
-#[expect(
+#[allow(
     dead_code,
-    reason = "only the wrapped kinds that reload by signal call it"
+    reason = "only a wrapped kind that reloads by signal calls it, and the core carries none"
 )]
 pub(crate) fn sighup() -> Option<i32> {
     Some(libc::SIGHUP)
 }
 
 #[cfg(not(unix))]
-#[expect(
+#[allow(
     dead_code,
-    reason = "only the wrapped kinds that reload by signal call it"
+    reason = "only a wrapped kind that reloads by signal calls it, and the core carries none"
 )]
 pub(crate) fn sighup() -> Option<i32> {
     None
 }
 
-/// Delivers the reload signal (ADR-0046). Unix-only in substance: a kind declares one only
+/// Delivers the reload signal (ADR-0051). Unix-only in substance: a kind declares one only
 /// through [`sighup`], which names none anywhere else, so the other arm exists for the compiler,
 /// not for a host.
 #[cfg(unix)]
@@ -2048,20 +2083,23 @@ enum GraceOutcome {
 /// leaves a half-written program where one is about to be started.
 ///
 /// A raw artifact is **moved** rather than copied when it can be: the download is staged in the
-/// same Supervisor directory the program lives in (ADR-0046), so the two are normally on one
+/// same Supervisor directory the program lives in (ADR-0051), so the two are normally on one
 /// filesystem and the install costs a metadata update instead of a second full write of several
 /// hundred megabytes. The move consumes the artifact — the caller's cleanup of it is best-effort
 /// for exactly this reason. A rename across filesystems fails, and so does one out of a staging
 /// directory an operator has put elsewhere; either way the stream below is the fallback, and the
 /// error that matters is reported from there rather than from the attempt.
 ///
-/// The artifact may be the program or an archive holding it (ADR-0034). An archive is opened here,
-/// where the binary's name is known, and the member of that name is what gets installed — nothing
+/// The artifact may be the program or an archive holding it (ADR-0050). An archive is opened here,
+/// where the binary's name is known, and the member of that name — or at the place `member` names,
+/// where the kind knows it (ADR-0050 clause 55) — is what gets
+/// installed — nothing
 /// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
 /// its author published. Unpacking always writes; only the raw case can be a move.
 fn stage_executable(
     artifact: &std::path::Path,
     path: &std::path::Path,
+    member: Option<&str>,
     archive_key: Option<&str>,
 ) -> Result<PathBuf, String> {
     let temp = path.with_extension("staged");
@@ -2075,16 +2113,26 @@ fn stage_executable(
         info!(artifact = %artifact.display(), "moved the package artifact into place");
         install::make_executable(&temp)?;
     } else {
-        let member = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .ok_or_else(|| format!("{} has no file name to look for", path.display()))?;
-        install::write_program(artifact, &temp, &member, archive_key)?;
+        // Where the kind knows the member's place in the archive, that place; otherwise the
+        // program's own file name (ADR-0050 clause 55).
+        let member = match member {
+            Some(member) => member.to_string(),
+            None => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .ok_or_else(|| format!("{} has no file name to look for", path.display()))?,
+        };
+        // A refused archive leaves no staged file behind: a member held twice is refused only
+        // once the first was written, which may be up to the unpack bound.
+        if let Err(e) = install::write_program(artifact, &temp, &member, archive_key) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
     }
     Ok(temp)
 }
 
-/// Unpacks a package that is a whole directory tree into `<root>/tree` (ADR-0034).
+/// Unpacks a package that is a whole directory tree into `<root>/tree` (ADR-0050).
 ///
 /// The tree is built in a staging directory first and moved into place by one rename, so the live
 /// name is either the old tree or the new one and never a half-written mixture. The live name is
@@ -2099,6 +2147,7 @@ fn stage_tree(
     artifact: &std::path::Path,
     root: &std::path::Path,
     program_path: &std::path::Path,
+    links: &[fleet_core::tree::KeptLink],
     archive_key: Option<&str>,
     group: Option<crate::storage::ProcessAccountGroup>,
 ) -> Result<PathBuf, String> {
@@ -2127,7 +2176,7 @@ fn stage_tree(
                 return Ok(());
             }
             crate::archive::Kind::TarGz => {
-                crate::archive::extract_tree_tar_gz(artifact, program_path, staging)?
+                crate::archive::extract_tree_tar_gz(artifact, program_path, links, staging)?
             }
             crate::archive::Kind::SevenZ => {
                 crate::archive::extract_tree_7z(artifact, program_path, staging, archive_key)?
@@ -2148,7 +2197,8 @@ fn stage_tree(
     }
 
     let program = staging.join(program_path);
-    if !program.is_file() {
+    // Asked of the member itself: a link the kind keeps is never the program.
+    if !std::fs::symlink_metadata(&program).is_ok_and(|meta| meta.is_file()) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(format!(
             "the unpacked package holds no file at {}",
@@ -2266,7 +2316,7 @@ pub(crate) fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-/// Wall-clock seconds since the Unix epoch — what a retention deadline (ADR-0034) is written and
+/// Wall-clock seconds since the Unix epoch — what a retention deadline (ADR-0050) is written and
 /// compared in, so it survives a Client restart.
 fn now_unix() -> u64 {
     SystemTime::now()
@@ -2305,7 +2355,7 @@ mod tests {
     /// waits it out instead of reporting a program that cannot run — the race a staged package
     /// meets when another thread forks while it is being written.
     /// Linux alone refuses to exec a file held open for writing, so the race exists only there.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0051
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_program_busy_for_a_moment_is_run_once_it_is_free() {
@@ -2377,7 +2427,7 @@ mod tests {
     async fn a_hold_after_a_failed_package_fails_the_configuration_it_owes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let live = dir.path().join("agent");
-        let target = InstallTarget::Binary(live.clone());
+        let target = InstallTarget::binary(live.clone());
         let artifact = dir.path().join("downloaded");
         std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
         let staged = target.stage(&artifact, None, None).expect("stage");
@@ -2426,8 +2476,8 @@ mod tests {
     /// After a package that failed, only a predecessor that ran and exited within the grace is
     /// started again: one that does not start at all — its interpreter is missing — has said why
     /// in its health, and is not tried again, with no configuration owed just as with one
-    /// (ADR-0034 clause 60).
-    /// Verifies: ADR-0034
+    /// (ADR-0050 clause 60).
+    /// Verifies: ADR-0050
     #[cfg(unix)]
     #[tokio::test]
     async fn a_predecessor_that_does_not_start_after_a_failed_package_is_not_started_again() {
@@ -2436,7 +2486,7 @@ mod tests {
         let live = dir.path().join("agent");
         std::fs::write(&live, "#!/nonexistent/interpreter\n").expect("a predecessor");
         std::fs::set_permissions(&live, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        let target = InstallTarget::Binary(live.clone());
+        let target = InstallTarget::binary(live.clone());
         let artifact = dir.path().join("downloaded");
         std::fs::write(&artifact, "#!/bin/sh\nexit 1\n").expect("a program that exits at once");
         let staged = target.stage(&artifact, None, None).expect("stage");
@@ -2486,7 +2536,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let live = dir.path().join("agent");
         std::fs::write(&live, b"what ran before").expect("a predecessor");
-        let target = InstallTarget::Binary(live.clone());
+        let target = InstallTarget::binary(live.clone());
         let artifact = dir.path().join("downloaded");
         std::fs::write(&artifact, "#!/bin/sh\nexec sleep 30\n").expect("a program that hangs");
         let staged = target.stage(&artifact, None, None).expect("stage");
@@ -2498,6 +2548,7 @@ mod tests {
         runner.preflight = Some(Preflight {
             args: Vec::new(),
             env: Vec::new(),
+            working_dir: None,
         });
         let mut s = Supervision {
             child: None,
@@ -2543,7 +2594,7 @@ mod tests {
     /// failed health in between for a Server to read as a program that does not start. One that
     /// stays busy past the retries says so, once.
     /// Linux alone refuses to exec a file held open for writing, so the race exists only there.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_start_retried_while_the_program_is_busy_reports_no_failure_in_between() {
@@ -2601,7 +2652,7 @@ mod tests {
             endpoint_token: zeroize::Zeroizing::default(),
             stop_timeout: Duration::from_secs(5),
             apply_grace,
-            install: Some(InstallTarget::Binary(live)),
+            install: Some(InstallTarget::binary(live)),
             retain_previous: Duration::ZERO,
             archive_key: None,
             version_probe: None,
@@ -3060,7 +3111,7 @@ mod tests {
         assert_eq!(find_semver("no version at all"), None);
     }
 
-    /// ADR-0046 stages the download in the same directory the program lives in, so installing a
+    /// ADR-0051 stages the download in the same directory the program lives in, so installing a
     /// raw artifact is a move and not a second full write of several hundred megabytes. What makes
     /// that observable is *why* the artifact is gone: it became the program, rather than being
     /// copied and deleted.
@@ -3084,7 +3135,7 @@ mod tests {
 
         let program = dir.path().join("program/agent");
         std::fs::create_dir_all(program.parent().expect("parent")).expect("mkdir");
-        let target = InstallTarget::Binary(program.clone());
+        let target = InstallTarget::binary(program.clone());
         let staged = target.stage(&artifact, None, None).expect("stage");
         target.commit(&staged).expect("commit");
 
@@ -3134,7 +3185,7 @@ mod tests {
         }
 
         let program = dir.path().join("agent");
-        let target = InstallTarget::Binary(program.clone());
+        let target = InstallTarget::binary(program.clone());
         let staged = target.stage(&artifact, None, None).expect("stage");
         target.commit(&staged).expect("commit");
 
@@ -3145,13 +3196,74 @@ mod tests {
         );
     }
 
-    /// ADR-0034: a retained predecessor is swept only once its deadline passes, never before, and
+    /// A single file whose kind names its place is installed from that place, past a directory and
+    /// another file of the program's name ahead of it; without the place the same archive holds
+    /// the program twice and is refused, and nothing staged is left behind
+    /// (ADR-0050 clause 55).
+    /// Verifies: ADR-0050
+    #[test]
+    fn a_member_target_installs_the_file_at_its_kinds_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("release.tar.gz");
+        {
+            let file = std::fs::File::create(&artifact).expect("create");
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            let mut dir_header = tar::Header::new_gnu();
+            dir_header.set_entry_type(tar::EntryType::Directory);
+            dir_header.set_size(0);
+            dir_header.set_mode(0o755);
+            dir_header.set_cksum();
+            builder
+                .append_data(&mut dir_header, "agent-2.0.0/etc/agent/", std::io::empty())
+                .expect("append the directory");
+            for (name, content) in [
+                (
+                    "agent-2.0.0/etc/logrotate.d/agent",
+                    b"a logrotate rule".as_slice(),
+                ),
+                ("agent-2.0.0/usr/bin/agent", b"the-program".as_slice()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, name, content)
+                    .expect("append");
+            }
+            builder.into_inner().expect("tar").finish().expect("gzip");
+        }
+
+        let program = dir.path().join("agent");
+        let target = InstallTarget::Binary {
+            path: program.clone(),
+            member: Some("usr/bin/agent"),
+        };
+        let staged = target.stage(&artifact, None, None).expect("stage");
+        target.commit(&staged).expect("commit");
+        assert_eq!(std::fs::read(&program).expect("read"), b"the-program");
+
+        let elsewhere = dir.path().join("other");
+        std::fs::create_dir_all(&elsewhere).expect("mkdir");
+        let by_name = InstallTarget::binary(elsewhere.join("agent"));
+        let Err(err) = by_name.stage(&artifact, None, None) else {
+            panic!("the file name alone matches twice");
+        };
+        assert!(err.contains("matches 2 members"), "{err}");
+        assert!(
+            !elsewhere.join("agent.staged").exists(),
+            "a refused archive leaves no staged file"
+        );
+    }
+
+    /// ADR-0050: a retained predecessor is swept only once its deadline passes, never before, and
     /// the marker goes with it.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn a_retained_backup_is_swept_only_after_its_deadline() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = InstallTarget::Binary(dir.path().join("prog"));
+        let target = InstallTarget::binary(dir.path().join("prog"));
         std::fs::write(target.backup(), b"the previous version").expect("write backup");
         target.retain(1000); // deadline: 1000 unix-seconds
         assert!(
@@ -3171,16 +3283,17 @@ mod tests {
     }
 
     /// A package taken back out whose predecessor cannot be put back — here it is gone — is put
-    /// back itself, a file and a tree alike: `program/` is never left empty (ADR-0034 clause 59).
-    /// Verifies: ADR-0034
+    /// back itself, a file and a tree alike: `program/` is never left empty (ADR-0050 clause 59).
+    /// Verifies: ADR-0050
     #[test]
     fn a_package_taken_back_whose_predecessor_cannot_be_put_back_stays_live() {
         let dir = tempfile::tempdir().expect("tempdir");
         let targets = [
-            InstallTarget::Binary(dir.path().join("prog")),
+            InstallTarget::binary(dir.path().join("prog")),
             InstallTarget::Tree {
                 root: dir.path().join("tree-root"),
                 program_path: PathBuf::from("bin/prog"),
+                links: &[],
             },
         ];
         for target in targets {
@@ -3203,7 +3316,7 @@ mod tests {
             assert!(error.contains("cannot restore"), "{error}");
             let program = match &target {
                 InstallTarget::Tree { .. } => live.join("bin/prog"),
-                InstallTarget::Binary(_) => live.clone(),
+                InstallTarget::Binary { .. } => live.clone(),
             };
             assert_eq!(
                 std::fs::read(&program).expect("live"),
@@ -3217,11 +3330,11 @@ mod tests {
 
     /// A backup with no marker is not something this Runner retained (a half-finished install
     /// leaves one), so a sweep leaves it alone.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn a_sweep_leaves_an_unmarked_backup_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = InstallTarget::Binary(dir.path().join("prog"));
+        let target = InstallTarget::binary(dir.path().join("prog"));
         std::fs::write(target.backup(), b"unmarked").expect("write backup");
         assert!(!target.sweep(u64::MAX), "no marker, nothing to sweep");
         assert!(target.backup().exists());
@@ -3229,11 +3342,11 @@ mod tests {
 
     /// Dropping a backup takes its marker too, so a superseding update does not leave a dangling
     /// deadline behind.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn dropping_a_backup_clears_its_marker() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = InstallTarget::Binary(dir.path().join("prog"));
+        let target = InstallTarget::binary(dir.path().join("prog"));
         std::fs::write(target.backup(), b"old").expect("write");
         target.retain(5000);
         assert!(target.backup_marker().exists());
@@ -3250,7 +3363,7 @@ mod tests {
     fn the_retention_marker_is_the_clients_alone() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = InstallTarget::Binary(dir.path().join("prog"));
+        let target = InstallTarget::binary(dir.path().join("prog"));
         std::fs::write(target.backup(), b"old").expect("write");
         target.retain(5000);
         let mode = std::fs::metadata(target.backup_marker())
@@ -3297,21 +3410,28 @@ mod tests {
     }
 
     /// With a process account registered, the version probe is run by the second service, not by
-    /// the Client — the program it names is not even on this host — and what the service relays
-    /// of its output is what the version is read from (ADR-0021 clause 18).
-    /// Verifies: ADR-0021
+    /// the Client — the program it names is not even on this host — in the working directory and
+    /// with the environment its kind names, and what the service relays of its output is what the
+    /// version is read from
+    /// (ADR-0021 clause 18, ADR-0051 clause 57).
+    /// Verifies: ADR-0021, ADR-0051
     #[cfg(unix)]
     #[tokio::test]
     async fn the_version_probe_runs_through_the_second_service() {
         use crate::supervisor::channel::Stream;
         let (peer, mut asked) = answering(Stream::Stdout, "agent version 1.2.3", 0).await;
         let (event_tx, mut events) = mpsc::channel(4);
+        let env = vec![("LD_LIBRARY_PATH".to_string(), "/nowhere/lib".to_string())];
         probe_version(
             Spawner::Channel(peer.channel.clone()),
             "test".to_string(),
-            PathBuf::from("/nowhere/agent"),
-            vec!["--version".to_string()],
-            None,
+            VersionProbe {
+                program: PathBuf::from("/nowhere/agent"),
+                args: vec!["--version".to_string()],
+                working_dir: Some(PathBuf::from("/nowhere")),
+                parse: None,
+                env: env.clone(),
+            },
             EventSender::new(0, event_tx),
         )
         .await;
@@ -3320,6 +3440,11 @@ mod tests {
             .expect("the probe was asked of the service");
         assert_eq!(launch.program, PathBuf::from("/nowhere/agent"));
         assert_eq!(launch.args, vec!["--version".to_string()]);
+        assert_eq!(launch.working_dir, Some(PathBuf::from("/nowhere")));
+        assert_eq!(
+            launch.env, env,
+            "the probe runs with its kind's environment"
+        );
         let (_, event) = events.try_recv().expect("a probed version");
         let ProcessEvent::Description(description) = event else {
             panic!("expected a Description event, got {event:?}");
@@ -3337,9 +3462,10 @@ mod tests {
     }
 
     /// With a process account registered, the preflight of a staged package is run by the second
-    /// service, with `${staged}` resolved in its environment, and what the program said through the
-    /// service is the reason it is refused (ADR-0021 clause 18).
-    /// Verifies: ADR-0021
+    /// service, with `${staged}` resolved in its arguments, its environment and its working
+    /// directory, and what the program said through the service is the reason it is refused
+    /// (ADR-0021 clause 18, ADR-0051 clause 57).
+    /// Verifies: ADR-0021, ADR-0051
     #[cfg(unix)]
     #[tokio::test]
     async fn the_preflight_runs_through_the_second_service() {
@@ -3350,8 +3476,9 @@ mod tests {
             temp: PathBuf::from("/nowhere/program/.staging"),
         };
         let preflight = Preflight {
-            args: vec!["--version".to_string()],
+            args: vec!["-I${staged}/lib".to_string(), "--version".to_string()],
             env: vec![("LD_LIBRARY_PATH".to_string(), "${staged}/lib".to_string())],
+            working_dir: Some(STAGED.to_string()),
         };
 
         let (peer, mut asked) = answering(Stream::Stdout, "agent 2.0.0", 0).await;
@@ -3367,6 +3494,14 @@ mod tests {
             .try_recv()
             .expect("the preflight was asked of the service");
         assert_eq!(launch.program, staged.program);
+        assert_eq!(
+            launch.args,
+            vec![
+                "-I/nowhere/program/.staging/lib".to_string(),
+                "--version".to_string()
+            ]
+        );
+        assert_eq!(launch.working_dir, Some(staged.root.clone()));
         assert_eq!(
             launch.env,
             vec![(
@@ -3392,8 +3527,9 @@ mod tests {
 
     /// What the Client asks the second service to start carries no environment of the Client's:
     /// the block's `env` and the Supervisor Endpoint's token, last, and nothing else — the program
-    /// takes the rest from the second service (ADR-0021 clause 22).
-    /// Verifies: ADR-0021
+    /// takes the rest from the second service (ADR-0021 clause 22). A Runner holding no token sets
+    /// none.
+    /// Verifies: ADR-0021, ADR-0048
     #[cfg(unix)]
     #[tokio::test]
     async fn a_start_through_the_second_service_carries_only_the_blocks_env_and_the_token() {
@@ -3431,6 +3567,17 @@ mod tests {
             launch.endpoint_token.as_deref().map(String::as_str),
             Some("the token")
         );
+
+        // A Runner holding no token, as a kind whose program never connects to the Supervisor
+        // Endpoint builds it, sets none (ADR-0048 clause 28).
+        let (peer, mut asked) = answering(Stream::Stdout, "", 0).await;
+        runner.endpoint_token = zeroize::Zeroizing::default();
+        runner.spawner = Spawner::Channel(peer.channel.clone());
+        runner.try_spawn().await.expect("started");
+        let launch = asked
+            .try_recv()
+            .expect("the start was asked of the service");
+        assert!(launch.endpoint_token.is_none());
     }
 
     /// Where a process account is registered, a tree is staged in a directory its group reads, so
@@ -3455,6 +3602,7 @@ mod tests {
         let target = InstallTarget::Tree {
             root: root.clone(),
             program_path: PathBuf::from("bin/agent"),
+            links: &[],
         };
         target.prepare(Some(group)).expect("prepare");
         assert_eq!(mode(&root), (0o750, group.0));
@@ -3645,6 +3793,7 @@ mod tests {
         let target = InstallTarget::Tree {
             root: dir.path().join("program"),
             program_path: PathBuf::from("bin/agent"),
+            links: &[],
         };
         target.prepare(Some(group)).expect("prepare");
         let staged = target.stage(&artifact, None, Some(group)).expect("staged");
@@ -3663,7 +3812,7 @@ mod tests {
         }
 
         let program = dir.path().join("single").join("agent");
-        let single = InstallTarget::Binary(program.clone());
+        let single = InstallTarget::binary(program.clone());
         single.prepare(Some(group)).expect("prepare");
         let raw = dir.path().join("downloaded");
         std::fs::write(&raw, "#!/bin/sh\nexit 0\n").expect("a bare program");
@@ -3693,6 +3842,7 @@ mod tests {
         let preflight = Preflight {
             args: vec!["--version".to_string()],
             env: Vec::new(),
+            working_dir: None,
         };
         let outcome = run_preflight(&Spawner::Channel(channel), "test", &staged, &preflight).await;
         let Preflighted::Unreached(e) = outcome else {

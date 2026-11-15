@@ -210,7 +210,7 @@ impl Beside {
 pub struct Answers {
     /// The Server's OpAMP endpoint; its scheme selects the transport (ADR-0012).
     pub endpoint: String,
-    /// The operator's name for this Client, reported as `service.instance.name` (ADR-0017) — which
+    /// The operator's name for this Client, reported as `service.instance.name` (ADR-0054) — which
     /// of the fleet's Clients this is. Not its `service.name`: that is the Agent *type*, the
     /// constant `supervisor` (ADR-0020), the same on every host and nothing to ask about.
     pub name: String,
@@ -218,7 +218,7 @@ pub struct Answers {
     /// The questionnaire always asks for it there; `None` for a loopback `ws://` / `http://`
     /// endpoint, or where no question was put — a packaged install.
     pub ca_file: Option<PathBuf>,
-    /// The hex Ed25519 key packages are verified against (ADR-0034); `None` takes no package until
+    /// The hex Ed25519 key packages are verified against (ADR-0050); `None` takes no package until
     /// one is set.
     pub verification_key: Option<String>,
     /// `[packages] self_update` (ADR-0019): whether the Server may replace this Client's own
@@ -728,7 +728,7 @@ pub fn ask(
         )?)
     };
 
-    // Without it nothing is installed, the Client's own updates included (ADR-0034); an empty
+    // Without it nothing is installed, the Client's own updates included (ADR-0050); an empty
     // answer is allowed and said so. A key the file holds is the default, so Enter keeps it and a
     // single `-` is how it is removed.
     let mut prompt = Input::<String>::new().allow_empty(true);

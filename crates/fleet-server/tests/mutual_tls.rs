@@ -88,7 +88,7 @@ impl Pki {
 
     /// A certificate and key naming `host` like [`issue_to_host`](Self::issue_to_host), whose
     /// subject carries `subject` — an operator's provisioned certificate with the values a Host
-    /// carries (ADR-0030 clause 15).
+    /// carries (ADR-0052 clause 15).
     fn issue_to_host_with(
         &self,
         host: &str,
@@ -117,7 +117,7 @@ impl Pki {
     }
 
     /// A bootstrap certificate and key signed by this CA, for `name`, naming the customer and the
-    /// site an approval requires of every bootstrap certificate (ADR-0016 clause 23).
+    /// site an approval requires of every bootstrap certificate (ADR-0048 clause 23).
     fn issue_bootstrap(&self, name: &str) -> (String, String) {
         let key = KeyPair::generate().expect("key");
         let mut params = CertificateParams::new(vec![name.to_string()]).expect("params");
@@ -176,7 +176,7 @@ struct Setup<'a> {
     max_agents: Option<usize>,
     /// The clock the enrolment window and the rate limit run on; the system's by default.
     clock: Option<Arc<dyn fleet_server::fleet::Clock>>,
-    /// Package delivery over an empty store (ADR-0034).
+    /// Package delivery over an empty store (ADR-0050).
     packages: bool,
     /// The bootstrap CA's key on the Server, which then issues bootstrap certificates (ADR-0027).
     issue_bootstrap: bool,
@@ -504,7 +504,7 @@ async fn post(
 /// trust, never reaches the Agent plane — neither the OpAMP endpoint nor the package download —
 /// while the Operator plane on its own listener serves a browser that presents none (ADR-0012,
 /// ADR-0040).
-/// Verifies: ADR-0040, ADR-0012, ADR-0034, G-17
+/// Verifies: ADR-0040, ADR-0012, ADR-0050, G-17
 #[tokio::test]
 async fn a_client_certificate_is_required_in_the_handshake_on_the_agent_plane() {
     let pki = Pki::new();
@@ -1884,7 +1884,7 @@ async fn an_operator_sees_each_host_and_can_mark_a_gateway() {
     );
 }
 
-/// A CSR in `renewal` of `old_cert`, proven with `old_key` as ADR-0016 clause 18 describes.
+/// A CSR in `renewal` of `old_cert`, proven with `old_key` as ADR-0048 clause 18 describes.
 fn renewal_csr(old_cert: &str, old_key: &str) -> Vec<u8> {
     use base64::Engine as _;
     use rcgen::{PublicKeyData as _, SigningKey as _};
@@ -1927,7 +1927,7 @@ fn issued(reply: opamp::proto::ServerToAgent) -> Option<String> {
 /// Over a Gateway's certificate a CSR without a renewal proof is refused and signs nothing, so a
 /// member behind the Gateway cannot take on the Gateway's host and its mark; a CSR whose proof
 /// names a downstream certificate is still issued, to that certificate's host.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn a_csr_over_a_gateways_certificate_needs_a_renewal_proof() {
     let pki = Pki::new();
@@ -1994,7 +1994,7 @@ async fn a_csr_over_a_gateways_certificate_needs_a_renewal_proof() {
     );
 }
 
-// ---- Hosts (ADR-0030) ----
+// ---- Hosts (ADR-0052) ----
 
 async fn hosts(served: &Served) -> serde_json::Value {
     client(&served.ca_pem, None)
@@ -2022,7 +2022,7 @@ fn described(uid: &InstanceUid, pairs: &[(&str, &str)]) -> AgentToServer {
 }
 
 /// Approving an enrolment writes the Host before the host has reported once as a member.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn an_approval_writes_the_host_before_its_first_report() {
     let pki = Pki::new();
@@ -2093,7 +2093,7 @@ async fn an_approval_writes_the_host_before_its_first_report() {
 /// `GET /api/v1/hosts` lists a Host's subject values and its Agents, grouped under their Client
 /// Agent, and an Agent behind a Gateway under the Gateway's Host; the fleet view carries the Host's
 /// values on a direct Agent and none behind a Gateway.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[tokio::test]
 async fn the_hosts_list_carries_subject_values_and_the_agents_behind_a_gateway() {
     let pki = Pki::new();
@@ -2380,7 +2380,7 @@ async fn a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called() {
 
 /// A CSR descends from the certificate the connection presented, whichever Agent the message
 /// names: a self-asserted `instance_uid` cannot lift a renewal out of its chain, and behind a
-/// Gateway revoking the Gateway reaches what was renewed through it (ADR-0023 clause 9 and ADR-0016 clause 19).
+/// Gateway revoking the Gateway reaches what was renewed through it (ADR-0023 clause 9 and ADR-0048 clause 19).
 /// Verifies: ADR-0040
 #[tokio::test]
 async fn a_csr_for_another_agent_still_descends_from_the_presented_certificate() {
@@ -3467,7 +3467,7 @@ async fn reported(served: &Served, client: &reqwest::Client) -> ServerToAgent {
 
 /// Two certificates of one host draw on one bucket, whichever of them a message comes over; a
 /// certificate of another host has a bucket of its own.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn two_certificates_of_one_host_share_a_bucket_and_two_hosts_do_not() {
     let pki = Pki::new();
@@ -3515,7 +3515,7 @@ async fn two_certificates_of_one_host_share_a_bucket_and_two_hosts_do_not() {
 
 /// One bootstrap certificate presented from two addresses is two buckets: an enrolling host is
 /// counted by where it connects from, not by a certificate the whole fleet may share.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn a_bootstrap_certificate_shared_by_two_addresses_is_two_buckets() {
     let pki = Pki::new();
@@ -3951,7 +3951,7 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
     names_its_agent(&reply, &uid, "the closed enrolment window");
 }
 
-// ---- A host fetches only what is offered to its own Agents (ADR-0034) ----
+// ---- A host fetches only what is offered to its own Agents (ADR-0050) ----
 
 /// The Agent type the delivery tests release.
 const OTELCOL: &str = "otelcol";
@@ -4047,7 +4047,7 @@ async fn released_to(served: &Served, host: &reqwest::Client, version: &str, art
 }
 
 /// A host fetches the artifact released to the Agent that reported with its certificate.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 #[tokio::test]
 async fn a_host_fetches_the_artifact_offered_to_its_own_agent() {
     let pki = Pki::new();
@@ -4063,7 +4063,7 @@ async fn a_host_fetches_the_artifact_offered_to_its_own_agent() {
 }
 
 /// Another member of the fleet is answered `404` for what was released to one host's Agent alone.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 #[tokio::test]
 async fn a_host_is_answered_404_for_an_artifact_offered_only_to_another_host() {
     let pki = Pki::new();
@@ -4103,9 +4103,9 @@ async fn answer(response: reqwest::Response) -> (u16, Vec<(String, Vec<u8>)>, Ve
 }
 
 /// The same request is answered byte for byte alike whether the store holds nothing under it,
-/// holds only an unsigned entry (ADR-0034), holds an artifact released to nobody, or holds one
+/// holds only an unsigned entry (ADR-0050), holds an artifact released to nobody, or holds one
 /// released to another host's Agent.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 #[tokio::test]
 async fn an_artifact_not_offered_and_one_not_held_are_answered_alike() {
     let pki = Pki::new();
@@ -4159,7 +4159,7 @@ async fn an_artifact_not_offered_and_one_not_held_are_answered_alike() {
 
 /// A host marked as a Gateway speaks for any Agent, so it fetches what is offered to any; before
 /// it is marked, it fetches nothing of another host's.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 #[tokio::test]
 async fn a_marked_gateway_fetches_what_is_offered_to_any_agent() {
     let pki = Pki::new();
@@ -4195,7 +4195,7 @@ async fn a_marked_gateway_fetches_what_is_offered_to_any_agent() {
 
 /// A certificate that names no host speaks for no Agent — not even the one it reported, to which
 /// the artifact was released.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 #[tokio::test]
 async fn a_certificate_naming_no_host_fetches_nothing() {
     let pki = Pki::new();
@@ -4214,7 +4214,7 @@ async fn a_certificate_naming_no_host_fetches_nothing() {
 /// A fetch that is not offered leaves one `download.refused` entry naming the check, the host, the
 /// certificate's serial and the artifact asked for; it is no failure the admission throttle counts,
 /// which here backs off after one.
-/// Verifies: ADR-0034, ADR-0028
+/// Verifies: ADR-0050, ADR-0028
 #[tokio::test]
 async fn a_refused_fetch_leaves_one_download_refused_entry_naming_its_check() {
     let pki = Pki::new();
@@ -4276,7 +4276,7 @@ async fn a_refused_fetch_leaves_one_download_refused_entry_naming_its_check() {
 
 /// A malformed identity or Platform token is a `400`, decided before any offer is tested: no
 /// `download.refused` entry follows it.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 #[tokio::test]
 async fn a_malformed_token_is_answered_400_before_the_offer_is_tested() {
     let pki = Pki::new();
@@ -4314,7 +4314,7 @@ async fn a_malformed_token_is_answered_400_before_the_offer_is_tested() {
 
 /// A download takes a token from the bucket of the host its certificate names — the bucket its
 /// Agent's messages draw on.
-/// Verifies: ADR-0034, ADR-0012
+/// Verifies: ADR-0050, ADR-0012
 #[tokio::test]
 async fn a_download_costs_a_token_of_the_hosts_bucket() {
     let pki = Pki::new();
@@ -4970,8 +4970,8 @@ async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refu
 
 /// Without the bootstrap CA's key the Server issues nothing and says why, a request outside the
 /// bounds is refused, and one naming only a customer, a site and a password is issued (ADR-0027
-/// clauses 1 and 3, ADR-0047 clause 14 and ADR-0040 clause 17).
-/// Verifies: ADR-0027, ADR-0047
+/// clauses 1 and 3, ADR-0053 clause 14 and ADR-0040 clause 17).
+/// Verifies: ADR-0027, ADR-0053
 #[tokio::test]
 async fn issuing_needs_the_key_and_a_request_within_bounds() {
     let pki = Pki::new();
@@ -5048,7 +5048,7 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
     let issued: serde_json::Value = issued.json().await.expect("json");
     assert_eq!(
         issued["subject"], "O=Kunde GmbH, OU=Werk Nord, CN=acme bootstrap Certificate",
-        "the Server sets the common name from the CA's (ADR-0047 clause 19)"
+        "the Server sets the common name from the CA's (ADR-0053 clause 19)"
     );
 }
 
@@ -5669,7 +5669,7 @@ async fn a_renewal_carries_the_predecessors_values_unchanged() {
     assert_eq!(values_of(&new_cert).organization_identifier, "K-4711");
 }
 
-// ---- The bootstrap proof (ADR-0016) ----
+// ---- The bootstrap proof (ADR-0048) ----
 
 /// A CSR for a new key carrying a bootstrap proof of `cert`, signed with `signing_key` — the
 /// certificate's own key unless a test forges it — and, with `renewal`, a renewal proof beside it.
@@ -5731,7 +5731,7 @@ fn error_of(reply: &ServerToAgent) -> Option<(i32, String)> {
 /// proof too is answered `BadRequest` and queued nowhere; one without a proof is queued under the
 /// handshake's certificate, and so is one whose proof names it — and its approval carries that
 /// certificate's values into the host certificate.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn an_enrolment_request_proves_the_handshakes_bootstrap_certificate() {
     let pki = Pki::new();
@@ -5820,7 +5820,7 @@ async fn an_enrolment_request_proves_the_handshakes_bootstrap_certificate() {
 
 /// A bootstrap certificate the Server revoked enrols no further: its request is refused and
 /// queued nowhere.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn a_revoked_bootstrap_certificates_request_is_refused() {
     let pki = Pki::new();
@@ -5855,7 +5855,7 @@ async fn a_revoked_bootstrap_certificates_request_is_refused() {
     assert!(enrolment.pending().is_empty());
 }
 
-// ---- Enrolment through a Gateway (ADR-0016) ----
+// ---- Enrolment through a Gateway (ADR-0048) ----
 
 /// A Server with enrolment and the register, a Gateway host `gw` marked, its window open, and the
 /// Gateway's client: what a request a Gateway relays arrives on.
@@ -5915,7 +5915,7 @@ async fn gateway_presenting(
 /// waits in the queue naming the Gateway's host in place of a peer address, there and in the audit,
 /// becomes no Agent, and its approval mints a host of its own — never the Gateway's — whose
 /// certificate the enrolling host collects in a later reply, addressed to it.
-/// Verifies: ADR-0016, ADR-0023
+/// Verifies: ADR-0048, ADR-0023
 #[tokio::test]
 async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
     let pki = Pki::new();
@@ -5997,7 +5997,7 @@ async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
 /// Through a Gateway, without an open window the request is answered `Unavailable`; a bootstrap
 /// proof whose certificate is revoked, or not one of the bootstrap CA, is answered `BadRequest`
 /// and queued nowhere — every answer addressed to the message's `instance_uid`.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn an_enrolment_through_a_gateway_is_refused_as_any_enrolment() {
     let pki = Pki::new();
@@ -6054,7 +6054,7 @@ async fn an_enrolment_through_a_gateway_is_refused_as_any_enrolment() {
 /// certificate is answered `BadRequest` naming both proofs. Nothing is signed or queued. A proof of
 /// the presented certificate itself — what a Client on a certificate an operator provisioned
 /// sends — renews it as a request without a proof does.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn a_member_does_not_enrol_and_a_gateway_needs_a_proof() {
     let pki = Pki::new();
@@ -6107,8 +6107,8 @@ async fn a_member_does_not_enrol_and_a_gateway_needs_a_proof() {
 /// A Gateway's own CSR with a bootstrap proof of the very certificate it presents and a renewal
 /// proof beside it is no enrolment: it stays on the Gateway's own route, is answered `BadRequest`
 /// naming both proofs, and is recorded as a refused issuance, not as a refused enrolment
-/// (ADR-0016 clauses 21 and 25).
-/// Verifies: ADR-0016
+/// (ADR-0048 clauses 21 and 25).
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn a_gateways_own_request_with_both_proofs_stays_on_its_route() {
     let pki = Pki::new();
@@ -6201,7 +6201,7 @@ fn answered(reply: &ServerToAgent) -> Answered {
 /// counted in its bootstrap certificate's bucket and the Gateway's enrolment aggregate: one
 /// certificate past its burst is throttled while a second bootstrap certificate is still taken and
 /// queued, and a member reporting through the same Gateway is still heard.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn enrolments_through_a_gateway_cannot_starve_its_members() {
     let pki = Pki::new();
@@ -6294,7 +6294,7 @@ async fn enrolments_through_a_gateway_cannot_starve_its_members() {
 /// whoever copied them, is an enrolment request whose certificate fails the check — counted in
 /// the bucket for unchecked enrolments, answered `BadRequest`, and spending nothing of the
 /// aggregate the Gateway's members are counted in.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn a_proof_copying_the_gateways_issuer_and_serial_spends_no_members_tokens() {
     let pki = Pki::new();
@@ -6354,7 +6354,7 @@ async fn a_proof_copying_the_gateways_issuer_and_serial_spends_no_members_tokens
     );
 }
 
-// ---- One request, one PEM block (ADR-0016 clauses 18 and 21) ----
+// ---- One request, one PEM block (ADR-0048 clauses 18 and 21) ----
 
 /// `victim`'s proofs, copied into a request of a key of the attacker's own — and the attacker's
 /// key.
@@ -6451,8 +6451,8 @@ async fn a_renewal_request_is_read_from_exactly_one_pem_block() {
 
 /// An enrolment request read from anything but exactly one PEM block — on an enrolment connection
 /// and through a Gateway — is answered `BadRequest` naming it and queued nowhere.
-/// Verifies: ADR-0016
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn an_enrolment_request_is_read_from_exactly_one_pem_block() {
     let pki = Pki::new();

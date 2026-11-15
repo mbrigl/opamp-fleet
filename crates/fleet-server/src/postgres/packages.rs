@@ -356,7 +356,7 @@ impl PgPackageBackend {
 }
 
 /// Holds the Package's row `FOR UPDATE` until the caller's transaction ends, and then counts the
-/// stored assignments that pin it, failing with `refusal` when any does (ADR-0033 clauses 12 and
+/// stored assignments that pin it, failing with `refusal` when any does (ADR-0049 clauses 12 and
 /// 13). A rollout holds the row of each Package it pins `FOR KEY SHARE` until its assignments are
 /// committed, so the count waits for it and sees them, and no rollout pins the Package until this
 /// transaction ends
@@ -830,7 +830,7 @@ mod tests {
     /// On PostgreSQL an entry whose blob went while it was uploaded is refused as an invalid
     /// request and one for a Package that is not stored as not found, whatever the database
     /// wrote around the message: what the REST API answers `400` and `404`, as on the filesystem.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn an_entry_refused_on_postgres_keeps_its_kind() {
         use crate::packages::Refusal;
@@ -885,7 +885,7 @@ mod tests {
     /// A deletion of a Package through B while a rollout through A that pins it has not yet
     /// committed waits for the rollout, and then refuses it from the assignment the rollout
     /// stored: the rollout holds the Package's row until it commits.
-    /// Verifies: ADR-0045, ADR-0033
+    /// Verifies: ADR-0045, ADR-0049
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_package_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};

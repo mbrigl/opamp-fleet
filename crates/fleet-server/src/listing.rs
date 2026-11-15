@@ -223,7 +223,7 @@ pub struct Derived {
     pub service_name: String,
     /// Every reported key outside the Server's `fleet.` space, with the value a Selector matches,
     /// `None` where the first value reported is no string or an empty one: the key is taken, and
-    /// no label can stand in for it (ADR-0030 clause 18).
+    /// no label can stand in for it (ADR-0052 clause 18).
     pub reported: BTreeMap<String, Option<String>>,
     /// `host.id=…` or `host.name=…`, empty when neither is reported.
     pub machine: String,
@@ -431,7 +431,7 @@ pub struct Candidate<'a> {
     pub holder: Option<&'a str>,
     /// The Host it last arrived over.
     pub host: Option<&'a str>,
-    /// What a Selector is matched against (ADR-0030 clause 18).
+    /// What a Selector is matched against (ADR-0052 clause 18).
     pub effective: Option<&'a AgentDescription>,
     pub own: &'a BTreeMap<String, String>,
     pub inherited: &'a BTreeMap<String, String>,

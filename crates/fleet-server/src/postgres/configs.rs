@@ -738,7 +738,7 @@ mod tests {
     /// A deletion of a Configuration through B while a rollout through A that pins one of its
     /// revisions has not yet committed waits for the rollout, and then refuses it from the
     /// assignment the rollout stored: the rollout holds the Configuration's row until it commits.
-    /// Verifies: ADR-0045, ADR-0033
+    /// Verifies: ADR-0045, ADR-0049
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_configuration_and_is_refused() {
         use crate::agent_store::tests::record;

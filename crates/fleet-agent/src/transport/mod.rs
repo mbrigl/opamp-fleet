@@ -39,7 +39,7 @@ pub(crate) struct Upstream<'a> {
     pub floors: Option<&'a crate::floors::FloorFile>,
 }
 
-/// Whether this Client enrols over plain HTTP (ADR-0016 clause 24): it holds no certificate the
+/// Whether this Client enrols over plain HTTP (ADR-0048 clause 24): it holds no certificate the
 /// Server issued, it presents one — the bootstrap certificate, or one an operator provisioned,
 /// which it cannot tell apart — and its endpoint is `https://` or `http://`. It then sends one
 /// report, its certificate signing request and nothing else, which is what a Gateway relays for an
@@ -157,13 +157,13 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 ///    certificate is in force (ADR-0040).
 /// 3. The floors are fetched when they are due — at the first reply, once an hour, and within the
 ///    minute before an offer is decided — and a queued download below its floor is refused
-///    (ADR-0035 clause 17). Offered packages are downloaded and verified (ADR-0034).
+///    (ADR-0035 clause 17). Offered packages are downloaded and verified (ADR-0050).
 /// 4. **The self-update restart, before anything is applied after it.** The `Installing` the
 ///    package step just owed is the last thing this version says (ADR-0019). It ends the run, so
 ///    `AfterReply::End` means exactly this.
-/// 5. The self-Agent's Supervisor set (ADR-0046), whose retired Agents' goodbyes go out with it.
+/// 5. The self-Agent's Supervisor set (ADR-0051), whose retired Agents' goodbyes go out with it.
 ///
-/// While `enrolling` over plain HTTP the request rides the enrolment report instead (ADR-0016).
+/// While `enrolling` over plain HTTP the request rides the enrolment report instead (ADR-0048).
 pub async fn after_reply<S: ReportSink>(
     engine: &mut Engine,
     config: &mut ClientConfig,
@@ -217,7 +217,7 @@ pub async fn after_reply<S: ReportSink>(
     AfterReply::Continue
 }
 
-/// Downloads, verifies, and applies any package the Engine has queued (ADR-0034). Each is handled
+/// Downloads, verifies, and applies any package the Engine has queued (ADR-0050). Each is handled
 /// in turn — download and verification are the transport's, the swap is the Supervisor's — and its
 /// outcome (`Installed`/`InstallFailed`) is reported back through the Engine. Returns whether any
 /// package was processed, so the caller flushes the owed status reports.
@@ -227,7 +227,7 @@ pub async fn after_reply<S: ReportSink>(
 /// caller on the next exchange.
 ///
 /// A shutdown ends a download where it stands — on the wire or waiting out a `Retry-After`
-/// (ADR-0034 clause 47) — and nothing is reported for it.
+/// (ADR-0050 clause 47) — and nothing is reported for it.
 pub async fn process_package_downloads<S: ReportSink>(
     engine: &mut Engine,
     config: &ClientConfig,
@@ -248,7 +248,7 @@ pub async fn process_package_downloads<S: ReportSink>(
         );
         let progress = crate::packages::Progress::default();
         let started = std::time::Instant::now();
-        // The install's trace (ADR-0017), opened here because this is where the operation begins:
+        // The install's trace (ADR-0054), opened here because this is where the operation begins:
         // the download and the verification are this task's, the staging and the swap are the
         // Supervisor's, and the span travels to it with the artifact so the two are one trace.
         let span = tracing::info_span!(
@@ -258,9 +258,9 @@ pub async fn process_package_downloads<S: ReportSink>(
             otel.status_code = tracing::field::Empty,
             otel.status_description = tracing::field::Empty,
         );
-        // Each Agent stages into its own directory (ADR-0046), so the Supervisor's install is a
+        // Each Agent stages into its own directory (ADR-0051), so the Supervisor's install is a
         // rename beside the download rather than a copy across filesystems. Keyed by the block
-        // name behind the Agent, never by index — the Agent set can change at runtime (ADR-0046).
+        // name behind the Agent, never by index — the Agent set can change at runtime (ADR-0051).
         let staging_dir = config.staging_dir_for(engine.block_name(index));
         let download =
             crate::packages::download_and_verify(&package, config, &staging_dir, &progress)
@@ -301,7 +301,7 @@ pub async fn process_package_downloads<S: ReportSink>(
     true
 }
 
-/// Applies the self-Agent's received configuration — its Supervisor set (ADR-0046) — if one is
+/// Applies the self-Agent's received configuration — its Supervisor set (ADR-0051) — if one is
 /// pending, and sends the retired Agents' goodbyes through `sink`. Returns whether an apply ran,
 /// so the caller flushes the owed status reports.
 pub async fn process_self_configuration<S: ReportSink>(
@@ -314,7 +314,7 @@ pub async fn process_self_configuration<S: ReportSink>(
         return false;
     };
     // A second gate behind the capability the Agent does not declare: on a host that keeps its
-    // set no path reaches the apply (ADR-0046 clause 40).
+    // set no path reaches the apply (ADR-0051 clause 40).
     if !config.server_manages_set() {
         tracing::warn!(
             hash = %hex::encode(&offer.config_hash),
@@ -362,7 +362,7 @@ pub enum OfferOutcome {
 ///    would otherwise compare against `metrics: None, traces: None, logs: None` and
 ///    tear down exporters the Server never mentioned. `merge` is what puts those back. What it no
 ///    longer puts back is a signal left out of an offer that *does* name one: that is a stop, and
-///    ADR-0017 is where the difference is decided.
+///    ADR-0054 is where the difference is decided.
 /// 3. **One acknowledgement for the whole message** (ADR-0013 clause 7). The Baseline hashes all
 ///    settings together, so the Agent answers the message, not its parts: a single status whose
 ///    `error_message` names everything dropped across both halves.
@@ -379,7 +379,7 @@ pub async fn process_connection_offer(
         return OfferOutcome::None;
     };
     // Opened here rather than on the function, which is called once per exchange and would
-    // otherwise trace every poll that had nothing to do (ADR-0017 clause 20). What follows is one
+    // otherwise trace every poll that had nothing to do (ADR-0054 clause 20). What follows is one
     // operation with an outcome the Server is told about, which is what a span is for here.
     //
     // `reconnect` is a field and not a phase: the reconnection itself happens after this returns,
@@ -574,7 +574,7 @@ mod tests {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut engine, config, uid) = engine_with_state_dir(&dir);
-        // Loopback is the cleartext exception (ADR-0017) — nothing leaves the machine.
+        // Loopback is the cleartext exception (ADR-0054) — nothing leaves the machine.
         engine.handle(&telemetry_only_offer(
             uid,
             "http://127.0.0.1:4318/v1/metrics",
@@ -616,13 +616,13 @@ mod tests {
 
     /// And a destination this Client refuses is reported `FAILED` naming the reason, on the same
     /// offer — not warned to a log while the Server is told everything applied.
-    /// Verifies: ADR-0017
+    /// Verifies: ADR-0054
     #[tokio::test]
     async fn a_refused_telemetry_destination_is_reported_failed_on_the_same_offer() {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
         let (mut engine, config, uid) = engine_with_state_dir(&dir);
-        // Cleartext to a public host name: the Baseline's "MAY refuse", taken (ADR-0017).
+        // Cleartext to a public host name: the Baseline's "MAY refuse", taken (ADR-0054).
         engine.handle(&telemetry_only_offer(
             uid,
             "http://collector.example:4318/v1/metrics",
@@ -660,8 +660,8 @@ mod tests {
     }
 
     /// The Supervisor-set apply refuses to run on a host that keeps its set, whatever put a set in
-    /// front of it: nothing is written and nothing is sent (ADR-0046 clause 40).
-    /// Verifies: ADR-0046
+    /// front of it: nothing is written and nothing is sent (ADR-0051 clause 40).
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn the_supervisor_set_apply_refuses_to_run_on_a_host_that_keeps_its_set() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -694,7 +694,7 @@ mod tests {
 
     /// A shutdown ends a download that is waiting out a `Retry-After` from its Server origin: the
     /// call returns at once, and no failure is reported for the download.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn a_shutdown_stops_a_download_waiting_out_retry_after() {
         opamp::tls::install_ring_provider();
@@ -792,13 +792,13 @@ mod tests {
     /// The Baseline permits interim status reports while a package downloads, and this is what
     /// they are for: a transfer that takes longer than a moment stays visible instead of looking
     /// like a stuck install. Driven by a server that trickles the artifact out.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn a_slow_download_is_reported_as_downloading_with_progress() {
         opamp::tls::install_ring_provider();
         let artifact = vec![7u8; 3072];
         let content_hash = Sha256::digest(&artifact).to_vec();
-        // Signed with a key of the test's own: a Client takes nothing unsigned (ADR-0034).
+        // Signed with a key of the test's own: a Client takes nothing unsigned (ADR-0050).
         let keypair = {
             let rng = ring::rand::SystemRandom::new();
             let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
@@ -852,7 +852,7 @@ mod tests {
         let mut engine = Engine::new(vec![state]);
         let uid = engine.poll_reports()[0].instance_uid.clone();
         // A Client that takes packages holds a key, and fetches from its own Server's origin
-        // (ADR-0034).
+        // (ADR-0050).
         let config = ClientConfig {
             endpoint: format!("ws://{addr}/v1/opamp"),
             state_dir: dir.path().to_path_buf(),

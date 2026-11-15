@@ -70,12 +70,12 @@ const ADMITTED_MAX: usize = 100_000;
 pub struct Proofs {
     pub certificate: Option<(CertId, u64)>,
     /// The certificate itself (DER), which a bootstrap proof naming it must embed byte for byte
-    /// (ADR-0016 clause 25).
+    /// (ADR-0048 clause 25).
     pub der: Option<Arc<[u8]>>,
     /// The host the certificate was issued to, when it names one (ADR-0027 clause 11).
     pub host: Option<String>,
     /// The certificate's subject values, which a Host made at its first report carries
-    /// (ADR-0030 clause 15).
+    /// (ADR-0052 clause 15).
     pub subject_values: crate::revocation::SubjectValues,
 }
 
@@ -86,7 +86,7 @@ impl Proofs {
             .is_some_and(|(id, _)| revocations.is_certificate_revoked(id))
     }
 
-    /// Who a member's messages and downloads are counted for (ADR-0016 clause 26): the host its
+    /// Who a member's messages and downloads are counted for (ADR-0048 clause 26): the host its
     /// certificate names, else the certificate, else — with no certificate at all — the peer.
     fn subject(&self, peer: Option<IpAddr>) -> Subject {
         match (&self.host, &self.certificate) {
@@ -121,7 +121,7 @@ impl Proofs {
     }
 }
 
-/// Whether `subject` is a host marked as a Gateway, read at each message (ADR-0016 clause 26).
+/// Whether `subject` is a host marked as a Gateway, read at each message (ADR-0048 clause 26).
 fn is_gateway(subject: &Subject, revocations: Option<&Arc<Revocations>>) -> bool {
     match (subject, revocations) {
         (Subject::Host(host), Some(revocations)) => revocations.is_gateway(host),
@@ -371,7 +371,7 @@ async fn admit_download(
         return unauthorized("the package download requires a certificate of the fleet");
     }
     // What the certificate proves, read once: counted here, and handed to the route, which serves
-    // only what is offered to an Agent of the host it names (ADR-0030 clause 16).
+    // only what is offered to an Agent of the host it names (ADR-0052 clause 16).
     let proofs = certificate.map(|cert| Proofs {
         der: Some(Arc::from(cert.as_ref())),
         host: facts.as_ref().and_then(|facts| facts.host.clone()),
@@ -746,7 +746,7 @@ async fn admit(
 
 /// The Server's handler behind the endpoint: every report goes to the fleet, and a WebSocket is
 /// also sent what the fleet wants its Agents to have when that changes. The CAs of the Agent plane
-/// tell which bootstrap certificates an enrolment request through a Gateway may prove (ADR-0016).
+/// tell which bootstrap certificates an enrolment request through a Gateway may prove (ADR-0048).
 struct Fleet(Arc<AppState>, Issuers);
 
 /// One connection as the fleet sees it.
@@ -759,14 +759,14 @@ struct Carrier {
     /// HTTP is stateless polling, so there is none to pass.
     conn: Option<ConnId>,
     /// The Agents this socket carried, any number of them told apart by `instance_uid` alone
-    /// (ADR-0016), so all of them are marked unreachable when it goes.
+    /// (ADR-0048), so all of them are marked unreachable when it goes.
     seen: Vec<InstanceUid>,
     /// What admitted the connection: re-checked before a CSR is signed, and the presented
     /// certificate is the predecessor of one it renews (ADR-0023 clause 9 and ADR-0040 clause 28).
     proofs: Proofs,
     /// Where the connection comes from.
     peer: Option<IpAddr>,
-    /// Who its messages are counted for (ADR-0016 clause 26).
+    /// Who its messages are counted for (ADR-0048 clause 26).
     subject: Subject,
     /// Why the session was ended, once its [`Guard`] has ended it.
     ended: Arc<Mutex<Option<&'static str>>>,
@@ -801,7 +801,7 @@ struct Session {
     ended: Arc<Mutex<Option<&'static str>>>,
 }
 
-/// Why a session is ended whose every Agent was forgotten (ADR-0030 clause 10).
+/// Why a session is ended whose every Agent was forgotten (ADR-0052 clause 10).
 const FORGOTTEN: &str = "forgotten";
 
 struct Guard {
@@ -1050,8 +1050,8 @@ impl Handler for Fleet {
         if !self.0.holds_its_lease() {
             return Reply::Refuse(StatusCode::SERVICE_UNAVAILABLE, NO_LEASE.to_string());
         }
-        // An enrolment request through a Gateway (ADR-0016 clause 25); counted in the Gateway's
-        // enrolment aggregate and, once checked, by the bootstrap certificate it names (ADR-0016 clause 26).
+        // An enrolment request through a Gateway (ADR-0048 clause 25); counted in the Gateway's
+        // enrolment aggregate and, once checked, by the bootstrap certificate it names (ADR-0048 clause 26).
         let through_gateway = self.enrolment_through_gateway(carrier, &report);
         // Before anything else: enrolment, the CSR, and the fleet lock (ADR-0012 clause 24).
         if self.over_rate(
@@ -1082,7 +1082,7 @@ impl Handler for Fleet {
             }
         }
         // The connection's own certificate, whatever the message claims to be: behind a Gateway
-        // that is the Gateway's, which renews nothing without a renewal proof (ADR-0016).
+        // that is the Gateway's, which renews nothing without a renewal proof (ADR-0048).
         let presented = carrier
             .proofs
             .certificate
@@ -1208,7 +1208,7 @@ impl Handler for Fleet {
     }
 }
 
-/// An enrolment request through a Gateway, as the throttle keys it (ADR-0016 clause 26).
+/// An enrolment request through a Gateway, as the throttle keys it (ADR-0048 clause 26).
 enum Relayed {
     /// Its proof embeds a certificate a bootstrap CA of `[enrolment]` issued: its own bucket.
     Checked(CertId),
@@ -1220,7 +1220,7 @@ enum Relayed {
 impl Fleet {
     /// Takes the message's token (ADR-0012) — for an enrolment request through a Gateway, from the
     /// Gateway's enrolment aggregate and the bucket of the bootstrap certificate it names, once
-    /// checked (ADR-0016 clause 26) — and records a message past the limit.
+    /// checked (ADR-0048 clause 26) — and records a message past the limit.
     fn over_rate(
         &self,
         carrier: &Carrier,
@@ -1286,7 +1286,7 @@ impl Fleet {
             return self.0.enrolment_answer(&report.instance_uid, None);
         };
         // A request claiming another identity never reaches the queue (ADR-0040), nor does one
-        // proving another bootstrap certificate than the handshake's (ADR-0016 clause 22).
+        // proving another bootstrap certificate than the handshake's (ADR-0048 clause 22).
         let request = match String::from_utf8(csr.csr.clone())
             .map_err(|_| "the certificate signing request is not PEM".to_string())
             .and_then(|pem| {
@@ -1306,13 +1306,13 @@ impl Fleet {
         )
     }
 
-    /// Whether a message is an enrolment request through a Gateway (ADR-0016 clause 25): a CSR
+    /// Whether a message is an enrolment request through a Gateway (ADR-0048 clause 25): a CSR
     /// carrying a bootstrap proof over the certificate of a host marked as a Gateway, unless the
     /// proof names that certificate itself — then it is the Gateway's own CSR, which `renews`
     /// decides; it names that certificate only when it embeds it byte for byte. A CSR with a
     /// renewal proof beside the bootstrap proof is no enrolment either: it stays on the route it
-    /// came by, whose reader of a proof refuses it (ADR-0016 clause 21). Its certificate is
-    /// checked as cheaply as the throttle allows before it keys a bucket (ADR-0016 clause 26): it parses, and
+    /// came by, whose reader of a proof refuses it (ADR-0048 clause 21). Its certificate is
+    /// checked as cheaply as the throttle allows before it keys a bucket (ADR-0048 clause 26): it parses, and
     /// it is one a bootstrap CA of `[enrolment]` issued as the handshake checks one — its issuer,
     /// that CA's signature over it, `CA:FALSE`, its validity, and the `clientAuth` extended key
     /// usage where it names any ([`Issuers::bootstrap_issued`]). The proof itself is checked by
@@ -1358,9 +1358,9 @@ impl Fleet {
         })
     }
 
-    /// An enrolment request through a Gateway (ADR-0016 clause 25): decided as any enrolment. The
+    /// An enrolment request through a Gateway (ADR-0048 clause 25): decided as any enrolment. The
     /// proof is checked — a bootstrap certificate of `[enrolment]`, valid, not revoked, its key
-    /// having signed the request's (ADR-0016 clause 21) — and the request is filed under the
+    /// having signed the request's (ADR-0048 clause 21) — and the request is filed under the
     /// certificate it proves, naming the Gateway's host in place of a peer address. Nothing in the
     /// message is read but the certificate signing request, and no Agent record is made. Every
     /// answer is addressed to the message's `instance_uid`, by which the Gateway routes it back.
@@ -1496,7 +1496,7 @@ impl Fleet {
             }
             Submitted::Closed => unavailable(instance_uid, "no enrolment window is open"),
         };
-        // Addressed to the message, so a Gateway routes even a refusal back (ADR-0016 clause 13).
+        // Addressed to the message, so a Gateway routes even a refusal back (ADR-0048 clause 13).
         ServerToAgent {
             instance_uid: instance_uid.to_vec(),
             ..answer
@@ -1504,7 +1504,7 @@ impl Fleet {
     }
 }
 
-/// Whether a request on an enrolment connection proves the certificate of its handshake (ADR-0016
+/// Whether a request on an enrolment connection proves the certificate of its handshake (ADR-0048
 /// clause 19): a bootstrap proof there must name that certificate, and hold; a request without one
 /// proves the handshake's certificate alone.
 ///

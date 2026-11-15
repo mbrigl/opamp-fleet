@@ -1,5 +1,5 @@
-//! Server-offered packages (ADR-0034): resolving a download URL, downloading the artifact from this
-//! Client's own Server origin over TLS 1.3 (ADR-0034), and **verifying it before it is applied** —
+//! Server-offered packages (ADR-0050): resolving a download URL, downloading the artifact from this
+//! Client's own Server origin over TLS 1.3 (ADR-0050), and **verifying it before it is applied** —
 //! the content hash and the Ed25519 signature, both always. What protects an installed binary is
 //! verification; what the origin rule protects is what a download exposes — the offered headers and
 //! this Client's certificate — and that a host never reaches past its Server for software.
@@ -64,15 +64,15 @@ fn ensure_safe_package_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Downloads the artifact to a file and verifies it (ADR-0034). Returns the path of the verified
+/// Downloads the artifact to a file and verifies it (ADR-0050). Returns the path of the verified
 /// artifact, ready for the Supervisor to swap over the Managed Process's binary.
 ///
 /// The artifact is a program — tens or hundreds of megabytes — so it is streamed to `staging_dir`
 /// and hashed as it arrives, never assembled in memory or read back: the signature covers the
 /// Agent type, the version and that hash, not the bytes themselves. `staging_dir` is the
-/// receiving Agent's own (ADR-0046), so the install that follows is a rename inside one
+/// receiving Agent's own (ADR-0051), so the install that follows is a rename inside one
 /// filesystem.
-/// Verifies: ADR-0034
+/// Verifies: ADR-0050
 pub async fn download_and_verify(
     package: &PackageDownload,
     config: &ClientConfig,
@@ -83,7 +83,7 @@ pub async fn download_and_verify(
 }
 
 /// How long a download waits when its own Server origin answers `429` or `503` with
-/// `Retry-After` (ADR-0034 clause 47): each wait the `Retry-After`, capped, and the waits of one
+/// `Retry-After` (ADR-0050 clause 47): each wait the `Retry-After`, capped, and the waits of one
 /// download together bounded.
 #[derive(Debug, Clone, Copy)]
 pub struct Patience {
@@ -116,16 +116,16 @@ pub async fn download_and_verify_patiently(
     // First, before any URL is resolved or a byte is written: the staged path is built from this
     // name, and a name that could escape the staging directory is refused outright.
     ensure_safe_package_name(&package.name)?;
-    // Refused before a byte is fetched: no key, or no signature to check with it (ADR-0034).
+    // Refused before a byte is fetched: no key, or no signature to check with it (ADR-0050).
     let key = signature_policy(&package.signature, config.package_key())?;
     let url = resolve_url(&package.download_url, &config.endpoint)?;
     let origin = ServerOrigin::new(config)?;
-    // Every request goes to this Client's own Server origin (ADR-0034), which is where its
+    // Every request goes to this Client's own Server origin (ADR-0050), which is where its
     // certificate belongs: the download route sits behind the Agent plane's handshake.
     let identified = download_client(crate::tls::client_tls(config)?)?;
     // A count, never a key and never a value — and the source without whatever authorises reaching
     // it. This line goes to the log file, and through the bridge to the destination the Server named
-    // (ADR-0017), which is the same reason the span below carries the redacted form: a pre-signed
+    // (ADR-0054), which is the same reason the span below carries the redacted form: a pre-signed
     // URL puts its signature in the query, and a log line is a poor place to keep one.
     let source = source_of(&url);
     info!(package = %package.name, url = %source, headers = package.headers.len(), "downloading package");
@@ -172,7 +172,7 @@ pub async fn download_and_verify_patiently(
         }
     };
     // The bytes are in; what remains is deciding whether they are the right ones. Its own phase of
-    // the trace (ADR-0017), because the hash and the signature are what a package's security rests
+    // the trace (ADR-0054), because the hash and the signature are what a package's security rests
     // on and "it failed to install" must be able to say which of the two.
     drop(download);
     let verify = tracing::info_span!("verify", bytes = staged.len).entered();
@@ -199,7 +199,7 @@ pub(crate) fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::
     .map_err(|e| format!("the download client: {e}"))
 }
 
-/// Where a download may go (ADR-0034 clause 51): this Client's own Server origin — the scheme, host
+/// Where a download may go (ADR-0050 clause 51): this Client's own Server origin — the scheme, host
 /// and port of its OpAMP endpoint, `wss` mapped to `https` (and `ws` to `http`, which the endpoint
 /// may only be on the loopback) — and nowhere else. Every URL is held to the transport rule first.
 pub struct ServerOrigin {
@@ -230,7 +230,7 @@ impl ServerOrigin {
         }
         Err(format!(
             "refusing a download from {}: a package is fetched only from this Client's own \
-             Server origin, {} (ADR-0034)",
+             Server origin, {} (ADR-0050)",
             origin_label(url),
             origin_label(&self.server)
         ))
@@ -281,7 +281,7 @@ pub(crate) async fn send_download(
 
 /// [`send_download`], waiting out a `429` or `503` with `Retry-After` in seconds from the Server's
 /// own origin — a Gateway behind one, whose cache is still fetching, or the Server's rate limit —
-/// within `patience` (ADR-0034 clause 47). Anything else is returned as it came, for the caller to
+/// within `patience` (ADR-0050 clause 47). Anything else is returned as it came, for the caller to
 /// fail on.
 pub(crate) async fn send_patiently(
     origin: &ServerOrigin,
@@ -300,7 +300,7 @@ pub(crate) async fn send_patiently(
     }
 }
 
-/// The waits of one download on `Retry-After` (ADR-0034 clause 47): each one at least a second and
+/// The waits of one download on `Retry-After` (ADR-0050 clause 47): each one at least a second and
 /// at most [`Patience::per_wait`], and none begun that would end past the deadline set when the
 /// download began — so the requests count against the bound as well as the waits.
 pub(crate) struct Waits {
@@ -393,7 +393,7 @@ fn with_headers(
 
 /// Where an artifact is being fetched from, without whatever authorises the fetch.
 ///
-/// The span this labels leaves the host for a destination the *Server* named (ADR-0017 clause 24), and
+/// The span this labels leaves the host for a destination the *Server* named (ADR-0054 clause 24), and
 /// a download URL is one of the few strings here that can carry a credential in plain sight: a
 /// pre-signed URL puts its signature in the query. The scheme, host and path answer the question a
 /// trace is read for — *which artifact was fetched* — and the query answers none of it.
@@ -531,7 +531,7 @@ async fn write_stream(
 
 /// Verifies the streamed artifact: the content hash from the stream, then the signature over what
 /// the offer says the artifact is — its Agent type (the package's name), its version and that
-/// hash (ADR-0034). A signed artifact offered as another type's program, or under another version,
+/// hash (ADR-0050). A signed artifact offered as another type's program, or under another version,
 /// does not verify.
 fn verify_staged(
     _path: &Path,
@@ -547,7 +547,7 @@ fn verify_staged(
     check_signature(&statement, &package.signature, key)
 }
 
-/// The signature policy (ADR-0034): there is no unsigned posture. An offer is refused before
+/// The signature policy (ADR-0050): there is no unsigned posture. An offer is refused before
 /// anything is downloaded when this Client holds no verification key, or when the offer carries no
 /// signature to check with it. `Ok` is the key the signature is then checked against.
 fn signature_policy<'a>(signature: &[u8], key: Option<&'a [u8]>) -> Result<&'a [u8], String> {
@@ -636,7 +636,7 @@ mod tests {
 
     /// A `503` and a `429` with `Retry-After` from the Client's own Server origin are waited out,
     /// and the download goes on.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn a_download_waits_out_retry_after_from_its_server_origin() {
         let (server, count) = answering(vec![(503, Some("30")), (429, Some("30"))]).await;
@@ -658,7 +658,7 @@ mod tests {
     /// download fail once the next wait would pass the bound. The waits are of seconds, so that the
     /// requests between them, which count against the bound too, take a share of it only a defect
     /// makes large.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn a_download_gives_up_once_its_waits_reach_the_bound() {
         let (server, count) = answering(vec![(503, Some("30")); 100]).await;
@@ -690,7 +690,7 @@ mod tests {
 
     /// A `Retry-After: 0` does not make the download ask in a tight loop for ever: the asking ends
     /// at the deadline, after a bounded number of requests, and each wait is at least a second.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn a_retry_after_of_zero_does_not_loop_without_bound() {
         let (server, count) = answering(vec![(503, Some("0")); 1000]).await;
@@ -728,7 +728,7 @@ mod tests {
     /// The time the requests take counts against the bound, not only the waits: a slow origin
     /// exhausts it although the waits alone would not. Each request takes a second, so that what a
     /// loaded host adds to it is small against the bound.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn request_time_counts_against_the_bound() {
         let count = std::sync::Arc::new(AtomicU64::new(0));
@@ -779,7 +779,7 @@ mod tests {
     }
 
     /// A `503` whose `Retry-After` is an HTTP date, missing or unreadable is not waited out.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn an_unusable_retry_after_is_not_waited_out() {
         for after in [Some("Wed, 21 Oct 2015 07:28:00 GMT"), None, Some("soon")] {
@@ -804,8 +804,8 @@ mod tests {
     }
 
     /// A redirect off the Server's origin is refused before the host it points at is asked: the
-    /// download fails naming that origin, and nothing is fetched from it (ADR-0034 clause 51).
-    /// Verifies: ADR-0034
+    /// download fails naming that origin, and nothing is fetched from it (ADR-0050 clause 51).
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn a_redirect_off_the_origin_is_refused_without_a_fetch() {
         let (mirror, count) = answering(Vec::new()).await;
@@ -841,9 +841,9 @@ mod tests {
     }
 
     /// An absolute `download_url` on another origin is refused without a byte fetched, and the
-    /// refusal names that origin (ADR-0034 clause 51) — whatever the offer's headers would have
+    /// refusal names that origin (ADR-0050 clause 51) — whatever the offer's headers would have
     /// carried never leaves the host.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn an_absolute_url_on_another_origin_is_refused_without_a_fetch() {
         let (other, count) = answering(Vec::new()).await;
@@ -866,8 +866,8 @@ mod tests {
     }
 
     /// What labels the download span must not carry what authorises the download: the span goes to
-    /// a destination the Server named (ADR-0017 clause 24), and a pre-signed URL is a credential.
-    /// Verifies: ADR-0034, ADR-0017
+    /// a destination the Server named (ADR-0054 clause 24), and a pre-signed URL is a credential.
+    /// Verifies: ADR-0050, ADR-0054
     #[test]
     fn the_download_source_drops_whatever_authorises_it() {
         assert_eq!(
@@ -925,7 +925,7 @@ mod tests {
 
     /// A header value is a credential, and this struct travels inside a `Debug`-deriving type that
     /// a log line could one day print. The key is diagnosable, the value never appears.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn a_download_never_debug_prints_its_header_values() {
         let mut package = offer(vec![0u8; 32], Vec::new());
@@ -966,7 +966,7 @@ mod tests {
     /// A package name is a file-name token, not a path: the safe set mirrors what the Server
     /// validates before it stores one, and anything that could steer the staged file elsewhere —
     /// a separator, a lone `..`, an empty or over-long name — is refused.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn a_traversing_package_name_is_refused() {
         assert!(ensure_safe_package_name("otelcol").is_ok());
@@ -999,7 +999,7 @@ mod tests {
     /// End to end at the sink: a traversing name is refused by `download_and_verify` before any URL
     /// is resolved or a byte is written, so nothing lands outside the staging directory — and the
     /// error is the one the caller reports as a failed package status.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[tokio::test]
     async fn download_refuses_to_stage_a_traversing_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1028,7 +1028,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn the_cap_triggers_only_past_the_limit() {
         assert!(over_cap(1000, 1024).is_none(), "within the ceiling is fine");
@@ -1048,7 +1048,7 @@ mod tests {
         (keypair, public)
     }
 
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn content_hash_mismatch_is_refused() {
         let (keypair, public) = keypair();
@@ -1073,7 +1073,7 @@ mod tests {
     /// There is no unsigned posture: no key, or no signature, is refused before anything is
     /// downloaded, and a signature that does not verify refuses the artifact. The Client's own
     /// update takes the same path.
-    /// Verifies: ADR-0034, ADR-0019
+    /// Verifies: ADR-0050, ADR-0019
     #[test]
     fn signature_policy_is_enforced() {
         let (keypair, public) = keypair();
@@ -1110,7 +1110,7 @@ mod tests {
 
     /// The signature covers which Agent type the artifact is for and at which version: the same
     /// signed bytes offered as another type's program, or under another version, are refused.
-    /// Verifies: ADR-0034
+    /// Verifies: ADR-0050
     #[test]
     fn a_signature_does_not_carry_over_to_another_type_or_version() {
         let (keypair, public) = keypair();
@@ -1135,8 +1135,8 @@ mod tests {
     }
 
     /// A download goes to the Server's own origin and nowhere else — not another port, not
-    /// plaintext, not another host (ADR-0034 clause 51).
-    /// Verifies: ADR-0034
+    /// plaintext, not another host (ADR-0050 clause 51).
+    /// Verifies: ADR-0050
     #[test]
     fn a_download_goes_only_to_the_servers_own_origin() {
         let config = ClientConfig {

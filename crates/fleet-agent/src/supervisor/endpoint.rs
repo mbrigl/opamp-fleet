@@ -1,4 +1,4 @@
-//! The Supervisor Endpoint (ADR-0016, ADR-0046): the loopback OpAMP endpoint every Supervisor
+//! The Supervisor Endpoint (ADR-0048, ADR-0051): the loopback OpAMP endpoint every Supervisor
 //! exposes, WebSocket-only — what a Managed Process carrying an OpAMP client of its own
 //! (notably the Collector's `opampextension`) connects to.
 //!
@@ -36,7 +36,7 @@ pub struct Endpoint {
     max_message_size: usize,
     /// How long a connection may take to send its request headers.
     header_read_timeout: Duration,
-    /// What a connection must present as `Authorization: Bearer …` (ADR-0016); empty asks nothing.
+    /// What a connection must present as `Authorization: Bearer …` (ADR-0048); empty asks nothing.
     /// Wiped when it is dropped (ADR-0014).
     token: Zeroizing<String>,
 }
@@ -67,7 +67,7 @@ impl Endpoint {
         })
     }
 
-    /// Asks every connection for `token` (ADR-0016).
+    /// Asks every connection for `token` (ADR-0048).
     #[must_use]
     pub fn with_token(mut self, token: Zeroizing<String>) -> Self {
         self.token = token;
@@ -143,7 +143,7 @@ struct Folding {
     expected: Option<Zeroizing<String>>,
 }
 
-/// A fresh token for one Supervisor start (ADR-0016): 32 bytes from the system's secure random
+/// A fresh token for one Supervisor start (ADR-0048): 32 bytes from the system's secure random
 /// source, hex. The bytes and the token are held in buffers wiped when they are dropped, the token
 /// sized up front so it is never grown (ADR-0014).
 ///
@@ -305,7 +305,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     /// A fake `opampextension`: connects, reports, and expects the capability echo.
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn extension_reports_are_folded_into_process_events() {
         let (event_tx, mut events) = mpsc::channel(16);
@@ -417,7 +417,7 @@ mod tests {
     /// A process that reports its components as a hash alone is asked for the map once per hash:
     /// not again when it answers without the map, again when the hash changes, and not when the
     /// map arrives.
-    /// Verifies: ADR-0046
+    /// Verifies: ADR-0051
     #[tokio::test]
     async fn a_hash_without_the_map_is_asked_for_the_map_once() {
         let (event_tx, _events) = mpsc::channel(16);
@@ -460,7 +460,7 @@ mod tests {
         assert!(!asks(&exchange(&mut socket, &reporting(b"b", true)).await));
     }
 
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn shutdown_stops_the_endpoint() {
         let (event_tx, _events) = mpsc::channel(16);
@@ -548,7 +548,7 @@ mod tests {
 
     /// Only the Managed Process reports through the endpoint: a connection without the token
     /// handed to the process is refused before the upgrade, one with it is served.
-    /// Verifies: ADR-0016
+    /// Verifies: ADR-0048
     #[tokio::test]
     async fn the_endpoint_admits_only_the_token_it_handed_out() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;

@@ -96,7 +96,7 @@ async fn serve(
         .and_then(|peer| peer.0.as_ref())
         .map(|cert| cert.as_ref().to_vec())
         .unwrap_or_default();
-    // The admission of `/v1/opamp`, as the download route holds to it (ADR-0016 clause 15).
+    // The admission of `/v1/opamp`, as the download route holds to it (ADR-0048 clause 15).
     match downstream.revocations.verdict(&certificate) {
         Verdict::Admit => {}
         Verdict::Revoked => {

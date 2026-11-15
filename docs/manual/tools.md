@@ -10,7 +10,7 @@ the keys it makes are the ones to keep off that host.
 
 | Command | Use it to |
 |---|---|
-| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector or this fleet's own Client — verify it, and hand it to the Server with its default configuration |
+| **[`package fetch`](#package-fetch)** | fetch a release of a known agent — the OpenTelemetry Collector, this fleet's own Client, and each agent [its table](#what-it-does) lists — verify it, and hand it to the Server with its default configuration |
 | **[`package pack`, `sha256`, `keygen`, `sign`, `floor`, `public-key`](#packing-and-signing)** | build, hash, and sign a package artifact out of *any* program you have, sign the floor below which no package of a type is taken, and make the package signing key |
 | **[`pki init`, `token-init`, `server-cert`, `bootstrap-ca`, `status`, `p12-extract`](#pki)** | make the fleet's certificate authorities, on the Server's PKCS#11 token where it has one, and the Server's or a Gateway's certificate, replace the bootstrap CA, say when the server CA ends, and turn a `bootstrap.p12` into its PEM pair |
 
@@ -59,7 +59,7 @@ $ sha=$(opamp-fleetctl package pack --out promtail-3.0.0.tar.gz ./promtail)
 
 ### What it does
 
-For three agent types it knows where the release lives, what the assets are called, and which
+For each agent type below it knows where the release lives, what the assets are called, and which
 checksum file goes with them:
 
 | `--agent` | Where it fetches from | What arrives |
@@ -104,7 +104,7 @@ Server base URL› https://127.0.0.1:4321
 
 The systems beside each agent are what it is published for — enough to see before the choice that
 an agent offers nothing for the hosts you run. They are a hint, not the offer: the platform
-question below shows what *that release* actually has. One needs a word:
+question below shows what *that release* actually has. Some need a word:
 
 - The **Collectors** add platforms between releases, so only their operating systems are named
   here; the architectures come from the release itself a step later.
@@ -141,6 +141,7 @@ $ opamp-fleetctl package fetch --agent otelcol-contrib --version 0.158.0 \
 | `--server <url>` | The Operator plane's `https://` URL. Create the Package and upload each artifact as its platform's entry. It stops there: putting the Package in a deployment is an operator act, and the tool prints the call that does it. Cannot be combined with `--no-upload`. |
 | `--cacert <file>` | The CA certificate (PEM) the Operator plane's certificate chains to — for a fleet made with [`pki init`](#pki), the `server-ca.pem` in its offline directory, or your PKI's CA when `[rest.tls]` names a certificate of its own ([setup](setup.md#the-uis-own-certificate)). It replaces the system's roots for the calls to the Server alone; the downloads from upstream are still checked against the system's roots. Without it, a Server certificate no system root vouches for ends the upload with `invalid peer certificate: UnknownIssuer`. Cannot be combined with `--no-upload`. |
 | `--no-upload` | Write the artifacts and stop, without the upload question. |
+| `--repack <n>` | For an agent whose artifact the tool repacks: which repack of this version it is, `1` (the default) for the first and `2` on for a later one, such as one that takes newer files from its sources. The second repack of `2.14.3` is uploaded as Package `2.14.4-0.r.2`: above `2.14.3` and every earlier repack, below the next release `2.14.4`, so a host on an earlier repack is offered it while its program still reports `2.14.3`, and a host on it is not offered it again, since its Supervisor reports the Package's version ([Packages](server.md#packages-and-deployments-distributing-software)). Count on from the last repack you uploaded; the tool does not look it up. Only an agent the tool repacks takes a number above `1`; one it uploads as upstream publishes it refuses it. |
 
 `--version` names the *release to fetch*, not this tool's own version — `--version 1.19`, not a
 bare `--version`.

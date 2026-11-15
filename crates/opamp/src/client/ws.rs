@@ -1,5 +1,5 @@
 //! The WebSocket transport: one connection, reconnected with backoff, carrying every Agent of the
-//! session — the *n* over one of ADR-0016.
+//! session — the *n* over one of ADR-0048.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;

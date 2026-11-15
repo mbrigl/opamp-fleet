@@ -1418,7 +1418,7 @@ fn released(configuration: &str, hash: &str) -> fleet_server::agent_store::Persi
 /// revisions: each adds the row it pins and deletes none, and the collection each runs after its
 /// rollout reckons what the Configuration keeps from the stored assignments, in its own
 /// transaction, not from the one assignment the instance knows of.
-/// Verifies: ADR-0045, ADR-0033
+/// Verifies: ADR-0045, ADR-0049
 #[test]
 fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
     use fleet_server::configs::{revision_hash, ConfigStore, Revision};
@@ -1497,7 +1497,7 @@ fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
 /// Two instances that each add an entry of another platform to one Package at the same moment
 /// keep both: each writes the row of its platform, and neither writes the Package it holds over
 /// the other's.
-/// Verifies: ADR-0045, ADR-0034
+/// Verifies: ADR-0045, ADR-0050
 #[test]
 fn two_entries_added_at_once_on_two_instances_are_both_kept() {
     use fleet_server::packages::{PackageId, PackageStore, Platform};
@@ -1555,7 +1555,7 @@ fn two_entries_added_at_once_on_two_instances_are_both_kept() {
 /// writes the row of its member under the Deployment's row lock, and neither writes the
 /// Deployment it holds over the other's. A type another instance filled is refused from what is
 /// stored, whatever the refusing instance holds in memory.
-/// Verifies: ADR-0045, ADR-0033, ADR-0034
+/// Verifies: ADR-0045, ADR-0049, ADR-0050
 #[test]
 fn two_members_added_at_once_on_two_instances_are_both_kept() {
     use fleet_server::deployments::{DeploymentError, DeploymentStore};
@@ -1940,7 +1940,7 @@ async fn a_restart_requested_while_the_listening_connection_was_cut_is_sent_once
 
 /// Labels A sets on an Agent B carries while B's listening connection is cut are held by B once
 /// it listens again.
-/// Verifies: ADR-0045, ADR-0030
+/// Verifies: ADR-0045, ADR-0052
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn labels_set_while_the_listening_connection_was_cut_are_held_once_back() {
     let Some(schema) = Schema::named() else {
@@ -1975,7 +1975,7 @@ async fn labels_set_while_the_listening_connection_was_cut_are_held_once_back() 
 
 /// Labels A sets on a Client Agent it carries while B's listening connection is cut reach the
 /// Agent of the same Host B carries, which inherits them once B listens again.
-/// Verifies: ADR-0045, ADR-0030
+/// Verifies: ADR-0045, ADR-0052
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_client_agents_labels_set_while_the_listening_connection_was_cut_are_inherited_once_back()
 {
@@ -2964,7 +2964,7 @@ async fn next_message(
 
 /// A rollout committed on A reaches an Agent B carries: B takes up the Configuration A saved and
 /// the assignment A released, and offers the Agent the new configuration within one second.
-/// Verifies: ADR-0045, ADR-0033
+/// Verifies: ADR-0045, ADR-0049
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_agent() {
     use futures_util::SinkExt;
@@ -3104,7 +3104,7 @@ async fn a_package_published_on_one_instance_is_listed_by_the_other() {
 /// A Configuration and a Package deleted through B leave the Deployment that held them in A's
 /// memory too: the transaction that deletes them announces each Deployment it took them out of,
 /// and A reads the Deployments again for it.
-/// Verifies: ADR-0045, ADR-0033
+/// Verifies: ADR-0045, ADR-0049
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_deleted_through_one_instance_leaves_the_deployments_the_other_holds() {
     use fleet_server::packages::PackageId;
@@ -3450,7 +3450,7 @@ fn view_of(instance: &Instance, uid: InstanceUid) -> Option<fleet_server::fleet:
 /// Labels set through B on a Client Agent A carries stay as B set them when A writes the Agent's
 /// next report before it heard of them, since A's write is of what a report decides alone; A then
 /// takes them up, and a later change through B reaches A's view within one second.
-/// Verifies: ADR-0030, ADR-0045
+/// Verifies: ADR-0052, ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carries_the_agent() {
     let Some(schema) = Schema::named() else {
@@ -3523,7 +3523,7 @@ async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carrie
 /// A restart requested through B for an Agent A carries stays queued when A writes the Agent's
 /// next report before it heard of it; A then takes it up and sends the restart, which clears it,
 /// and a request made after that is queued again and sent within one second.
-/// Verifies: ADR-0030, ADR-0045
+/// Verifies: ADR-0052, ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it() {
     let Some(schema) = Schema::named() else {
@@ -3625,7 +3625,7 @@ fn the_ceiling_on_agent_records_holds_across_instances() {
 
 /// Many Agents created at once through twelve instances leave no more records than `max_agents`:
 /// each creation counts the records the others created, however many are made at once.
-/// Verifies: ADR-0045, ADR-0030
+/// Verifies: ADR-0045, ADR-0052
 #[test]
 fn many_creations_at_once_on_many_instances_never_pass_the_ceiling() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3681,7 +3681,7 @@ fn many_creations_at_once_on_many_instances_never_pass_the_ceiling() {
 /// An Agent carried by A that went quiet is forgotten through B, which decides from the presence
 /// A wrote: refused while it reports, forgotten once it is silent past the budget, and A then ends
 /// its session within one second.
-/// Verifies: ADR-0030, ADR-0045
+/// Verifies: ADR-0052, ADR-0045
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_one_that_carries_it()
 {
@@ -3731,7 +3731,7 @@ async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_on
 /// An Agent forgotten through B stays forgotten when A, which holds it and has not heard of it
 /// yet, writes its next report or flushes at shutdown: A writes nothing of it again, neither the
 /// record nor the labels it held, and drops the Agent it reported for and ends its session.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[test]
 fn an_agent_forgotten_through_one_instance_is_not_written_again_by_another() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3783,7 +3783,7 @@ fn an_agent_forgotten_through_one_instance_is_not_written_again_by_another() {
 /// An Agent that asks for a new identity keeps its stored record under the new key, labels set
 /// through another instance included, and the instance that carries it keeps carrying it: the
 /// record moves in the store as it is stored, and is not dropped as one forgotten.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[test]
 fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3836,7 +3836,7 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
 /// An Agent rekeyed at its request through A is dropped under its old identity by B, which
 /// held it: the move announces the old identity forgotten, so B holds no record of it under a
 /// name no store keeps.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_rekeyed_through_one_instance_is_dropped_under_its_old_identity_by_another() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3891,7 +3891,7 @@ async fn an_agent_rekeyed_through_one_instance_is_dropped_under_its_old_identity
 /// A rollout on A to Agents forgotten through B meanwhile, before A heard of it, releases to the
 /// others alone: the press counts only the Agents it wrote an assignment for, a rollout to one
 /// forgotten Agent answers that it is unknown, and A holds neither any more.
-/// Verifies: ADR-0030, ADR-0033
+/// Verifies: ADR-0052, ADR-0049
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rollout_counts_only_the_agents_it_released_to() {
     use fleet_server::fleet::{AppState, RolloutError, Transport};
@@ -3976,7 +3976,7 @@ async fn a_rollout_counts_only_the_agents_it_released_to() {
 /// The shutdown flush of A writes only the Agents A heard from: an Agent B carries, which A
 /// only loaded, keeps what B wrote of it, and an Agent A heard from keeps a `last_seen_ms`
 /// another instance wrote later.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[test]
 fn the_shutdown_flush_writes_only_the_agents_this_instance_heard_from() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4030,7 +4030,7 @@ fn the_shutdown_flush_writes_only_the_agents_this_instance_heard_from() {
 
 /// The shutdown flush of A leaves an Agent A heard from, and that has moved to B since, as B
 /// wrote it: B holds its connection, so A writes nothing of it.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[test]
 fn the_shutdown_flush_leaves_an_agent_that_moved_to_another_instance_as_that_one_wrote_it() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4079,7 +4079,7 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_to_another_instance_as_that_one
 /// The shutdown flush of A leaves an Agent A heard from, that moved to B since and disconnected
 /// there, as B wrote it: no instance holds it any more, and B took it after A did, though B's
 /// clock runs behind A's.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[test]
 fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_written() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4132,7 +4132,7 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_w
 /// A's presence batch writes the disconnect of an Agent A took back from B, whose clock runs
 /// ahead of A's: the row still holds the count of takes A was answered, whatever `last_seen_ms` B
 /// stamped it with.
-/// Verifies: ADR-0030, ADR-0045
+/// Verifies: ADR-0052, ADR-0045
 #[test]
 fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_agent() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4180,7 +4180,7 @@ fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_age
 /// A presence batch that names A anew, over an Agent B took and disconnected, counts as a take:
 /// A's disconnect is written under the count it answered, the shutdown flush of B, which took the
 /// Agent before, leaves what A wrote, and that of A, which disconnected the Agent last, writes it.
-/// Verifies: ADR-0030, ADR-0045
+/// Verifies: ADR-0052, ADR-0045
 #[test]
 fn a_batch_that_names_its_instance_anew_counts_as_a_take() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4237,7 +4237,7 @@ fn a_batch_that_names_its_instance_anew_counts_as_a_take() {
 /// An Agent forgotten after A took it several times, which connects to A again before A's next
 /// batch and says goodbye, is written disconnected: the record created again counts its takes from
 /// the start, and A keeps the count that take answered, not the greater one from before.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[test]
 fn the_goodbye_of_an_agent_forgotten_and_connected_again_is_written() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4279,7 +4279,7 @@ fn the_goodbye_of_an_agent_forgotten_and_connected_again_is_written() {
 /// An Agent forgotten through B while A still holds it, created again through B and then
 /// connected to A, has its goodbye written by A: A keeps the count its take answered, though it
 /// counted more takes of the record before it was forgotten.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[test]
 fn the_goodbye_of_an_agent_forgotten_through_another_instance_is_written_where_it_connects_again() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4387,7 +4387,7 @@ fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_it
 
 /// An Agent that has just connected to A is not forgotten through B before A's next presence
 /// batch: the report that connects it writes that A holds it, at once.
-/// Verifies: ADR-0030
+/// Verifies: ADR-0052
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_just_connected_is_not_forgotten_through_another_instance() {
     use fleet_server::fleet::{AppState, ForgetError};
@@ -4992,7 +4992,7 @@ async fn reported(
 /// stops, each downstream Agent A held is taken over by B once, at its next report, and stays
 /// connected to the Gateway; B refuses none of the pool's connections, and the Gateway goes on
 /// admitting downstream peers.
-/// Verifies: ADR-0045, ADR-0016
+/// Verifies: ADR-0045, ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped_one_once() {
     let Some(schema) = Schema::named() else {
@@ -5138,7 +5138,7 @@ async fn floors_behind(
 /// holds the revocation list and the floors B holds, a revocation and a floor committed through B
 /// while A was stopped included. The revoked downstream session is ended, a request with its
 /// certificate is refused, and the floors handed down are B's.
-/// Verifies: ADR-0045, ADR-0040, ADR-0035, ADR-0016
+/// Verifies: ADR-0045, ADR-0040, ADR-0035, ADR-0048
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gateway_whose_instance_stopped_serves_the_list_and_the_floors_the_other_holds() {
     let Some(schema) = Schema::named() else {
@@ -5245,7 +5245,7 @@ async fn a_gateway_whose_instance_stopped_serves_the_list_and_the_floors_the_oth
 /// A Configuration whose revision was pinned through one instance is not deleted through another
 /// that holds no such pin in memory: the deletion counts the stored assignments in its own
 /// transaction, under the Configuration's row lock.
-/// Verifies: ADR-0045, ADR-0033
+/// Verifies: ADR-0045, ADR-0049
 #[test]
 fn a_configuration_pinned_through_one_instance_is_not_deleted_through_another() {
     use fleet_server::agent_store::Pin;
@@ -5326,7 +5326,7 @@ fn refused_with<T: std::fmt::Debug>(
 /// A Package pinned through one instance is not changed or deleted through another that holds no
 /// such pin: each write to it counts the stored assignments in its own transaction, under the
 /// Package's row lock, and is refused, leaving the Package as stored.
-/// Verifies: ADR-0045, ADR-0033
+/// Verifies: ADR-0045, ADR-0049
 #[test]
 fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
     use fleet_server::packages::{PackageId, PackageStore, Platform};
@@ -5416,7 +5416,7 @@ fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
 /// A Deployment an Agent was released through on one instance is not deleted through another
 /// that holds no such assignment: the deletion counts the stored assignments in its own
 /// transaction, under the Deployment's row lock.
-/// Verifies: ADR-0045, ADR-0033
+/// Verifies: ADR-0045, ADR-0049
 #[test]
 fn a_deployment_released_through_on_one_instance_is_not_deleted_through_another() {
     use fleet_server::agent_store::Pin;
@@ -5514,7 +5514,7 @@ async fn release_a_package(instance: &Instance) -> usize {
 /// A Package that a release through B pinned, and that a later release through A moved the Agent
 /// off, is deleted through B, which does not carry the Agent: B's own count of the pin is stale,
 /// and the deletion decides from the stored assignments, not from it.
-/// Verifies: ADR-0045, ADR-0033
+/// Verifies: ADR-0045, ADR-0049
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_package_released_away_through_one_instance_is_deleted_through_another() {
     let Some(schema) = Schema::named() else {
@@ -5577,7 +5577,7 @@ async fn a_package_released_away_through_one_instance_is_deleted_through_another
 /// deployment reach through B name the Agent A carries with its labels, its assignment and A's
 /// presence, B serves its host the artifact released to it, and once A's lease is gone the Agent
 /// reads as disconnected.
-/// Verifies: ADR-0030, ADR-0045, ADR-0023, ADR-0034
+/// Verifies: ADR-0052, ADR-0045, ADR-0023, ADR-0050
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_carried_by_one_instance_is_read_through_another_that_holds_none_of_it() {
     let Some(schema) = Schema::named() else {
@@ -5698,7 +5698,7 @@ async fn an_agent_carried_by_one_instance_is_read_through_another_that_holds_non
 /// An Agent B carries inherits the labels of its Client Agent, which A carries: B reads the Client
 /// Agent from the database when it places the Agent, once it has taken up the host register
 /// another instance wrote, and follows a change of its labels made through A.
-/// Verifies: ADR-0045, ADR-0030
+/// Verifies: ADR-0045, ADR-0052
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_carries() {
     let Some(schema) = Schema::named() else {
@@ -5762,6 +5762,78 @@ async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_
     assert!(
         eventually(Duration::from_secs(10), || inherits("core")).await,
         "B followed the Client Agent's labels"
+    );
+}
+
+/// A label in the Supervisor's space the database already holds matches nothing in the list read
+/// from it: a Selector on it admits no Agent, an Agent placed under the Client Agent that holds it
+/// does not inherit it, and the label beside it still matches and is inherited.
+/// Verifies: ADR-0052, ADR-0031
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stored_label_in_the_supervisors_space_matches_nothing_in_the_list() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let a = Instance::start(&pki, &schema, schema.config_on(schema.config.port)).await;
+    let (cert, key) = pki.issue_to_host("h1");
+    let (client, agent) = (InstanceUid([0x35; 16]), InstanceUid([0x36; 16]));
+    let mut client_session = websocket(&a, &pki, &cert, &key).await;
+    report_as(
+        &mut client_session,
+        client,
+        1,
+        0,
+        (
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true")],
+        ),
+        true,
+    )
+    .await;
+    let mut session = websocket(&a, &pki, &cert, &key).await;
+    report_as(&mut session, agent, 1, 0, PACKAGED, true).await;
+    schema.sql(&format!(
+        "UPDATE agents SET labels = '{{\"supervisor.kind.x\":\"true\",\"ring\":\"early\"}}'::json \
+         WHERE instance_uid = '{client}'"
+    ));
+    let listed = |key: &'static str, value: &'static str| {
+        let on_a = a.state.clone();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                on_a.list_agents(&fleet_server::fleet::AgentQuery {
+                    filter: fleet_server::listing::AgentFilter {
+                        selector: std::collections::BTreeMap::from([(
+                            key.to_string(),
+                            value.to_string(),
+                        )]),
+                        ..Default::default()
+                    },
+                    limit: 100,
+                    ..fleet_server::fleet::AgentQuery::default()
+                })
+                .expect("a page")
+                .agents
+            })
+            .await
+            .expect("list")
+        }
+    };
+    assert!(
+        listed("supervisor.kind.x", "true").await.is_empty(),
+        "a stored label in the Supervisor's space admits no Agent"
+    );
+    let ring = listed("ring", "early").await;
+    let uids: Vec<&str> = ring.iter().map(|view| view.instance_uid.as_str()).collect();
+    assert_eq!(uids.len(), 2, "the label beside it matches both: {uids:?}");
+    let placed = ring
+        .iter()
+        .find(|view| view.instance_uid == agent.to_string())
+        .expect("the Agent under the Client Agent");
+    assert_eq!(
+        placed.inherited_labels,
+        std::collections::BTreeMap::from([("ring".to_string(), "early".to_string())]),
+        "only the label outside the reserved spaces is inherited"
     );
 }
 
@@ -5970,7 +6042,7 @@ async fn an_agents_view_names_its_holder_and_the_list_filters_by_it() {
 /// Agent behind the same Gateway, which A carries: B reads the Agents that arrived over the
 /// Gateway's Host through the port's `query_page` when it places the Agent, and places it again
 /// when A changes that Client Agent's labels.
-/// Verifies: ADR-0045, ADR-0030
+/// Verifies: ADR-0045, ADR-0052
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_behind_a_gateway_inherits_the_labels_of_its_client_agent_another_instance_carries(
 ) {

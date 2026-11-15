@@ -1,4 +1,4 @@
-//! A Gateway refuses what its Server revoked, end to end (ADR-0016 clause 14, ADR-0040 clause 34):
+//! A Gateway refuses what its Server revoked, end to end (ADR-0048 clause 14, ADR-0040 clause 34):
 //! the real Server on mutual TLS with its register, the real Gateway fetching the list from it,
 //! and a downstream peer whose certificate the Server revokes. The floors the Gateway hands down
 //! are held to the same admission (ADR-0035 clause 16).
@@ -384,7 +384,7 @@ async fn closed_with(
 
 /// A certificate the Server revokes is refused behind the Gateway within one refresh, and the
 /// session it holds there is closed with `1008` and the reason `revoked`; another is unaffected.
-/// Verifies: ADR-0016, ADR-0040, G-15
+/// Verifies: ADR-0048, ADR-0040, G-15
 #[tokio::test]
 async fn a_certificate_the_server_revokes_is_refused_behind_the_gateway() {
     let fleet = Fleet::start(true).await;
@@ -476,7 +476,7 @@ async fn a_host_behind_the_gateway_is_handed_the_floors_it_fetched_behind_the_ad
 }
 
 /// A Gateway whose host the operator has not marked is handed no list, and so admits nobody.
-/// Verifies: ADR-0016, ADR-0040
+/// Verifies: ADR-0048, ADR-0040
 #[tokio::test]
 async fn an_unmarked_gateway_admits_nobody() {
     let fleet = Fleet::start(false).await;
@@ -489,7 +489,7 @@ async fn an_unmarked_gateway_admits_nobody() {
 
 /// A Gateway that cannot renew its list for longer than the maximum age admits nobody, and ends
 /// the sessions it holds with `1008` and the reason `revocation list stale`.
-/// Verifies: ADR-0016
+/// Verifies: ADR-0048
 #[tokio::test]
 async fn a_gateway_whose_list_goes_stale_admits_nobody() {
     let fleet = Fleet::start(true).await;
@@ -514,7 +514,7 @@ async fn a_gateway_whose_list_goes_stale_admits_nobody() {
 /// `Unavailable`, routed back to it by its `instance_uid`; its neighbour's reports keep being
 /// processed, because behind a marked Gateway each Agent has a bucket of its own inside the
 /// Gateway's aggregate.
-/// Verifies: ADR-0012, ADR-0016
+/// Verifies: ADR-0012, ADR-0048
 #[tokio::test]
 async fn a_throttled_agent_behind_a_gateway_hears_unavailable_and_its_neighbour_does_not() {
     let unavailable = |reply: &opamp::proto::ServerToAgent| {

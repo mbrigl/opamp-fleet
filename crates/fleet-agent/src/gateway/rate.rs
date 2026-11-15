@@ -4,7 +4,7 @@
 //! of the host that sent it before the Gateway does anything else with it. A bucket holds `burst`
 //! tokens and gains `messages_per_sec` of them a second, and a new one starts full, as the Server
 //! sizes a host's (ADR-0012 clause 22). The key is the host the downstream certificate speaks as —
-//! the one it names, else the one derived from its issuer and serial (ADR-0016 clause 15) — or, for
+//! the one it names, else the one derived from its issuer and serial (ADR-0048 clause 15) — or, for
 //! an enrolling peer, its address, an IPv6 one by its /64. The buckets live in memory, in one table
 //! bounded at the Gateway's total of bindings, and a full one forgets the bucket used least
 //! recently, which can only grant tokens (ADR-0022 clause 5).

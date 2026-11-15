@@ -1,5 +1,5 @@
 //! `opamp-fleetctl package fetch` — turns an agent release into package artifacts this fleet can
-//! install, and optionally uploads them (ADR-0034, ADR-0047).
+//! install, and optionally uploads them (ADR-0050, ADR-0053).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
@@ -12,11 +12,11 @@
 //! Two rules shape what it produces:
 //!
 //! - **As published wherever possible.** An artifact that reaches the fleet unaltered is one whose
-//!   SHA-256 an operator can compare against the release page, and ADR-0034's line from author to
+//!   SHA-256 an operator can compare against the release page, and ADR-0050's line from author to
 //!   host stays unbroken. Every artifact is verified against the checksum *upstream* published
 //!   before anything else happens to it.
 //! - **Repacked only where it must be.** An agent whose upstream publishes no archive a Client can
-//!   install is repacked deterministically, from its own tree alone (ADR-0047). That is the one
+//!   install is repacked deterministically, from its own tree alone (ADR-0053). That is the one
 //!   place the bytes change, and the tool says so.
 //!
 //! Interactive by default; every prompt has a flag, so the same tool serves a pipeline:
@@ -26,20 +26,18 @@
 use crate::package::sha256_file;
 use clap::ValueEnum;
 use dialoguer::{Confirm, Input, MultiSelect, Select};
+use fleet_core::tree::KeptLink;
 use std::path::{Path, PathBuf};
 
 /// How many release series the operator is offered. Enough to reach the release before last when
 /// one turns out badly, few enough to read without scrolling.
 const SERIES_SHOWN: usize = 3;
 
-/// The member cap a tree package is held to (ADR-0034). Checked while packing rather than
+/// The member cap a tree package is held to (ADR-0050). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 const MAX_TREE_MEMBERS: usize = 10_000;
 
@@ -72,6 +70,12 @@ pub struct Args {
     /// Write the artifacts and stop — no upload, and no question about one.
     #[arg(long, conflicts_with = "server")]
     no_upload: bool,
+    /// Which repack of this version it is, for an agent whose artifact this tool repacks: 1, the
+    /// default, for the first, 2 and on for a later one of the same version. The second repack of
+    /// 2.14.3 is uploaded as Package `2.14.4-0.r.2`, above the first and below upstream's next
+    /// release (ADR-0053 clause 28).
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    repack: u32,
 }
 
 /// The agents this tool knows how to fetch. Adding one is this enum, its [`Source`], and nothing
@@ -91,7 +95,7 @@ enum AgentKind {
 
 /// Everything that differs between one upstream project and the next, in one place.
 struct Source {
-    /// The Agent type a Supervisor reports and a package Set is built for (ADR-0034) — also this
+    /// The Agent type a Supervisor reports and a package Set is built for (ADR-0050) — also this
     /// tool's default package name.
     service_name: &'static str,
     /// The GitHub repository whose tags name the versions.
@@ -159,6 +163,15 @@ impl AgentKind {
         Ok((self.tag_of_version(upstream), package_version(upstream)?))
     }
 
+    /// Whether this tool repacks the agent's artifact, rather than uploading it as upstream
+    /// publishes it: only then can one version have a later repack
+    /// (ADR-0053 clause 28).
+    fn repacked(self) -> bool {
+        match self {
+            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
+        }
+    }
+
     /// The systems this agent can be fetched for, as the agent menu states them.
     ///
     /// A hint, not the plan: what is actually offered comes from the release itself a step later.
@@ -182,6 +195,15 @@ impl AgentKind {
         }
     }
 
+    /// Whether the release's assets have to be listed to plan the fetch. An agent whose artifacts
+    /// are not assets of its GitHub release says no, sparing a request against a rate-limited
+    /// API.
+    fn needs_assets(self) -> bool {
+        match self {
+            AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => true,
+        }
+    }
+
     /// The line that introduces the per-platform hints printed when the fetch is done.
     ///
     /// Every other agent is installed by a Supervisor, which needs a block; this fleet's own Client
@@ -199,7 +221,7 @@ impl AgentKind {
     /// they agree with the `[[supervisor]]` blocks in `config/supervisor.toml` down to the file names.
     fn default_configurations(self) -> &'static [DefaultConfiguration] {
         // Each is stated for the `service.name` its Collector reports, so a Deployment holding it
-        // fits it to that Agent type alone (ADR-0033); the Deployment's Selector does the aiming.
+        // fits it to that Agent type alone (ADR-0049); the Deployment's Selector does the aiming.
         match self {
             AgentKind::Otelcol => &[DefaultConfiguration {
                 name: "otelcol-conf",
@@ -212,7 +234,7 @@ impl AgentKind {
                 body: include_str!("../../../config/examples/otelcol-contrib-conf.yaml"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
-            // deliberately does not own (ADR-0046 admits only `[[supervisor]]` blocks), and none
+            // deliberately does not own (ADR-0051 admits only `[[supervisor]]` blocks), and none
             // of it has a default this tool could put on a Server.
             AgentKind::Supervisor => &[],
         }
@@ -226,30 +248,62 @@ impl AgentKind {
 /// # Errors
 /// Names the number when it cannot be written as SemVer this way.
 fn package_version(upstream: &str) -> Result<String, String> {
-    let split = upstream.find(['-', '+']).unwrap_or(upstream.len());
-    let (core, rest) = upstream.split_at(split);
-    let components: Vec<&str> = core.split('.').collect();
-    let numeric = |c: &&str| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit());
-    let written = (components.len() <= 3 && components.iter().all(numeric)).then(|| {
-        let mut parts: Vec<&str> = components
-            .iter()
-            .map(|c| match c.trim_start_matches('0') {
-                "" => "0",
-                trimmed => trimmed,
-            })
-            .collect();
-        parts.resize(3, "0");
-        format!("{}{rest}", parts.join("."))
-    });
-    written
-        .filter(|version| fleet_core::version::is_semver(version))
-        .ok_or_else(|| {
-            format!(
-                "upstream's version {upstream:?} cannot be written as SemVer, which a Package \
-                 version is — fetch it by hand and upload it under a SemVer version you choose \
-                 in the same order"
-            )
+    // The rule lives in the internal crate, so a kind that reports its program's version by it
+    // agrees with the Package this tool names.
+    fleet_core::version::written_as_semver(upstream).ok_or_else(|| {
+        format!(
+            "upstream's version {upstream:?} cannot be written as SemVer, which a Package \
+             version is — fetch it by hand and upload it under a SemVer version you choose \
+             in the same order"
+        )
+    })
+}
+
+/// The Package version of the `repack`-th repack of one upstream version, whose Package version
+/// is `version` (ADR-0053 clause 28). The first is the version
+/// itself. A later one is `<major>.<minor>.<patch+1>-0.r.<n>`: a pre-release of the next patch, so
+/// it orders above the first repack and below upstream's next release, and its repack number is a
+/// numeric identifier, compared as a number. Build metadata would not do, since two versions that
+/// differ only in it compare equal (ADR-0035 clause 2), and the program keeps reporting the
+/// version it is, which the Server offers a Package only above.
+///
+/// # Errors
+/// Refuses a repack number below 1, a later repack of an agent this tool does not repack, and a
+/// version that is not three numbers.
+fn repack_version(agent: AgentKind, version: &str, repack: u32) -> Result<String, String> {
+    if repack > 1 && !agent.repacked() {
+        return Err(format!(
+            "--repack is for an agent whose artifact this tool repacks; {} is uploaded as its \
+             release publishes it, so a version of it has one artifact only",
+            agent.source().service_name
+        ));
+    }
+    numbered_repack(version, repack)
+}
+
+/// The numbering of [`repack_version`], whichever agent it is for.
+fn numbered_repack(version: &str, repack: u32) -> Result<String, String> {
+    match repack {
+        0 => return Err("--repack counts from 1, the first repack of a version".to_string()),
+        1 => return Ok(version.to_string()),
+        _ => {}
+    }
+    let numbers: Vec<u64> = version
+        .split('.')
+        .map(|part| {
+            (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| part.parse().ok())
+                .flatten()
         })
+        .collect::<Option<_>>()
+        .filter(|numbers: &Vec<u64>| numbers.len() == 3)
+        .ok_or_else(|| {
+            format!("a later repack of {version:?} cannot be numbered: it is not three numbers")
+        })?;
+    let next = numbers[2].checked_add(1).ok_or_else(|| {
+        format!("a later repack of {version:?} cannot be numbered: no next patch")
+    })?;
+    Ok(format!("{}.{}.{next}-0.r.{repack}", numbers[0], numbers[1]))
 }
 
 /// A Configuration this tool puts on the Server beside the package, when the Server has none of
@@ -262,7 +316,7 @@ struct DefaultConfiguration {
     /// The Configuration's name — also the file name its entry gets in the Supervisor's config
     /// directory, which is what the `[[supervisor]]` block has to name.
     name: &'static str,
-    /// The Agent type this is for (ADR-0033 clause 4); empty is every type.
+    /// The Agent type this is for (ADR-0049 clause 4); empty is every type.
     service_name: &'static str,
     body: &'static str,
 }
@@ -275,7 +329,7 @@ struct Download {
 
 /// One platform's artifact, planned before anything is downloaded.
 struct Plan {
-    /// The platform as *this fleet* names it (ADR-0034), which is what the upload path carries.
+    /// The platform as *this fleet* names it (ADR-0050), which is what the upload path carries.
     os: String,
     arch: String,
     /// What has to be fetched. Every one of them is verified before any of them is used.
@@ -288,7 +342,7 @@ struct Plan {
     /// what `[packages] self_update` has to say, since nothing supervises that one. Printed at the end,
     /// because it is the next thing an operator needs.
     ///
-    /// For a **wrapped** agent it is the `type` alone (ADR-0046): the Client's kind knows the
+    /// For a **wrapped** agent it is the `type` alone (ADR-0051): the Client's kind knows the
     /// program's name, where it sits in the tree, and how it is invoked, so this tool dictates no
     /// line for a host to transcribe. Those facts live in that agent's artifact document under
     /// `docs/artifacts/`, which the kind's own tests pin — the two ends of one artifact, kept in
@@ -314,8 +368,38 @@ enum ChecksumSource {
 /// What happens between the download and the artifact.
 enum Action {
     /// Nothing. The artifact is uploaded exactly as upstream published it, so the hash the fleet
-    /// verifies is the hash on the release page (ADR-0034).
+    /// verifies is the hash on the release page (ADR-0050).
     AsPublished,
+}
+
+impl Action {
+    /// Whether the artifact is this tool's repack rather than what upstream published: every
+    /// action but [`AsPublished`](Self::AsPublished) is a kind's repack (ADR-0053).
+    fn repacks(&self) -> bool {
+        !matches!(self, Action::AsPublished)
+    }
+}
+
+/// What a kind's plans are made from: the release as upstream and this tool name it, its assets,
+/// and the command line, from which a kind reads what only it asks for.
+struct Release<'a> {
+    /// The version as upstream numbers it (`1.19`).
+    version: &'a str,
+    /// Upstream's tag of that version (`v0.158.0`).
+    #[allow(
+        dead_code,
+        reason = "a kind that builds its URLs from the tag reads it"
+    )]
+    tag: &'a str,
+    /// The Package version the artifacts are uploaded as, a later repack's included — what a
+    /// repacked artifact is named by (ADR-0035 clause 6).
+    #[allow(dead_code, reason = "a kind that repacks names its artifact by it")]
+    package_version: &'a str,
+    /// The release's assets as `(name, url)`, empty for an agent that does not need them.
+    assets: &'a [(String, String)],
+    /// The command line, for a flag only one kind takes.
+    #[allow(dead_code, reason = "a kind with a flag of its own reads it")]
+    args: &'a Args,
 }
 
 /// `package fetch`: which agent, which version, which platforms, and whether to upload — each
@@ -340,9 +424,21 @@ pub async fn run(args: Args) -> Result<(), String> {
     // The release is fetched under upstream's spelling, and named as a Package in SemVer — before
     // anything is downloaded, so a number that cannot be written so costs nothing.
     let (tag, package_version) = agent.release_names(&version)?;
+    let package_version = repack_version(agent, &package_version, args.repack)?;
 
-    let assets = release_assets(&source, &tag).await?;
-    let available = plans(agent, &version, &assets).await?;
+    let assets = if agent.needs_assets() {
+        release_assets(&source, &tag).await?
+    } else {
+        Vec::new()
+    };
+    let release = Release {
+        version: &version,
+        tag: &tag,
+        package_version: &package_version,
+        assets: &assets,
+        args: &args,
+    };
+    let available = plans(agent, &release).await?;
     if available.is_empty() {
         // For this project's own releases the likeliest reason is a known one, and saying it saves
         // the operator a trip to the release page: older releases carry another name and container,
@@ -413,7 +509,7 @@ pub async fn run(args: Args) -> Result<(), String> {
             version = package_version
         );
         // Silent for an agent that has none — the Client's own configuration is its host's
-        // (ADR-0046), so there is nothing here to offer and nothing to apologise for.
+        // (ADR-0051), so there is nothing here to offer and nothing to apologise for.
         if !agent.default_configurations().is_empty() {
             eprintln!(
                 "  The default configuration ({}) is not uploaded either; an upload puts it there \
@@ -535,8 +631,12 @@ fn select_platforms<'p>(available: &'p [Plan], wanted: &[String]) -> Result<Vec<
     }
     let labels: Vec<String> = available
         .iter()
-        .map(|p| match p.action {
-            Action::AsPublished => format!("{}/{}", p.os, p.arch),
+        .map(|p| {
+            if p.action.repacks() {
+                format!("{}/{} (repacked)", p.os, p.arch)
+            } else {
+                format!("{}/{}", p.os, p.arch)
+            }
         })
         .collect();
     let picked = MultiSelect::new()
@@ -659,16 +759,12 @@ async fn release_assets(source: &Source, tag: &str) -> Result<Vec<(String, Strin
 }
 
 /// What this release offers, one entry per platform this fleet can name.
-async fn plans(
-    agent: AgentKind,
-    version: &str,
-    assets: &[(String, String)],
-) -> Result<Vec<Plan>, String> {
+async fn plans(agent: AgentKind, release: &Release<'_>) -> Result<Vec<Plan>, String> {
     match agent {
         AgentKind::Otelcol | AgentKind::OtelcolContrib => {
-            Ok(collector_plans(agent, version, assets))
+            Ok(collector_plans(agent, release.version, release.assets))
         }
-        AgentKind::Supervisor => Ok(supervisor_plans(version, assets)),
+        AgentKind::Supervisor => Ok(supervisor_plans(release.version, release.assets)),
     }
 }
 
@@ -792,7 +888,7 @@ fn collector_checksum(asset: &str, dist: &str, assets: &[(String, String)]) -> C
     ChecksumSource::Sums { urls }
 }
 
-/// Upstream's platform words in this fleet's vocabulary (ADR-0034), or `None` for one this fleet
+/// Upstream's platform words in this fleet's vocabulary (ADR-0050), or `None` for one this fleet
 /// has no name for — an Agent reports `os.type` and `host.arch`, and a package entry no Agent can
 /// match is one nobody would ever be offered.
 fn normalize_os(os: &str) -> Option<String> {
@@ -850,12 +946,26 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
         .cloned()
         .ok_or_else(|| "a plan with nothing to fetch".to_string())?;
 
-    match &plan.action {
-        Action::AsPublished => {
-            eprintln!("  as published — the fleet verifies upstream's own hash");
-            Ok(downloaded)
-        }
+    // A kind that repacks answers its step here; the rest of a repack is the same for every kind.
+    let artifact = out_dir.join(&plan.out_name);
+    let repacked: Option<Result<(), String>> = match &plan.action {
+        Action::AsPublished => None,
+    };
+    let Some(repacked) = repacked else {
+        eprintln!("  as published — the fleet verifies upstream's own hash");
+        return Ok(downloaded);
+    };
+    repacked?;
+    // What was downloaded was a means, not a result; leaving it beside the artifact invites
+    // uploading the wrong file.
+    for file in &fetched {
+        let _ = std::fs::remove_file(file);
     }
+    eprintln!(
+        "  repacked  sha256 {}",
+        hex::encode(sha256_file(&artifact)?)
+    );
+    Ok(artifact)
 }
 
 /// The SHA-256 upstream published for this artifact, from whichever form the source uses.
@@ -905,27 +1015,29 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 }
 
 /// Packs a directory as a `.tar.gz` a Client can install as a tree — deterministically, with every
-/// link resolved, and with nothing from outside the tree (ADR-0047).
+/// link resolved, and with nothing from outside the tree (ADR-0053).
 ///
 /// Determinism is not tidiness: the fleet decides whether to distribute by content hash, so an
 /// artifact that differed by when it was packed would be a rollout nobody asked for. Times, owners
 /// and order are therefore fixed, exactly as `package pack` fixes them for one file.
 ///
-/// Links are resolved rather than carried because a tree package refuses them (ADR-0034): what a
+/// Links are resolved rather than carried because a tree package refuses them (ADR-0050): what a
 /// link names is not where it sits, which is the one thing a path check cannot judge. A link is
 /// resolved inside the tree alone, and one that leads out of it fails the pack before anything is
 /// written: following it would put the operator's own files into an artifact the operator then
 /// signs, and make its bytes depend on the host that packed it. So does anything that is neither a
 /// file nor a directory, which a pack could only hang on or read from outside the tree. A link
 /// pointing at nothing inside the tree is dropped.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+///
+/// The one exception is `kept`, the absolute links the kind names by their exact path in the tree
+/// and their exact target (ADR-0053 clause 27): each is packed
+/// as that link, read from the tree and never followed, and the Client creates exactly those. A
+/// link at a named path with another target leads out like any other.
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
-fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
+fn pack_tree(root: &Path, wrapper: &str, kept: &[KeptLink], out: &Path) -> Result<(), String> {
     let mut members = Vec::new();
     let mut refused = std::collections::BTreeMap::new();
     // The root is the first ancestor: a link back up to it is a cycle like any other.
@@ -933,6 +1045,7 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
         root,
         Path::new(""),
         Path::new(""),
+        kept,
         &mut members,
         &mut vec![PathBuf::new()],
         &mut refused,
@@ -959,17 +1072,14 @@ fn pack_tree(root: &Path, wrapper: &str, out: &Path) -> Result<(), String> {
 }
 
 /// Writes the members, in the order given, into `file` as a gzipped tar.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn write_members(
     root: &Path,
     wrapper: &str,
-    members: &[(PathBuf, PathBuf, bool)],
+    members: &[(PathBuf, Member)],
     file: std::fs::File,
     out: &Path,
 ) -> Result<(), String> {
@@ -977,22 +1087,35 @@ fn write_members(
         file,
         flate2::Compression::default(),
     ));
-    for (name, real, is_dir) in members {
+    for (name, member) in members {
         let inside = Path::new(wrapper).join(name);
         let mut header = tar::Header::new_gnu();
         header.set_mtime(0);
         header.set_uid(0);
         header.set_gid(0);
-        if *is_dir {
-            header.set_entry_type(tar::EntryType::Directory);
-            header.set_size(0);
-            header.set_mode(0o755);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, &inside, std::io::empty())
-                .map_err(|e| format!("cannot pack {}: {e}", inside.display()))?;
-            continue;
-        }
+        let real = match member {
+            Member::Dir(_) => {
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_mode(0o755);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, &inside, std::io::empty())
+                    .map_err(|e| format!("cannot pack {}: {e}", inside.display()))?;
+                continue;
+            }
+            // A kept link is stored as the link it is, with the mode every link has.
+            Member::Link(target) => {
+                header.set_entry_type(tar::EntryType::Symlink);
+                header.set_size(0);
+                header.set_mode(0o777);
+                builder
+                    .append_link(&mut header, &inside, target)
+                    .map_err(|e| format!("cannot pack {}: {e}", inside.display()))?;
+                continue;
+            }
+            Member::File(real) => real,
+        };
         // `real` holds no link, so what is opened is the member the walk judged.
         let full = root.join(real);
         let source = std::fs::File::open(&full)
@@ -1016,12 +1139,25 @@ fn write_members(
     Ok(())
 }
 
+/// What one member of a repack is: a directory or a file, by the path inside the tree it is read
+/// from, which holds no link, or a link the kind keeps, by its target.
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
+)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Member {
+    Dir(PathBuf),
+    File(PathBuf),
+    Link(PathBuf),
+}
+
 /// Every member under the directory packed as `name` and read from `real` — directories included,
-/// because a tree keeps its shape. A member is its name in the artifact, the path inside the tree
-/// it is read from, which holds no link, and whether it is a directory; the two paths differ for
-/// everything reached through a linked directory. A link that leads out of the tree, and anything
-/// that is neither a file nor a directory, is no member but goes into `refused`, keyed by its own
-/// path in the tree and saying what it is. The member cap is checked as each member is found, so a
+/// because a tree keeps its shape. A member is its name in the artifact and what it is; the name
+/// and the path it is read from differ for everything reached through a linked directory. A link
+/// `kept` names is a member at its own path only, never reached through a linked directory. A link
+/// that leads out of the tree, and anything that is neither a file nor a directory, is no member
+/// but goes into `refused`, keyed by its own path in the tree and saying what it is. The member cap is checked as each member is found, so a
 /// tree whose links multiply its paths stops at the cap rather than after the whole walk.
 ///
 /// Links are followed, and that is the whole difficulty. A link to a *directory* has to be
@@ -1036,18 +1172,16 @@ fn write_members(
 /// directory is legitimate duplication and must be packed again. Deduplicating by real path
 /// instead would leave one of the two names empty — and which one, on directory-read order, which
 /// is nobody's guarantee.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn collect_members(
     root: &Path,
     name: &Path,
     real: &Path,
-    into: &mut Vec<(PathBuf, PathBuf, bool)>,
+    kept: &[KeptLink],
+    into: &mut Vec<(PathBuf, Member)>,
     ancestors: &mut Vec<PathBuf>,
     refused: &mut std::collections::BTreeMap<PathBuf, String>,
 ) -> Result<(), String> {
@@ -1058,6 +1192,20 @@ fn collect_members(
         let entry = entry.map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
         let member = name.join(entry.file_name());
         let own = real.join(entry.file_name());
+        if member == own && entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+            let target = std::fs::read_link(entry.path())
+                .map_err(|e| format!("cannot read {}: {e}", own.display()))?;
+            if fleet_core::tree::is_kept(kept, &own, &target) {
+                into.push((member, Member::Link(target)));
+                if into.len() > MAX_TREE_MEMBERS {
+                    return Err(format!(
+                        "the tree holds more than the {MAX_TREE_MEMBERS} members a package may \
+                         carry"
+                    ));
+                }
+                continue;
+            }
+        }
         // Resolving rather than reading the entry itself: what matters is what the member *is*
         // once the link is followed, because that is what gets packed.
         let (resolved, is_dir) = match resolve_inside(root, real, Path::new(&entry.file_name()))? {
@@ -1078,7 +1226,12 @@ fn collect_members(
                 continue;
             }
         };
-        into.push((member.clone(), resolved.clone(), is_dir));
+        let what = if is_dir {
+            Member::Dir(resolved.clone())
+        } else {
+            Member::File(resolved.clone())
+        };
+        into.push((member.clone(), what));
         if into.len() > MAX_TREE_MEMBERS {
             return Err(format!(
                 "the tree holds more than the {MAX_TREE_MEMBERS} members a package may carry"
@@ -1088,19 +1241,16 @@ fn collect_members(
             continue;
         }
         ancestors.push(resolved.clone());
-        collect_members(root, &member, &resolved, into, ancestors, refused)?;
+        collect_members(root, &member, &resolved, kept, into, ancestors, refused)?;
         ancestors.pop();
     }
     Ok(())
 }
 
 /// What a path of the tree is once every link on it is followed inside the tree.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 enum Resolution {
     /// A file or directory inside the tree, by its path relative to the root, which holds no link.
@@ -1116,12 +1266,9 @@ enum Resolution {
 
 /// How many links one resolution follows before it counts as a loop — the bound Linux puts on one
 /// path lookup.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 const MAX_LINK_HOPS: usize = 40;
 
@@ -1132,12 +1279,9 @@ const MAX_LINK_HOPS: usize = 40;
 /// A `..` above the root or an absolute target leads out, and so does a path that climbs above the
 /// root past a component that does not exist: whether a link leads out is the tree's to say, not
 /// the host's.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, String> {
     use std::path::Component;
@@ -1223,20 +1367,24 @@ fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, S
     })
 }
 
-/// The mode to store, which off Unix is a decision rather than a reading: a tar written on Windows
-/// has no mode to carry, and a tree whose programs arrive unexecutable is a tree that will not run.
-#[cfg_attr(
-    any(not(test), not(unix)),
-    expect(
-        dead_code,
-        reason = "only an agent whose upstream publishes no installable archive is repacked"
-    )
+/// The mode to store, normalized (ADR-0053 clause 27):
+/// `0o755` for a file any execute bit is set on, `0o644` for every other, so no write bit beyond
+/// the owner's and no setuid, setgid or sticky bit upstream set reaches the signed artifact. Off
+/// Unix it is a decision rather than a reading: a tar written on Windows has no mode to carry, and
+/// a tree whose programs arrive unexecutable is a tree that will not run.
+#[allow(
+    dead_code,
+    reason = "a kind whose upstream publishes no installable archive repacks with it, and the core carries none"
 )]
 fn mode_of(meta: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o777
+        if meta.permissions().mode() & 0o111 == 0 {
+            0o644
+        } else {
+            0o755
+        }
     }
     #[cfg(not(unix))]
     {
@@ -1248,8 +1396,8 @@ fn mode_of(meta: &std::fs::Metadata) -> u32 {
 // ── The Server ──────────────────────────────────────────────────────────────
 
 /// Creates the Set if it is not there and stores this platform's artifact as its entry
-/// (ADR-0034). Nothing is distributed by either call: a Set reaches an Agent only through a
-/// rollout act (ADR-0033), which stays the operator's.
+/// (ADR-0050). Nothing is distributed by either call: a Set reaches an Agent only through a
+/// rollout act (ADR-0049), which stays the operator's.
 async fn upload(
     client: &reqwest::Client,
     server: &str,
@@ -1290,8 +1438,8 @@ async fn upload(
 ///
 /// Two rules keep it from being a surprise. **An existing Configuration is never touched** — the
 /// name is asked for first, and one that answers is left exactly as the operator left it, edits and
-/// all. And **nothing is distributed**: saving only saves (ADR-0033), and a Configuration reaches an
-/// Agent only through a Deployment that holds it (ADR-0033), so the default reaches no Agent until
+/// all. And **nothing is distributed**: saving only saves (ADR-0049), and a Configuration reaches an
+/// Agent only through a Deployment that holds it (ADR-0049), so the default reaches no Agent until
 /// an operator reads it, puts it into a Deployment and presses that Deployment's rollout. That
 /// matters here, because these bodies are starting points with example values in them — a parent
 /// host to correct, a plugin path to confirm.
@@ -1349,8 +1497,8 @@ async fn put_json(client: &reqwest::Client, url: &str, body: String) -> Result<(
 /// Why an upload never came back with a status.
 ///
 /// The Server refuses some uploads *before* it reads a byte of the body — an identity nobody
-/// created, a Set already assigned and therefore immutable (ADR-0033), a store at its ceiling
-/// (ADR-0034). With hundreds of megabytes already in flight and no `Expect: 100-continue` to hold
+/// created, a Set already assigned and therefore immutable (ADR-0049), a store at its ceiling
+/// (ADR-0050). With hundreds of megabytes already in flight and no `Expect: 100-continue` to hold
 /// them back — HTTP's own remedy for exactly this, which this client does not speak — that
 /// response races the upload, the connection resets, and what arrives here is a transport error
 /// carrying no status at all. Reporting it as "cannot reach" would name the one thing that is not
@@ -1552,6 +1700,61 @@ mod tests {
     use super::*;
     use std::io::Read as _;
 
+    /// A later repack of one version is numbered as a pre-release of the next patch, so it orders
+    /// above the first repack and below upstream's next release, its repack number compared as a
+    /// number; the first keeps the version
+    /// (ADR-0053 clause 28).
+    /// Verifies: ADR-0053
+    #[test]
+    fn a_later_repack_orders_between_the_version_and_the_next_release() {
+        use std::cmp::Ordering;
+        let repack = |n| numbered_repack("2.14.3", n);
+        assert_eq!(repack(1).as_deref(), Ok("2.14.3"));
+        assert_eq!(repack(2).as_deref(), Ok("2.14.4-0.r.2"));
+        assert_eq!(repack(10).as_deref(), Ok("2.14.4-0.r.10"));
+        let order = [
+            "2.14.3".to_string(),
+            repack(2).expect("r.2"),
+            repack(3).expect("r.3"),
+            repack(9).expect("r.9"),
+            repack(10).expect("r.10"),
+            repack(11).expect("r.11"),
+            repack(100).expect("r.100"),
+            // Upstream's own pre-release of the next patch still lies above every repack.
+            "2.14.4-rc.1".to_string(),
+            "2.14.4".to_string(),
+        ];
+        for pair in order.windows(2) {
+            assert_eq!(
+                fleet_core::version::precedence(&pair[0], &pair[1]),
+                Some(Ordering::Less),
+                "{pair:?}"
+            );
+        }
+        // Build metadata would compare equal to the first repack, so it is not the form.
+        assert_eq!(
+            fleet_core::version::precedence("2.14.3", "2.14.3+r2"),
+            Some(Ordering::Equal)
+        );
+        repack(0).expect_err("counts from 1");
+        numbered_repack("2.14.3-rc.1", 2).expect_err("not three numbers");
+        numbered_repack("2.14", 2).expect_err("not three numbers");
+        numbered_repack(&format!("1.0.{}", u64::MAX), 2).expect_err("no next patch");
+        // An agent this tool uploads as upstream publishes it has one artifact per version.
+        for agent in [
+            AgentKind::Otelcol,
+            AgentKind::OtelcolContrib,
+            AgentKind::Supervisor,
+        ] {
+            assert!(!agent.repacked(), "{agent:?}");
+            repack_version(agent, "0.158.0", 2).expect_err("not repacked");
+            assert_eq!(
+                repack_version(agent, "0.158.0", 1).as_deref(),
+                Ok("0.158.0")
+            );
+        }
+    }
+
     /// The tag patterns are what keep a version list from offering things that are not releases of
     /// the agent being fetched — the Collector repository tags its builder alongside.
     #[test]
@@ -1584,9 +1787,9 @@ mod tests {
         );
     }
 
-    /// Upstream `1.19` is fetched under its own tag and named Package `1.19.0`; a leading zero is
-    /// dropped, and a number that cannot be written as SemVer is refused, naming it
-    /// (ADR-0035 clause 6).
+    /// Upstream `1.19` is fetched under its own tag and named Package `1.19.0`, and a number that
+    /// cannot be written as SemVer is refused, naming it (ADR-0035 clause 6). How a number is
+    /// written is tested with `fleet_core::version::written_as_semver`.
     /// Verifies: ADR-0035
     #[test]
     fn fetch_names_the_package_in_semver_and_fetches_upstreams_tag() {
@@ -1598,9 +1801,6 @@ mod tests {
             AgentKind::Otelcol.release_names("0.158.0"),
             Ok(("v0.158.0".to_string(), "0.158.0".to_string()))
         );
-        assert_eq!(package_version("24.04.1").as_deref(), Ok("24.4.1"));
-        assert_eq!(package_version("2").as_deref(), Ok("2.0.0"));
-        assert_eq!(package_version("1.19-rc.1").as_deref(), Ok("1.19.0-rc.1"));
         for unwritable in ["nightly", "1.2.3.4", "1.x", "", "1.0.0-01"] {
             let refusal = AgentKind::Otelcol
                 .release_names(unwritable)
@@ -1701,9 +1901,9 @@ mod tests {
     }
 
     /// The release also carries the operator tool's archives, named like the Client's
-    /// (ADR-0047 clause 3); they are selected by stem, never by version and platform alone, so none
+    /// (ADR-0053 clause 3); they are selected by stem, never by version and platform alone, so none
     /// of them becomes the `supervisor` Package's entry for its platform (ADR-0039 clause 5).
-    // Verifies: ADR-0047
+    // Verifies: ADR-0053
     #[test]
     fn the_supervisor_passes_over_the_operator_tools_archives() {
         let assets = vec![
@@ -1783,7 +1983,7 @@ mod tests {
             );
         }
 
-        // Nothing to seed beside it: the Client's configuration is its host's (ADR-0046).
+        // Nothing to seed beside it: the Client's configuration is its host's (ADR-0051).
         assert!(AgentKind::Supervisor.default_configurations().is_empty());
     }
 
@@ -1817,7 +2017,7 @@ mod tests {
     /// names left which one to directory-read order. A cycle is still not followed, and a link
     /// pointing at nothing is dropped.
     ///
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_linked_directory_is_packed_under_both_names_and_a_cycle_does_not_hang() {
@@ -1831,12 +2031,12 @@ mod tests {
         std::os::unix::fs::symlink("nowhere", tree.join("lib/dangling")).expect("link to nothing");
 
         let artifact = dir.path().join("packed.tar.gz");
-        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+        pack_tree(&tree, "wrapper", &[], &artifact).expect("pack");
 
         let dest = dir.path().join("unpacked");
         std::fs::create_dir_all(&dest).expect("create");
         let summary =
-            fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &dest)
+            fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &[], &dest)
                 .expect("the packed tree is one a Client installs");
 
         assert_eq!(
@@ -1861,7 +2061,7 @@ mod tests {
     /// the root is the first ancestor of the walk, so a link right under it to `..` or to the root
     /// packs no second copy of the tree; each such link is packed as an empty directory.
     ///
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_link_to_the_root_is_not_followed() {
@@ -1876,7 +2076,7 @@ mod tests {
             .expect("link the root the long way");
 
         let artifact = dir.path().join("packed.tar.gz");
-        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+        pack_tree(&tree, "wrapper", &[], &artifact).expect("pack");
 
         let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
             std::fs::File::open(&artifact).expect("open"),
@@ -1924,7 +2124,7 @@ mod tests {
     /// exception. The error names each such link by its path in the tree and its target, quoted,
     /// in the order of their paths, and only those.
     ///
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_link_out_of_the_tree_fails_the_repack_naming_it() {
@@ -1955,7 +2155,7 @@ mod tests {
             }
 
             let artifact = dir.path().join(format!("packed-{n}.tar.gz"));
-            let error = pack_tree(&tree, "wrapper", &artifact).expect_err(&format!(
+            let error = pack_tree(&tree, "wrapper", &[], &artifact).expect_err(&format!(
                 "a link out of the tree fails the repack: {links:?}"
             ));
 
@@ -1985,7 +2185,7 @@ mod tests {
     /// A name from upstream reaches the operator's terminal quoted and escaped, so a control
     /// character in it cannot rewrite what the operator reads.
     ///
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_link_out_of_the_tree_is_named_escaped() {
@@ -1995,7 +2195,7 @@ mod tests {
         std::os::unix::fs::symlink("/etc/\x1b[2Jcerts", tree.join("in\x1b[1Avisible"))
             .expect("link out");
 
-        let error = pack_tree(&tree, "wrapper", &dir.path().join("packed.tar.gz"))
+        let error = pack_tree(&tree, "wrapper", &[], &dir.path().join("packed.tar.gz"))
             .expect_err("a link out of the tree fails the repack");
 
         assert!(
@@ -2012,7 +2212,7 @@ mod tests {
     /// read from outside the tree, so either, and a link to one, fails it, named, before anything
     /// is written.
     ///
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_member_that_is_neither_file_nor_directory_fails_the_repack() {
@@ -2028,7 +2228,7 @@ mod tests {
         std::os::unix::fs::symlink("run/pipe", tree.join("to-pipe")).expect("link the pipe");
 
         let artifact = dir.path().join("packed.tar.gz");
-        let error = pack_tree(&tree, "wrapper", &artifact)
+        let error = pack_tree(&tree, "wrapper", &[], &artifact)
             .expect_err("a pipe fails the repack instead of hanging it");
 
         for named in ["\"run/pipe\"", "\"to-pipe\""] {
@@ -2044,7 +2244,7 @@ mod tests {
     /// names far more than 10 000 members, and the repack stops at the cap instead of walking
     /// them all — without the bound, this walk would not end in any time a test waits.
     ///
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_tree_whose_links_multiply_it_stops_at_the_member_cap() {
@@ -2062,7 +2262,7 @@ mod tests {
         std::fs::write(tree.join(format!("d{LEVELS}/leaf")), b"a-leaf").expect("write");
 
         let artifact = dir.path().join("packed.tar.gz");
-        let error = pack_tree(&tree, "wrapper", &artifact).expect_err("past the cap");
+        let error = pack_tree(&tree, "wrapper", &[], &artifact).expect_err("past the cap");
 
         assert!(error.contains("10000 members"), "{error}");
         assert!(!artifact.exists(), "no artifact is left at the output path");
@@ -2071,7 +2271,7 @@ mod tests {
     /// A repack that fails while it writes takes back what it wrote, since half an artifact is one
     /// somebody might sign. A member the walk saw but that cannot be read is the failure here.
     ///
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_repack_that_fails_while_writing_leaves_no_artifact() {
@@ -2090,7 +2290,7 @@ mod tests {
         }
 
         let artifact = dir.path().join("packed.tar.gz");
-        let error = pack_tree(&tree, "wrapper", &artifact).expect_err("an unreadable member");
+        let error = pack_tree(&tree, "wrapper", &[], &artifact).expect_err("an unreadable member");
 
         assert!(error.contains("locked"), "{error}");
         assert!(!artifact.exists(), "the half-written artifact is removed");
@@ -2100,7 +2300,7 @@ mod tests {
     /// through other links on the way, and one that names nothing inside the tree is dropped —
     /// however it climbs, as long as it does not climb out.
     ///
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn a_link_inside_the_tree_is_packed_under_its_name() {
@@ -2118,11 +2318,11 @@ mod tests {
             .expect("link to nothing");
 
         let artifact = dir.path().join("packed.tar.gz");
-        pack_tree(&tree, "wrapper", &artifact).expect("pack");
+        pack_tree(&tree, "wrapper", &[], &artifact).expect("pack");
 
         let dest = dir.path().join("unpacked");
         std::fs::create_dir_all(&dest).expect("create");
-        fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &dest)
+        fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &[], &dest)
             .expect("the packed tree is one a Client installs");
         assert_eq!(
             std::fs::read(dest.join("bin/agent")).expect("the linked file"),
@@ -2142,10 +2342,182 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    const LOADER: KeptLink = KeptLink {
+        path: "runtime/lib64/ld-linux-x86-64.so.2",
+        target: "/lib64/ld-linux-x86-64.so.2",
+    };
+
+    /// A tree with the entry point and the loader link the kind names.
+    #[cfg(unix)]
+    fn tree_with_a_loader_link(dir: &Path, target: &str) -> PathBuf {
+        let tree = dir.join("tree");
+        std::fs::create_dir_all(tree.join("runtime/lib64")).expect("create");
+        std::fs::write(tree.join("AppRun"), b"the-entry-point").expect("write");
+        std::os::unix::fs::symlink(target, tree.join("runtime/lib64/ld-linux-x86-64.so.2"))
+            .expect("the loader link");
+        tree
+    }
+
+    /// A link the kind names by its exact path and target is packed as that link, never followed,
+    /// and a Client installing the tree with the same kind creates it.
+    ///
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn a_link_the_kind_keeps_is_packed_as_that_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tree = tree_with_a_loader_link(dir.path(), "/lib64/ld-linux-x86-64.so.2");
+        let artifact = dir.path().join("packed.tar.gz");
+        pack_tree(&tree, "wrapper", &[LOADER], &artifact).expect("pack");
+
+        let file = std::fs::File::open(&artifact).expect("open");
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        let links: Vec<(String, String, u32, u64)> = archive
+            .entries()
+            .expect("entries")
+            .map(|entry| entry.expect("entry"))
+            .filter(|entry| entry.header().entry_type().is_symlink())
+            .map(|entry| {
+                (
+                    entry.path().expect("path").to_string_lossy().into_owned(),
+                    entry
+                        .link_name()
+                        .expect("target")
+                        .expect("a link has a target")
+                        .to_string_lossy()
+                        .into_owned(),
+                    entry.header().mode().expect("mode"),
+                    entry.header().mtime().expect("mtime"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [(
+                "wrapper/runtime/lib64/ld-linux-x86-64.so.2".to_string(),
+                "/lib64/ld-linux-x86-64.so.2".to_string(),
+                0o777,
+                0
+            )]
+        );
+
+        let dest = dir.path().join("unpacked");
+        std::fs::create_dir_all(&dest).expect("create");
+        fleet_agent::archive::extract_tree_tar_gz(&artifact, Path::new("AppRun"), &[LOADER], &dest)
+            .expect("the Client installs the tree with the kind's link");
+        assert_eq!(
+            std::fs::read_link(dest.join("runtime/lib64/ld-linux-x86-64.so.2")).expect("link"),
+            Path::new("/lib64/ld-linux-x86-64.so.2")
+        );
+    }
+
+    /// Every other link leading out still fails the repack, naming it: the named link without the
+    /// kind naming it, the named path with another target, an unnamed absolute link beside a kept
+    /// one, and the kept link reached through a linked directory under another name.
+    ///
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn a_link_the_kind_does_not_keep_still_fails_the_repack() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let refuse = |tree: &Path, kept: &[KeptLink], named: &str| {
+            let artifact = tree.with_extension("tar.gz");
+            let error = pack_tree(tree, "wrapper", kept, &artifact).expect_err(named);
+            assert!(error.contains(named), "{named}: {error}");
+            assert!(error.contains("leads out of the tree"), "{error}");
+            assert!(!artifact.exists(), "no artifact for {named}");
+        };
+
+        let unnamed =
+            tree_with_a_loader_link(&dir.path().join("unnamed"), "/lib64/ld-linux-x86-64.so.2");
+        refuse(
+            &unnamed,
+            &[],
+            r#""runtime/lib64/ld-linux-x86-64.so.2" -> "/lib64/ld-linux-x86-64.so.2""#,
+        );
+
+        let other = tree_with_a_loader_link(&dir.path().join("other"), "/etc/passwd");
+        refuse(
+            &other,
+            &[LOADER],
+            r#""runtime/lib64/ld-linux-x86-64.so.2" -> "/etc/passwd""#,
+        );
+
+        let beside =
+            tree_with_a_loader_link(&dir.path().join("beside"), "/lib64/ld-linux-x86-64.so.2");
+        std::os::unix::fs::symlink("/etc/passwd", beside.join("runtime/passwd")).expect("link");
+        refuse(&beside, &[LOADER], r#""runtime/passwd" -> "/etc/passwd""#);
+
+        let aliased =
+            tree_with_a_loader_link(&dir.path().join("aliased"), "/lib64/ld-linux-x86-64.so.2");
+        std::os::unix::fs::symlink("runtime", aliased.join("rt")).expect("link a directory");
+        let artifact = dir.path().join("aliased.tar.gz");
+        let error = pack_tree(&aliased, "wrapper", &[LOADER], &artifact)
+            .expect_err("the kept link under another name");
+        assert!(error.contains("leads out of the tree"), "{error}");
+        assert!(!artifact.exists());
+    }
+
+    /// A repack stores normalized modes: a file with any execute bit `0o755`, every other file
+    /// `0o644`, a directory `0o755` — whatever write, setuid, setgid or sticky bits upstream set.
+    ///
+    /// Verifies: ADR-0053
+    #[cfg(unix)]
+    #[test]
+    fn a_repack_stores_normalized_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("bin")).expect("create");
+        let mode = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod")
+        };
+        for (name, from) in [
+            ("AppRun", 0o4777),
+            ("bin/tool", 0o710),
+            ("bin/data", 0o666),
+            ("bin/private", 0o600),
+        ] {
+            std::fs::write(tree.join(name), name).expect("write");
+            mode(&tree.join(name), from);
+        }
+        mode(&tree.join("bin"), 0o1777);
+
+        let artifact = dir.path().join("packed.tar.gz");
+        pack_tree(&tree, "wrapper", &[], &artifact).expect("pack");
+
+        let file = std::fs::File::open(&artifact).expect("open");
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        let modes: std::collections::BTreeMap<String, u32> = archive
+            .entries()
+            .expect("entries")
+            .map(|entry| {
+                let entry = entry.expect("entry");
+                let path = entry.path().expect("path").to_string_lossy().into_owned();
+                (path, entry.header().mode().expect("mode"))
+            })
+            .collect();
+        for (path, want) in [
+            ("wrapper/AppRun", 0o755),
+            ("wrapper/bin/tool", 0o755),
+            ("wrapper/bin/data", 0o644),
+            ("wrapper/bin/private", 0o644),
+        ] {
+            assert_eq!(modes.get(path), Some(&want), "{path} in {modes:?}");
+        }
+        let bin = modes
+            .iter()
+            .find(|(path, _)| path.trim_end_matches('/') == "wrapper/bin")
+            .map(|(_, mode)| *mode);
+        assert_eq!(bin, Some(0o755), "{modes:?}");
+    }
+
     /// The bytes of a repack are the tree's alone: the same tree packed twice, and a copy of it
     /// packed from elsewhere on the host, give the same artifact.
     ///
-    /// Verifies: ADR-0047
+    /// Verifies: ADR-0053
     #[cfg(unix)]
     #[test]
     fn the_same_tree_repacks_to_the_same_bytes() {
@@ -2164,7 +2536,7 @@ mod tests {
 
         let packed = |from: &Path, name: &str| {
             let artifact = dir.path().join(name);
-            pack_tree(from, "wrapper", &artifact).expect("pack");
+            pack_tree(from, "wrapper", &[], &artifact).expect("pack");
             std::fs::read(&artifact).expect("read")
         };
         let first = packed(&tree, "first.tar.gz");
@@ -2201,7 +2573,7 @@ mod tests {
         );
     }
 
-    /// An upload the Server refuses before it reads the body — an assigned Set (ADR-0033), an
+    /// An upload the Server refuses before it reads the body — an assigned Set (ADR-0049), an
     /// unknown identity, a full store — leaves the operator with a transport error and no status:
     /// the refusal races a body already in flight and loses. What the operator must still be told
     /// is *why the Server said no*, never "cannot reach" about a Server that answered.
@@ -2297,7 +2669,7 @@ mod tests {
     /// Every *supervised* agent this tool can fetch carries a default Configuration, and each one
     /// is storable: the name follows the ADR-0020 grammar the Server enforces (which admits no dot,
     /// so no file extension), the body is not empty (the Server refuses an empty one), and it is
-    /// stated for its Agent type, so a Deployment holding it fits it to that type alone (ADR-0033).
+    /// stated for its Agent type, so a Deployment holding it fits it to that type alone (ADR-0049).
     ///
     /// This is the test that fails when a variant is added and its default is forgotten, which is
     /// the only way an agent could reach a Server with a package and nothing to run. The Client's
@@ -2309,7 +2681,7 @@ mod tests {
             let service_name = agent.source().service_name;
             if matches!(agent, AgentKind::Supervisor) {
                 // The one package nothing supervises. A Client reads `supervisor.toml` on its own
-                // host, and the fleet owns only the `[[supervisor]]` half of it (ADR-0046), so
+                // host, and the fleet owns only the `[[supervisor]]` half of it (ADR-0051), so
                 // there is no body this tool could put on a Server — and an offer needs none: the
                 // consent that admits this package is already in that file (ADR-0019).
                 assert!(

@@ -1,6 +1,6 @@
 # ADR-0033: A Deployment is the one thing aimed and rolled out, and a rollout pins what it releases
 
-- **Status:** 🟢 accepted
+- **Status:** ⚪ superseded by [ADR-0049](0049-deployments-and-rollouts.md)
 - **Date:** 2026-10-17
 - **Deciders:** Markus Brigl
 - **Applies to:** `crates/fleet-server/src/configs.rs`, `crates/fleet-server/src/deployments.rs`, the assignments, rollout acts and deletions in `crates/fleet-server/src/fleet.rs`, the matching and offer functions of `crates/fleet-server/src/packages.rs`, the persisted assignment in `crates/fleet-server/src/agent_store.rs` and its adapters, the Configuration, Deployment, Package-deletion and rollout routes of `crates/fleet-server/src/api.rs` and the OpenAPI document, the Configurations, Deployments and Agents tabs of the bundled UI in `crates/fleet-server/static/index.html`, the Client's check of an offer for its own package, and every document that tells an operator how to aim or roll out a Configuration or a Package

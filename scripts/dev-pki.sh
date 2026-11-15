@@ -2,8 +2,8 @@
 #
 # Creates the certificates a development Server and Client need, since both refuse to run without
 # them (ADR-0012, ADR-0040), with the operator tool's `opamp-fleetctl pki init`
-# (ADR-0047) — no openssl. Every certificate of the set says it is a development one:
-# `OpAMP Fleet Dev … CA`, `O=Development` (ADR-0047 clause 20).
+# (ADR-0053) — no openssl. Every certificate of the set says it is a development one:
+# `OpAMP Fleet Dev … CA`, `O=Development` (ADR-0053 clause 20).
 # Everything lands in one directory, gitignored, and is for a development machine only: the keys
 # are unencrypted and the CAs are throwaway.
 #

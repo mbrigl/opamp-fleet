@@ -27,7 +27,7 @@ use std::time::Duration;
 use fleet_server::fleet::{AgentView, AppState, PackageOffering};
 use fleet_server::packages::{PackageStore, Platform};
 
-/// The Platform this test's Client will report about itself (ADR-0034) — the Server offers only
+/// The Platform this test's Client will report about itself (ADR-0050) — the Server offers only
 /// the artifact that fits the machine, so a self-update test has to store one for this one.
 fn this_host() -> Platform {
     Platform::new(std::env::consts::OS, std::env::consts::ARCH).expect("this host has a platform")
@@ -78,7 +78,7 @@ fn ring_holding(
     ring_holding_signed(state, id, Some((&this_host(), signature)))
 }
 
-/// The same with the signature given — where a signature lives (ADR-0034).
+/// The same with the signature given — where a signature lives (ADR-0050).
 fn ring_holding_signed(
     state: &fleet_server::fleet::AppState,
     id: &fleet_server::packages::PackageId,
@@ -93,7 +93,7 @@ fn ring_holding_signed(
     deployments
         .put_package("stable", id, true)
         .expect("package into the ring");
-    // The signature is the entry's own (ADR-0034).
+    // The signature is the entry's own (ADR-0050).
     if let Some((platform, bytes)) = signature {
         state
             .packages()
@@ -205,7 +205,7 @@ const NEWER_VERSION: &str = "9.9.9";
 /// version as an operator would type it.
 ///
 /// A second build, rather than offering the running binary back to itself, because the fleet
-/// does not make that offer: a Set reaches an Agent only as an **upgrade** (ADR-0033), and a Client
+/// does not make that offer: a Set reaches an Agent only as an **upgrade** (ADR-0049), and a Client
 /// reports the version it runs whether or not a package put it there — so a Set at the running
 /// version reaches nobody, which is what `a_set_at_the_running_version_reaches_nobody` asserts.
 /// What is left to test here is the update itself, and an update needs something newer to install.
@@ -442,7 +442,7 @@ impl Drop for Supervised {
     }
 }
 
-/// Finds an Agent by the operator's name for it — `service.instance.name` (ADR-0017). The Client's
+/// Finds an Agent by the operator's name for it — `service.instance.name` (ADR-0054). The Client's
 /// configured `name` is its *instance* name; its `service.name` is the constant type `supervisor`
 /// (ADR-0020), the same on every host in the fleet, which is what a Selector aiming the Client's own
 /// package matches on.
@@ -477,7 +477,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let client = PathBuf::from(env!("CARGO_BIN_EXE_supervisor"));
     // The artifact is a Client built as a greater version — the only thing that will pass the
     // staged binary's own self-check, which requires it to *be* an OpAMP Fleet Client at the
-    // offered version, and the only thing the fleet will offer a Client at all (ADR-0033).
+    // offered version, and the only thing the fleet will offer a Client at all (ADR-0049).
     //
     // Offered the way an operator uploads a release: the number on the archive, without the commit
     // the build carries (ADR-0038). The staged binary reports the full string and must still be
@@ -486,8 +486,8 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
     let artifact = std::fs::read(newer).expect("read the newer client binary");
     let store_dir = tempfile::tempdir().expect("store dir");
     let store = PackageStore::open(store_dir.path().to_path_buf()).expect("store");
-    // The Client's own Agent reports the constant type `supervisor` (ADR-0017, ADR-0020), and a Set
-    // reaches only Agents of its type — the type is part of its identity (ADR-0034). Its name is
+    // The Client's own Agent reports the constant type `supervisor` (ADR-0054, ADR-0020), and a Set
+    // reaches only Agents of its type — the type is part of its identity (ADR-0050). Its name is
     // the same string, which is what the consent below is narrowed to.
     let set = fleet_server::packages::PackageId::new("supervisor", version).expect("package id");
     store.create(&set).expect("create package");
@@ -508,7 +508,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
 
     let mut service = Supervised::start(&program, &config);
 
-    // A saved Package reaches nobody (ADR-0033): the rollout act releases it, and it needs the
+    // A saved Package reaches nobody (ADR-0049): the rollout act releases it, and it needs the
     // Client's Agent to be known and fitted — so it is retried until the first report arrived.
     common::wait_until_within(SLOW_DEADLINE, "the rollout act to reach the agent", || {
         service.tend();
@@ -536,7 +536,7 @@ async fn the_client_installs_a_version_of_itself_and_reports_it_installed() {
 
     // The configured `name` names this instance; the type is the constant `supervisor`, the same
     // for every Client in the fleet, so one Selector aims the Client's package at all of them
-    // without naming a host (ADR-0017, ADR-0020).
+    // without naming a host (ADR-0054, ADR-0020).
     assert_eq!(
         view(&state.snapshot(), "self-updating-client")
             .expect("the client's own agent")
@@ -609,7 +609,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 
     // A supervised Managed Process that stays up and records its pid — rewritten with a fresh one
     // every time it is (re)started. Placed in the Supervisor's own `program/` directory and named
-    // by a bare file name, the only shape a block may carry (ADR-0046): a Managed Process is always
+    // by a bare file name, the only shape a block may carry (ADR-0051): a Managed Process is always
     // one this Client installed.
     let stub = {
         let program_dir = state_dir.join("supervisors/managed/program");
@@ -649,7 +649,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 
     let mut service = Supervised::start(&program, &config);
 
-    // A saved Set reaches nobody (ADR-0033): the rollout act releases it, and it needs the
+    // A saved Set reaches nobody (ADR-0049): the rollout act releases it, and it needs the
     // Client's Agent to be known and fitted — so it is retried until the first report arrived.
     common::wait_until_within(SLOW_DEADLINE, "the rollout act to reach the agent", || {
         service.tend();
@@ -705,7 +705,7 @@ async fn managed_processes_stop_cleanly_on_the_self_update_restart() {
 /// already running 0.4.0, and to one running 0.4.1-dev — a downgrade of the host that manages the
 /// host.
 ///
-/// ADR-0033 holds a Set against what the Agent reports installed, and a Client that arrived by
+/// ADR-0049 holds a Set against what the Agent reports installed, and a Client that arrived by
 /// `.deb`, `.rpm`, MSI or by hand has installed no *package*, so it reports the version it runs —
 /// which is what this asserts across the process boundary, together with what the Server then does
 /// with it: an equal Set and an older one reach nobody, a greater one reaches this Client.
@@ -776,7 +776,7 @@ async fn a_set_at_the_running_version_reaches_nobody() {
             .rollout_deployment(&ring_holding(&state, &same))
             .expect("the act runs"),
         0,
-        "a Set at the version this Client already runs must reach nobody (ADR-0033)"
+        "a Set at the version this Client already runs must reach nobody (ADR-0049)"
     );
     assert_eq!(
         state
@@ -804,7 +804,7 @@ async fn a_set_at_the_running_version_reaches_nobody() {
 
 /// A self-update whose signature does not verify against `[packages] verification_key` fails with
 /// `InstallFailed` naming the signature, nothing is staged, and the Client keeps running the
-/// version it runs. The Server never offers an unsigned Package (ADR-0034), so a signature over
+/// version it runs. The Server never offers an unsigned Package (ADR-0050), so a signature over
 /// other bytes is the case that reaches the Client.
 /// Verifies: ADR-0019
 #[tokio::test]

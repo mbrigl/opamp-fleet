@@ -71,6 +71,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("platform", Core),
             ("rate", Core),
             ("renewal", Core),
+            ("tree", Core),
             ("version", Core),
             // What a client certificate is known by; read with `x509-parser`, and issued with
             // `ring` and `rcgen`.
@@ -231,10 +232,11 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     (
         "fleet-tools",
         &[
-            // One command-line program and no library (ADR-0047): nothing here is core, and a
+            // One command-line program and no library (ADR-0053): nothing here is core, and a
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),
+            ("gpgv", Adapter),
             ("package", Adapter),
             ("pki", Adapter),
             ("signing", Adapter),
@@ -251,10 +253,10 @@ const CORE_CRATES: &[&str] = &[
 ];
 
 /// What the core may name of a technology, by path prefix. `tokio::sync` is channels, which need
-/// no runtime and do no I/O — and ADR-0046 makes a Port a message pair over them; `tokio::select`
+/// no runtime and do no I/O — and ADR-0051 makes a Port a message pair over them; `tokio::select`
 /// and `tokio::pin` are how the core waits on several of them, control flow over futures that
 /// starts no task and touches nothing outside the process. `toml::Table` and
-/// `toml::Value` are the configuration's values (ADR-0024 clause 1), which ADR-0046 hands a
+/// `toml::Value` are the configuration's values (ADR-0024 clause 1), which ADR-0051 hands a
 /// Plugin as its block; reading and parsing the file stays at the edge. An address is a value, and
 /// `env::consts` is fixed at compile time.
 const CORE_PREFIXES: &[&[&str]] = &[

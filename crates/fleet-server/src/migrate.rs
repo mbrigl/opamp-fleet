@@ -16,7 +16,7 @@
 //!   signatures moved onto the entries, and a Package that was not carried leaves them, named.
 //! - **Configurations** keep their content; each loses its Selector, and is listed with the
 //!   Selector it had, for the operator to place in a Deployment. One without an Agent type is not
-//!   carried, because the Server refuses it at startup (ADR-0033 clause 2): it is listed, and its
+//!   carried, because the Server refuses it at startup (ADR-0049 clause 2): it is listed, and its
 //!   file stays in the old directory for the operator to save again with a type.
 //! - **Agents** are carried with their labels moved into the record. A Package released through a
 //!   Deployment stays assigned through it, while both were carried. A 0.5 Server released every
@@ -466,7 +466,7 @@ fn carry_packages(
             if let Some(url) = entry.source_url {
                 report.line(format!(
                     "dropped: {id} for {tag} — a referenced entry ({url}); every artifact is \
-                     uploaded now (ADR-0034)"
+                     uploaded now (ADR-0050)"
                 ));
                 continue;
             }
@@ -601,7 +601,7 @@ fn carry_configurations(
         }
         if crate::configs::check_type(&config.saved).is_err() {
             report.line(format!(
-                "listed: Configuration {} was not carried — it has no Agent type (service_name),                  which every Configuration needs (ADR-0033); save it again with a type from {},                  which stays where it is; it had the Selector {}",
+                "listed: Configuration {} was not carried — it has no Agent type (service_name),                  which every Configuration needs (ADR-0049); save it again with a type from {},                  which stays where it is; it had the Selector {}",
                 config.name,
                 path.display(),
                 selector_text(&selector)
@@ -611,7 +611,7 @@ fn carry_configurations(
         backend.put(&config)?;
         report.line(format!(
             "listed: Configuration {} had the Selector {} — put it into a Deployment whose \
-             Selector aims it (ADR-0033)",
+             Selector aims it (ADR-0049)",
             config.name,
             selector_text(&selector)
         ));

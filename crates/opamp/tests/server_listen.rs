@@ -214,7 +214,7 @@ fn unusable_material_names_the_part() {
 /// A client that offers TLS 1.2 alone never completes the handshake: the listener speaks TLS 1.3
 /// and nothing older. The client is built from the full ring provider, which still has its TLS 1.2
 /// suites, so the refusal is the listener's.
-/// Verifies: ADR-0008, ADR-0012, ADR-0016, Q-3
+/// Verifies: ADR-0008, ADR-0012, ADR-0048, Q-3
 #[tokio::test]
 async fn a_client_offering_only_tls_1_2_is_refused() {
     let pki = Pki::new();

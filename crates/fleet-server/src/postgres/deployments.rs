@@ -920,7 +920,7 @@ mod tests {
     /// write, so the second runs exactly then; the gate opens once the second waits for the
     /// Deployment's row, or has reached the gate itself, which only an amendment that took no hold
     /// does.
-    /// Verifies: ADR-0045, ADR-0034
+    /// Verifies: ADR-0045, ADR-0050
     #[test]
     fn two_packages_of_one_type_added_at_once_add_one() {
         let Some(test) = TestDatabase::named() else {
@@ -994,7 +994,7 @@ mod tests {
     /// The deletion of a Configuration or a Package takes it out of every Deployment that holds it
     /// in the transaction that deletes it: nothing the fleet does after, which a crash would cut
     /// off, is needed for no Deployment to name it.
-    /// Verifies: ADR-0045, ADR-0033
+    /// Verifies: ADR-0045, ADR-0049
     #[test]
     fn a_deleted_member_leaves_every_deployment_in_the_transaction_that_deletes_it() {
         use crate::configs::{ConfigBackend as _, Removal};
@@ -1050,7 +1050,7 @@ mod tests {
     /// A deletion of a Deployment through B while a rollout through A that releases through it
     /// has not yet committed waits for the rollout, and then refuses it from the assignment the
     /// rollout stored: the rollout holds the Deployment's row until it commits.
-    /// Verifies: ADR-0045, ADR-0033
+    /// Verifies: ADR-0045, ADR-0049
     #[test]
     fn a_deletion_waits_for_a_rollout_through_the_deployment_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};
