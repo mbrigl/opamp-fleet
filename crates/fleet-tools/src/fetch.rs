@@ -613,6 +613,10 @@ fn select_platforms<'p>(available: &'p [Plan], wanted: &[String]) -> Result<Vec<
                 let (os, arch) = w
                     .split_once('/')
                     .ok_or_else(|| format!("{w:?} is not an os/arch pair"))?;
+                // Folded as an asset's platform is, so the words an operator knows pick the
+                // artifact the menu names canonically (ADR-0050 clause 6).
+                let os = fleet_core::platform::os_token(os)?;
+                let arch = fleet_core::platform::arch_token(arch)?;
                 available
                     .iter()
                     .find(|p| p.os == os && p.arch == arch)
@@ -1876,6 +1880,24 @@ mod tests {
             pair("linux", "386")
         );
         assert_eq!(platform("otelcol_1.0.0_linux_arm-v7.tar.gz"), None);
+    }
+
+    /// A platform asked for with `--platform` folds through the same table as an asset's, so
+    /// `macos/x86_64` picks the artifact the menu lists as `darwin/amd64` (ADR-0050 clause 6).
+    /// Verifies: ADR-0050
+    #[test]
+    fn a_platform_asked_for_folds_through_the_core_table() {
+        let assets = vec![asset("otelcol_0.158.0_darwin_amd64.tar.gz")];
+        let plans = collector_plans(AgentKind::Otelcol, "0.158.0", &assets);
+        let chosen = select_platforms(&plans, &["macos/x86_64".to_string()]).expect("folded");
+        assert_eq!(
+            (chosen[0].os.as_str(), chosen[0].arch.as_str()),
+            ("darwin", "amd64")
+        );
+        let Err(err) = select_platforms(&plans, &["darwin/arm-v7".to_string()]) else {
+            panic!("a token that cannot be canonical picks nothing");
+        };
+        assert!(err.contains("arm-v7"), "{err}");
     }
 
     /// The Collector's platform list is read from the assets, and the two distributions must not
