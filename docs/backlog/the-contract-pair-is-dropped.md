@@ -2,8 +2,10 @@
 
 **Kind:** schema, release.
 
-**Observed.** The Deployments' mirror columns `packages` and `configurations` and the Hosts'
-`instance_uids` arrays are written by no release since 0.8.1. Ticket
+**Observed.** No release since 0.8.1 writes the Deployments' mirror columns `packages` and
+`configurations`. The Hosts' `instance_uids` arrays are still written: 0.8.1, 0.8.2 and `main`
+insert `'{}'`, take a released Agent out with `array_remove`, reset them on the mark of a Gateway
+and filter them in the upsert. Ticket
 `docs/plan/the-contract-pair-is-removed/01-the-server-stops-naming-the-contract-pair.md` is release
 X: it gives the columns defaults, and the code stops naming them.
 

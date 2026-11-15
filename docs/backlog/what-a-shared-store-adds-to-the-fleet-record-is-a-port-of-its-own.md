@@ -10,7 +10,9 @@ a store several instances share needs, each with a default for the store one Ser
 
 **Idea.** A narrower port that only the PostgreSQL store implements, which `AppState` holds where
 there is one. It supersedes ADR-0052 clause 2, which the backlog entry
-`the-next-normalization-restates-the-audit-record-and-the-enforcement.md` also rewords. The work is
-L. The human parked it.
+`the-next-normalization-restates-the-audit-record-and-the-enforcement.md` also rewords. The human
+parked it.
+
+**Effort.** L.
 
 **From.** Ticket 15 of `revision-2026-11-12`, moved to the backlog by the human (2026-11-15).

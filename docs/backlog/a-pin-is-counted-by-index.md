@@ -11,7 +11,9 @@ done: the bound on the Agents a fleet stores is read from the counter row (`post
 line 1639).
 
 **Idea.** A migration adds the three indexes. ADR-0023 clause 22 allows a migration that adds
-indexes. The work is S. It blocks no stage: the G-20 load test met its target at 100 000 Agents
-without it.
+indexes. With 100 000 stored Agents, `EXPLAIN` of a pin count shows no sequential scan of `agents`.
+It blocks no stage: the G-20 load test met its target at 100 000 Agents without it.
+
+**Effort.** S.
 
 **From.** Ticket 02 of `fleet-at-scale-costs`, moved to the backlog by the human (2026-11-15).

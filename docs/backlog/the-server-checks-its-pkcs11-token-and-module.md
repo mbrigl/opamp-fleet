@@ -17,8 +17,10 @@
 
 **Idea.** At startup, the Server checks both: a key that is extractable, not sensitive, or was
 extractable once, named by its label; and a module or a directory above it that others or its group
-may write, named by `[pkcs11] module`. The work is S. A refusal at startup needs a note or an ADR on
+may write, named by `[pkcs11] module`. A refusal at startup needs a note or an ADR on
 ADR-0043; a warning needs neither. Which of the two is the human's.
+
+**Effort.** S.
 
 **From.** The review of stage 3, ticket 12 (2026-11-08); merged into one entry from two by the
 human (2026-11-15).
