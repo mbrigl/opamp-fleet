@@ -34,7 +34,7 @@ fn this_host() -> Platform {
 }
 
 // What the Client exits with to ask its service manager for a restart, and its file name inside a
-// version directory. Imported rather than restated (ADR-0008 clause 21): a copied constant is a
+// version directory. Imported rather than restated (ADR-0040 clause 21): a copied constant is a
 // correctness risk that no comment can remove.
 use fleet_agent::service::layout::BINARY_FILENAME as CLIENT_BINARY;
 use fleet_agent::update::EXIT_RESTART_FOR_UPDATE;

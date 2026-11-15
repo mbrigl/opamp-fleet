@@ -1,5 +1,5 @@
 //! Which TLS material the Client uses (ADR-0012, ADR-0026), read from disk and handed to `opamp` as
-//! [`ClientTls`] (ADR-0008).
+//! [`ClientTls`] (ADR-0040).
 //!
 //! The decisions are the Client's: an optional CA file that *replaces* the built-in roots, and the
 //! identity in force — the one the Server issued, else the one the operator configured. Building a

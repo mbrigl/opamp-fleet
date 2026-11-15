@@ -90,7 +90,7 @@ pub const CLIENT_AGENT_TYPE: &str = "supervisor";
 
 pub struct AgentState {
     /// What OpAMP defines about this Agent: identity, sequence numbers, the two Capability Sets,
-    /// what the next report owes, and the status messages (ADR-0008).
+    /// what the next report owes, and the status messages (ADR-0040).
     protocol: AgentProtocol,
     /// What this Client reports about it.
     local: Local,
@@ -126,7 +126,7 @@ fn logged_hash(hash: &[u8]) -> String {
 }
 
 /// What this Client reports about one Agent, and the package bookkeeping behind its status — the
-/// content the protocol asks for (ADR-0008).
+/// content the protocol asks for (ADR-0040).
 struct Local {
     /// What the host says about itself (ADR-0017).
     host: Box<dyn HostFacts>,
@@ -432,7 +432,7 @@ impl AgentState {
     }
 
     /// The next `AgentToServer`: which fields it carries is the protocol's to decide, what they
-    /// hold is this Agent's (ADR-0008).
+    /// hold is this Agent's (ADR-0040).
     pub fn next_report(&mut self) -> AgentToServer {
         self.note_floor();
         self.protocol.next_report(&self.local)

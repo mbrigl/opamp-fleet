@@ -4,11 +4,13 @@
 
 **Decided.** The human chose that a superseding ADR names both functions, with the allowlist test
 (2026-11-15). It is proposed after the next normalization, against the restated ADR that carries
-ADR-0008 clause 22; the normalization carries the gap unchanged.
+ADR-0040
+clause 22; the normalization carries the gap unchanged.
 
 **What was ticketed.**
 
-ADR-0008 clause 22 names what `fleet-tools` uses of the Client. It does not name two functions the
+ADR-0040
+clause 22 names what `fleet-tools` uses of the Client. It does not name two functions the
 tool calls: `fleet_agent::nofollow::read_privileged` and
 `fleet_agent::config_init::read_password_file` (`crates/fleet-tools/src/pki.rs`). No test checks
 what the tool takes from the Client.
@@ -35,7 +37,9 @@ This must be settled before the next normalization of the ADR record.
 **Its reading.**
 
 - Touches: `crates/fleet-tools/src/pki.rs`, `crates/fleet-core/tests/dependency_direction.rs`
-- ADR-0008 clause 22; ADR-0036 clauses 5 and 24.
+-
+  ADR-0040
+  clause 22; ADR-0036 clauses 5 and 24.
 
 **Its mode.**
 

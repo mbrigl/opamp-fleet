@@ -1,4 +1,4 @@
-//! The Baseline's attribute keys, and reading a string out of a set of them (ADR-0008).
+//! The Baseline's attribute keys, and reading a string out of a set of them (ADR-0040).
 //!
 //! An `AgentDescription` carries its identity as `KeyValue` pairs, and the keys are fixed strings
 //! the Baseline names. Both ends match on the same ones —
@@ -149,7 +149,7 @@ mod tests {
 
     /// The rule ADR-0039 leans on: an Agent that reports its type as an empty string reports no
     /// type, so it matches no package rather than every untyped one.
-    /// Verifies: ADR-0008
+    /// Verifies: ADR-0040
     #[test]
     fn an_empty_string_is_not_a_value() {
         assert_eq!(string_value(&attrs(), SERVICE_VERSION), None);

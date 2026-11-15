@@ -281,7 +281,7 @@ impl Member {
 pub trait DeploymentBackend: Send + Sync {
     /// Every persisted Deployment, once, when the store opens. One that cannot be read fails the
     /// open and names where it is: a channel that silently vanished would withdraw nothing and
-    /// offer nothing, and say neither (ADR-0008's principle).
+    /// offer nothing, and say neither (ADR-0040's principle).
     fn load(&self) -> Result<Vec<Deployment>, String>;
 
     /// Creates a Deployment without members, or replaces the Selector of the one stored, in one

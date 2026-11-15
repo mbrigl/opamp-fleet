@@ -66,10 +66,12 @@ The parts the system is made of, each with one responsibility, named in the voca
 [`GLOSSARY.md`](GLOSSARY.md). One level deep, deeper only where the size of a part earns it. The
 golden path and the test pattern an agent copies from are named here.
 
-Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)):
+Five crates in one workspace
+([ADR-0040](adr/0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)):
 
 - **`opamp`** — the OpAMP communication layer, publishable on its own
-  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). Always the
+  ([ADR-0040](adr/0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+  Always the
   generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
   machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
   HTTP client from a `Connection` the application fills in, and every other HTTPS client of the
@@ -397,7 +399,8 @@ no module.
   `install`, the Gateway's package cache, and the second service's purge on Windows, which goes
   by path — works by path in directories that account owns and no other account may write.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
-  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)); `config_file` reads it from disk, makes
+  ([ADR-0040](adr/0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md));
+  `config_file` reads it from disk, makes
   its
   directories absolute, finds the identity the state directory holds, and redacts the text the
   Client reports as its effective configuration.
@@ -406,7 +409,8 @@ no module.
   settings verification in `connection`, the Gateway's upstream pool (`gateway::pool`) and its
   downstream listener, and the Supervisor Endpoint (`supervisor::endpoint`) use the same `opamp`
   building blocks
-  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)). The Gateway's
+  ([ADR-0040](adr/0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)).
+  The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
   ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)),
   and its `floors` fetches the floors and hands the hosts behind it the ones it last fetched,

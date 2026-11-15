@@ -1,4 +1,4 @@
-//! The OpAMP Fleet Server (ADR-0008, ADR-0012): the control plane that tells Agents which
+//! The OpAMP Fleet Server (ADR-0040, ADR-0012): the control plane that tells Agents which
 //! configuration they should run and records what they report back.
 //!
 //! A library crate so integration tests can assemble the exact router the binary serves.

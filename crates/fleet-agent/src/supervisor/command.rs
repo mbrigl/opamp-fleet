@@ -12,7 +12,7 @@ use tracing::debug;
 use crate::supervisor::ports::{parse_settings, Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
 
-/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
+/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0040.
 ///
 /// `command` is not among them: the core takes it out and resolves it (ADR-0018), and what
 /// arrives here is [`SupervisorContext::program`].

@@ -98,7 +98,9 @@ Moving to a newer upstream version is a deliberate change, not a version-string 
 4. **Adjust the code** for anything that moved, and record any gap under *Deviations* rather than
    leaving it silent.
 5. **Move the `opamp` crate's version** to the target's `MAJOR.MINOR` with patch `0` — its version
-   is the Baseline's (ADR-0008). `BASELINE` in `crates/opamp/build.rs` and the version in
+   is the Baseline's
+   (ADR-0040).
+   `BASELINE` in `crates/opamp/build.rs` and the version in
    `crates/opamp/Cargo.toml` change together; a test fails the build when they disagree.
 6. **Update the marker and the reconciliation date** in [Protocol Baseline](#protocol-baseline)
    last, once the steps above actually hold.
@@ -177,8 +179,8 @@ separately because conformance depends on them just as much.
 |---|---|---|---|
 | WebSocket transport | Servers SHOULD accept it; Clients MAY choose either | implemented | Varint header followed by the Protobuf message (`opamp::frame`); both ends (ADR-0012). The Client uses it by default; the Server pushes config changes over it, and on shutdown closes every session with the code `1001` (going away) before it saves the fleet. |
 | Plain HTTP transport | Servers SHOULD accept it; Clients MAY choose either | implemented | *"Server implementations SHOULD accept both plain HTTP connections and WebSocket connections. OpAMP Client implementations may choose to support either."* Both ends (ADR-0012). The Client polls, by default every 30 s, with an immediate follow-up after a config outcome. |
-| Default endpoint | Port 4320, path `/v1/opamp` | implemented | Both defaults in place; address/endpoint configurable on both ends (ADR-0008). |
-| Message size limits | Both ends MUST enforce a receive limit and MUST NOT send past it; `413` on HTTP, close `1009` on WebSocket | implemented | New in `v0.19.0` — see [Message size limits](#message-size-limits). Default 64 MiB, the upstream recommendation; `max_message_size_bytes` in `server.toml` and `supervisor.toml` tightens it (ADR-0008). |
+| Default endpoint | Port 4320, path `/v1/opamp` | implemented | Both defaults in place; address/endpoint configurable on both ends (ADR-0040). |
+| Message size limits | Both ends MUST enforce a receive limit and MUST NOT send past it; `413` on HTTP, close `1009` on WebSocket | implemented | New in `v0.19.0` — see [Message size limits](#message-size-limits). Default 64 MiB, the upstream recommendation; `max_message_size_bytes` in `server.toml` and `supervisor.toml` tightens it (ADR-0040). |
 | gzip on HTTP | The Server MUST honour `Content-Encoding` | implemented | The Server accepts gzip and identity request bodies; a body that inflates past the message size limit is refused with `413`, so compression buys no memory. Response compression (a SHOULD) is not done yet. |
 | `Content-Type` header | The Client MUST set `application/x-protobuf` on plain HTTP | implemented | The Client sets it; the Server requires it on POST (`415` otherwise) and takes a WebSocket upgrade as the other transport. |
 | `instance_uid` | MUST be 16 bytes, SHOULD be UUID v7 | implemented | Generated as UUID v7, persisted across restarts (`opamp::uid`); the Server rejects other lengths with `bad_request`. |
@@ -313,7 +315,8 @@ resolving one by inventing semantics of this project's own.
 The base control loop is implemented on both ends and on both transports
 ([ADR-0011](adr/0011-the-protocol-is-pinned-and-checked-against-opamp-go.md),
 [ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md),
-[ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)): status reporting, remote configuration gated
+[ADR-0040](adr/0040-the-operator-tool-takes-from-the-client-what-this-adr-names.md)):
+status reporting, remote configuration gated
 by the config hash, effective-configuration
 and health reporting, identity handling (UUID v7, reassignment, server-generated identity), state
 recovery via `ReportFullState`, disconnect handling, and TLS. Supervisor Mode (ADR-0018) puts real

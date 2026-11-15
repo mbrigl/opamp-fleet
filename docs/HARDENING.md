@@ -60,7 +60,9 @@ has:
   operator approves for a host of its own (ADR-0016).
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
-- **TLS 1.3 alone, on every connection of both ends** (ADR-0008, ADR-0012): the process-wide
+- **TLS 1.3 alone, on every connection of both ends**
+  (ADR-0040,
+  ADR-0012): the process-wide
   provider carries the three TLS 1.3 suites and no other, every configuration pins TLS 1.3, and a
   peer offering only TLS 1.2 fails the handshake. Plaintext is accepted on `127.0.0.1` and `::1`
   alone and refused at startup anywhere else.
@@ -299,12 +301,15 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
   - ✅ the package upload has no deadline, but is held to the floor above, and its size to
     `max_package_size_bytes` and the whole store, uploads still arriving included, to
     `max_total_package_bytes` · ✅ capped, HTTP/2-bounded and throttled as above
-- **Client → Server**, outbound (`opamp::client::connection`, ADR-0008).
+- **Client → Server**, outbound (`opamp::client::connection`,
+  ADR-0040).
   - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
     ✅ reconnect backoff · ✅ message size in both directions
 - **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0016).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1), from the listener every OpAMP endpoint
-    is served on (ADR-0008) · ✅ message size, gzip after decompression, per-hop exchange timeout,
+    is served on
+    (ADR-0040)
+    · ✅ message size, gzip after decompression, per-hop exchange timeout,
     `max_carried_agents` · ✅ no downstream `Authorization` forwarded; every upstream connection
     carries the Gateway's own certificate alone (ADR-0016)
   - ✅ a downstream peer that never finishes its headers after the handshake is hung up on

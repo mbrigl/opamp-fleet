@@ -3082,7 +3082,7 @@ mod tests {
 
     // What remains here are the cases that reach *into* this module — a private helper and the
     // install function — and need no program to spawn. Everything that supervises a running process
-    // lives in `tests/supervisor_process.rs`, where a real stub is reachable (ADR-0008) and the
+    // lives in `tests/supervisor_process.rs`, where a real stub is reachable (ADR-0040) and the
     // cases run on all three platforms.
 
     #[test]

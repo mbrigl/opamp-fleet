@@ -1,4 +1,4 @@
-//! The OpAMP Fleet Client, as a library (ADR-0008).
+//! The OpAMP Fleet Client, as a library (ADR-0040).
 //!
 //! Every module of the Client lives here and `src/main.rs` is reduced to starting a process. The
 //! reason is testability rather than reuse: Cargo will only hand a test the path of a helper binary

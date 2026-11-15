@@ -1,4 +1,4 @@
-//! The REST API v1 — the Server's integration contract (ADR-0008, ADR-0031) — and the bundled
+//! The REST API v1 — the Server's integration contract (ADR-0040, ADR-0031) — and the bundled
 //! rudimentary UI. Both belong to the Operator plane and are served on its own listener
 //! (ADR-0012); the one exception, the Agent-facing artifact download, is [`download_router`].
 //!
@@ -222,7 +222,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         ))
         // The one route that legitimately carries a program: the framework's 2 MiB default would
         // refuse every real agent binary, so the upload streams past it and the handler bounds it
-        // by `max_package_size_bytes` instead (ADR-0008). No other route is unbounded.
+        // by `max_package_size_bytes` instead (ADR-0040). No other route is unbounded.
         .routes(routes!(put_package_entry, delete_package_entry).layer(DefaultBodyLimit::disable()))
         .routes(routes!(put_entry_signature, delete_entry_signature))
         .routes(routes!(list_package_floors))
@@ -383,7 +383,7 @@ pub fn download_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// The bundled UI: one embedded page, no frontend toolchain (ADR-0008).
+/// The bundled UI: one embedded page, no frontend toolchain (ADR-0040).
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }

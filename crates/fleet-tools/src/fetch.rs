@@ -310,7 +310,7 @@ fn numbered_repack(version: &str, repack: u32) -> Result<String, String> {
 /// that name yet.
 ///
 /// The body is compiled in rather than read from the repository: this tool is released as a
-/// binary an operator runs anywhere (ADR-0008), so a file path beside it would be a default that
+/// binary an operator runs anywhere (ADR-0040), so a file path beside it would be a default that
 /// only works in a checkout.
 struct DefaultConfiguration {
     /// The Configuration's name — also the file name its entry gets in the Supervisor's config

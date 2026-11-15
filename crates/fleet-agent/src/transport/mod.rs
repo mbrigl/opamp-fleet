@@ -1,4 +1,4 @@
-//! The Client's upstream connection (ADR-0012, ADR-0008). The connection itself — the transport,
+//! The Client's upstream connection (ADR-0012, ADR-0040). The connection itself — the transport,
 //! its TLS, backoff, heartbeat, framing, limits, throttling, the goodbye — is `opamp::client`'s.
 //! What is the Client's is which material it is built from, in [`connection`], and [`Upstream`]:
 //! the session over the [`Engine`], with the flows that follow a reply.
@@ -148,7 +148,7 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
     }
 }
 
-/// The Client's own flows after a reply, the same for both transports (ADR-0008): what the reply
+/// The Client's own flows after a reply, the same for both transports (ADR-0040): what the reply
 /// left to do, in one order.
 ///
 /// 1. A connection-settings offer (ADR-0013) — verified OpAMP settings end the

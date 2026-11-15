@@ -2,7 +2,7 @@
 //! the health-gated apply, the binary swap and its rollback (ADR-0039), and the tree install
 //! (ADR-0039).
 //!
-//! An integration test rather than a unit test, and that is the reason ADR-0008 exists: these cases
+//! An integration test rather than a unit test, and that is the reason ADR-0040 exists: these cases
 //! need the supervision core **and** a real program to spawn, and Cargo hands a test the path of a
 //! helper binary "only … when building an integration test or benchmark". As unit tests inside a
 //! binary crate they could reach no such program, so they ran `/bin/sh` scripts and were gated to

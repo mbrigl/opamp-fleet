@@ -18,7 +18,7 @@
 //! download route to the hosts they were offered to (ADR-0039), [`floors`] hands those hosts the
 //! floors it fetched (ADR-0034), and [`rate`] counts what each downstream host sends against a
 //! bucket of its own (ADR-0022).
-//! The endpoint's communication is `opamp::server`'s, the one the Server sits on too (ADR-0008);
+//! The endpoint's communication is `opamp::server`'s, the one the Server sits on too (ADR-0040);
 //! what is the Gateway's is the [`Forwarding`] handler behind it.
 
 pub mod cache;
@@ -231,7 +231,7 @@ pub async fn run_on(
 }
 
 /// [`run_on`] with the header bound tightened — what a test waits out instead of the 30 seconds
-/// every OpAMP listener applies (ADR-0008).
+/// every OpAMP listener applies (ADR-0040).
 ///
 /// # Errors
 /// As [`run_on`].

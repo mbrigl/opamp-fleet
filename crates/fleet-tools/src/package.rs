@@ -9,7 +9,7 @@
 //! it writes container formats [`fleet_agent::archive`] can open, with the member named the way the
 //! Supervisor will look for it, and its tests open what it wrote with that same module.
 //!
-//! It is part of the operator tool, which lives in its own crate for that reason (ADR-0008,
+//! It is part of the operator tool, which lives in its own crate for that reason (ADR-0040,
 //! ADR-0036): nothing the Server or Client runtime does depends on it, and a managed host never
 //! runs it. `fetch` is [`crate::fetch`]; the rest is here.
 //!

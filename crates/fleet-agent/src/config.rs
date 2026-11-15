@@ -352,7 +352,7 @@ pub(crate) const WINDOWS_RESERVED: [&str; 22] = [
 
 /// The only way to build an [`InstanceName`]: validated against the grammar above. `pub` because
 /// callers outside this module need to construct one and there is nothing else to do it with
-/// (ADR-0008 widens visibility by need).
+/// (ADR-0040 widens visibility by need).
 ///
 /// # Errors
 /// Returns an error naming the rule the value breaks.
@@ -884,7 +884,7 @@ pub struct GatewayTlsConfig {
 }
 
 impl GatewayConfig {
-    /// Loud validation (ADR-0008): a pool of zero would carry nothing, and the pool is a WebSocket
+    /// Loud validation (ADR-0040): a pool of zero would carry nothing, and the pool is a WebSocket
     /// pool — a polling upstream cannot carry the Server's pushes to the Agents behind it.
     fn check(&self, endpoint: &str) -> Result<(), String> {
         if self.upstream_connections == 0 {
@@ -949,7 +949,7 @@ pub struct TlsConfig {
 }
 
 impl TlsConfig {
-    /// Loud validation (ADR-0008): half an identity is a configuration error, not a fallback to
+    /// Loud validation (ADR-0040): half an identity is a configuration error, not a fallback to
     /// none — a Server demanding mutual TLS would refuse the connection with no hint why.
     fn check(&self) -> Result<(), String> {
         match (&self.cert_file, &self.key_file) {
@@ -1989,7 +1989,7 @@ mod tests {
         ClientConfig::load(&path).expect("plaintext on a loopback literal loads");
     }
 
-    /// Verifies: ADR-0012, ADR-0008
+    /// Verifies: ADR-0012, ADR-0040
     #[test]
     fn rejects_an_unknown_scheme_and_unknown_keys() {
         let cfg = ClientConfig {

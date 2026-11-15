@@ -1,4 +1,4 @@
-//! The Server's own configuration — TOML, from `server.toml` and its environment (ADR-0008,
+//! The Server's own configuration — TOML, from `server.toml` and its environment (ADR-0040,
 //! ADR-0024).
 
 use std::collections::BTreeMap;
@@ -1038,7 +1038,7 @@ impl RestAuthConfig {
     }
 
     /// A section that authenticates nobody would lock the operator out of their own Server, and an
-    /// empty user or password is a half-written credential rather than an intent (ADR-0008).
+    /// empty user or password is a half-written credential rather than an intent (ADR-0040).
     fn check(&self) -> Result<(), String> {
         if self.basic_users.is_empty() {
             return Err(
@@ -1079,7 +1079,7 @@ pub struct ConnectionOfferConfig {
 }
 
 impl ConnectionOfferConfig {
-    /// Loud validation (ADR-0008): no credential key, at least one offered field, and an endpoint
+    /// Loud validation (ADR-0040): no credential key, at least one offered field, and an endpoint
     /// that keeps the fleet on TLS off the loopback.
     fn check(&self) -> Result<(), String> {
         for (key, value) in [
@@ -1145,7 +1145,7 @@ pub struct TelemetryOfferConfig {
 }
 
 impl TelemetryOfferConfig {
-    /// Loud validation (ADR-0008): an empty section offers nothing and is never what an operator
+    /// Loud validation (ADR-0040): an empty section offers nothing and is never what an operator
     /// meant, and an endpoint that is not an OTLP/HTTP URL would be refused by every Agent.
     ///
     /// An endpoint set to the empty string passes both tests deliberately — it is a withdrawal
@@ -1213,7 +1213,7 @@ pub struct ClientCaConfig {
 }
 
 impl ClientCaConfig {
-    /// Loud validation (ADR-0008): a CA that cannot sign, or one whose certificates expire before
+    /// Loud validation (ADR-0040): a CA that cannot sign, or one whose certificates expire before
     /// the Client would renew them, is a configuration error rather than a runtime surprise.
     fn check(&self) -> Result<(), String> {
         if self.validity_days == 0 {
@@ -2270,7 +2270,7 @@ mod tests {
         assert!(err.contains("at least one"), "{err}");
     }
 
-    /// Verifies: ADR-0008
+    /// Verifies: ADR-0040
     #[test]
     fn rejects_unknown_keys() {
         assert!(toml::from_str::<ServerConfig>("listne = \"0.0.0.0:1\"").is_err());
@@ -2388,7 +2388,7 @@ mod tests {
         let err = ServerConfig::load(&path).expect_err("an empty section must fail startup");
         assert!(err.contains("[rest.auth.basic_users]"), "{err}");
 
-        // Bearer is not a scheme this plane has, and a typo fails loudly (ADR-0008, ADR-0026).
+        // Bearer is not a scheme this plane has, and a typo fails loudly (ADR-0040, ADR-0026).
         assert!(toml::from_str::<ServerConfig>("[rest.auth]\nbearer_tokens = [\"tok\"]").is_err());
     }
 
