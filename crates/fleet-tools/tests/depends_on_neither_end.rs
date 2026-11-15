@@ -135,7 +135,14 @@ fn the_operator_tool_links_neither_end() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
     // Filtered to the host, the graph needs no package that is not already downloaded.
     let output = std::process::Command::new(std::env::var("CARGO").unwrap_or("cargo".into()))
-        .args(["metadata", "--format-version", "1", "--locked", "--filter-platform", &host])
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--locked",
+            "--filter-platform",
+            &host,
+        ])
         .arg("--manifest-path")
         .arg(&workspace)
         .output()
