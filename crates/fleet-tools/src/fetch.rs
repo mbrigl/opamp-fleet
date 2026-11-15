@@ -801,14 +801,18 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
     plans
 }
 
-/// The platform an asset named `<prefix><os>_<arch>.tar.gz` is for, in the words an Agent reports
-/// — or `None` when the name has another shape or a platform this fleet does not know.
+/// The platform an asset named `<prefix><os>_<arch>.tar.gz` is for, folded by the table an Agent's
+/// report and the Server's store fold through (ADR-0050 clause 6) — or `None` when the name has
+/// another shape or a token that cannot be canonical.
 fn platform_of(name: &str, prefix: &str) -> Option<(String, String)> {
     let (os, arch) = name
         .strip_prefix(prefix)?
         .strip_suffix(".tar.gz")?
         .split_once('_')?;
-    Some((normalize_os(os)?, normalize_arch(arch)?))
+    Some((
+        fleet_core::platform::os_token(os).ok()?,
+        fleet_core::platform::arch_token(arch).ok()?,
+    ))
 }
 
 /// The platforms this project's own release publishes, in the order its build matrix states them
@@ -886,27 +890,6 @@ fn collector_checksum(asset: &str, dist: &str, assets: &[(String, String)]) -> C
         .collect();
     urls.sort_by_key(|url| std::cmp::Reverse(url.len()));
     ChecksumSource::Sums { urls }
-}
-
-/// Upstream's platform words in this fleet's vocabulary (ADR-0050), or `None` for one this fleet
-/// has no name for — an Agent reports `os.type` and `host.arch`, and a package entry no Agent can
-/// match is one nobody would ever be offered.
-fn normalize_os(os: &str) -> Option<String> {
-    match os {
-        "linux" | "windows" | "darwin" => Some(os.to_string()),
-        "macos" => Some("darwin".to_string()),
-        _ => None,
-    }
-}
-
-fn normalize_arch(arch: &str) -> Option<String> {
-    match arch {
-        "amd64" | "arm64" | "386" => Some(arch.to_string()),
-        "x86_64" => Some("amd64".to_string()),
-        "aarch64" => Some("arm64".to_string()),
-        "i386" => Some("386".to_string()),
-        _ => None,
-    }
 }
 
 // ── Producing an artifact ───────────────────────────────────────────────────
@@ -1863,6 +1846,38 @@ mod tests {
         (name.to_string(), format!("https://example.invalid/{name}"))
     }
 
+    /// An asset's platform folds through the one table both ends read, so a fetched artifact is
+    /// stored under the Platform an Agent reports. A token the table has never heard of passes
+    /// through, as the Server keeps it, and only one that cannot be a canonical token is passed
+    /// over (ADR-0050 clause 6).
+    /// Verifies: ADR-0050
+    #[test]
+    fn an_asset_platform_folds_through_the_core_table() {
+        let platform = |name: &str| platform_of(name, "otelcol_1.0.0_");
+        let pair = |os: &str, arch: &str| Some((os.to_string(), arch.to_string()));
+        assert_eq!(
+            platform("otelcol_1.0.0_osx_x64.tar.gz"),
+            pair("darwin", "amd64")
+        );
+        assert_eq!(
+            platform("otelcol_1.0.0_win64_x86-64.tar.gz"),
+            pair("windows", "amd64")
+        );
+        assert_eq!(
+            platform("otelcol_1.0.0_Linux_ARM64.tar.gz"),
+            pair("linux", "arm64")
+        );
+        assert_eq!(
+            platform("otelcol_1.0.0_linux_s390x.tar.gz"),
+            pair("linux", "s390x")
+        );
+        assert_eq!(
+            platform("otelcol_1.0.0_linux_386.tar.gz"),
+            pair("linux", "386")
+        );
+        assert_eq!(platform("otelcol_1.0.0_linux_arm-v7.tar.gz"), None);
+    }
+
     /// The Collector's platform list is read from the assets, and the two distributions must not
     /// be confused: `otelcol-contrib_…` starts with text a careless `otelcol_` check would accept.
     #[test]
@@ -1882,14 +1897,14 @@ mod tests {
             .collect();
         assert_eq!(
             platforms,
-            vec!["linux/amd64", "windows/amd64"],
-            "an MSI is not an artifact a Supervisor installs, and s390x is a platform this fleet \
-             cannot name"
+            vec!["linux/amd64", "linux/s390x", "windows/amd64"],
+            "an MSI is not an artifact a Supervisor installs, and s390x passes through as the \
+             Server keeps it"
         );
         assert!(
-            core[1].block_hint.contains("otelcol.exe"),
+            core[2].block_hint.contains("otelcol.exe"),
             "{:?}",
-            core[1].block_hint
+            core[2].block_hint
         );
 
         let contrib = collector_plans(AgentKind::OtelcolContrib, "0.158.0", &assets);
