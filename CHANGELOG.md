@@ -39,6 +39,9 @@ once its tag exists.
 
 ### Changed
 
+- **The 7z reader takes up `sevenz-rust2` 0.25.** It bounds each decoded entry by its declared
+  size, rejects an entry that ends short of it and checks the block's CRC where 0.24 skipped it, so
+  a malformed `.7z` artifact is refused rather than unpacked short. **What to do:** nothing.
 - **An instance on PostgreSQL takes up the Agents a notice names in one read**
   ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clauses 8 and 9). When another instance changes the records of Agents this instance holds, it
