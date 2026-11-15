@@ -15,7 +15,7 @@
 //! picks its transport by URL scheme, so serving only one would silently exclude half of them),
 //! [`pool`] holds the upstream connections, [`registry`] routes replies back by `instance_uid`, and
 //! [`cache`] holds the uploaded artifacts the Gateway relays offers of and serves them on the
-//! download route to the hosts they were offered to (ADR-0033), [`floors`] hands those hosts the
+//! download route to the hosts they were offered to (ADR-0039), [`floors`] hands those hosts the
 //! floors it fetched (ADR-0034), and [`rate`] counts what each downstream host sends against a
 //! bucket of its own (ADR-0022).
 //! The endpoint's communication is `opamp::server`'s, the one the Server sits on too (ADR-0008);

@@ -53,7 +53,7 @@ pub enum ProcessCommand {
         /// the restart and its health gate rather than ending where the message does.
         span: tracing::Span,
     },
-    /// A package was downloaded and verified (content hash and signature; ADR-0033): swap its
+    /// A package was downloaded and verified (content hash and signature; ADR-0039): swap its
     /// bytes over the Managed Process's binary, restart, and health-gate exactly as `ApplyConfig`
     /// does — a binary that will not stay up is rolled back to the previous one. Answered with
     /// [`ProcessEvent::PackageApplied`]. `staged` is the path of the verified artifact — a file,
@@ -111,7 +111,7 @@ pub enum ProcessEvent {
         result: Result<(), String>,
     },
     /// Outcome of an [`ProcessCommand::ApplyPackage`]: `Ok(version)` reports `Installed` at that
-    /// version, `Err` reports `InstallFailed` with the error after rolling back (ADR-0033).
+    /// version, `Err` reports `InstallFailed` with the error after rolling back (ADR-0039).
     PackageApplied {
         hash: Vec<u8>,
         result: Result<String, String>,
@@ -147,7 +147,7 @@ impl EventSender {
 /// The two shapes share their whole lifecycle — set the old one aside, install the new one, prove
 /// it starts, put the old one back if it does not — and differ only in what "it" is. Keeping that
 /// difference in this type rather than inside the process adapter's swap is what lets the health
-/// gate and the rollback stay one piece of code for both (ADR-0033). How each shape is set aside,
+/// gate and the rollback stay one piece of code for both (ADR-0039). How each shape is set aside,
 /// installed and put back is the adapter's, in [`process`](super::process).
 #[derive(Debug, Clone)]
 pub enum InstallTarget {
@@ -156,7 +156,7 @@ pub enum InstallTarget {
         /// Where the program lives.
         path: PathBuf,
         /// Where its archive holds it, where its kind knows the place
-        /// (ADR-0033 clause 55): the one member whose trailing
+        /// (ADR-0039 clause 55): the one member whose trailing
         /// path components are this, `/`-separated and without the archive's wrapping directory
         /// (`usr/bin/agent`), so a release that carries further files of the program's name
         /// installs the program and not one of those. `None` finds the member by the program's
@@ -172,7 +172,7 @@ pub enum InstallTarget {
         /// Where the program sits inside the tree, as written in the configuration.
         program_path: PathBuf,
         /// The absolute links the kind's tree keeps, the only links the install creates
-        /// (ADR-0033 clause 57).
+        /// (ADR-0039 clause 57).
         links: &'static [fleet_core::tree::KeptLink],
     },
 }
@@ -202,7 +202,7 @@ pub struct ProcessAccountGroup(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub &'static str);
 
-/// The package this Supervisor's Managed Process currently runs (ADR-0033), persisted so a
+/// The package this Supervisor's Managed Process currently runs (ADR-0039), persisted so a
 /// restarted Client reports the version it has and is not re-offered it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstalledPackage {
@@ -244,7 +244,7 @@ pub trait PackageFloors: Send + Sync {
 }
 
 /// What an Agent persists across restarts (ADR-0009): its identity, the remote configuration it
-/// last applied, and the package its Managed Process runs (ADR-0033). The filesystem adapter is
+/// last applied, and the package its Managed Process runs (ADR-0039). The filesystem adapter is
 /// [`Storage`](crate::storage::Storage).
 pub trait AgentStorage: Send + Sync {
     /// The persisted `instance_uid`, or a new one, persisted, when there is none.
@@ -341,7 +341,7 @@ pub struct SupervisorContext {
     /// directory (ADR-0018). The plugin spawns this rather than reading its own
     /// `binary`/`command` key, so the path rule lives in one place instead of once per plugin.
     pub program: PathBuf,
-    /// What an offered package replaces (ADR-0033) — resolved beside `program` and for
+    /// What an offered package replaces (ADR-0039) — resolved beside `program` and for
     /// the same reason: a plugin that decided this for itself could disagree with where the core
     /// put the program.
     pub install: InstallTarget,
@@ -350,11 +350,11 @@ pub struct SupervisorContext {
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// `Ok` — the health-gated acknowledgement (ADR-0018). Zero acknowledges on start.
     pub apply_grace: Duration,
-    /// How long the version a successful update supersedes is kept before deletion (ADR-0033),
+    /// How long the version a successful update supersedes is kept before deletion (ADR-0039),
     /// resolved from the per-Supervisor override or the global `[updates]` default. Zero deletes on
     /// success.
     pub retain_previous: Duration,
-    /// The key that opens an encrypted `.7z` package artifact (ADR-0033); `None` when none is
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0039); `None` when none is
     /// configured. Client-wide, like the package verification key.
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// The process account's primary group, where a process account is registered: what the
@@ -408,18 +408,18 @@ pub struct KindDefaults {
     /// The program's file name in this Supervisor's own `program/` directory (ADR-0018).
     /// `None` leaves it to the block's program key.
     pub program: Option<&'static str>,
-    /// Where the program sits inside an unpacked package tree (ADR-0033); `None` is a single-file
+    /// Where the program sits inside an unpacked package tree (ADR-0039); `None` is a single-file
     /// package, or a kind that leaves the question to the block.
     pub program_path: Option<&'static str>,
     /// Where a single-file package's archive holds the program, as trailing path components
     /// (`usr/bin/agent`), for an archive that carries more than one file of the program's name.
-    /// `None` finds the member by its file name alone (ADR-0033
+    /// `None` finds the member by its file name alone (ADR-0039
     /// clause 55).
     pub member: Option<&'static str>,
     /// The absolute links a tree package of this kind keeps as links, each by its exact path in
     /// the tree and its exact target: the only links the tree's install creates, and the only
     /// links leading out that `opamp-fleetctl` packs
-    /// (ADR-0033 clause 57). Empty for nearly every kind.
+    /// (ADR-0039 clause 57). Empty for nearly every kind.
     pub tree_links: &'static [fleet_core::tree::KeptLink],
     /// The Agent *type* this kind presents (ADR-0017). `None` falls back to the program's file
     /// name, which is what the block already said.
@@ -448,7 +448,7 @@ pub struct KindTiming {
     pub stop_timeout: Option<Duration>,
     /// Overrides `[supervisors] apply_grace_secs`.
     pub apply_grace: Option<Duration>,
-    /// Overrides `[updates] retain_previous_secs` (ADR-0033).
+    /// Overrides `[updates] retain_previous_secs` (ADR-0039).
     pub retain_previous: Option<Duration>,
 }
 

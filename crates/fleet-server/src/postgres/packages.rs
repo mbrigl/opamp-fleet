@@ -830,7 +830,7 @@ mod tests {
     /// On PostgreSQL an entry whose blob went while it was uploaded is refused as an invalid
     /// request and one for a Package that is not stored as not found, whatever the database
     /// wrote around the message: what the REST API answers `400` and `404`, as on the filesystem.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn an_entry_refused_on_postgres_keeps_its_kind() {
         use crate::packages::Refusal;

@@ -131,7 +131,7 @@ pub async fn serve_guarded(
 
 /// The Agent type every scaffolded Agent reports as `service.name` (ADR-0017). It is a constant
 /// because a type describes a *kind* of Agent: the test fleet is one kind of thing on many hosts,
-/// which is also what makes one package able to reach several of them (ADR-0033).
+/// which is also what makes one package able to reach several of them (ADR-0039).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub const AGENT_TYPE: &str = "io.opentelemetry.collector";
 
@@ -169,7 +169,7 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
                         value: Some(any_value::Value::StringValue("linux".to_string())),
                     }),
                 },
-                // The other half of the Platform a package is fitted against (ADR-0033). An Agent
+                // The other half of the Platform a package is fitted against (ADR-0039). An Agent
                 // reporting no `host.arch` fits no artifact at all, which is its own test.
                 KeyValue {
                     key: "host.arch".to_string(),

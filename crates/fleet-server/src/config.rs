@@ -61,7 +61,7 @@ pub struct ServerConfig {
     /// Refused at startup, like `config_dir` (ADR-0023). Read only so that a leftover key can be
     /// named.
     pub packages_dir: Option<IgnoredAny>,
-    /// How the Server checks the signatures on its Package entries (ADR-0033).
+    /// How the Server checks the signatures on its Package entries (ADR-0039).
     #[serde(default)]
     pub packages: PackagesConfig,
     /// Where the artifacts' bytes are kept: the filesystem under `data_dir`, or a bucket of an
@@ -73,7 +73,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub database: DatabaseConfig,
     /// Refused at startup: every package is offered as a path the Client resolves against its own
-    /// endpoint, and a Client downloads from no other host (ADR-0033). Read only so that a leftover
+    /// endpoint, and a Client downloads from no other host (ADR-0039). Read only so that a leftover
     /// key can be named.
     pub advertised_url: Option<IgnoredAny>,
     /// The largest OpAMP message the Server accepts or sends, on either transport and in either
@@ -81,13 +81,13 @@ pub struct ServerConfig {
     /// configurable — a fleet of small status reports can be served with far less.
     #[serde(default = "default_max_message_size")]
     pub max_message_size_bytes: usize,
-    /// The largest package artifact the REST API accepts on upload (ADR-0033). Nothing to do with
+    /// The largest package artifact the REST API accepts on upload (ADR-0039). Nothing to do with
     /// the OpAMP message limit above: a package is a *program*, routinely hundreds of megabytes,
     /// and it travels over the REST plane, never in an OpAMP message.
     #[serde(default = "default_max_package_size")]
     pub max_package_size_bytes: usize,
     /// The total size of all stored package artifacts the REST API keeps before it refuses a new
-    /// upload (ADR-0033). Where `max_package_size_bytes` bounds one artifact, this bounds the whole
+    /// upload (ADR-0039). Where `max_package_size_bytes` bounds one artifact, this bounds the whole
     /// store — so a caller cannot fill the disk by uploading many artifacts under distinct names.
     /// `0` is refused at load.
     #[serde(default = "default_max_total_package_size")]
@@ -345,7 +345,7 @@ impl AuditConfig {
     }
 }
 
-/// The `[packages]` section (ADR-0033): the operator's public key, against which the Server checks
+/// The `[packages]` section (ADR-0039): the operator's public key, against which the Server checks
 /// every entry's signature — as feedback only. The Agent's own check decides what is installed.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -878,7 +878,7 @@ pub fn read_secret_file(key: &str, file: &Path) -> Result<zeroize::Zeroizing<Str
 
 /// The Ed25519 adapter behind [`SignatureVerifier`](crate::packages::SignatureVerifier): the
 /// operator's public key from `[packages] verification_key`, checked with `ring`, the provider the
-/// Client verifies with (ADR-0033).
+/// Client verifies with (ADR-0039).
 pub struct Ed25519Verifier(Vec<u8>);
 
 impl Ed25519Verifier {
@@ -1500,7 +1500,7 @@ impl ServerConfig {
             return Err(
                 "advertised_url is removed — every package is offered as a path the Client \
                  resolves against its own Server, and a Client downloads from no other host \
-                 (ADR-0033); remove the key"
+                 (ADR-0039); remove the key"
                     .to_string(),
             );
         }
@@ -1516,7 +1516,7 @@ impl ServerConfig {
         if let Some(auth) = &self.rest.auth {
             auth.check()?;
         }
-        // A malformed key fails startup, not the first signature it would have checked (ADR-0033).
+        // A malformed key fails startup, not the first signature it would have checked (ADR-0039).
         self.packages.verification_key()?;
         self.blobs.check()?;
         self.database.check()?;
@@ -2158,8 +2158,8 @@ mod tests {
 
     /// `[packages] verification_key` is the operator's public key, hex, as the Client's key of the
     /// same name: absent by default, decoded when given, and a malformed one fails startup naming
-    /// it (ADR-0033 clause 19).
-    /// Verifies: ADR-0033
+    /// it (ADR-0039 clause 19).
+    /// Verifies: ADR-0039
     #[test]
     fn a_malformed_verification_key_fails_startup() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
@@ -2187,7 +2187,7 @@ mod tests {
 
     /// Every package is offered as a path, so a leftover `advertised_url` is named and refused
     /// rather than ignored: it would tell the operator a mirror is in use that no Client reaches.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_leftover_advertised_url_fails_startup_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");

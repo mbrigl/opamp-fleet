@@ -109,7 +109,7 @@ pub struct Engine {
     /// arrives per Agent but the settings are connection-scoped, so the Engine keeps exactly one
     /// pending offer — n Agents receiving the same offer verify and switch once.
     pending_connection_offer: Option<ConnectionSettingsOffers>,
-    /// Packages awaiting the transport's download and verification (ADR-0033), each tagged with
+    /// Packages awaiting the transport's download and verification (ADR-0039), each tagged with
     /// the owning Agent's index so the verified artifact routes back to the right Supervisor.
     pending_package_downloads: Vec<(usize, PackageDownload)>,
     /// How the Client updates *itself* (ADR-0019). Unarmed when `[packages] self_update = false`, in
@@ -361,19 +361,19 @@ impl Engine {
         self.pending_connection_offer.take()
     }
 
-    /// Whether a package waits for the transport to download it (ADR-0033).
+    /// Whether a package waits for the transport to download it (ADR-0039).
     #[must_use]
     pub fn has_package_downloads(&self) -> bool {
         !self.pending_package_downloads.is_empty()
     }
 
-    /// The packages the transport must download and verify (ADR-0033), each with its Agent's
+    /// The packages the transport must download and verify (ADR-0039), each with its Agent's
     /// index — drained so each is dispatched once.
     pub fn take_package_downloads(&mut self) -> Vec<(usize, PackageDownload)> {
         std::mem::take(&mut self.pending_package_downloads)
     }
 
-    /// Records download progress for the Agent whose package is being fetched (ADR-0033), so the
+    /// Records download progress for the Agent whose package is being fetched (ADR-0039), so the
     /// next report carries `Downloading` with its details instead of a silent `Installing`.
     pub fn package_downloading(
         &mut self,
@@ -386,7 +386,7 @@ impl Engine {
         }
     }
 
-    /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0033),
+    /// Hands a downloaded, verified artifact to the owning Agent's Supervisor to apply (ADR-0039),
     /// or — for the Client's own Agent — installs it as a new version of the Client (ADR-0019).
     /// The Supervisor's `PackageApplied` event closes the lifecycle. A missing adapter, or one not
     /// accepting commands, fails the install (reported, not silent).
@@ -465,7 +465,7 @@ impl Engine {
         }
     }
 
-    /// A package download or verification failed (ADR-0033): the owning Agent reports
+    /// A package download or verification failed (ADR-0039): the owning Agent reports
     /// `InstallFailed` — a rejected package is a report, not a silence.
     pub fn package_download_failed(&mut self, index: usize, hash: Vec<u8>, error: String) {
         if let Some(agent) = self.agents.get_mut(index) {
@@ -498,7 +498,7 @@ impl Engine {
 
     /// Whether any Agent this Engine runs takes Server-offered packages — a self-update or a managed
     /// process's package. What the startup check uses to decide whether an unconfigured verification
-    /// key is worth warning about (ADR-0033).
+    /// key is worth warning about (ADR-0039).
     pub fn installs_packages(&self) -> bool {
         self.agents.iter().any(|a| a.state.accepts_packages())
     }

@@ -116,7 +116,7 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
     common::stop_client(&mut client);
 }
 
-/// ADR-0033 end to end: a Supervisor configured for a package that is a whole tree runs the
+/// ADR-0039 end to end: a Supervisor configured for a package that is a whole tree runs the
 /// program from inside it. The tree is put in place here rather than delivered, because what this
 /// has to prove is the half the unit tests cannot — that the path the *configuration* resolves to
 /// at startup is the path the process is actually spawned from, across the process boundary.

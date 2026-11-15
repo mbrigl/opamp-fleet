@@ -27,7 +27,9 @@ admits only the process its Supervisor started (ADR-0016).
 
 Out of scope, and deliberately so: **authorization and multi-tenancy**, which the specification
 names as non-goals, with one bound on the Agent plane: a host receives from the Server only the
-configurations and packages released to an Agent it speaks for (ADR-0033), on the Server and from
+configurations and packages released to an Agent it speaks for
+(ADR-0039),
+on the Server and from
 a Gateway's package cache alike. The boundary is worth
 stating precisely because the host binding (ADR-0027 clause 11) runs close to it — *which Agent is
 speaking*, and so *what its host may receive from the Server*, is authentication and belongs here;
@@ -70,7 +72,9 @@ has:
   failures from one address are answered `429` before admission checks anything else, on both
   planes. On the Agent plane the TLS handshake and its client-certificate verification come
   before that, and a failed handshake is not counted as an admission failure.
-- **Nothing installed unsigned, and downloads only from the Client's own Server** (ADR-0033): a
+- **Nothing installed unsigned, and downloads only from the Client's own Server**
+  (ADR-0039):
+  a
   Client without the verification key takes no package, the Server offers no entry
   that carries no signature, and every download hop is held to `https://` and the Client's own
   Server origin before a request is sent. Every artifact is uploaded: the Server sends no request
@@ -242,7 +246,9 @@ has:
   so a Server cannot move the fleet to a host only a public CA vouches for.
 - **The Supervisor Endpoint admits only the process its Supervisor started** (ADR-0016): a token
   made at every start, handed to the process in its environment, asked of every connection.
-- **A package signature covers the Agent type, the version and the hash** (ADR-0033): a signed
+- **A package signature covers the Agent type, the version and the hash**
+  (ADR-0039):
+  a signed
   artifact installs as its own type's program at its own version and nowhere else. **A Package
   version is SemVer** (ADR-0034): the Server creates no other, `package sign` signs no other, and a
   Supervisor takes no other. A Supervisor refuses a package whose version SemVer orders below the
@@ -365,7 +371,9 @@ unaudited; how a Client that knows only Ed25519 keeps verifying a package and a 
 signature grows; where the Client's second verification key lives; and what has to be true before
 the certificates move — ML-DSA in TLS 1.3 as a standard, issuance through rcgen, verification in
 the other OpAMP implementations, and a browser on the Operator plane. It would supersede
-ADR-0012 (the TLS provider), [ADR-0033](adr/0033-packages-signatures-and-delivery.md) (the package
+ADR-0012 (the TLS provider),
+[ADR-0039](adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)
+(the package
 signature), [ADR-0034](adr/0034-package-versions-high-water-mark-and-floor.md) (the floor's
 signature) and
 [ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)

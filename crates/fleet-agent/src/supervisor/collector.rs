@@ -133,7 +133,7 @@ impl Plugin for CollectorPlugin {
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
             retain_previous: ctx.retain_previous,
-            // A package (ADR-0033) swaps this Collector's program — one file, or a whole tree.
+            // A package (ADR-0039) swaps this Collector's program — one file, or a whole tree.
             install: Some(install),
             archive_key: ctx.archive_key,
             // The Collector states its version on `--version`, so even one without the

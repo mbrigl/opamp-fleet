@@ -44,9 +44,9 @@ sha2 = "0.11"
 hex = "0.4"
 uuid = { version = "1", features = ["v7"] }
 # Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (ADR-0012) — and,
-# on the Client, the gzip layer of a `.tar.gz` package artifact (ADR-0033).
+# on the Client, the gzip layer of a `.tar.gz` package artifact (ADR-0039).
 flate2 = "1"
-# Opening a `.7z` package artifact, encrypted or not (ADR-0033). Pure Rust; default features are
+# Opening a `.7z` package artifact, encrypted or not (ADR-0039). Pure Rust; default features are
 # off because they pull `bzip2`, which links a *system* library — `aes256` is the RustCrypto AES
 # this needs, and LZMA/LZMA2 decoding is in the base. That keeps what ADR-0011 and ADR-0012
 # actually secured: no system dependency, no cmake, no `protoc`. This build is not free of C —
@@ -57,13 +57,13 @@ flate2 = "1"
 # produce. Only `crates/fleet-tools` and the Client's own tests ask for it (ADR-0008); the
 # Client daemon never encodes, and does not enable it.
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["aes256"] }
-# Reading a `.zip` package artifact (ADR-0033 clause 62) — the container some agents publish their
+# Reading a `.zip` package artifact (ADR-0039 clause 62) — the container some agents publish their
 # portable Windows build in. Default features pull C-binding codecs (bzip2, xz, zstd), so only
 # `deflate` is taken, which decompresses on the `flate2`/`miniz_oxide` chain already present;
 # reading stays pure Rust (ADR-0011, ADR-0012). Read-only and unencrypted: the Client never
-# writes a zip, and a confidential artifact is a `.7z` (ADR-0033).
+# writes a zip, and a confidential artifact is a `.7z` (ADR-0039).
 zip = { version = "9", default-features = false, features = ["deflate"] }
-# Reading the tar inside a `.tar.gz` package artifact (ADR-0033). Pure Rust and no system library,
+# Reading the tar inside a `.tar.gz` package artifact (ADR-0039). Pure Rust and no system library,
 # which is what ADR-0011 and ADR-0012 keep this build free of; the Client extracts one member and
 # never writes a path the archive chose.
 tar = "0.4"
@@ -90,7 +90,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 # `tls12` stays enabled because reqwest requires it; TLS 1.3 alone is enforced where the provider and
 # every configuration are built (`opamp::tls`, ADR-0008).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-# Ed25519 verification of downloaded package artifacts (ADR-0033) — the same ring already vendored
+# Ed25519 verification of downloaded package artifacts (ADR-0039) — the same ring already vendored
 # for TLS, used directly, so no new crypto backend enters the build.
 ring = "0.17"
 # Operators' Basic passwords are kept as Argon2id hashes, never in clear (ADR-0026); the

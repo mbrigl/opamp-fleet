@@ -356,7 +356,7 @@ struct Parked {
 struct Supervision {
     /// The Managed Process, while one runs.
     child: Option<ManagedChild>,
-    /// Consecutive start failures, and when the current process started (ADR-0033): together they
+    /// Consecutive start failures, and when the current process started (ADR-0039): together they
     /// stop a program that keeps crashing from being restarted forever. A process that runs
     /// stably clears the streak; a command (config, package, restart) resets it.
     policy: RestartPolicy,
@@ -502,7 +502,7 @@ impl InstallTarget {
         let (live, backup) = (self.live(), self.backup());
         // A rename never lands on an occupied name: Windows refuses it outright, and a directory
         // rename would nest rather than replace. This also clears any *retained* predecessor
-        // (ADR-0033) and its marker — each Supervisor keeps only the immediately previous version.
+        // (ADR-0039) and its marker — each Supervisor keeps only the immediately previous version.
         self.drop_backup();
         match std::fs::rename(&live, &backup) {
             Ok(()) => Ok(true),
@@ -574,7 +574,7 @@ impl InstallTarget {
     }
 
     /// Puts back what ran before. Where nothing is there to put back, what is live stays, so a
-    /// failed rollback never empties `program/` (ADR-0033 clause 59).
+    /// failed rollback never empties `program/` (ADR-0039 clause 59).
     fn restore(&self) -> Result<(), String> {
         let (live, backup) = (self.live(), self.backup());
         if let Err(e) = std::fs::symlink_metadata(&backup) {
@@ -588,7 +588,7 @@ impl InstallTarget {
     /// Takes a package that was swapped in back out to its staged name, and puts back what ran
     /// before it (ADR-0021 clause 17). On an error what was live is live again: where the package
     /// cannot be taken out it stays, and where what ran before cannot be put back the package is
-    /// put back, so `program/` is never left empty (ADR-0033 clause 59).
+    /// put back, so `program/` is never left empty (ADR-0039 clause 59).
     fn take_back(&self, staged: &Staged, has_backup: bool) -> Result<(), String> {
         let live = self.live();
         std::fs::rename(&live, &staged.temp)
@@ -604,7 +604,7 @@ impl InstallTarget {
         Ok(())
     }
 
-    /// The marker beside a retained backup (ADR-0033): a sibling file holding the Unix-seconds
+    /// The marker beside a retained backup (ADR-0039): a sibling file holding the Unix-seconds
     /// deadline after which the backup may be swept. A file even for a tree, whose backup is a
     /// directory, so a restart can find the deadline without opening the tree.
     fn backup_marker(&self) -> PathBuf {
@@ -613,7 +613,7 @@ impl InstallTarget {
         PathBuf::from(raw)
     }
 
-    /// Keeps the backup and records when it may be deleted (ADR-0033). Persisted, so the deadline
+    /// Keeps the backup and records when it may be deleted (ADR-0039). Persisted, so the deadline
     /// survives a Client restart the way the self-update outcome marker does (ADR-0019).
     ///
     /// The marker is the Client's alone, `0600`, though it stands in `program/`, which the process
@@ -632,7 +632,7 @@ impl InstallTarget {
         let _ = std::fs::remove_file(self.backup_marker());
     }
 
-    /// Deletes a retained backup whose deadline has passed (ADR-0033). Best-effort; returns whether
+    /// Deletes a retained backup whose deadline has passed (ADR-0039). Best-effort; returns whether
     /// it removed one. An unreadable or absent marker leaves an unretained backup alone — only a
     /// backup this Runner deliberately retained carries a marker, and a marker whose value will not
     /// parse is treated as expired rather than kept forever.
@@ -747,13 +747,13 @@ pub struct Runner {
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// (ADR-0018's health-gated acknowledgement); zero acknowledges on start.
     pub apply_grace: Duration,
-    /// What an `ApplyPackage` swap replaces (ADR-0033) — one file, or a whole tree (ADR-0033).
+    /// What an `ApplyPackage` swap replaces (ADR-0039) — one file, or a whole tree (ADR-0039).
     /// `None` for a plugin with nothing swappable, which then reports a package `InstallFailed`.
     pub install: Option<InstallTarget>,
-    /// How long the version a successful update supersedes is kept before deletion (ADR-0033), so
+    /// How long the version a successful update supersedes is kept before deletion (ADR-0039), so
     /// an operator has a fallback window. Zero deletes it on success.
     pub retain_previous: Duration,
-    /// Opens an encrypted `.7z` artifact (ADR-0033); `None` when no key is configured.
+    /// Opens an encrypted `.7z` artifact (ADR-0039); `None` when no key is configured.
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
@@ -789,7 +789,7 @@ impl Runner {
             parked: None,
         };
         // Clear any predecessor whose retention window already elapsed while the Client was down
-        // (ADR-0033) — the deadline is wall-clock, so a restart is exactly when one may have passed.
+        // (ADR-0039) — the deadline is wall-clock, so a restart is exactly when one may have passed.
         self.sweep_backup();
         // What runs today, before it runs: a Collector without the opampextension never reports
         // its own version, and one that is not configured yet never even starts.
@@ -839,7 +839,7 @@ impl Runner {
                 }
                 command = self.commands.recv() => match command {
                     Some(ProcessCommand::ApplyConfig { config, span }) => {
-                        s.policy.fresh_chance(); // a new configuration (ADR-0033)
+                        s.policy.fresh_chance(); // a new configuration (ADR-0039)
                         s.backoff.reset();
                         // A configuration still owed its acknowledgement is superseded by this
                         // one, whose status the Agent reports from now on.
@@ -918,7 +918,7 @@ impl Runner {
                                 continue;
                             }
                         };
-                        s.policy.fresh_chance(); // a new package (ADR-0033)
+                        s.policy.fresh_chance(); // a new package (ADR-0039)
                         s.backoff.reset();
                         let (staged, checked) = prepared;
                         let package = Parked { staged, checked, version, hash, span };
@@ -940,7 +940,7 @@ impl Runner {
                     // is due at once (ADR-0021 clause 17).
                     Some(ProcessCommand::Restart) => {
                         stop(&mut s.child, self.stop_timeout, &self.name).await;
-                        s.policy.fresh_chance(); // an operator restart (ADR-0033)
+                        s.policy.fresh_chance(); // an operator restart (ADR-0039)
                         s.backoff.reset();
                         s.child = self.spawn_if_due(&mut s.waiting).await;
                         if s.child.is_some() {
@@ -988,7 +988,7 @@ impl Runner {
                         )))
                         .await;
                     // A process that had been up a while is ordinary supervision, not a start loop:
-                    // its exit clears the streak (ADR-0033). One that keeps exiting quickly does not,
+                    // its exit clears the streak (ADR-0039). One that keeps exiting quickly does not,
                     // so it is held after a few tries rather than restarted forever.
                     s.policy.exited(Instant::now());
                     if self.respawn_or_hold(&mut s, &mut shutdown).await {
@@ -1053,7 +1053,7 @@ impl Runner {
         }
     }
 
-    /// Swaps a staged package in, starts it and gates it (ADR-0033), and reports the outcome;
+    /// Swaps a staged package in, starts it and gates it (ADR-0039), and reports the outcome;
     /// a package that fails is rolled back to its predecessor, which is started again.
     ///
     /// Swapped in only once the second service is reached (ADR-0021 clause 17): until then the
@@ -1097,7 +1097,7 @@ impl Runner {
             span,
         } = package;
         // Swap the binary, restart, and health-gate on the apply grace — a binary that will not
-        // stay up is rolled back to the bytes it replaced (ADR-0033).
+        // stay up is rolled back to the bytes it replaced (ADR-0039).
         stop(&mut s.child, self.stop_timeout, &self.name).await;
         let swapped = self
             .swap_and_gate(staged, &version, &mut s.child, &mut s.waiting, shutdown)
@@ -1150,7 +1150,7 @@ impl Runner {
                         result: Err(error),
                     })
                     .await;
-                // The package's start failed, and counts as a failed start (ADR-0033 clause 60):
+                // The package's start failed, and counts as a failed start (ADR-0039 clause 60):
                 // what runs now — the predecessor, rolled back, or a first install kept in place
                 // — is started again once, unless the streak holds it, and stays supervised
                 // exactly as after a failed ApplyConfig. That start, not the package's, decides
@@ -1236,7 +1236,7 @@ impl Runner {
     }
 
     /// Swaps the staged artifact over the binary, respawns, and health-gates on the apply grace,
-    /// rolling the binary back on failure (ADR-0033). The process is already stopped. On success
+    /// rolling the binary back on failure (ADR-0039). The process is already stopped. On success
     /// `child` holds the running process; on failure the previous binary is restored (and the
     /// caller respawns it). The second service was reached just before; where it has gone by the
     /// start, or goes during the grace, the package is taken back out to its staged name and what
@@ -1342,7 +1342,7 @@ impl Runner {
         self.conclude(target, has_backup, outcome)
     }
 
-    /// Concludes a swap on its gate's `outcome` (ADR-0033): rolls back to the predecessor after a
+    /// Concludes a swap on its gate's `outcome` (ADR-0039): rolls back to the predecessor after a
     /// failure, keeps it for the retention window after a success.
     fn conclude(&self, target: &InstallTarget, has_backup: bool, outcome: GraceOutcome) -> Swapped {
         match (&outcome, has_backup) {
@@ -1359,14 +1359,14 @@ impl Runner {
                 }
             }
             // No predecessor: a first install with nothing behind it. It is *not* rolled back
-            // (ADR-0033) — the verified program stays in place, reported InstallFailed, so a first
+            // (ADR-0039) — the verified program stays in place, reported InstallFailed, so a first
             // package that will not start does not empty `program/` and set the Server re-offering
             // it in a loop. Discarding it here would make that loop turn.
             (GraceOutcome::Failed(_), false) => {
                 warn!(supervisor = %self.name, "the first install would not start; kept in place, not rolled back (nothing to roll back to)");
             }
             // Applied: the predecessor is no longer what runs, but it is kept for the retention
-            // window (ADR-0033) so an operator has a fallback, then swept once its deadline passes.
+            // window (ADR-0039) so an operator has a fallback, then swept once its deadline passes.
             (_, true) => self.retain_backup(target),
             (_, false) => {}
         }
@@ -1394,7 +1394,7 @@ impl Runner {
     /// the service leaves it owed (ADR-0021 clause 17). Returns `true` when shutdown was requested
     /// meanwhile.
     ///
-    /// Only a program that ran and exited within the grace is started again (ADR-0033 clause 60):
+    /// Only a program that ran and exited within the grace is started again (ADR-0039 clause 60):
     /// a start that did not happen — the program is not there, or cannot be executed — has
     /// already said why in its health, and starting the same files again would only say so once
     /// more.
@@ -1439,12 +1439,12 @@ impl Runner {
         let exited_in_grace = ran && result.is_err();
         self.settle(config, result).await;
         // Stay supervised: a flaky-but-valid configuration is retried with backoff — but not
-        // forever (ADR-0033): a configuration that will not start is held after a few tries
+        // forever (ADR-0039): a configuration that will not start is held after a few tries
         // rather than spun on.
         exited_in_grace && self.respawn_or_hold(s, shutdown).await
     }
 
-    /// Keeps the version a successful update superseded, or drops it now (ADR-0033). With retention
+    /// Keeps the version a successful update superseded, or drops it now (ADR-0039). With retention
     /// off it is deleted at once; otherwise the backup stays and a marker records the deadline
     /// `now + retain_previous`, swept once it passes.
     fn retain_backup(&self, target: &InstallTarget) {
@@ -1461,7 +1461,7 @@ impl Runner {
         );
     }
 
-    /// Deletes a retained predecessor whose deadline has passed (ADR-0033). Called at startup and on
+    /// Deletes a retained predecessor whose deadline has passed (ADR-0039). Called at startup and on
     /// a periodic tick, so the window is honoured whether or not the Client restarts within it.
     fn sweep_backup(&self) {
         if let Some(target) = &self.install {
@@ -1472,7 +1472,7 @@ impl Runner {
     }
 
     /// Respawns after a start failure — or, once the [`RestartPolicy`] says the process keeps
-    /// failing to stay up, **holds** it down instead of spinning (ADR-0033). A held Supervisor
+    /// failing to stay up, **holds** it down instead of spinning (ADR-0039). A held Supervisor
     /// reports unhealthy and waits: the next configuration, package, or restart is a fresh chance
     /// and resets the streak. Returns `true` when shutdown was requested mid-wait.
     ///
@@ -1501,7 +1501,7 @@ impl Runner {
         }
     }
 
-    /// Holds the program down after `failures` failed starts in a row, and says so (ADR-0033
+    /// Holds the program down after `failures` failed starts in a row, and says so (ADR-0039
     /// clause 60): it is not started again until a new configuration, package, or restart. A
     /// configuration owed its acknowledgement — held after the package that was to be its start
     /// failed — is no longer waited for: no start comes to decide it, so it is `FAILED`
@@ -1813,7 +1813,7 @@ fn why_unreached(error: &std::io::Error) -> &'static str {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How often a running Supervisor re-checks whether a retained predecessor's window has passed
-/// (ADR-0033). Coarse on purpose: the window is measured in hours to a day, and the startup sweep
+/// (ADR-0039). Coarse on purpose: the window is measured in hours to a day, and the startup sweep
 /// covers a Client that was down when a deadline elapsed.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -2090,9 +2090,9 @@ enum GraceOutcome {
 /// directory an operator has put elsewhere; either way the stream below is the fallback, and the
 /// error that matters is reported from there rather than from the attempt.
 ///
-/// The artifact may be the program or an archive holding it (ADR-0033). An archive is opened here,
+/// The artifact may be the program or an archive holding it (ADR-0039). An archive is opened here,
 /// where the binary's name is known, and the member of that name — or at the place `member` names,
-/// where the kind knows it (ADR-0033 clause 55) — is what gets
+/// where the kind knows it (ADR-0039 clause 55) — is what gets
 /// installed — nothing
 /// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
 /// its author published. Unpacking always writes; only the raw case can be a move.
@@ -2114,7 +2114,7 @@ fn stage_executable(
         install::make_executable(&temp)?;
     } else {
         // Where the kind knows the member's place in the archive, that place; otherwise the
-        // program's own file name (ADR-0033 clause 55).
+        // program's own file name (ADR-0039 clause 55).
         let member = match member {
             Some(member) => member.to_string(),
             None => path
@@ -2132,7 +2132,7 @@ fn stage_executable(
     Ok(temp)
 }
 
-/// Unpacks a package that is a whole directory tree into `<root>/tree` (ADR-0033).
+/// Unpacks a package that is a whole directory tree into `<root>/tree` (ADR-0039).
 ///
 /// The tree is built in a staging directory first and moved into place by one rename, so the live
 /// name is either the old tree or the new one and never a half-written mixture. The live name is
@@ -2316,7 +2316,7 @@ pub(crate) fn now_ns() -> u64 {
         .unwrap_or(0)
 }
 
-/// Wall-clock seconds since the Unix epoch — what a retention deadline (ADR-0033) is written and
+/// Wall-clock seconds since the Unix epoch — what a retention deadline (ADR-0039) is written and
 /// compared in, so it survives a Client restart.
 fn now_unix() -> u64 {
     SystemTime::now()
@@ -2476,8 +2476,8 @@ mod tests {
     /// After a package that failed, only a predecessor that ran and exited within the grace is
     /// started again: one that does not start at all — its interpreter is missing — has said why
     /// in its health, and is not tried again, with no configuration owed just as with one
-    /// (ADR-0033 clause 60).
-    /// Verifies: ADR-0033
+    /// (ADR-0039 clause 60).
+    /// Verifies: ADR-0039
     #[cfg(unix)]
     #[tokio::test]
     async fn a_predecessor_that_does_not_start_after_a_failed_package_is_not_started_again() {
@@ -2594,7 +2594,7 @@ mod tests {
     /// failed health in between for a Server to read as a program that does not start. One that
     /// stays busy past the retries says so, once.
     /// Linux alone refuses to exec a file held open for writing, so the race exists only there.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_start_retried_while_the_program_is_busy_reports_no_failure_in_between() {
@@ -3199,8 +3199,8 @@ mod tests {
     /// A single file whose kind names its place is installed from that place, past a directory and
     /// another file of the program's name ahead of it; without the place the same archive holds
     /// the program twice and is refused, and nothing staged is left behind
-    /// (ADR-0033 clause 55).
-    /// Verifies: ADR-0033
+    /// (ADR-0039 clause 55).
+    /// Verifies: ADR-0039
     #[test]
     fn a_member_target_installs_the_file_at_its_kinds_place() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3257,9 +3257,9 @@ mod tests {
         );
     }
 
-    /// ADR-0033: a retained predecessor is swept only once its deadline passes, never before, and
+    /// ADR-0039: a retained predecessor is swept only once its deadline passes, never before, and
     /// the marker goes with it.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_retained_backup_is_swept_only_after_its_deadline() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3283,8 +3283,8 @@ mod tests {
     }
 
     /// A package taken back out whose predecessor cannot be put back — here it is gone — is put
-    /// back itself, a file and a tree alike: `program/` is never left empty (ADR-0033 clause 59).
-    /// Verifies: ADR-0033
+    /// back itself, a file and a tree alike: `program/` is never left empty (ADR-0039 clause 59).
+    /// Verifies: ADR-0039
     #[test]
     fn a_package_taken_back_whose_predecessor_cannot_be_put_back_stays_live() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3330,7 +3330,7 @@ mod tests {
 
     /// A backup with no marker is not something this Runner retained (a half-finished install
     /// leaves one), so a sweep leaves it alone.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_sweep_leaves_an_unmarked_backup_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3342,7 +3342,7 @@ mod tests {
 
     /// Dropping a backup takes its marker too, so a superseding update does not leave a dangling
     /// deadline behind.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn dropping_a_backup_clears_its_marker() {
         let dir = tempfile::tempdir().expect("tempdir");

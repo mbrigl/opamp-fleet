@@ -1,6 +1,6 @@
 //! The supervision `Runner` (ADR-0018) across everything it does *to a host*: spawn and watchdog,
-//! the health-gated apply, the binary swap and its rollback (ADR-0033), and the tree install
-//! (ADR-0033).
+//! the health-gated apply, the binary swap and its rollback (ADR-0039), and the tree install
+//! (ADR-0039).
 //!
 //! An integration test rather than a unit test, and that is the reason ADR-0008 exists: these cases
 //! need the supervision core **and** a real program to spawn, and Cargo hands a test the path of a
@@ -1338,7 +1338,7 @@ async fn apply_config_restarts_and_acknowledges(via: Via) {
 }
 both!(apply_config_restarts_and_acknowledges);
 
-// ── The binary swap (ADR-0033) ───────────────────────────────────────────────
+// ── The binary swap (ADR-0039) ───────────────────────────────────────────────
 
 /// A Runner that swaps one file and runs whatever is at it.
 fn binary_harness(via: Via, binary: &Path, apply_grace: Duration) -> Harness {
@@ -1423,7 +1423,7 @@ async fn a_package_that_cannot_run_here_is_refused_without_stopping_what_runs(vi
 }
 both!(a_package_that_cannot_run_here_is_refused_without_stopping_what_runs);
 
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn apply_package_swaps_the_binary_and_acknowledges_installed(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1455,9 +1455,9 @@ async fn apply_package_swaps_the_binary_and_acknowledges_installed(via: Via) {
 }
 both!(apply_package_swaps_the_binary_and_acknowledges_installed);
 
-/// The case ADR-0033 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
+/// The case ADR-0039 exists for: what upstream publishes is a `.tar.gz`, not a bare binary. The
 /// Supervisor takes the member named after its own binary and installs that.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn a_package_delivered_as_a_tar_gz_is_unpacked_and_installed(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1502,7 +1502,7 @@ both!(a_package_delivered_as_a_tar_gz_is_unpacked_and_installed);
 /// not installed yet, and the Server delivers it. A plugin with nothing to run — a Collector
 /// awaiting its configuration — must not turn that into a failed install, which would delete the
 /// binary that was just put in place.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("otelcol"));
@@ -1538,7 +1538,7 @@ async fn an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds(via: V
 }
 both!(an_install_with_nothing_to_run_yet_keeps_the_binary_and_succeeds);
 
-// Verifies: ADR-0033, G-10
+// Verifies: ADR-0039, G-10
 async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1567,10 +1567,10 @@ async fn a_package_that_will_not_stay_up_is_rolled_back_and_fails(via: Via) {
 }
 both!(a_package_that_will_not_stay_up_is_rolled_back_and_fails);
 
-/// ADR-0033: a *first* install that will not start has nothing to roll back to, so it is **kept**
+/// ADR-0039: a *first* install that will not start has nothing to roll back to, so it is **kept**
 /// rather than discarded — the verified binary stays in `program/`. Discarding it would empty the
 /// directory and set the Server re-offering the same artifact in a loop.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn a_first_install_that_will_not_start_is_kept_not_discarded(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1585,7 +1585,7 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded(via: Via) {
     // Not rolled back to nothing: the verified program is still there.
     assert!(
         binary.exists(),
-        "the first install is kept, not discarded (ADR-0033)"
+        "the first install is kept, not discarded (ADR-0039)"
     );
     assert_eq!(
         std::fs::read(&binary).expect("read"),
@@ -1598,10 +1598,10 @@ async fn a_first_install_that_will_not_start_is_kept_not_discarded(via: Via) {
 }
 both!(a_first_install_that_will_not_start_is_kept_not_discarded);
 
-/// ADR-0033: a program that keeps failing to start is **held** after a few tries, not restarted
+/// ADR-0039: a program that keeps failing to start is **held** after a few tries, not restarted
 /// forever — the loop that hammered the Server with re-downloads is bounded. A held Supervisor
 /// reports it plainly.
-// Verifies: ADR-0033
+// Verifies: ADR-0039
 async fn a_program_that_keeps_crashing_is_held_not_looped(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1647,11 +1647,11 @@ async fn offer_package(harness: &Harness, dir: &Path, bytes: &[u8], version: &st
         .expect("send");
 }
 
-/// ADR-0033 clause 60: a failed package is a failed start like any other. Where the predecessor it
+/// ADR-0039 clause 60: a failed package is a failed start like any other. Where the predecessor it
 /// is rolled back to will not start either, the Supervisor holds after three failed starts in a
 /// row — the package's and two of the predecessor's — rather than granting the predecessor three
 /// of its own after the package's.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_too(via: Via) {
     use fleet_agent::supervisor::restart::MAX_CRASH_RESTARTS;
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1696,9 +1696,9 @@ async fn a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_to
 }
 both!(a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_too);
 
-/// ADR-0033 clause 59: the predecessor a failed package is rolled back to is started once, and
+/// ADR-0039 clause 59: the predecessor a failed package is rolled back to is started once, and
 /// that process stays; no second respawn replaces it while it runs.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn a_failed_package_starts_its_predecessor_exactly_once(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1746,9 +1746,9 @@ async fn a_failed_package_starts_its_predecessor_exactly_once(via: Via) {
 }
 both!(a_failed_package_starts_its_predecessor_exactly_once);
 
-/// ADR-0033: a successful update does not delete the version it superseded — it is retained for the
+/// ADR-0039: a successful update does not delete the version it superseded — it is retained for the
 /// window, with a marker recording the deadline, so an operator has a fallback.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn a_successful_update_keeps_the_previous_version_for_the_window(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let binary = dir.path().join(program_name("agent"));
@@ -1794,7 +1794,7 @@ async fn a_successful_update_keeps_the_previous_version_for_the_window(via: Via)
 }
 both!(a_successful_update_keeps_the_previous_version_for_the_window);
 
-// ── The tree install (ADR-0033) ──────────────────────────────────────────────
+// ── The tree install (ADR-0039) ──────────────────────────────────────────────
 
 /// Writes a `.tar.gz` holding `members` — (path inside the archive, contents).
 fn tar_gz(path: &Path, members: &[(String, Vec<u8>)]) {
@@ -1814,7 +1814,7 @@ fn tar_gz(path: &Path, members: &[(String, Vec<u8>)]) {
 }
 
 /// A release-shaped `.tar.gz`: the program and a library it "loads", under one version-named
-/// wrapper directory (ADR-0033).
+/// wrapper directory (ADR-0039).
 fn tree_release(path: &Path, wrapper: &str, program: &Path, library: &[u8]) {
     tar_gz(
         path,
@@ -1845,9 +1845,9 @@ fn tree_harness(via: Via, root: &Path) -> Harness {
     )
 }
 
-/// The case ADR-0033 exists for: an agent that is a program *plus* what it loads, arriving with
+/// The case ADR-0039 exists for: an agent that is a program *plus* what it loads, arriving with
 /// nothing on the host first — and then being replaced the same way.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn a_tree_package_lands_whole_and_replaces_the_one_before_it(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("program");
@@ -1902,7 +1902,7 @@ both!(a_tree_package_lands_whole_and_replaces_the_one_before_it);
 
 /// The health gate, one level up: a tree whose program will not stay up puts the *whole* previous
 /// tree back — libraries included, since half of each would run nothing.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn a_tree_that_will_not_stay_up_is_rolled_back_whole(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("program");
@@ -1948,7 +1948,7 @@ both!(a_tree_that_will_not_stay_up_is_rolled_back_whole);
 
 /// The archive names a member the configuration does not — refused, with the old tree left exactly
 /// where it was.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 async fn a_tree_missing_the_configured_program_is_refused_and_changes_nothing(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path().join("program");
@@ -2428,7 +2428,7 @@ mod an_apply_while_the_second_service_is_away {
     }
 
     /// [`a_package_waits_staged_while_the_service_is_away_and_is_swapped_in_once_it_is_back`] for a
-    /// package that is a tree (ADR-0033 clause 56): staged beside what runs and kept, the whole
+    /// package that is a tree (ADR-0039 clause 56): staged beside what runs and kept, the whole
     /// previous tree in place while the service is away, and swapped in whole once it is back —
     /// here it survives its grace and is `Installed`.
     /// Verifies: ADR-0021
@@ -2534,10 +2534,10 @@ mod an_apply_while_the_second_service_is_away {
         shut_down(away).await;
     }
 
-    /// The predecessor a successful update retained (ADR-0033 clause 61) outlasts the retries a
+    /// The predecessor a successful update retained (ADR-0039 clause 61) outlasts the retries a
     /// package that waits for the second service makes: one that does not reach the service sets
     /// nothing aside. The swap once the service is back replaces it, as any next update does.
-    /// Verifies: ADR-0033, ADR-0021
+    /// Verifies: ADR-0039, ADR-0021
     #[tokio::test]
     async fn a_retained_predecessor_outlasts_the_retries_while_a_package_waits() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2601,7 +2601,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A configuration whose retry reaches the second service but whose program does not start —
     /// it is not there — is `FAILED`, as the apply itself would have been, and is not started
-    /// again: a respawn is for a program that ran and exited within the grace (ADR-0033 clause 60), and a start that did not happen has nothing to respawn.
+    /// again: a respawn is for a program that ran and exited within the grace (ADR-0039 clause 60), and a start that did not happen has nothing to respawn.
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_retry_whose_program_does_not_start_fails_the_configuration_and_respawns_nothing() {
@@ -2745,8 +2745,8 @@ mod an_apply_while_the_second_service_is_away {
 
     /// The second service goes during a package's apply grace, and the predecessor the package
     /// would be taken back out for cannot be put back — it is gone. The package stays live and is
-    /// reported `InstallFailed`: `program/` is never left empty (ADR-0033 clause 59).
-    /// Verifies: ADR-0033, ADR-0021
+    /// reported `InstallFailed`: `program/` is never left empty (ADR-0039 clause 59).
+    /// Verifies: ADR-0039, ADR-0021
     #[tokio::test]
     async fn a_package_whose_predecessor_cannot_be_put_back_stays_live() {
         let (mut away, service) = running(&stub_agent(), Duration::from_secs(3)).await;

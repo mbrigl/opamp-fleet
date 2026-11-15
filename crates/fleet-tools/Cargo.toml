@@ -24,13 +24,13 @@ opamp = { workspace = true, features = ["client"] }
 fleet-agent = { path = "../fleet-agent" }
 # The PKCS#11 primitives the Server and the operator program share (ADR-0026).
 fleet-core = { workspace = true, features = ["pkcs11"] }
-# ADR-0033: `pack` writes the containers a Client can open, so it needs the *writers* — `compress`
+# ADR-0039: `pack` writes the containers a Client can open, so it needs the *writers* — `compress`
 # for 7z, and the gzip/tar pair for `.tar.gz` and for the tree `opamp-fleetctl package fetch`
 # repacks.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 flate2.workspace = true
 tar.workspace = true
-# ADR-0033: package signatures are raw Ed25519 over the artifact bytes; `keygen`/`sign` produce
+# ADR-0039: package signatures are raw Ed25519 over the artifact bytes; `keygen`/`sign` produce
 # exactly what the Client verifies.
 ring.workspace = true
 sha2.workspace = true
@@ -59,7 +59,7 @@ reqwest.workspace = true
 rustls.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
-# ADR-0033: the signing file is read strictly — unknown fields refused — which derive states in
+# ADR-0039: the signing file is read strictly — unknown fields refused — which derive states in
 # one line per type rather than in hand-written checks over a `serde_json::Value`.
 serde.workspace = true
 # ADR-0014: the passwords and keys these tools read and write are held in buffers wiped on drop.

@@ -70,7 +70,7 @@ sysinfo = { workspace = true, features = ["network"] }
 # its WebSocket upgrade is `opamp`'s own (ADR-0008). The HTTP engine under it — hyper, tower,
 # http-body — is already linked through reqwest; this adds the routing layer.
 axum.workspace = true
-# ADR-0033: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
+# ADR-0039: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
 # encrypted `.7z` with the key from `[packages] archive_key`.
 flate2.workspace = true
 tar.workspace = true

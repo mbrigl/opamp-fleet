@@ -1,7 +1,7 @@
 //! The Client replacing its own binary on the ADR-0021 version directories (ADR-0019): the
 //! [`SelfUpdater`] adapter and the start-up check of the process that comes after it.
 //!
-//! Updating a Managed Process is done by a Supervisor that outlives it (ADR-0033): stop, swap,
+//! Updating a Managed Process is done by a Supervisor that outlives it (ADR-0039): stop, swap,
 //! restart, watch, roll back. Nothing here outlives anything — the process that installs the
 //! package is the process that has to exit for the install to take effect. So the work is split
 //! across the restart, and this module owns both halves:
@@ -240,7 +240,7 @@ pub fn install(
 
     // Refuse a downgrade. An offer for an older release than the one running — even a genuinely
     // signed one — is how a compromised Server pushes a build with a known vulnerability back onto a
-    // fleet; the Ed25519 signature covers the Agent type, the version and the hash (ADR-0033), which
+    // fleet; the Ed25519 signature covers the Agent type, the version and the hash (ADR-0039), which
     // ties an artifact to its own version but says nothing of how that version orders against the
     // running one, so an old release stays validly signed forever. A rebuild of the same release
     // (Equal) and any newer one still install. Rollback to the *previous* version is a separate
@@ -339,7 +339,7 @@ fn stage(
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let binary = dir.join(BINARY_FILENAME);
-    // The artifact is the program or an archive holding it (ADR-0033) — the same shapes a Managed
+    // The artifact is the program or an archive holding it (ADR-0039) — the same shapes a Managed
     // Process's package comes in, which is why the unpacking is shared with the Supervisor's swap.
     install::write_program(artifact, &binary, BINARY_FILENAME, archive_key)?;
 
@@ -975,7 +975,7 @@ mod tests {
         probe(&binary, "0.1.1").expect("the release number is what an operator uploads");
         probe(&binary, "0.1.1+799e36a").expect("and the full string still works");
         // A rebuild of the same release passes too; which bytes arrived is the content hash's
-        // question (ADR-0033), never this one.
+        // question (ADR-0039), never this one.
         probe(&binary, "0.1.1+deadbee").expect("same release, other build");
     }
 

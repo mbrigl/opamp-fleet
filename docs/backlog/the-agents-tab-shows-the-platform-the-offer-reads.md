@@ -3,7 +3,8 @@
 **Kind:** defect.
 
 **Observed.** The fleet search reads an Agent's platform as `Platform::reported` folds it
-(ADR-0033 clauses 6 and 14), so an Agent that reports `linux` and `x86_64` is found by
+(ADR-0039
+clauses 6 and 14), so an Agent that reports `linux` and `x86_64` is found by
 `linux-amd64`. The OS column of the Agents tab still builds the platform itself, in `platformOf`
 in `crates/fleet-server/static/index.html`: raw, and from the non-identifying attributes only. The
 row shows `linux-x86_64`, and a search for that text no longer finds the row. An Agent that

@@ -1,5 +1,5 @@
 //! `opamp-fleetctl package fetch` — turns an agent release into package artifacts this fleet can
-//! install, and optionally uploads them (ADR-0033, ADR-0036).
+//! install, and optionally uploads them (ADR-0039, ADR-0036).
 //!
 //! Getting a real agent into the fleet is a research task before it is a command: which repository
 //! publishes the binaries, what the assets are called this month, which checksum file goes with
@@ -12,7 +12,7 @@
 //! Two rules shape what it produces:
 //!
 //! - **As published wherever possible.** An artifact that reaches the fleet unaltered is one whose
-//!   SHA-256 an operator can compare against the release page, and ADR-0033's line from author to
+//!   SHA-256 an operator can compare against the release page, and ADR-0039's line from author to
 //!   host stays unbroken. Every artifact is verified against the checksum *upstream* published
 //!   before anything else happens to it.
 //! - **Repacked only where it must be.** An agent whose upstream publishes no archive a Client can
@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 /// one turns out badly, few enough to read without scrolling.
 const SERIES_SHOWN: usize = 3;
 
-/// The member cap a tree package is held to (ADR-0033). Checked while packing rather than
+/// The member cap a tree package is held to (ADR-0039). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
 #[allow(
     dead_code,
@@ -95,7 +95,7 @@ enum AgentKind {
 
 /// Everything that differs between one upstream project and the next, in one place.
 struct Source {
-    /// The Agent type a Supervisor reports and a package Set is built for (ADR-0033) — also this
+    /// The Agent type a Supervisor reports and a package Set is built for (ADR-0039) — also this
     /// tool's default package name.
     service_name: &'static str,
     /// The GitHub repository whose tags name the versions.
@@ -329,7 +329,7 @@ struct Download {
 
 /// One platform's artifact, planned before anything is downloaded.
 struct Plan {
-    /// The platform as *this fleet* names it (ADR-0033), which is what the upload path carries.
+    /// The platform as *this fleet* names it (ADR-0039), which is what the upload path carries.
     os: String,
     arch: String,
     /// What has to be fetched. Every one of them is verified before any of them is used.
@@ -368,7 +368,7 @@ enum ChecksumSource {
 /// What happens between the download and the artifact.
 enum Action {
     /// Nothing. The artifact is uploaded exactly as upstream published it, so the hash the fleet
-    /// verifies is the hash on the release page (ADR-0033).
+    /// verifies is the hash on the release page (ADR-0039).
     AsPublished,
 }
 
@@ -614,7 +614,7 @@ fn select_platforms<'p>(available: &'p [Plan], wanted: &[String]) -> Result<Vec<
                     .split_once('/')
                     .ok_or_else(|| format!("{w:?} is not an os/arch pair"))?;
                 // Folded as an asset's platform is, so the words an operator knows pick the
-                // artifact the menu names canonically (ADR-0033 clause 6).
+                // artifact the menu names canonically (ADR-0039 clause 6).
                 let os = fleet_core::platform::os_token(os)?;
                 let arch = fleet_core::platform::arch_token(arch)?;
                 available
@@ -806,7 +806,7 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
 }
 
 /// The platform an asset named `<prefix><os>_<arch>.tar.gz` is for, folded by the table an Agent's
-/// report and the Server's store fold through (ADR-0033 clause 6) — or `None` when the name has
+/// report and the Server's store fold through (ADR-0039 clause 6) — or `None` when the name has
 /// another shape or a token that cannot be canonical.
 fn platform_of(name: &str, prefix: &str) -> Option<(String, String)> {
     let (os, arch) = name
@@ -1008,7 +1008,7 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 /// artifact that differed by when it was packed would be a rollout nobody asked for. Times, owners
 /// and order are therefore fixed, exactly as `package pack` fixes them for one file.
 ///
-/// Links are resolved rather than carried because a tree package refuses them (ADR-0033): what a
+/// Links are resolved rather than carried because a tree package refuses them (ADR-0039): what a
 /// link names is not where it sits, which is the one thing a path check cannot judge. A link is
 /// resolved inside the tree alone, and one that leads out of it fails the pack before anything is
 /// written: following it would put the operator's own files into an artifact the operator then
@@ -1383,7 +1383,7 @@ fn mode_of(meta: &std::fs::Metadata) -> u32 {
 // ── The Server ──────────────────────────────────────────────────────────────
 
 /// Creates the Set if it is not there and stores this platform's artifact as its entry
-/// (ADR-0033). Nothing is distributed by either call: a Set reaches an Agent only through a
+/// (ADR-0039). Nothing is distributed by either call: a Set reaches an Agent only through a
 /// rollout act (ADR-0032), which stays the operator's.
 async fn upload(
     client: &reqwest::Client,
@@ -1485,7 +1485,7 @@ async fn put_json(client: &reqwest::Client, url: &str, body: String) -> Result<(
 ///
 /// The Server refuses some uploads *before* it reads a byte of the body — an identity nobody
 /// created, a Set already assigned and therefore immutable (ADR-0032), a store at its ceiling
-/// (ADR-0033). With hundreds of megabytes already in flight and no `Expect: 100-continue` to hold
+/// (ADR-0039). With hundreds of megabytes already in flight and no `Expect: 100-continue` to hold
 /// them back — HTTP's own remedy for exactly this, which this client does not speak — that
 /// response races the upload, the connection resets, and what arrives here is a transport error
 /// carrying no status at all. Reporting it as "cannot reach" would name the one thing that is not
@@ -1853,8 +1853,8 @@ mod tests {
     /// An asset's platform folds through the one table both ends read, so a fetched artifact is
     /// stored under the Platform an Agent reports. A token the table has never heard of passes
     /// through, as the Server keeps it, and only one that cannot be a canonical token is passed
-    /// over (ADR-0033 clause 6).
-    /// Verifies: ADR-0033
+    /// over (ADR-0039 clause 6).
+    /// Verifies: ADR-0039
     #[test]
     fn an_asset_platform_folds_through_the_core_table() {
         let platform = |name: &str| platform_of(name, "otelcol_1.0.0_");
@@ -1883,8 +1883,8 @@ mod tests {
     }
 
     /// A platform asked for with `--platform` folds through the same table as an asset's, so
-    /// `macos/x86_64` picks the artifact the menu lists as `darwin/amd64` (ADR-0033 clause 6).
-    /// Verifies: ADR-0033
+    /// `macos/x86_64` picks the artifact the menu lists as `darwin/amd64` (ADR-0039 clause 6).
+    /// Verifies: ADR-0039
     #[test]
     fn a_platform_asked_for_folds_through_the_core_table() {
         let assets = vec![asset("otelcol_0.158.0_darwin_amd64.tar.gz")];

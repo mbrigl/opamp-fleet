@@ -52,7 +52,7 @@ than anywhere else, and none beats one that has stopped being true.
 - **Package downloads** come from the Server alone: every artifact is uploaded to it, and a
   Client fetches only from its own Server's origin, or from its Gateway. What arrives is checked
   against its hash and the operator's signature
-  ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)).
+  ([ADR-0039](adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)).
 - **The service manager** starts the Client and restarts it after a self-update
   ([ADR-0019](adr/0019-the-client-updates-itself-from-a-signed-package.md)). Where a process
   account is registered, it also runs the second service, which starts the Managed Processes
@@ -115,7 +115,9 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   surface in `cli`.
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
   fetch (`fetch`), pack, hash and sign package artifacts — or sign a Package's signing file from
-  the UI (`signing`, ADR-0033) — its `pki` commands make the fleet's certificates and, through
+  the UI (`signing`,
+  ADR-0039)
+  — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
   of a PKCS#12 file (ADR-0036). `gpgv` verifies an upstream's OpenPGP signature (ADR-0036 clause
   29); no command calls it yet. The tool takes from the Client a helper of its archive module
@@ -412,7 +414,8 @@ no module.
   ([ADR-0034](adr/0034-package-versions-high-water-mark-and-floor.md)).
   The Gateway's `cache` sees every offer `registry` hands down, fetches each artifact offered on
   the Server's route once into the state directory, and serves it on the downstream download route
-  to the hosts it was offered to ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)).
+  to the hosts it was offered to
+  ([ADR-0039](adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)).
   Which host the Gateway takes to speak for an `instance_uid` is decided in the core module
   `gateway::policy`; the cache holds the bindings and keeps them across restarts in the journal
   `gateway::store` reads and writes beside the artifacts; while that journal cannot be read the
@@ -487,7 +490,9 @@ releases it, together with the Configurations the Deployment holds. The Agent is
 with its entry's signature; the Client downloads it
 from its own Server's origin and nowhere else, and `api` serves it only when `fleet` finds it
 offered to an Agent the certificate's host speaks for, by the test `packages` shares with the
-offer ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)); behind a Gateway the
+offer
+([ADR-0039](adr/0039-a-32-bit-arm-build-is-spelled-arm32.md));
+behind a Gateway the
 Client downloads it from the Gateway's cache, which `gateway` fetched once from the Server. The
 Client checks hash and signature in `packages`, and the
 Supervisor swaps the program, keeps the previous one for its grace period and rolls back if the
