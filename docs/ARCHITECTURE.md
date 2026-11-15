@@ -9,7 +9,7 @@
 > **Kept current by:** Markus Brigl. A document everyone may edit and nobody owns is
 > the one that goes stale.
 >
-> **Last design revision:** 2026-11-12, due after 20 changes. The revision that took the count
+> **Last design revision:** 2026-11-15, due after 20 changes. The revision that took the count
 > moves the date; the number is this project's to set; a sensor counts the changes outside
 > `docs/` since the commit that set the date and says when the next is due
 > ([ADR-0006](adr/0006-feature-layer.md)).
@@ -100,7 +100,8 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   certificate gets, the shape of a leaf by its role and the loading of a CA from its certificate
   and key file, by the Server's two CAs and the operator tool alike, in the adapter `x509::issue`;
   the first certificate of a CA file is read by `opamp::tls::first_certificate` — the links a kind's
-  tree package keeps, which `opamp-fleetctl` packs and the Client creates (`tree`) — and the
+  tree package keeps, which `opamp-fleetctl` packs and the Client creates (`tree`), though no kind
+  on `main` states one yet — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0027) — and, behind the feature `pkcs11` that
   only the Server and the operator tool turn on, what both do alike on a PKCS#11 token with
@@ -116,7 +117,10 @@ Five crates in one workspace ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.
   fetch (`fetch`), pack, hash and sign package artifacts — or sign a Package's signing file from
   the UI (`signing`, ADR-0050) — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
-  of a PKCS#12 file (ADR-0053).
+  of a PKCS#12 file (ADR-0053). `gpgv` verifies an upstream's OpenPGP signature (ADR-0053 clause
+  29); no command calls it yet. The tool takes from the Client its unpacker (`archive`), its
+  PKCS#12 reader (`tls::pkcs12_identity`), and its reads of an administrator's file
+  (`nofollow::read_privileged`, `config_init::read_password_file`).
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
