@@ -41,7 +41,7 @@ own glibc is not newer); it holds 219 symlinks, 38 of them dangling. On a newer 
 starts the agent through `runtime/default` instead, the host's own C library, reached through
 one absolute link to the host's program loader, a link out of the tree. Dereferenced, with that
 one link kept, it runs (about 7 100 files, 248 MB — inside the tree limits of
-[ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md) clause 57).
+[ADR-0033](0033-packages-signatures-and-delivery.md) clause 57).
 Five links are directories, and one is load-bearing: `usr/share/perl/5.26` → `5.26.1` is the name
 the bundled `PERL5LIB` uses.
 
@@ -127,10 +127,10 @@ the Linux AppImage repacked deterministically into a tree whose one link is the 
    crash budget; the first apply ends the hold.
 
 5. **The Windows package is upstream's portable zip, byte for byte**, opened as
-   [ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md) clause 62
+   [ADR-0033](0033-packages-signatures-and-delivery.md) clause 62
    decides. Taken as published, the hash an Agent verifies is upstream's own. It is uploaded to the
    Server like every artifact
-   ([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)
+   ([ADR-0033](0033-packages-signatures-and-delivery.md)
    clause 3).
 
 6. **The Linux package is the AppImage, repacked by `opamp-fleetctl package fetch`.** The tool
@@ -161,7 +161,7 @@ the Linux AppImage repacked deterministically into a tree whose one link is the 
      kind names exactly that link, by that path and that target, as the one its tree keeps
      ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
      clause 27,
-     [ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)
+     [ADR-0033](0033-packages-signatures-and-delivery.md)
      clause 57): the repack packs it as that link and the Client creates it; every other link
      leading out still fails the repack. `AppRun.env` and every file of either runtime travel as
      upstream built them. Upstream's compat runtime holds a link that names nothing:
