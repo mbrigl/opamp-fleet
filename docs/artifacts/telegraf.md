@@ -37,7 +37,7 @@ list cannot be read from anywhere and is this tool's own (`TELEGRAF_PLATFORMS`).
 ## 2. Assets per platform
 
 `telegraf-<version>_<os>_<arch>.tar.gz`, and `.zip` for Windows. Upstream spells 32-bit `i386`
-where this fleet says `386` ([ADR-0039](../adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)); the
+where this fleet says `386` ([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)); the
 mapping is the third and fourth column of `TELEGRAF_PLATFORMS`:
 
 | This fleet | Upstream |
@@ -92,7 +92,7 @@ unpacked, gathered or rewritten.
 
 ## 5. Shape in the delivered tree
 
-A **single-file package** ([ADR-0039](../adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)). The
+A **single-file package** ([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)). The
 archive wraps everything in a version-named directory. On Windows the program is `telegraf.exe`
 directly inside it, beside `telegraf.conf`. On Unix it is `usr/bin/telegraf`, and it is not the
 only entry of that name: the tarball also holds the logrotate rule `etc/logrotate.d/telegraf` and
@@ -103,7 +103,7 @@ place below the version-named directory: `usr/bin/telegraf` on Unix, `telegraf.e
 (`MEMBER` in the kind, [ADR-draft-telegraf](../adr/draft-telegraf.md) clause 8). The Client
 takes the one file whose trailing path components are that place, wherever the archive keeps it in
 its order, and refuses an archive in which it matches more than one
-([ADR-0039](../adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)
+([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)
 clause 55). Only the program is unpacked, so the kind still has no `program_path`.
 
 The installed program therefore lands in this Supervisor's own `program/` directory, which is also

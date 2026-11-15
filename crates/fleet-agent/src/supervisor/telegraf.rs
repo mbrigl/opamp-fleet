@@ -28,7 +28,7 @@ const PROGRAM: &str = "telegraf";
 /// logrotate rule `etc/logrotate.d/telegraf`, and the directories `etc/telegraf/`,
 /// `usr/lib/telegraf/` and `var/log/telegraf/` — so the file name alone does not say which member
 /// is the program; the path does, and the installer refuses an archive in which it matches more
-/// than one (ADR-0039 clause 55).
+/// than one (ADR-0033 clause 55).
 #[cfg(windows)]
 const MEMBER: &str = "telegraf.exe";
 #[cfg(not(windows))]

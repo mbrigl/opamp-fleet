@@ -2411,7 +2411,7 @@ mod tests {
         assert!(url("linux", "386").ends_with("_linux_i386.tar.gz"));
         // The fleet's side of the list is no alias spelling and a valid token: the core table
         // leaves each as it is, so the artifact is stored under the spelling written here
-        // (ADR-0039 clause 6). The core names no set of canonical tokens to check it against.
+        // (ADR-0033 clause 6). The core names no set of canonical tokens to check it against.
         for (os, arch, _, _) in TELEGRAF_PLATFORMS {
             assert_eq!(fleet_core::platform::os_token(os).as_deref(), Ok(os));
             assert_eq!(fleet_core::platform::arch_token(arch).as_deref(), Ok(arch));
