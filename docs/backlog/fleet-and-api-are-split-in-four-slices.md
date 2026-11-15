@@ -18,6 +18,10 @@ has moved to `fleet::held` (revision-2026-11-06 ticket 03), and the cursor pagin
 4. **The REST API by resource.** Every route, view and conversion of about ten resources lives in
    `api.rs`.
 
+`listing::derive` in `crates/fleet-server/src/listing.rs` and the build of `AgentView` in
+`fleet.rs` (near lines 4783 to 4804) also derive the same display values twice: the attribute
+split, the remote configuration status, the service version and the OS description fallback.
+
 **Idea.** In that order, one slice a change: report processing into a module of its own, cut into
 named steps a unit test can call, behind the same `AppState` entry point; Package and Deployment
 administration into a module `api` calls, keeping the refusal; the core's serialization of the
