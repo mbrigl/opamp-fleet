@@ -18,7 +18,7 @@ does
 clauses 5 and 24). A test held the tool to that list.
 
 For those four items `opamp-fleetctl` linked the whole Client. Of the 282 crates the tool linked on
-2026-11-15 (`cargo tree -e normal`), about 43 came only through `fleet-agent`: the OpenTelemetry
+2026-11-15 (`cargo tree -e normal`), 56 came only through `fleet-agent`: the OpenTelemetry
 stack, `service-manager`, `sysinfo`, `toml_edit`, `tracing-subscriber` and `tracing-appender` among
 them. Each was in the tool's supply chain (Q-3) and compiled with it, and every change to the
 Client recompiled the tool. The tool runs on an operator's machine and never on a managed host, yet
@@ -338,7 +338,7 @@ the operator tools.
 ## Alternatives considered
 
 - **The operator tool depends on the Client, and a test holds it to a list of Client paths.**
-  [ADR-0008](0008-five-crates-on-tokio-and-axum.md) clause 22. Rejected: the tool linked about 43
+  [ADR-0008](0008-five-crates-on-tokio-and-axum.md) clause 22. Rejected: the tool linked 56
   crates only the Client needs, recompiled with every change to the Client, and was built on one of
   the two ends it serves.
 - **The shared items in `fleet-core`.** Clause 16 of ADR-0008 allowed it, since the tool counted as
@@ -448,8 +448,8 @@ the operator tools.
 - [The Cargo Book, development
   dependencies](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#development-dependencies):
   they are used to compile tests, examples and benchmarks, and are not propagated to packages that
-  depend on this one. `cargo tree -p fleet-tools -e normal`, run on 2026-11-15, with and without
-  `--prune fleet-agent`, for the count in the Context.
+  depend on this one. `cargo tree -p fleet-tools -e normal`, run on 2026-11-15 before and after
+  the move, for the count in the Context.
 - [`ripgrep`](https://github.com/BurntSushi/ripgrep): a library with a thin `main.rs`; `kubectl`
   beside `kubelet`: an operator tool built with the system it drives but not run on a node.
 - [TOML v1.0](https://toml.io/), the [`toml` crate](https://crates.io/crates/toml), and the
@@ -469,8 +469,8 @@ the operator tools.
 - Positive: the Server is one binary embedding its UI. The operations that write to a host (binary
   swap, health gate, rollback, tree install) are tested on all three platforms.
 - Positive: `crates/fleet-agent` is what runs on a managed host, and its manifest says so.
-- Positive: `opamp-fleetctl` links about 43 crates fewer, and a change to the Client no longer
-  recompiles it. The Server no longer links `tree`.
+- Positive: `opamp-fleetctl` links 56 crates fewer, 226 instead of 282, and a change to the Client
+  no longer recompiles it. The Server no longer links `tree`.
 - Positive: which internal crate an item belongs in is decided by a test, not argued in review.
 - Negative / trade-offs: the published API includes `Connection`, the listener and the TLS types.
   `axum-server`'s `Handle` and `tokio-tungstenite`'s socket are part of it, so a breaking bump of
