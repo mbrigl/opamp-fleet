@@ -24,7 +24,7 @@ queries, so a database adapter can enforce them without in-memory scans. A rollo
 revisions and assignments that must hold together.
 
 What a port stores is secret-bearing whatever the backend
-([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md) clause 5): effective configurations,
+([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) clause 5): effective configurations,
 bootstrap PKCS#12 files, the certificate register. Q-1 forbids sending a credential or a package
 unencrypted beyond the loopback, which holds for the Server's traffic to its database and its object
 store as much as for an Agent's. Q-3 bounds what a new dependency may bring:
@@ -42,7 +42,7 @@ content-addressed and immutable, streamed through the Server in both directions,
 read from a file and the connection verified against the database's certificate and host name.
 Running several Server instances against one database or one bucket has its own questions —
 presence, leases, notifying the other instances — which
-[ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+[ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
 answers.
 
 Existing installations must keep their trust data. Starting empty would lose the revocation list,
@@ -66,9 +66,9 @@ the commit of a decision fails on a lost connection, on the bound of a call, or 
 elsewhere on the database server holds the notification lock longer than the bound clause 24 puts on
 each wait for a lock, the session's `lock_timeout`. The audit record cannot be written with the
 decision: one writer task per instance gives every entry its place in the chain of its lease
-([ADR-0029](0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md))
+([ADR-0028](0028-the-audit-record.md))
 and writes them in batches, and an entry is accepted before the act it records
-([ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+([ADR-0028](0028-the-audit-record.md)
 clause 5).
 
 ## Decision
@@ -87,13 +87,13 @@ that decides its request, and move an old layout by an offline command.
      With `"fs"` it holds every record, the audit record among them. With `"postgres"` and the
      filesystem blob store it holds the blobs alone, and the audit record is in the database
      (clause 12). Its layout is fixed
-     ([ADR-0035](0035-package-versions-high-water-mark-and-floor.md)).
+     ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md)).
    - With `"postgres"` and `[blobs] store = "s3"` the Server keeps nothing on its own disk. It
      creates no `data_dir`, and a configuration that names one fails startup, naming the key. It
      reads its configuration, its TLS files and its secret files, all of them read-only, and writes
      to no file. The Server's image names no data directory for that reason, and a Server in it
      that keeps state on its disk is given one by its operator
-     ([ADR-0039](0039-releases-attestations-and-the-server-image.md)
+     ([ADR-0038](0038-releases-attestations-and-the-server-image.md)
      clause 16).
    - `config_dir` and `packages_dir` do not exist. A `server.toml` that names either fails
      startup, naming the key and `server migrate`.
@@ -135,14 +135,14 @@ that decides its request, and move an old layout by an offline command.
 3. **On the filesystem store the Server answers from memory; on PostgreSQL from the database.**
    - With `store = "fs"` there is one Server. It loads every record through its port at startup,
      answers from memory, and writes through the port before an act is answered, as
-     [ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md) clause 4 states.
+     [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) clause 4 states.
    - With `store = "postgres"` an instance holds in memory only the Agents it carries, and the
      Operator plane reads the fleet from the database
-     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
      clauses 8 and 13), through the port's `get` and `query`
-     ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md) clause 2) and its `query_page` and
+     ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) clause 2) and its `query_page` and
      `reported_values`
-     ([ADR-0031](0031-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+     ([ADR-0030](0030-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
      clause 9). An instance, too, writes through the port before an act is answered.
 
 4. **The filesystem adapter keeps one JSON file per Agent, `data_dir/agents/<instance_uid>.json`;
@@ -165,7 +165,7 @@ that decides its request, and move an old layout by an offline command.
    loaded at startup; `DELETE` removes the file, and a file that does not parse fails startup
    naming it. With PostgreSQL each is a row, with its revisions in rows of their own, and
    `DELETE` removes them in one transaction. What the record holds besides the saved fields — the
-   revisions a rollout pins — is [ADR-0033](0033-deployments-and-rollouts.md)'s.
+   revisions a rollout pins — is [ADR-0032](0032-deployments-and-rollouts.md)'s.
 
 6. **The Package store's layout is fixed, and no other is read.** With the filesystem store a
    Package is `packages/<agent_type>@<version>.json`, holding its identity and every entry's
@@ -248,7 +248,7 @@ that decides its request, and move an old layout by an offline command.
      - Unless the approval stands, the request waits and the approval answers that it could not
        be written.
    - The audit record names each signature and what came of it
-     ([ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)):
+     ([ADR-0028](0028-the-audit-record.md)):
      - `issuance.signed` is recorded before the decision is written, and for an enrolment it
        names the request under `request`;
      - `enrolment.approved` is recorded once the decision is written, before the approval is
@@ -276,13 +276,15 @@ that decides its request, and move an old layout by an offline command.
     carries one version, a counter that the transaction of every revocation and every lift
     increments, and so does that of every change to the register: an entry written for a renewal or
     an approval, and one the prune removes. What
-    [ADR-0026](0026-admission-by-client-certificate-and-revocation.md) clause 28 revokes depends on
+    [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+    clause 28 revokes depends on
     the register as much as on the list, so an instance that missed the notification of an entry
     finds the version moved, and never takes its own next write of the list as naming a register it
     does not hold. Every instance reads the same version: it is the `ETag` of the Gateways' list
-    ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md) clause 34) and what an
+    ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+    clause 34) and what an
     instance compares at each renewal of its lease
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
     clause 10). A certificate entry is dropped with its register entry once neither the certificate
     nor any renewal of it is valid. With PostgreSQL a register entry is removed only while the
     database holds no valid certificate renewed from it, whatever the register of the instance that
@@ -311,24 +313,25 @@ that decides its request, and move an old layout by an offline command.
       deletes the entry
       ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
       A revocation with the authority `bootstrap` removes the file before it is answered, and
-      lifting the revocation ([ADR-0026](0026-admission-by-client-certificate-and-revocation.md))
+      lifting the revocation
+      ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
       does not bring it back.
     - At most 10 000 valid entries are kept, and a request beyond that is answered `409`.
     - A bootstrap certificate is revoked as
-      [ADR-0026](0026-admission-by-client-certificate-and-revocation.md)
+      [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
       states for revocation, with the authority `bootstrap`.
     - The audit records each issuance as `enrolment.bootstrap_issued`, with serial, subject,
       `not_after` and `p12`. It records each download of a PKCS#12 file as
       `enrolment.bootstrap_p12_downloaded` with the serial. It records each deletion as
       `enrolment.bootstrap_deleted` with the serial and subject
-      ([ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
+      ([ADR-0028](0028-the-audit-record.md)).
     - When the audit cannot be written, nothing is handed out or deleted, and the request is
       answered `503`.
 
 12. **How long the record goes back.**
     - The audit record is one hash chain on the filesystem store and one hash chain per lease of
       a Server instance on the PostgreSQL store
-      ([ADR-0029](0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)),
+      ([ADR-0028](0028-the-audit-record.md)),
       kept where the Server keeps its records: in files under `data_dir/audit/` with
       `store = "fs"`, in the database with `store = "postgres"`. Each instance writes its chain by
       one writer thread of its own, in the order the decisions were taken.
@@ -390,7 +393,7 @@ that decides its request, and move an old layout by an offline command.
       act let go. On PostgreSQL whether an entry references a blob is read from the stored
       entries, under the lock of clause 14, and not from what the instance holds, so a blob that
       an entry written through another instance names is kept.
-    - The size limits of a Package entry ([ADR-0034](0034-packages-signatures-and-delivery.md))
+    - The size limits of a Package entry ([ADR-0033](0033-packages-signatures-and-delivery.md))
       count the blobs.
     - A Package's metadata names a blob by its hash only.
 
@@ -400,7 +403,7 @@ that decides its request, and move an old layout by an offline command.
     instance on one database uses the same bucket and prefix. On PostgreSQL every sweep of
     unreferenced blobs (clause 13) and every cleanup of `<prefix>staging/` (clause 16) run under an
     advisory lock, so one instance does them at a time
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
     clause 2). The lock is taken whatever the blob store: with `"fs"` the instance is alone and
     the lock decides nothing, but the PostgreSQL record store does not ask which blob store it
     serves, and one rule for every PostgreSQL Server costs one session per sweep.
@@ -419,7 +422,7 @@ that decides its request, and move an old layout by an offline command.
       time of that blob's mark and finds it still there. Then, before it calls the blob store, it
       finds that no more than 15 seconds have passed since it sent that renewal, on the clock that
       counts a suspend which the lease of
-      [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+      [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
       clause 3 is measured on. Once any of these fails it deletes nothing more and says so in the
       log; a blob whose mark another sweep took away it passes over. An upload
       whose blob is marked is refused, to be uploaded again, in the transaction that checks that the
@@ -444,7 +447,7 @@ that decides its request, and move an old layout by an offline command.
       reached, under asynchronous replication, leaves the new primary without them while the old
       sweep may still be deleting, so the exclusion holds across a failover only with the
       synchronous replication that clause 17 of
-      [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+      [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
       requires. And an instance of 0.8.0 beside the instances of this release neither marks nor
       reads a mark, so until the last one is replaced a sweep through it may still delete a blob
       that an entry written meanwhile names. In each case the next start fails on that entry, naming
@@ -472,7 +475,7 @@ that decides its request, and move an old layout by an offline command.
       The Server touches no key outside `<prefix>`. A key under `<prefix>blobs/` that is not a hash,
       or any other key under `<prefix>`, fails startup naming the key.
     - `<lease>` is the identifier of the lease of the instance that writes the upload
-      ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+      ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
       clause 3), or `fs` with the filesystem record store, which has one Server and no lease. A
       staging object is left behind only by an upload that was cut off, or one whose staging
       object could not be deleted. The cleanup runs with every sweep of clause 13 — at startup, and
@@ -496,7 +499,7 @@ that decides its request, and move an old layout by an offline command.
     - At startup the Server lists `<prefix>blobs/` for each blob's hash and size and downloads
       nothing. The integrity of what it serves rests on the hash it computed at upload, on the
       signature over every artifact, and on the hash the Client checks before it installs
-      ([ADR-0034](0034-packages-signatures-and-delivery.md)).
+      ([ADR-0033](0033-packages-signatures-and-delivery.md)).
     - `get` streams the object through the Server to the Agent. The fleet never reaches the
       store, and the Server hands out no presigned URL, neither for downloads nor for uploads.
 
@@ -594,7 +597,7 @@ that decides its request, and move an old layout by an offline command.
     - A Configuration's revisions, a Package's entries and a Deployment's members are rows of their
       own, and a package floor one row per Agent type, written under `SELECT … FOR UPDATE` after
       the check that it is not lowered
-      ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+      ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
       clause 19).
 
 22. **The Server applies its own schema.**
@@ -610,7 +613,7 @@ that decides its request, and move an old layout by an offline command.
       name that release, 0.8.0. A Server of 0.7.1 holds no lease, keeps its audit record in files
       and leaves the revocation list's version where it was, so it refuses the schema once a
       Server of 0.8.0 has applied them, rather than serve beside its instances
-      ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+      ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
       clause 16). A rollback to 0.7.1 after the upgrade restores the database from its backup.
     - Migration 13 adds the table of the sweeps' marks (clause 14) and names 0.8.0, which reads
       and writes none of them.
@@ -655,12 +658,12 @@ that decides its request, and move an old layout by an offline command.
     before it opens either listener and renews the lease while it runs. An instance that cannot
     renew before its lease lapses ends its sessions, closes its listeners and takes a new lease once
     the database answers again
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
     clauses 1 to 3). An instance with the filesystem blob store (clause 14) or a CA key in a file
     must be the only instance in the schema: it takes an exclusive lock, fails startup beside
     another live lease, makes a second instance fail startup, and refuses every call once the lock's
     connection ends
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
     clause 2).
 
 24. **The database connection is TLS 1.3, verified, and configured in `server.toml` alone.**
@@ -722,7 +725,7 @@ that decides its request, and move an old layout by an offline command.
       - **Agents:** records are carried over, with each Agent's labels moved into its record.
       - **Configurations and Deployments:** they keep their content. A Configuration loses its
         Selector, and the migration lists every Configuration with the Selector it had, for the
-        operator to place in a Deployment ([ADR-0033](0033-deployments-and-rollouts.md)). A
+        operator to place in a Deployment ([ADR-0032](0032-deployments-and-rollouts.md)). A
         Configuration without an Agent type is not carried, because the Server would refuse it at
         startup; the migration names it, and its file stays in the old directory for the operator
         to save again with a type.
@@ -752,8 +755,8 @@ that decides its request, and move an old layout by an offline command.
     - It copies no audit entry. The old `data_dir/audit/` stays where it is as the closed archive,
       and the migration records the `seq` and the hash of its last entry in the database, which
       the first chain names as its predecessor
-      ([ADR-0029](0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
-      clause 6). No Server writes to the archive again; its instances open their chains in the
+      ([ADR-0028](0028-the-audit-record.md)
+      clause 9). No Server writes to the archive again; its instances open their chains in the
       database (clause 12).
     - It copies rather than moves: the old `data_dir` stays as the backup. It prints what it
       copied and exits non-zero when it could not copy all of it, leaving the database without
@@ -761,10 +764,10 @@ that decides its request, and move an old layout by an offline command.
     - Moving records back from PostgreSQL to files is not provided.
 
 **Out of scope:** presence, leases and notifying other instances
-([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md));
+([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md));
 copying the archived filesystem audit record into the database, which clause 27 links instead;
 paging and filtering in the database, which
-[ADR-0031](0031-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+[ADR-0030](0030-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
 decides; moving records from PostgreSQL back to files or blobs from S3 back to the filesystem;
 Object Lock and bucket versioning, which the operator may enable but the Server neither needs nor
 checks; server-side encryption beyond what the bucket's own default applies; keeping the
@@ -857,7 +860,7 @@ monitors a production store or database.
   entries other acts wrote meanwhile. Rejected for an entry that records the outcome.
 - **Record the signature only once its decision committed.** The entry would then follow an act
   that already counts, against
-  [ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
+  [ADR-0028](0028-the-audit-record.md)
   clause 5, and a record that cannot take it could no longer refuse the act. Rejected.
 - **Migrate at Server startup instead of a command.** It saves a step, but the first start would
   copy a whole `data_dir` while serving nothing, and a failure would leave a half-filled database
@@ -866,7 +869,7 @@ monitors a production store or database.
   either record store.** A second Server against the same schema would fail startup, and the
   database would be a durable copy of what one Server holds. Several instances serve one fleet
   from one database
-  ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)),
+  ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)),
   and a copy of the fleet in each instance's memory would be stale as soon as another instance
   writes. Rejected; clause 3 answers from memory on the filesystem store alone.
 - **`data_dir` with either record store, the audit record a file under it.** A Server on
@@ -1102,7 +1105,7 @@ Tests that carry `Verifies: ADR-0023`:
 - That two writers on the database keep both of what they write, or count both writes against a
   bound, and that the migrations are applied once while instances start together, is decided by
   tests that carry the marker of
-  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
+  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md):
   [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
   `two_revocations_committed_at_once_on_two_instances_are_both_kept`,
   `an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one`,
@@ -1119,14 +1122,17 @@ Tests that carry `Verifies: ADR-0023`:
 - Tests that carry `Verifies: ADR-0023`, for clause 23:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_second_instance_that_must_be_alone_fails_startup_naming_it`,
-  `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`. Beside them, with the marker of
-  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md):
+  `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`;
+  [`tests/stateless_instance.rs`](../../crates/fleet-server/tests/stateless_instance.rs)
+  `an_instance_takes_its_lease_before_it_opens_a_listener`, which holds the lock its lease is
+  taken under elsewhere and observes that neither plane takes a connection until the instance
+  holds a lease. Beside them, with the marker of
+  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md):
   [`postgres/lease.rs`](../../crates/fleet-server/src/postgres/lease.rs)
   `instances_that_share_the_database_each_hold_a_lease`, `an_instance_that_must_be_alone_is_alone`;
   [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
   `an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_one`, which opens the
-  listeners again only once the instance holds a new lease. No test of its own decides that an
-  instance takes its lease before it first opens a listener.
+  listeners again only once the instance holds a new lease.
 - Tests that carry `Verifies: ADR-0023`, for clause 22:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied`: the schema of
@@ -1167,5 +1173,5 @@ Tests that carry `Verifies: ADR-0023`:
   `the_audit_record_of_an_approval_that_did_not_commit_verifies_and_names_it_undecided`.
 - Clause 12 as it stands here, retention by `retain_days` on the PostgreSQL store included, is
   verified by the tests
-  [ADR-0029](0029-the-audit-record-is-one-hash-chain-per-lease-and-names-the-lease-each-decision-was-taken-under.md)
+  [ADR-0028](0028-the-audit-record.md)
   names.

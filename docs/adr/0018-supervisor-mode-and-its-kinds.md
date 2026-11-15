@@ -1,7 +1,7 @@
-# ADR-0018: Supervisor Mode and its kinds
+# ADR-0018: Supervisor Mode and its kinds, and a repeated offer of a configuration is applied once
 
-- **Status:** ⚪ superseded by [ADR-0046](0046-supervisor-mode-and-its-kinds-and-a-repeated-offer-is-applied-once.md)
-- **Date:** 2026-11-13
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-14
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and the delivered-block check (`check_delivered_block`) each kind states, the Client Agent in `build_engine`, the capability set and the handling of a received or stored remote configuration of the Client Agent and of a Supervisor's Agent in agent.rs), crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` and `remote_config_disabled` keys), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[[supervisor]]` blocks and the `[supervisors]` section of supervisor.toml (among them `delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`), the `[features]` table of crates/fleet-agent/Cargo.toml, the artifact documents under docs/artifacts/ each wrapped kind adds
 
@@ -50,7 +50,7 @@ update that finds this out after the swap has already stopped what ran. Not ever
 its version as Semantic Versioning.
 
 A package update swaps files: the running program is renamed aside, the artifact is written beside
-it and renamed into place ([ADR-0034](0034-packages-signatures-and-delivery.md)). All of that
+it and renamed into place ([ADR-0033](0033-packages-signatures-and-delivery.md)). All of that
 needs write permission on the **directory**. A program in a system directory such as
 `/usr/local/bin` cannot be updated by a Client that does not run as root, and the failure would
 appear at rollout time on every matched host rather than at startup on one. A Client that also
@@ -101,7 +101,7 @@ write any files into a Supervisor's own `config/` directory and restart its proc
 agent's configuration language allows, a command a configuration names, a Collector receiver
 bound to any port, it allows as the process's account. Package delivery on the
 same channel stops at a signature the operator's key makes
-([ADR-0034](0034-packages-signatures-and-delivery.md)); a remote configuration has no such stop.
+([ADR-0033](0033-packages-signatures-and-delivery.md)); a remote configuration has no such stop.
 An operator may run an agent whose configuration is too sensitive to take from a compromised
 Server, or which another system already configures. A switch per Supervisor binds a name, not an
 agent, while the Server manages the set: the Server can remove a listed Supervisor and deliver the
@@ -136,11 +136,11 @@ once the Supervisor-set apply succeeded: `remote-config.pb` and one copy of each
 `config/`, both in `state_dir`. Nothing runs on those files, since the set they carry is already
 in `supervisor.toml` (clause 30). Restoring them at start reports `RemoteConfigStatus` `APPLIED`
 with the stored hash, which tells the Server the Client runs that set, and the Server offers a set
-only while the reported hash differs ([ADR-0032](0032-configurations-and-the-rest-api.md), the
+only while the reported hash differs ([ADR-0031](0031-configurations-and-the-rest-api.md), the
 offer of a remote configuration).
 
 The Server offers a remote configuration only to an Agent declaring `AcceptsRemoteConfig`
-([ADR-0032](0032-configurations-and-the-rest-api.md), `offer` in
+([ADR-0031](0031-configurations-and-the-rest-api.md), `offer` in
 `crates/fleet-server/src/fleet.rs`), as the Baseline requires, and a Client's capabilities bind
 what it reports and acts on ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md),
 the Client's capabilities); read the other way, an Agent that does not declare a capability does
@@ -150,7 +150,7 @@ therefore offered no remote configuration, with no change on the Server.
 What a Supervisor runs without a remote configuration follows from how each kind finds its
 configuration. Every kind reads it from the Supervisor's own `config/` directory,
 `<supervisor_dir>/<name>/config/`, where `store_remote_config` writes one file per entry and
-records roles in `.supplementary` ([ADR-0032](0032-configurations-and-the-rest-api.md), how a
+records roles in `.supplementary` ([ADR-0031](0031-configurations-and-the-rest-api.md), how a
 received configuration is stored):
 
 - `collector` passes every unroled file in `config/` as its own `--config`, then the block's
@@ -181,6 +181,26 @@ exist, and a kind that falls back to a weaker default when a named file is missi
 operator's agent on what the Server chose. For a listed Supervisor any key a delivered block may
 change is a remote configuration under another name.
 
+**One offer of a configuration reaches a Client twice in the normal case.** After a rollout, a
+heartbeat that left the Client before the Server's push arrived still names the old hash, and the
+Server answers it with the offer again. A second apply would wait behind the first and restart the
+Managed Process once more after the first had reported `APPLIED`: on a test host a flaky
+end-to-end test, on a production host a needless restart. A package offer is treated the same way:
+a repeat of the hash installed or in flight is ignored
+([ADR-0033](0033-packages-signatures-and-delivery.md) clause 49).
+
+**A program may answer only where and as its start runs it.** A kind may name the working directory
+a Managed Process starts in (clause 14). A program that needs its tree root to run, as a bundled
+interpreter that resolves its libraries from there does, answers a version probe or a preflight run
+elsewhere as another program would, or not at all. A program that finds its tree's libraries only
+through its environment answers a probe without that environment not at all. A preflight proves a
+staged package, whose root is known only once it is staged, so a preflight that is to hand the
+program a path into its own tree needs a name for that root.
+
+**The `supervisor.` namespace is the Supervisor's own statement.** `[attributes]` refuses every
+`supervisor.*` key ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clause 10), so the
+kinds a Client Agent reports are the kinds it was compiled with (clause 18).
+
 ## Decision
 
 We will implement Supervisor Mode as a hexagonal supervision core in the Client crate whose
@@ -193,7 +213,8 @@ the set of `[[supervisor]]` blocks, and nothing else in the file, unless the hos
 `[supervisors] server_manages_set = false`, while a delivered block may bring no environment,
 arguments or host paths that reach past what its package's signature covers, and let the operator
 name Supervisors in `[supervisors] remote_config_disabled`, whose Agents neither declare nor act on
-remote configuration and run only on what the operator placed on the host.
+remote configuration and run only on what the operator placed on the host, and take an offered
+configuration whose hash an Agent is applying or has applied as a report, not a second apply.
 
 1. **Two Ports, as modules.** The Managed-Process Port is a message pair, `ProcessCommand` in and
    `ProcessEvent` out, plus a `Plugin` factory trait that validates a block's settings (`check`,
@@ -220,7 +241,7 @@ remote configuration and run only on what the operator placed on the host.
 
 3. **A block is parsed in two stages.** The core takes the common keys, `type`, `name`,
    `service_name` ([ADR-0017](0017-what-an-agent-reports-about-itself.md)), `endpoint_port`,
-   `program_path` ([ADR-0034](0034-packages-signatures-and-delivery.md)), `stop_timeout_secs`,
+   `program_path` ([ADR-0033](0033-packages-signatures-and-delivery.md)), `stop_timeout_secs`,
    `apply_grace_secs` and `retain_previous_secs`, and the program key the kind names (`binary`
    for `collector`, `command` for `command`), which clause 21 resolves. Everything else is the
    kind's, parsed with `deny_unknown_fields`. `name` follows the instance-name grammar of
@@ -249,7 +270,7 @@ remote configuration and run only on what the operator placed on the host.
    Managed Processes stop first, then each Agent's `agent_disconnect` goes out, within the service
    managers' stop budgets ([ADR-0020](0020-the-installed-service-and-its-state.md)). The Collector
    Supervisor passes each written configuration entry as its own `--config` (never a supplementary
-   entry, [ADR-0032](0032-configurations-and-the-rest-api.md)), appends its extra `args`, does not
+   entry, [ADR-0031](0031-configurations-and-the-rest-api.md)), appends its extra `args`, does not
    start before a configuration exists, and manipulates no YAML.
 
 7. **Configuration status is health-gated.** `RemoteConfigStatus` is `APPLYING` on receipt,
@@ -276,7 +297,7 @@ remote configuration and run only on what the operator placed on the host.
 
 10. **Install and update run behind the Plugin, in one contract.** `ApplyPackage` hands the
     adapter a verified artifact and expects a health-gated outcome with rollback on failure
-    ([ADR-0034](0034-packages-signatures-and-delivery.md)). The swap on `InstallTarget` (one file
+    ([ADR-0033](0033-packages-signatures-and-delivery.md)). The swap on `InstallTarget` (one file
     or a tree) is the shared default; a kind whose installation is not a file swap implements the
     step itself inside the same contract. Resolving the program and declaring `AcceptsPackages`
     stay in the core (clauses 21 and 22), because a capability the Server acts on must derive from
@@ -284,7 +305,7 @@ remote configuration and run only on what the operator placed on the host.
 
 11. **Uninstall undoes what installing did, and the core purges.** A Supervisor removed from the
     set receives `Uninstall` before its directory is purged (the purge of a removed Supervisor,
-    [ADR-0035](0035-package-versions-high-water-mark-and-floor.md)): the adapter stops its
+    [ADR-0034](0034-package-versions-high-water-mark-and-floor.md)): the adapter stops its
     process, undoes whatever its installs left outside the Supervisor's directory, answers
     `Uninstalled` and exits. The generic uninstall is exactly the bounded graceful stop. An `Err`
     outcome is logged with what could not be undone; it does not hold up the removal. A Supervisor
@@ -303,7 +324,7 @@ remote configuration and run only on what the operator placed on the host.
     wrapped kind's program key, `program_path`, `service_name`, `endpoint_port` and the three
     timing keys; `command`'s `working_dir` and `reload_signal`; and `[supervisor.attributes]`,
     since a Server Label tags one Agent among several
-    ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)) while the Client-wide
+    ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)) while the Client-wide
     `[attributes]` describe the host. A configuration a freshly self-updated version refuses is
     that update's failed attempt: a run resolves the update in flight even when the file does not
     load, so the host returns to the version that could read it
@@ -351,7 +372,7 @@ remote configuration and run only on what the operator placed on the host.
 
 17. **Timing is a fleet policy, then a kind's correction, never a host's.** `[supervisors]` holds
     `stop_timeout_secs` (default 10) and `apply_grace_secs` (default 3); `[updates]` holds
-    `retain_previous_secs` (default one day, [ADR-0034](0034-packages-signatures-and-delivery.md)).
+    `retain_previous_secs` (default one day, [ADR-0033](0033-packages-signatures-and-delivery.md)).
     A wrapped kind may correct any of the three where its agent demands it (an agent whose shutdown
     drains for up to a minute), and its blocks may state none of them. Only `collector` and
     `command` blocks may override them, because there no kind exists to hold the value.
@@ -359,9 +380,11 @@ remote configuration and run only on what the operator placed on the host.
 18. **A Client reports which kinds it carries.** Its Client Agent reports one non-identifying
     attribute per compiled-in kind, `supervisor.kind.<kind> = "true"`, so a Selector can aim a
     Supervisor set at Clients that can run it. One key per kind, because a Selector is equality
-    over string values and the question is about one member of the set. An operator's own
-    attribute of the same key is left as written. `AvailableComponents` is not used for this: the
-    message is *Development* in the pinned Baseline
+    over string values and the question is about one member of the set. An operator cannot state
+    one: `[attributes]` refuses every `supervisor.*` key at startup
+    ([ADR-0017](0017-what-an-agent-reports-about-itself.md)
+    clause 10). `AvailableComponents` is
+    not used for this: the message is *Development* in the pinned Baseline
     ([ADR-0011](0011-the-protocol-is-pinned-and-checked-against-opamp-go.md)) and Selectors do not
     match it.
 
@@ -403,7 +426,7 @@ remote configuration and run only on what the operator placed on the host.
 
 23. **A vendor agent is brought in by repacking.** An agent installed by the machine's package
     manager is not supervised here; it is repacked as a relocatable artifact and delivered as a
-    package ([ADR-0034](0034-packages-signatures-and-delivery.md)). The manual documents the
+    package ([ADR-0033](0033-packages-signatures-and-delivery.md)). The manual documents the
     fleet-delivered route for every agent it describes.
 
 24. **The Client's own consent stays explicit.** `[self_update]` names the package it takes
@@ -414,7 +437,7 @@ remote configuration and run only on what the operator placed on the host.
 25. **Placeholders name a Supervisor's own directories.** In the `args` and `env` values of
     `collector` and `command` blocks, `${supervisor_dir}` expands to `<supervisor_dir>/<name>` and
     `${config_dir}` to `<supervisor_dir>/<name>/config`, where the received configuration's
-    entries are written ([ADR-0032](0032-configurations-and-the-rest-api.md)), so
+    entries are written ([ADR-0031](0031-configurations-and-the-rest-api.md)), so
     `args = ["-c", "${config_dir}/fluent-bit-conf"]` cannot drift. They are expanded when the
     Supervisor starts, and **never** in the program key, whose written shape is what the operator
     reads. An unrecognised `${…}` is passed through verbatim, neither refused nor emptied, because
@@ -422,7 +445,7 @@ remote configuration and run only on what the operator placed on the host.
 
 26. **The Server manages the set through the Client Agent, and only the blocks are read.** A
     remote configuration offered to the Client Agent, a Configuration stated for the Agent type
-    `supervisor` ([ADR-0032](0032-configurations-and-the-rest-api.md)), is parsed entry by entry
+    `supervisor` ([ADR-0031](0031-configurations-and-the-rest-api.md)), is parsed entry by entry
     as TOML. The union of the entries' `[[supervisor]]` blocks, in entry-name order, is the
     offered set; every other top-level key is ignored. The boundary is enforced by what the Client
     takes, not by policing what the Server sends. A duplicate `name` within or across entries, an
@@ -447,7 +470,7 @@ remote configuration and run only on what the operator placed on the host.
        changed one only stopped, and their Agents send `agent_disconnect`;
     2. the merged document is written to `supervisor.toml`;
     3. the removed Supervisors' directories are purged (the purge of a removed Supervisor,
-       [ADR-0035](0035-package-versions-high-water-mark-and-floor.md));
+       [ADR-0034](0034-package-versions-high-water-mark-and-floor.md));
     4. the changed and added Supervisors start from the file just written, an added one
        introducing itself as a new Agent on the running connection.
 
@@ -520,7 +543,7 @@ remote configuration and run only on what the operator placed on the host.
 
 38. **The key `server_manages_set`.** `[supervisors] server_manages_set` is a boolean and defaults
     to `true`, the behaviour clauses 26 to 37 describe, with the purge of a removed Supervisor
-    ([ADR-0035](0035-package-versions-high-water-mark-and-floor.md)) and the orphaned directories
+    ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md)) and the orphaned directories
     of [ADR-0021](0021-the-accounts-the-service-runs-under.md). It is read when the configuration
     is loaded, like every key of the file, and is never taken from the Server, since the
     Supervisor-set apply replaces only the `[[supervisor]]` array (clauses 26 and 30). A change
@@ -534,7 +557,7 @@ remote configuration and run only on what the operator placed on the host.
     enabled, and `AcceptsPackages` with `ReportsPackageStatuses` where `[self_update]` consents and
     a verification key is configured. Self-update is a separate consent (clause 24) and is not
     touched. The Server then offers the Client no set
-    ([ADR-0032](0032-configurations-and-the-rest-api.md), the offer of a remote configuration).
+    ([ADR-0031](0031-configurations-and-the-rest-api.md), the offer of a remote configuration).
 
 40. **A set that arrives anyway is ignored.** It is not stored, not applied, and no
     `RemoteConfigStatus` is reported: no Supervisor stops or starts and `supervisor.toml` is not
@@ -591,10 +614,10 @@ remote configuration and run only on what the operator placed on the host.
 44. **Switching `server_manages_set` back on hands the set to the Server again.** When the key
     returns to `true`, the next start declares both capabilities, reports no hash, unless that
     earlier start warned that it could not remove `remote-config.pb` itself, and is offered
-    whatever set is released to the Client Agent ([ADR-0033](0033-deployments-and-rollouts.md)). The
+    whatever set is released to the Client Agent ([ADR-0032](0032-deployments-and-rollouts.md)). The
     first applied offer replaces the `[[supervisor]]` array, the operator's blocks included, and
     purges each Supervisor it removes (clause 32 and the purge of a removed Supervisor,
-    [ADR-0035](0035-package-versions-high-water-mark-and-floor.md)).
+    [ADR-0034](0034-package-versions-high-water-mark-and-floor.md)).
 
 45. **The key `remote_config_disabled`.** `[supervisors] remote_config_disabled` is a list of
     Supervisor names and defaults to empty. It is read when the configuration is loaded, like
@@ -614,7 +637,7 @@ remote configuration and run only on what the operator placed on the host.
     without `AcceptsRemoteConfig` and without `ReportsRemoteConfig`. Every other capability stays
     as it is: `ReportsEffectiveConfig`, `AcceptsRestartCommand`, and `AcceptsPackages` with
     `ReportsPackageStatuses` where a verification key is configured. The Server then offers it no
-    remote configuration ([ADR-0032](0032-configurations-and-the-rest-api.md), the offer of a
+    remote configuration ([ADR-0031](0031-configurations-and-the-rest-api.md), the offer of a
     remote configuration), and nothing on the Server changes.
 
 48. **A remote configuration that arrives anyway is ignored.** It is not stored, no entry file is
@@ -692,8 +715,8 @@ remote configuration and run only on what the operator placed on the host.
 
 52. **Switching it back on hands `config/` to the Server again.** When a name leaves the list, the
     next start declares both capabilities, reports no hash, and is offered whatever is released to
-    that Agent ([ADR-0033](0033-deployments-and-rollouts.md)). The first stored offer replaces
-    every file in `config/` ([ADR-0032](0032-configurations-and-the-rest-api.md), how a received
+    that Agent ([ADR-0032](0032-deployments-and-rollouts.md)). The first stored offer replaces
+    every file in `config/` ([ADR-0031](0031-configurations-and-the-rest-api.md), how a received
     configuration is stored), the operator's included.
 
 53. **A kind may lead its own process group, and is then stopped as a group.** A kind whose agent
@@ -706,19 +729,45 @@ remote configuration and run only on what the operator placed on the host.
     Client starts itself on Windows has no group, and its stop ends the pid alone.
 
 54. **A package is proved to run before it is installed.** For every kind, after an artifact is
-    unpacked to its staged name ([ADR-0034](0034-packages-signatures-and-delivery.md), the staged
+    unpacked to its staged name ([ADR-0033](0033-packages-signatures-and-delivery.md), the staged
     name of an unpacked artifact) and before the swap, the Runner runs the staged program once
     with a preflight its kind supplies. A failure answers `PackageApplied{Err}` carrying the
     dynamic linker's own message (*"version `GLIBC_2.39' not found"*, *"cannot open shared object
     file"*), and nothing is swapped, so a running Managed Process is never stopped for a package
     that could not run. A kind's preflight is its version arguments, with whatever environment its
     ADR adds; `command` uses its `version_args`, so a `command` block without them has no
-    preflight. The health gate and rollback of [ADR-0034](0034-packages-signatures-and-delivery.md)
+    preflight. The health gate and rollback of [ADR-0033](0033-packages-signatures-and-delivery.md)
     remain the second line.
 
 55. **A version probe may bring its own parser.** `VersionProbe` takes an optional parse function,
     strict Semantic Versioning by default. A kind whose program prints its version in another form
     supplies the parser, and its ADR says how the form is read.
+
+56. **An offer of the hash applying or applied is a report, not an apply.** A remote
+    configuration whose `config_hash` is the hash of the status the Agent holds, `APPLYING` or
+    `APPLIED`, is not stored, not handed to the process adapter or to the Supervisor-set apply,
+    and restarts nothing. The Agent reports the status it holds again in its next message. This
+    holds for a Supervisor's Agent and for the Client Agent alike. A Server answers a heartbeat
+    that left the Client before its push arrived with the offer again, so one offer reaching a
+    Client twice is the normal case, not a fault. An offer of another hash is taken as before,
+    after the one applying. A hash whose apply `FAILED` is applied again when offered again, so a
+    host repaired after the failure takes the offer once more. A deliberate restart stays the
+    `Restart` command. [ADR-0033](0033-packages-signatures-and-delivery.md) clause 49 treats a
+    package hash already installed or in flight the same way.
+
+57. **The version probe and the preflight ask the program as its start runs it.** `VersionProbe`
+    and `Preflight` each take an optional working directory, inherited when none is named. A kind
+    that names a working directory for the start (clause 14) names it for both, so the version is
+    asked of the program the Supervisor runs, and the preflight starts in the same place inside the
+    staged tree. The staged tree's root is known only once the package is staged, so a preflight
+    writes `${staged}` for it, and `${staged}` resolves to that root in the preflight's arguments,
+    in the values of its environment and in its working directory. A program handed paths into its
+    own tree, or a tree carrying its own libraries, is proved against the staged tree rather than
+    against what the running version leaves behind. `VersionProbe` takes an environment too, empty
+    by default: a kind whose start hands its program an environment the program needs to run at
+    all, such as the library path of a tree carrying its own libraries, hands the probe the same,
+    pointing into the live tree. `collector` and `command` name no working directory and no
+    environment for either.
 
 **Out of scope:** dynamic plugin loading; plain-HTTP polling on the Supervisor Endpoint; injecting
 the `opampextension` configuration into a Collector's configuration; connection pools larger than
@@ -727,7 +776,7 @@ one (Gateway Mode, [ADR-0016](0016-client-modes-and-the-gateway.md)); reporting 
 locally edited `[[supervisor]]` set against the last applied offer at startup; an opt-in reaping of
 orphaned directories; migrating a Supervisor tree when its root moves; a supervise-only mode for
 programs this Client does not install, which would need its own decision and capability model; how
-a multi-file tree is unpacked and swapped ([ADR-0034](0034-packages-signatures-and-delivery.md));
+a multi-file tree is unpacked and swapped ([ADR-0033](0033-packages-signatures-and-delivery.md));
 keeping some blocks from the Server while it manages the others; how the fleet view or the REST
 API shows that a host keeps its set, beyond the capability set the Server already lists; any
 change on the Server, the REST API or the bundled UI for either switch; the restart command and
@@ -738,6 +787,19 @@ program the Client starts itself on Windows.
 
 ## Alternatives considered
 
+- **Apply every remote configuration received.** A heartbeat that crosses the Server's push
+  brings the same offer a second time, and its apply restarts the Managed Process once more after
+  the first has reported `APPLIED`. An offer of the hash applying or applied is a report (clause
+  56).
+- **The Server holds back the offer while its push is in flight.** A heartbeat that crosses a push
+  is a race of the Baseline that any Server can produce, and the Server cannot know whether the
+  push arrived. Only the Client knows what it is applying, so it decides (clause 56).
+- **A repeated offer of a hash that failed is a report too.** A host repaired after the failure
+  would then need a new hash to try again, which only a changed Configuration gives. The repeat of
+  a failed hash is applied again; what a Server re-offers after a failure is the Server's
+  (clause 56).
+- **Compare the content of an offer, not its hash.** The hash is what the Server sends for the
+  offer and what the status names; two offers of one hash are one configuration (clause 56).
 - **Dynamic plugin loading (shared libraries).** Rust has no stable ABI, so it means a C ABI
   boundary, unsafe code and version-skew handling for a third-party capability nobody needs; the
   registry keeps a new kind to one module.
@@ -829,7 +891,7 @@ program the Client starts itself on Windows.
   it aside.** A re-added Supervisor would resurrect a disconnected Agent's identity and stale
   configuration; a split directory is unreasoned; retention exists to roll back a living
   Supervisor, which a removed one is not; a renamed copy is a slower leak. The purge
-  [ADR-0035](0035-package-versions-high-water-mark-and-floor.md) decides removes the directory
+  [ADR-0034](0034-package-versions-high-water-mark-and-floor.md) decides removes the directory
   whole.
 - **Reaping orphaned directories at startup.** Startup cannot tell a leftover from a deliberate
   hand edit, and the destructive reading deletes an identity that was not meant to go; the
@@ -877,7 +939,7 @@ program the Client starts itself on Windows.
 - **Wiping the whole `config/` directory at start.** It would delete the files an operator placed
   there before the restart that put the switch in force.
 - **Moving the Server's stored files aside instead of deleting them.** They can carry secret
-  material ([ADR-0032](0032-configurations-and-the-rest-api.md), how a received configuration is
+  material ([ADR-0031](0031-configurations-and-the-rest-api.md), how a received configuration is
   stored), and nothing needs them back: switching back on reports no hash, so the Server offers
   again what is released.
 - **A separate host path for a listed Supervisor's local configuration.** It would be a second
@@ -899,6 +961,15 @@ program the Client starts itself on Windows.
   the host.
 - **Refusing startup when a listed name matches no block.** A Server that delivers that block later
   is the normal case, and the refusal would stop the whole Client for it.
+- **Run the version probe and the preflight in the Client's own working directory, with arguments
+  as written and the probe with no environment.** A program that needs its tree root or its
+  environment to run would then answer as another program would, or not at all, and a preflight
+  could not hand the program a path into the staged tree. Both run as the start runs the program,
+  and a preflight names the staged root `${staged}` (clause 57).
+- **Leave an operator's `[attributes]` key under a kind's `supervisor.kind.*` key as written.** An
+  operator could then claim for a Client a kind it was not compiled with, and a Selector would aim
+  a Supervisor set at a Client that cannot run it. `[attributes]` refuses every `supervisor.*`
+  key, so an operator cannot state one (clause 18).
 - **Preflight by static inspection of required `GLIBC_` symbols.** A start attempt is the
   definition of "runs here", catches a missing library too, and yields the operator's message.
 - **Leave a directory the purge cannot delete as an orphan.** The orphan stays beneath the
@@ -1139,6 +1210,11 @@ program the Client starts itself on Windows.
   `the_probe_reports_a_version_description`, `a_failing_or_versionless_probe_stays_silent` and
   `a_swapped_binary_is_probed_again_for_its_version`
   (`crates/fleet-agent/tests/supervisor_process.rs`). A kind's own parser is tested with that kind.
+- The probe and the preflight as the start runs them (clause 57):
+  `the_version_probe_runs_through_the_second_service` (the probe's working directory and
+  environment) and
+  `the_preflight_runs_through_the_second_service` (`${staged}` resolved in the arguments, the
+  environment and the working directory), in `crates/fleet-agent/src/supervisor/process.rs`.
 - Delivered environment, arguments and rendering, in
   [`crates/fleet-agent/src/reconfigure.rs`](../../crates/fleet-agent/src/reconfigure.rs):
   `a_delivered_block_may_not_add_environment_the_operator_did_not_allow`,
@@ -1176,7 +1252,7 @@ program the Client starts itself on Windows.
   `the_rewrite_keeps_the_files_restrictive_mode`, `a_freshly_created_file_is_owner_only`,
   `the_plan_is_a_diff_by_name_and_unchanged_blocks_ride_through`,
   `the_purge_deletes_exactly_the_removed_supervisors_directory` (the purge of
-  [ADR-0035](0035-package-versions-high-water-mark-and-floor.md) clause 13),
+  [ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 13),
   `the_purge_does_not_follow_a_symlink_out_of_the_supervisors_root`,
   `an_empty_offer_removes_every_block`; `retiring_uninstalls_the_removed_and_only_stops_the_changed`
   (`crates/fleet-agent/src/engine.rs`); and end to end
@@ -1240,6 +1316,15 @@ program the Client starts itself on Windows.
     `a_server_offers_no_configuration_to_a_listed_supervisor` (clauses 47 and 52: a released
     Configuration reaches the unlisted Supervisor and not the listed one over the same
     connection).
+- Clause 56, in `crates/fleet-agent/src/supervisor/agent.rs`:
+  `a_repeated_offer_of_the_hash_applying_is_reported_not_applied`,
+  `a_repeated_offer_of_the_hash_applied_restarts_nothing`,
+  `the_client_agent_applies_a_repeated_offer_of_its_set_once`,
+  `an_offer_of_another_hash_is_applied_after_the_one_applying`,
+  `a_repeated_offer_of_a_hash_that_failed_is_applied_again`; and in
+  `crates/fleet-agent/tests/e2e.rs`
+  `a_config_change_reaches_both_supervised_agents_over_one_connection`, whose Server's push is
+  delayed past a heartbeat.
 
 **Not mechanically decidable:** the process-group stop (clause 53) has no dedicated test: a worker
 left behind shows only with an agent that forks one, so review of the spawn and of `signal_child`

@@ -6,7 +6,7 @@ use std::time::Duration;
 /// Writes a throwaway self-signed client certificate and key into `dir` and returns the `[tls]`
 /// table that names them, to be appended at the end of a `supervisor.toml`.
 ///
-/// The Client refuses to start without a client certificate (ADR-0040). The test Servers serve
+/// The Client refuses to start without a client certificate (ADR-0026). The test Servers serve
 /// plaintext with an open admission and do not check it, so the files only have to exist and
 /// parse.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this support
@@ -29,7 +29,7 @@ pub fn client_identity(dir: &Path) -> String {
 
 /// The fleet state on `dir` with the Deployments armed, as the binary wires it: the Configuration
 /// store under `fleet-configs`, and an empty package store under `packages`, which arms the
-/// Deployments that release Configurations and Packages alike (ADR-0049).
+/// Deployments that release Configurations and Packages alike (ADR-0032).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this support
 pub fn fleet_state(dir: &Path) -> fleet_server::fleet::AppState {
     let packages =
@@ -43,7 +43,7 @@ pub fn fleet_state(dir: &Path) -> fleet_server::fleet::AppState {
 }
 
 /// Saves a top-level Configuration for the Agent type `service_name` — content only, distributed
-/// to nobody (ADR-0049).
+/// to nobody (ADR-0032).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this support
 pub fn save(state: &fleet_server::fleet::AppState, name: &str, body: &str, service_name: &str) {
     state
@@ -68,7 +68,7 @@ pub const CHANNEL: (&str, &str) = ("channel", "e2e");
 pub const FLEET_DEPLOYMENT: &str = "fleet";
 
 /// Aims the Deployment `deployment` at `selector`, puts `configurations` into it beside what it
-/// already holds, and rolls it out (ADR-0049) — answering how many Agents the press moved.
+/// already holds, and rolls it out (ADR-0032) — answering how many Agents the press moved.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this support
 pub fn release(
     state: &fleet_server::fleet::AppState,
@@ -98,7 +98,7 @@ pub fn release(
 }
 
 /// Releases `configurations` to every Agent the Server knows now, the way an operator does since
-/// ADR-0049: each Agent is labelled into the [`CHANNEL`] (beside the labels it has), and the
+/// ADR-0032: each Agent is labelled into the [`CHANNEL`] (beside the labels it has), and the
 /// [`FLEET_DEPLOYMENT`] aimed at that channel holds the Configurations and is rolled out. An Agent
 /// that appears later waits, as it would for any press.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this support

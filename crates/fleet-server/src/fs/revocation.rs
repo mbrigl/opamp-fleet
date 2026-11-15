@@ -1,4 +1,4 @@
-//! The register, the revocation list and the Hosts on the filesystem (ADR-0040, ADR-0052,
+//! The register, the revocation list and the Hosts on the filesystem (ADR-0026, ADR-0029,
 //! ADR-0023): the default adapter behind [`LedgerStore`](crate::revocation::LedgerStore).
 
 use std::collections::BTreeMap;
@@ -37,7 +37,7 @@ struct HostFile {
 }
 
 /// The file name of a certificate: the first 16 hex characters of its issuer's name hash, and its
-/// serial (ADR-0035 clause 23).
+/// serial (ADR-0034 clause 23).
 pub(crate) fn cert_file_stem(id: &CertId) -> String {
     format!("{}-{}", &id.issuer[..16.min(id.issuer.len())], id.serial)
 }
@@ -88,7 +88,7 @@ impl FsLedgerStore {
     }
 
     /// The list as persisted, without the credential entries a list may still hold: the Agent
-    /// plane admits by client certificate alone, so there is no credential to revoke (ADR-0040
+    /// plane admits by client certificate alone, so there is no credential to revoke (ADR-0026
     /// clause 29). They are dropped with one log line, and the list is written back without them.
     fn certificate_revocations(&self, bytes: &[u8]) -> Result<Vec<Revocation>, String> {
         let parse =
@@ -213,7 +213,7 @@ impl LedgerStore for FsLedgerStore {
 
     /// Answers from the Hosts as last written, which the next write of the Hosts carries the
     /// binding into: another Host speaking for `instance_uid` holds it, unless it is marked as a
-    /// Gateway. A Gateway's Host is bound none (ADR-0052 clause 16), but its file may list
+    /// Gateway. A Gateway's Host is bound none (ADR-0029 clause 16), but its file may list
     /// `instance_uid`s a release before this one kept there, and no migration rewrites the files.
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
         let written = self.written_hosts.lock().expect("hosts lock");
@@ -286,7 +286,7 @@ mod tests {
     use super::*;
     use crate::revocation::{Facts, Revoked};
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn the_ledger_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -388,7 +388,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn a_persisted_credential_entry_is_dropped_on_load() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -445,7 +445,7 @@ mod tests {
 
     /// A Host file written before a Host had a valid until loads without one, and one written now
     /// keeps it across a reopen.
-    /// Verifies: ADR-0052
+    /// Verifies: ADR-0029
     #[test]
     fn a_host_file_without_a_valid_until_still_loads() {
         let dir = tempfile::tempdir().expect("tempdir");

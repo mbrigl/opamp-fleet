@@ -44,7 +44,7 @@
   // System packages the base image does not carry, installed once when the container is created.
   //
   // All four are *developer tooling* — nothing shipped depends on them, which is why the first
-  // three need no ADR (AGENTS.md §3.6); the fourth is ADR-0043's below — and each earns
+  // three need no ADR (AGENTS.md §3.6); the fourth is ADR-0026's below — and each earns
   // its place:
   //
   //   shellcheck  the shell lint, from the base image's signed Debian archive, so the pre-push
@@ -58,8 +58,8 @@
   //   softhsm2  the PKCS#11 token the tests of the Server's keys on a token run against, as the
   //             CI runner's do; scripts/check-rust.sh and scripts/check-store.sh give it a
   //             configuration and a token directory of their own, outside the repository
-  //             (ADR-0043
-  //             clause 7). Without it those tests skip locally.
+  //             (ADR-0026
+  //             clause 39). Without it those tests skip locally.
   "postCreateCommand": {
     "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm softhsm2"
   },
@@ -70,7 +70,7 @@
   // CONTRIBUTING.md → "Git hooks". The development observability stack runs on the host,
   // apart from this container (observability/compose.yaml); this puts its Collector on the
   // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
-  // plaintext to a loopback IP literal alone (ADR-0054), the stack's rustfs on :9100, the S3
+  // plaintext to a loopback IP literal alone (ADR-0017), the stack's rustfs on :9100, the S3
   // store a development Server may use (ADR-0023), and its PostgreSQL on :5432, the database it may
   // keep its records in (ADR-0023). See observability/README.md.
   "postStartCommand": {

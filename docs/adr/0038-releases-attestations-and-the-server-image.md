@@ -1,4 +1,4 @@
-# ADR-0039: Releases, attestations and the Server's image
+# ADR-0038: Releases, attestations and the Server's image
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-02
@@ -19,9 +19,9 @@ them.
 `SHA256SUMS` proves only that a download matches the file next to it on the same release page.
 Anyone who can replace one asset can replace both. Two assets carry more weight than the rest: the
 Client's archive, which a Server hands to a whole fleet as a self-update, where the fleet's package
-signature ([ADR-0034](0034-packages-signatures-and-delivery.md)) is made over whatever the operator
+signature ([ADR-0033](0033-packages-signatures-and-delivery.md)) is made over whatever the operator
 downloaded; and the operator tool, which makes the fleet's certificate authorities and its signing
-key ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)). An operator who wants to know that a
+key ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)). An operator who wants to know that a
 file came from this repository's release workflow, at a known commit, needs a way to check it.
 
 GitHub artifact attestations answer that question. A workflow job with `id-token: write` gets a
@@ -77,7 +77,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
 ### The release and its assets
 
 1. **A release is one workflow run that builds five targets from one version.** The version and its
-   `version/*` tag are decided as [ADR-0038](0038-the-products-version.md) states. A first job
+   `version/*` tag are decided as [ADR-0037](0037-the-products-version.md) states. A first job
    decides the number, builds the Client and asks it `--version`; every artifact is named from that
    one answer, and each target's build asserts its own binary reports the same full version (except
    the cross-compiled macOS x86_64 build, which the runner cannot execute). Every job checks out
@@ -99,22 +99,22 @@ provenance of every asset and of the image, publishing nothing that does not ver
 
 2. **Every archive is a `.tar.gz` written by `opamp-fleetctl package pack --format tar.gz`,** the
    operator tool the same run builds and publishes
-   ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)). The packer names the single member
+   ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)). The packer names the single member
    after the program, with its executable mode, so **the Client's release archive is a valid
    package artifact unmodified**: the operator uploads the file they downloaded, and the SHA-256
    the packer prints is both the published checksum and the hash an Agent verifies
-   ([ADR-0034](0034-packages-signatures-and-delivery.md)). `.tar.gz` because it is the container
+   ([ADR-0033](0033-packages-signatures-and-delivery.md)). `.tar.gz` because it is the container
    every other agent's package ships as and the one that carries the executable bit and unpacks the
    same way on every platform. `.7z` remains a package container the Client opens and the packer
-   writes, including encrypted ([ADR-0034](0034-packages-signatures-and-delivery.md)); a release
+   writes, including encrypted ([ADR-0033](0033-packages-signatures-and-delivery.md)); a release
    has no use for encryption.
 
 3. **Every asset of the Client is named `supervisor_<version>_<os>_<arch>.<ext>`,** and the
    operator tool's by the same grammar under its own name
-   ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)). Four fields separated by `_`: the
+   ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)). Four fields separated by `_`: the
    package name, the base version `MAJOR.MINOR.PATCH` without build metadata, and the platform in
    the vocabulary an Agent reports as `os.type` and `host.arch`
-   ([ADR-0034](0034-packages-signatures-and-delivery.md)). **All artifacts of a target share the
+   ([ADR-0033](0033-packages-signatures-and-delivery.md)). **All artifacts of a target share the
    stem** and differ in extension alone:
 
    | | artifact |
@@ -148,7 +148,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
 5. **What is published.** A GitHub release named after the version holds:
    - the Client's five archives, the two `.deb`, the two `.rpm` and the `.msi`;
    - the four archives of the operator tool
-     ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md));
+     ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md));
    - the eleven SBOMs (clause 7);
    - one `SHA256SUMS` covering every asset.
 
@@ -166,7 +166,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
    - the procedure that uploads the Client's archives, selected by their `supervisor_` stem, as one
      package for Agent type `supervisor`;
    - the full baked version string, as provenance. The upload uses the release number, since
-     versions are compared without build metadata ([ADR-0038](0038-the-products-version.md)).
+     versions are compared without build metadata ([ADR-0037](0037-the-products-version.md)).
 
 6. **The operator tool's archives are attested, as the Client's artifacts are.** They carry what
    every asset of a release carries: their entry in `SHA256SUMS`, and the release's
@@ -316,7 +316,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
 - code signatures inside an asset or on the image: Authenticode on the `.msi`, `rpm` and `dpkg`
   signatures, Apple notarization, a cosign signature;
 - the Client verifying an attestation before a self-update; the fleet's package signature
-  ([ADR-0034](0034-packages-signatures-and-delivery.md)) stays the only check on that path;
+  ([ADR-0033](0033-packages-signatures-and-delivery.md)) stays the only check on that path;
 - an SBOM-predicate attestation that binds each archive to its SBOM (`actions/attest` with
   `sbom-path`);
 - SLSA Build Level 3 and an isolated builder;
@@ -517,7 +517,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
   already shows. No asset carries a code signature: Windows shows an unknown publisher and `rpm`
   reports no signature.
 - Negative / trade-offs: the `version` job pushes the tag before anything is built
-  ([ADR-0038](0038-the-products-version.md)). An attestation or verification failure in `publish`
+  ([ADR-0037](0037-the-products-version.md)). An attestation or verification failure in `publish`
   leaves a pushed tag without a release. Re-running the failed job publishes it. A new run refuses
   the spent number, as it does for any `publish` failure.
 - Negative / trade-offs: a script that downloads `supervisor_<version>_*` without an extension also
@@ -574,7 +574,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
 - [`scripts/check-build-hardening.sh`](../../scripts/check-build-hardening.sh) check 3 fails on a
   `cargo install` in `release.yml` without an exact version, which covers the tool of clause 8.
   Its check 2 fails on a cache in `release.yml`.
-- A test that carries `Verifies: ADR-0039`, for clause 16:
+- A test that carries `Verifies: ADR-0038`, for clause 16:
   [`config.rs`](../../crates/fleet-server/src/config.rs)
   `a_data_dir_the_account_cannot_write_fails_startup_naming_it`. The check of the Containerfile
   above allows no `FLEET_SERVER__DATA_DIR`.

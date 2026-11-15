@@ -1,5 +1,5 @@
 //! The WebSocket transport: one connection, reconnected with backoff, carrying every Agent of the
-//! session — the *n* over one of ADR-0048.
+//! session — the *n* over one of ADR-0016.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -560,7 +560,7 @@ async fn serve<S: Session, X: StopSignal>(
                                 // The Server's close, its frame or the connection's end, before
                                 // the next connection reports: else the Server may still hold the
                                 // Agents carried here and take the next one for another peer
-                                // (ADR-0045 clause 8). A Server that does not answer within the
+                                // (ADR-0025 clause 8). A Server that does not answer within the
                                 // bound does not hold the Client back.
                                 let _ = tokio::time::timeout(CLOSE_ANSWER, async {
                                     while let Some(Ok(message)) = socket.next().await {
@@ -749,9 +749,9 @@ mod tests {
     }
 
     /// A connection opened from a named local address reaches the server from that address
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 20).
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_connection_from_a_named_address_reaches_the_server_from_it() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -795,9 +795,9 @@ mod tests {
     }
 
     /// A lost connection logs the delay it drew, and the next connection comes no earlier
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 20).
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_lost_connection_logs_the_delay_it_drew_and_waits_it() {
         let written = Written::default();
@@ -937,7 +937,7 @@ mod tests {
     /// On verified connection settings the Client leaves the connection only once the Server
     /// answered its close, here 300 ms after it: the next connection is dialled after that, so the
     /// Server has ended the session before the next one reports.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_reconnect_on_verified_settings_waits_for_the_servers_close() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -959,7 +959,7 @@ mod tests {
     }
 
     /// A Server that never answers the close holds the Client back no longer than the bound.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_reconnect_waits_no_longer_than_the_bound_for_a_silent_server() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

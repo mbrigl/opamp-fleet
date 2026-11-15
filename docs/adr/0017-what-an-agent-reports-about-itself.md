@@ -1,7 +1,7 @@
 # ADR-0017: What an Agent reports about itself
 
-- **Status:** ⚪ superseded by [ADR-0054](0054-what-an-agent-reports-about-itself.md)
-- **Date:** 2026-10-24
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-14
 - **Deciders:** Markus Brigl
 - **Applies to:** AgentDescription building and the fold of a Managed Process's description in `crates/fleet-agent/src/supervisor/agent.rs` and `crates/fleet-agent/src/supervisor/agent/description.rs`, the host attributes in `crates/fleet-agent/src/host.rs`, the Agent type resolution in `crates/fleet-agent/src/supervisor/block.rs` and `crates/fleet-agent/src/supervisor/mod.rs`, the attribute keys in `crates/opamp/src/attributes.rs`, `[attributes]`, `service_namespace` and a `[[supervisor]]` block's `service_name` in `supervisor.toml`, the fleet view's name and network columns; `crates/fleet-agent/src/telemetry.rs`, the telemetry half of `crates/fleet-agent/src/connection.rs`, the operation spans in the Client's transport, engine, reconfigure, packages, update (`crates/fleet-agent/src/update/`) and Supervisor modules, the Server's `[telemetry_offer]` (`crates/fleet-server/src/config.rs`, `crates/fleet-server/src/fleet.rs`), the OpenTelemetry crates in `Cargo.toml`, and every document that tells an operator where an Agent's type comes from or what a Managed Process or `[attributes]` contributes to an Agent's description
 
@@ -29,7 +29,7 @@ equals the Configuration's type, and a rollout pins the fitting ones to it. A De
 Selector can aim at `service.name`. A Package is resolved for the type the Agent reports. The
 Supervisor refuses an offered Package whose name is not its own type before anything is
 downloaded, and keeps the high-water mark per its own type
-([ADR-0035](0035-package-versions-high-water-mark-and-floor.md)); both read the Supervisor's
+([ADR-0034](0034-package-versions-high-water-mark-and-floor.md)); both read the Supervisor's
 value.
 
 **A Managed Process is code the Supervisor does not vouch for.** The Server ships its program as a
@@ -53,7 +53,7 @@ unfiltered, such a report could state:
   that reports another platform is offered a binary built for another machine, which the
   Supervisor swaps over the program; only the health gate would catch it.
 - **A Client Agent.** The Client Agent is recognised by the `supervisor.kind.*` attributes that it
-  alone reports ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)). A process that reports
+  alone reports ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)). A process that reports
   one makes a second Client Agent in its group: nobody in the group inherits Labels, and every
   Agent of the host is marked ambiguous and drops out of every Deployment aimed by an inherited
   Label. Behind a Gateway the group is keyed by the reported `host.id` or `host.name`, so a process
@@ -65,7 +65,7 @@ unfiltered, such a report could state:
 What the process knows that nobody else does is its version, and for a Collector its `dist.name`.
 The rest of what a Collector's `opampextension` reports is `host.name`, `os.type`, `host.arch` and
 `os.description`, which the Supervisor reports from the same machine in the same spelling
-([ADR-0034](0034-packages-signatures-and-delivery.md)), plus attributes written in the Collector's
+([ADR-0033](0033-packages-signatures-and-delivery.md)), plus attributes written in the Collector's
 own configuration under `agent_description.non_identifying_attributes` and its resource
 attributes. G-16 has the Supervisor Endpoint relay a Collector's `service.*` description and
 leaves what the host is to the Supervisor and the operator. No kind this project builds states a
@@ -143,6 +143,13 @@ offer of their own, without a verifying connection or a reconnect — is
 Agent states about itself, what own telemetry is, what an offer of it means, and what the Client
 admits.
 
+**The `supervisor.` namespace is the Supervisor's own statement.** A Package is matched against
+the version of the Package a Supervisor installed
+([ADR-0032](0032-deployments-and-rollouts.md) clause 25), and the Client Agent is told apart by
+the kinds it reports ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 18). An operator
+who could state a key in that namespace could make every Agent of the host a Client Agent or
+choose the version a Package is held against.
+
 ## Decision
 
 We will describe each Agent by the type its Supervisor states, the operator's name for it and the
@@ -163,7 +170,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
    Managed Process reports is never a source of the type (clause 8). The Baseline's reverse-FQDN
    shape is a recommendation and is not enforced. The Client Agent reports the constant
    `supervisor` ([ADR-0020](0020-the-installed-service-and-its-state.md)), never its configured
-   name. A Selector or a Configuration's type ([ADR-0032](0032-configurations-and-the-rest-api.md))
+   name. A Selector or a Configuration's type ([ADR-0031](0031-configurations-and-the-rest-api.md))
    on `service.name` aims at a type.
 
 2. **`service.instance.name` is the operator's name for the Agent**, non-identifying: the
@@ -180,15 +187,18 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 4. **The identifying attributes** are `service.name`; `service.namespace`, only when the top-level
    `service_namespace` key in `supervisor.toml` is set, since only an operator knows the
    deployment; `service.version` — for the Client Agent its baked version
-   ([ADR-0038](0038-the-products-version.md)), for a Supervisor-backed Agent only what the Managed
+   ([ADR-0037](0037-the-products-version.md)), for a Supervisor-backed Agent only what the Managed
    Process reports, never invented from the Client's; and `service.instance.id`, the Instance UID.
 
 5. **Where the Agent runs is reported best effort, and absent rather than blank.** Beside
    `service.instance.name`, the non-identifying attributes are `os.type` and `host.arch` in the
-   conventions' vocabulary ([ADR-0034](0034-packages-signatures-and-delivery.md)), `os.name`,
+   conventions' vocabulary ([ADR-0033](0033-packages-signatures-and-delivery.md)), `os.name`,
    `os.version`, `os.build_id`, `os.description`, `host.name`, `host.id`, `host.cpu.model.name`,
-   `host.ip`, and `host.mac`. What the platform cannot answer is left out: a placeholder would be
-   something false a Selector could match. Nothing is taken from the connection.
+   `host.ip`, and `host.mac`. A Supervisor-backed Agent also reports `supervisor.package.version`,
+   the version of the Package its Supervisor installed, when and from what record
+   [ADR-0032](0032-deployments-and-rollouts.md) clause 25 states.
+   What the platform cannot answer is left out: a placeholder would be something false a Selector
+   could match. Nothing is taken from the connection.
 
 6. **`host.ip` and `host.mac` follow the conventions.**
    - Enumerated with `sysinfo`'s `network` feature, the crate the Client already carries for its
@@ -250,10 +260,16 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     where the code reports nothing under the same key. What the code reports always wins, so an
     attribute can never restate the type or the instance name. An attribute that is added stands
     against the Managed Process: the fold leaves its key alone (clause 8). Tagging one Agent among
-    several is a Label's job ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)): a
+    several is a Label's job ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)): a
     `[[supervisor]]` block carrying an `attributes` table fails at startup with a message naming
     the Server's Label. The Client Agent also reports the kinds it was compiled with
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)).
+    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)). An `[attributes]` key that starts with
+    `supervisor.`, whether TOML spells it quoted, dotted, or as a sub-table under
+    `[attributes.supervisor]`, fails at startup with a message naming the key. That namespace is
+    the Supervisor's own statement: `supervisor.kind.*`
+    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 18)
+    and `supervisor.package.version` (clause 5). An operator who could state one could make every
+    Agent of the host a Client Agent or choose the version a Package is held against.
 
 11. **The fleet view shows the instance name first and the type beneath it.** `AgentView` carries
     `service_name` (the type) and `service_instance_name`; the bundled UI's name column falls back
@@ -431,11 +447,11 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 33. **`certificate`, `tls` and `proxy` behave as they do on the OpAMP settings.** An offered
     `certificate` is honoured: its `cert` is presented by the exporter, paired with the key this
     Client generated for its CSR — the client-certificate machinery of
-    [ADR-0026](0026-admission-by-client-certificate-and-revocation.md), reused as-is. A
-    `private_key` in the offer is refused by name, because this Client's private key never leaves
-    its host and is never accepted from the Server; a `cert` with no key on disk to pair with is
-    refused by name too. `ca_cert` is not added to the trust store, as the Baseline advises. `tls`
-    and `proxy` are refused and reported by name.
+    [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
+    reused as-is. A `private_key` in the offer is refused by name, because this Client's private
+    key never leaves its host and is never accepted from the Server; a `cert` with no key on disk
+    to pair with is refused by name too. `ca_cert` is not added to the trust store, as the Baseline
+    advises. `tls` and `proxy` are refused and reported by name.
 
 34. **The Server offers destinations from a `[telemetry_offer]` section.** `metrics_endpoint`,
     `traces_endpoint`, `logs_endpoint`, and one `[telemetry_offer.headers]` table sent with every
@@ -471,7 +487,7 @@ Managed Process can read on its host, which includes the Client's `state_dir` an
 run under one account ([ADR-0021](0021-the-accounts-the-service-runs-under.md)); `service.version`,
 which stays the process's word; what a compromised Client reports, since its code builds the whole
 description and no rule on the Client binds it; and the Server's precedence of the effective
-description ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
+description ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)).
 
 ## Alternatives considered
 
@@ -508,8 +524,9 @@ description ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
   reported on its Endpoint comes from something the operator never meant to state one. Rejected.
 - **Stop handing the token to processes that speak no OpAMP.** It narrows who can reach the
   Endpoint, but a Collector's own children still inherit the token, and the type would still be the
-  process's word. It is a separate decision about the Supervisor Endpoint
-  ([ADR-0016](0016-client-modes-and-the-gateway.md)) and can be taken beside this one.
+  process's word. It is a separate decision about the Supervisor Endpoint, which
+  [ADR-0016](0016-client-modes-and-the-gateway.md) clause 28 takes for a kind whose program never
+  connects to it.
 - **Fold every key a process reports except `service.instance.id` and `service.instance.name`.**
   A process on one host could draw another host's Configurations, an artifact for another
   platform, and a whole host out of its Label-based rollouts. Rejected.
@@ -523,13 +540,24 @@ description ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
   Configuration fit and the artifact choice.** The Server receives one description and cannot tell
   which key the process supplied. Ignoring these keys for every Agent would remove the Supervisor's
   true values with the false ones: pinning one host by `host.name`
-  ([ADR-0034](0034-packages-signatures-and-delivery.md)) would stop working, the artifact could no
+  ([ADR-0033](0033-packages-signatures-and-delivery.md)) would stop working, the artifact could no
   longer be chosen, and the grouping behind a Gateway
-  ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)) would lose its key. The Supervisor
+  ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)) would lose its key. The Supervisor
   knows which value came from the process and can decide where the Server cannot. Rejected.
 - **Let an operator admit further keys per `[[supervisor]]` block.** That would restore a
   Collector's own tags. But it puts a per-Agent setting back into `supervisor.toml`, where tagging
   one Agent is a Label's job (clause 10). It can be decided later if a need appears. Not taken now.
+- **Let `[attributes]` add any key the code does not report, `supervisor.*` included.** An
+  operator could then state `supervisor.kind.*` and make every Agent of the host a Client Agent,
+  or state `supervisor.package.version` and choose the version a Package is held against. That
+  namespace is the Supervisor's own statement, so `[attributes]` refuses every key in it at
+  startup, however TOML spells it (clause 10).
+- **Report no version of the installed Package, and leave the Agent's version as the only one.**
+  A Package would then be held against the Agent's own claim, which is the same field for the
+  Client Agent and for a Supervisor-backed one
+  ([ADR-0032](0032-deployments-and-rollouts.md), which holds a Package against
+  `supervisor.package.version`). The Supervisor reports what it installed under a key of its
+  own (clause 5).
 - **Derive the type from `<program> --version` output.** A name has no grammar the way a SemVer
   does (`Fluent Bit v3.1.0`, `promtail, version 3.0.0 (branch: main)`); the configuration fallback
   gets the same value without guessing.
@@ -718,7 +746,7 @@ description ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
 - Positive: a Managed Process cannot draw another host's Configurations, be offered an artifact
   for another platform, make its host or another one ambiguous, or override the operator's
   attributes or shadow a Label outside `service.*`. That the Client Agent is recognised by the
-  attributes it alone reports ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)) holds on
+  attributes it alone reports ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)) holds on
   every honest Client.
 - Positive: the fleet view shows each host's addresses, the attributes are searchable, and the
   wire stays convention-shaped for any OpenTelemetry-aware consumer.
@@ -798,7 +826,8 @@ description ([ADR-0030](0030-the-fleet-record-of-agents-and-hosts.md)).
   `a_block_may_state_its_agent_type_and_a_reverse_fqdn_is_accepted`,
   `an_empty_agent_type_is_refused_rather_than_treated_as_absent`,
   `attributes_describe_the_host_and_a_block_no_longer_tags_one_agent`,
-  `non_string_attributes_are_rejected` (clauses 1, 10).
+  `non_string_attributes_are_rejected`,
+  `an_attribute_in_the_supervisors_namespace_is_refused_by_name` (clauses 1, 10).
 -
   [`crates/fleet-agent/tests/collector_extension_e2e.rs`](../../crates/fleet-agent/tests/collector_extension_e2e.rs):
   `a_collector_extensions_own_report_reaches_the_fleet_as_its_supervisors_agent` — an extension

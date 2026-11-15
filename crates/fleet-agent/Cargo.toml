@@ -1,6 +1,6 @@
 [package]
 name = "fleet-agent"
-description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0048)"
+description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0016)"
 # The test stubs (src/bin/stub_*.rs) are further binaries; `cargo run -p fleet-agent` means this one.
 # The operator tools are not here at all: they are `crates/fleet-tools` (ADR-0008).
 default-run = "supervisor"
@@ -17,7 +17,7 @@ publish.workspace = true
 name = "supervisor"
 path = "src/main.rs"
 
-# ADR-0051 clause 2: each wrapped Supervisor kind is a feature named after its `type`, all of them
+# ADR-0018 clause 2: each wrapped Supervisor kind is a feature named after its `type`, all of them
 # in the published build. `collector` and `command` are the core's own and always compiled in.
 [features]
 default = []
@@ -37,7 +37,7 @@ prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-# ADR-0051: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
+# ADR-0018: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
 # the file — comments, ordering, formatting — exactly as written; the questionnaire's edit of an
 # existing file does the same (ADR-0020 clause 24).
 toml_edit.workspace = true
@@ -53,7 +53,7 @@ ring.workspace = true
 rcgen.workspace = true
 time.workspace = true
 # `verify`: a Gateway with a bootstrap CA tells a member from an enrolling peer by whether a CA of
-# its client CA file signed the certificate, as the Server does (ADR-0048).
+# its client CA file signed the certificate, as the Server does (ADR-0016).
 x509-parser = { workspace = true, features = ["verify"] }
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
@@ -64,13 +64,13 @@ tracing-opentelemetry.workspace = true
 opentelemetry-http.workspace = true
 async-trait.workspace = true
 # `network` on top of the workspace's `system`: the interface enumeration behind `host.ip` and
-# `host.mac` (ADR-0054).
+# `host.mac` (ADR-0017).
 sysinfo = { workspace = true, features = ["network"] }
-# The downstream OpAMP endpoint of Gateway Mode (ADR-0048) is `opamp::server`'s, an axum router;
+# The downstream OpAMP endpoint of Gateway Mode (ADR-0016) is `opamp::server`'s, an axum router;
 # its WebSocket upgrade is `opamp`'s own (ADR-0008). The HTTP engine under it — hyper, tower,
 # http-body — is already linked through reqwest; this adds the routing layer.
 axum.workspace = true
-# ADR-0050: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
+# ADR-0033: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
 # encrypted `.7z` with the key from `[packages] archive_key`.
 flate2.workspace = true
 tar.workspace = true
@@ -81,7 +81,7 @@ zip.workspace = true
 # (ADR-0012).
 zeroize.workspace = true
 
-# ADR-0051: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
+# ADR-0018: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
 # which has no SIGTERM equivalent (there, kill is the stop).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -133,7 +133,7 @@ maintainer-scripts = "../../packaging/linux"
 
 [package.metadata.generate-rpm]
 name = "opamp-fleet"
-# One `Release`, forever: ADR-0038 releases a version once, so there is never a second build of one.
+# One `Release`, forever: ADR-0037 releases a version once, so there is never a second build of one.
 release = "1"
 assets = [
     { source = "target/release/supervisor", dest = "/usr/libexec/opamp-fleet/supervisor", mode = "755" },
@@ -170,5 +170,5 @@ rustls.workspace = true
 # encoder rides here alone, since `pack` lives in its own crate (ADR-0008) — a dev-dependency
 # reaches the tests and no shipped binary.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
-# ADR-0051: the end-to-end test runs the real Server in-process against the real Client binary.
+# ADR-0018: the end-to-end test runs the real Server in-process against the real Client binary.
 fleet-server = { path = "../fleet-server" }

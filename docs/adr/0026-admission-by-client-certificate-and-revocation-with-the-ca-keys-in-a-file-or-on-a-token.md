@@ -1,10 +1,9 @@
-# ADR-0040: Admission by a client certificate alone, a guarded Operator plane, and a revocation list that follows renewal, with the CA keys in a file or on a token
+# ADR-0026: Admission by a client certificate alone, a guarded Operator plane, and a revocation list that follows renewal, with the CA keys in a file or on a token
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-08
 - **Deciders:** Markus Brigl
-- **Applies to:** Admission on `/v1/opamp`, the package download route and `/v1/gateway/revocations` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential and guard in `crates/fleet-server/src/credentials.rs` and `api.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the WebSocket session loop and the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the `/api/v1/revocations` route, the reading of a CSR in `crates/fleet-server/src/ca.rs` and its handling in `crates/fleet-server/src/fleet.rs`, the Client's identity, CSR and renewal in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity it presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, and the Server's `hash-credential` command in `crates/fleet-server/src/main.rs`
-- **Supersedes:** [ADR-0026](0026-admission-by-client-certificate-and-revocation.md)
+- **Applies to:** Admission on `/v1/opamp`, the package download route and `/v1/gateway/revocations` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential and guard in `crates/fleet-server/src/credentials.rs` and `api.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the WebSocket session loop and the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the `/api/v1/revocations` route, the reading of a CSR in `crates/fleet-server/src/ca.rs` and its handling in `crates/fleet-server/src/fleet.rs`, the Client's identity, CSR and renewal in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity it presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, the Server's `hash-credential` and `pki status` commands in `crates/fleet-server/src/main.rs`, the `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` and every PKCS#11 adapter beside the local CA in `crates/fleet-server/src/pkcs11.rs` and `crates/fleet-core/src/pkcs11.rs`, the signing of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the `[pkcs11]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `pki init`, `pki token-init` and `pki bootstrap-ca` commands in `crates/fleet-tools/src/pki.rs`, the `cryptoki` dependency of the Server and of `crates/fleet-tools` in `Cargo.toml` and `deny.toml`, SoftHSM2 with its `softhsm2.conf` and token directory in the Dev Container and on the CI runner, `docs/ARCHITECTURE.md`, and every document that tells an operator where the CA keys live
 
 ## Context
 
@@ -57,7 +56,7 @@ Forces that shape the answer:
   earlier version, by the self-update of
   [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md), with nobody at the host.
 - **The Agent plane serves the package download besides `/v1/opamp`**
-  ([ADR-0034](0034-packages-signatures-and-delivery.md)). A handshake that requires a certificate
+  ([ADR-0033](0033-packages-signatures-and-delivery.md)). A handshake that requires a certificate
   requires it there too, so the Client's downloader must present one — to the Server, never to a
   mirror.
 - **An approval means something only when the enrolling peer can be told apart.** A bootstrap
@@ -121,18 +120,43 @@ Three facts shape the revocation list:
   certificate stays on the downstream hop, and nothing of the downstream Agent's proof reaches the
   Server.
 
-This ADR restates
-[ADR-0026](0026-admission-by-client-certificate-and-revocation.md)
-in full and keeps its numbering. Its clauses 8 and 17 take up the CA keys on a token of
-[ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md).
+The certificate is worth only what the key that signs it is worth. The Server signs two kinds of
+certificate: as the local client CA it signs every host certificate (clause 8), and as the
+bootstrap CA it issues bootstrap certificates on request
+([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+A key kept as a file is a PKCS#8 PEM file that `opamp-fleetctl pki init` writes into the Server's
+directory and the Server reads unattended, unencrypted
+([ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 7 and 16). Whoever reads
+`client-ca-key.pem` once, from the host, from a backup or from a snapshot of its disk, can sign a
+member certificate for any host until the CA is replaced, and nothing in the fleet would tell that
+certificate from a real one. Several Server instances on one PostgreSQL database
+([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md))
+each need the CA keys, and copying a key file to every instance multiplies the places it can be
+read from; an instance whose CA key is a file therefore runs alone (that ADR's clause 2). A key
+on a token is made there by `opamp-fleetctl pki token-init` on the Server host and never leaves it
+([ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 7, 8, 12 and 16).
+
+The `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` separates the signing of a host
+certificate from the code that decides to sign it, and the bootstrap certificates are signed in
+`crates/fleet-server/src/bootstrap.rs`. The CA keys are ECDSA P-256, which every PKCS#11 token
+supports. `rcgen` 0.14 signs with any key that implements its `SigningKey` trait, so the
+certificate is built by the same code and only the signature comes from elsewhere.
+
+A hardware or cloud HSM costs money and operation that a first step does not need. SoftHSM2 speaks
+the same PKCS#11 interface, is free, and runs wherever the Server runs, so the Server is built and
+tested against it and moves to a hardware token by naming another module. Whether the Server keeps
+its records in files or in PostgreSQL does not change what a token protects. The working note
+"server split", recorded outside the ADRs, sets the target in D3 and D9.
 
 ## Decision
 
 We will admit a peer to the Agent plane on one proof, a client certificate required in the TLS
 handshake and checked against a persisted revocation list that follows every renewal, guard the
 Operator plane with Basic credentials required beyond the loopback and kept only as a hash, refuse
-a CSR whose `instance_uid` claims are not all its sender's, and end each WebSocket session once
-the certificate that admitted it is revoked or expires.
+a CSR whose `instance_uid` claims are not all its sender's, end each WebSocket session once
+the certificate that admitted it is revoked or expires, and keep each CA key in a file or on a
+token the Server reaches over PKCS#11, generated there and never leaving it, built and tested
+against SoftHSM2.
 
 LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never loopback,
 `localhost` included.
@@ -279,11 +303,11 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     handshake, and a host gets its first certificate from an operator.
 18. **The package download is reached with a client certificate.** Its route on the Agent plane
     sits behind the same handshake as `/v1/opamp`
-    ([ADR-0034](0034-packages-signatures-and-delivery.md)). The route requires a certificate from
+    ([ADR-0033](0033-packages-signatures-and-delivery.md)). The route requires a certificate from
     the client CA; a bootstrap certificate is answered `401`. The Client presents its certificate
     only to the Server's own origin — the scheme, host and port of its OpAMP endpoint — and
     presents none to any other host or on a redirect hop that leaves that origin
-    ([ADR-0034](0034-packages-signatures-and-delivery.md)).
+    ([ADR-0033](0033-packages-signatures-and-delivery.md)).
 19. **Repeated admission failures from one peer address are throttled.** `[admission_throttle]` in
     `server.toml` sets `max_failures` (default 10), `window_secs` (default 60) and `backoff_secs`
     (default 300). Every `401` on `/v1/opamp` and on the download route counts as a failure of the
@@ -298,7 +322,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     or a bootstrap certificate on the download route — so the throttle does not stop guessing; it
     bounds what a refused host that keeps retrying costs in handshakes, revocation lookups and
     audit entries
-    ([ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)).
+    ([ADR-0028](0028-the-audit-record.md)).
 20. **Enrolment reaches the Server directly or through a Gateway, and the Server decides it.** A
     host enrols by connecting to the Server, or through a Gateway that holds the bootstrap CA's
     certificate: the Gateway admits it as an enrolling peer and relays its one CSR, which carries a
@@ -361,7 +385,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     the filesystem store the one Server holds every session, and a revocation reaches them in
     process as it is committed, through the revocation list's subscription. On PostgreSQL a
     revocation committed on any instance reaches every instance by its notification
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
     clause 9), or after a missed one by the re-read of that ADR's clause 10. Either way it is
     checked against every open session there at once; a session checks itself once
     more as it starts, so a revocation landing during its admission is not missed. A session it
@@ -386,6 +410,90 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     clause 10), the same on every instance, so an `ETag` one instance gave is answered `304` by
     another. Bootstrap certificates are not on it: a Gateway admits no bootstrap certificate. The
     route is outside the OpenAPI document, as the package download is.
+35. **One PKCS#11 token, named in `server.toml`.** `[pkcs11]` names `module`, the path of the
+    PKCS#11 library; `token_label`; and `pin_file`, a file that holds the user PIN. The PIN file may
+    be read by its owner and its group and written by its owner alone, as `password_file` may
+    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+    clause 24). One that others may read, or its group may write, fails startup naming it. The PIN
+    is never written into `server.toml` (clause 21). The Server loads the module at startup through
+    `cryptoki` and keeps a pool of four sessions on the token, opened as they are needed; no setting
+    changes the number. PKCS#11 initialises a module once per process, so instances that share a
+    process, as tests run them, share one `cryptoki` context. A module that does not load, a token
+    that is not found or a PIN that is refused fails startup, naming the key.
+36. **The token is optional, whichever store holds the records.** With `[pkcs11]` set, each key may
+    be named by its label; without it, by its file. `[database] store` does not decide it. A
+    `key_label` while `[pkcs11]` is not set fails startup, naming both keys.
+37. **The token signs; the Server builds.** A PKCS#11 key implements `rcgen`'s `SigningKey`: its
+    public half is read from the token once, and each signature is one `C_Sign` with `CKM_ECDSA`
+    over the SHA-256 the Server computes, its `r || s` encoded as the DER `ECDSA-Sig-Value` X.509
+    asks for. The certificate's contents, its serial and its validity are made as with a key file.
+    The adapter sits behind the `CertificateSigner` port and behind a signer port of the same shape
+    for bootstrap certificates and audit checkpoints. A separate signing service can later take a
+    port's place without a change to the use cases.
+38. **The Server signs only what a use case justifies, and audits every signature.** A host
+    certificate is signed for a valid renewal proof, an approved enrolment request or a member's
+    CSR on its own connection. A bootstrap certificate is signed for an operator's request, and a
+    checkpoint on the schedule of [ADR-0028](0028-the-audit-record.md) clause 11. Every certificate
+    signed with a token key writes the audit entry `pkcs11.signed`. It names the key's label as
+    `key_label`, the certificate's `issuer` and `serial`, and as `use_case` the one that asked for
+    it: `renewal`, `enrolment_approval`, `member_csr` or `bootstrap_issue`. A checkpoint is its own
+    signature's entry: it names the key and carries the signature, and no `pkcs11.signed` is
+    written beside it. The entry's place in the record is held before the token is asked to sign,
+    so without a record nothing is signed. It stands beside the entry the use case writes for its
+    decision. A signature made with a key file writes none.
+39. **SoftHSM2 is the planned token, and says so.** The Server is built and tested against
+    SoftHSM2; a hardware or cloud HSM is a change of `[pkcs11] module`, nothing else. SoftHSM2 keeps
+    its token in files on one host, so it serves the Server instances of that host alone
+    (clause 41). The module the `[pkcs11]` section loads is a library the operator has the Server
+    load, which [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 21 leaves to the ADR
+    that loads it. This clause decides that the module may open a connection of its own to a
+    network HSM: to the address the vendor's client configuration names, over the module's own TLS
+    stack. The Server neither builds that connection nor sees it; it and the device's protection of
+    it are the operator's. When the module's `C_GetInfo` names `SoftHSM` as its manufacturer, the
+    Server starts, logs a warning that the keys have no hardware protection, and writes the audit
+    entry `pkcs11.software_token` at every startup. The Dev Container and the CI runner install
+    SoftHSM2 for the tests, beside the packages they already install, within
+    [ADR-0004](0004-dev-container-runtime.md).
+    - SoftHSM2 reads a configuration of its own, `softhsm2.conf`, from the path in `SOFTHSM2_CONF`
+      or from `/etc/softhsm2.conf`. Its `directories.tokendir` names the directory that holds the
+      tokens, encrypted under their PINs. The Server neither writes nor reads either; it loads the
+      module, and the module finds its configuration as it always does.
+    - In production `softhsm2.conf`, the token directory and the token's initialisation are the
+      operator's, as an HSM's setup is. The token directory is the keys: it belongs in the backup,
+      readable by the Server's account alone, and a copy of it with the PIN file is a copy of every
+      key on the token.
+    - In the Dev Container and on the CI runner the project creates both: a `softhsm2.conf` whose
+      token directory lies outside the repository, and a token initialised for the tests, its PIN in
+      a file beside it. Nothing of it is committed.
+    - With a hardware or cloud HSM neither file exists; the vendor's client configures how the
+      module reaches the device.
+    - The Server's image carries no PKCS#11 module
+      ([ADR-0038](0038-releases-attestations-and-the-server-image.md)). An operator who runs the
+      image with a token mounts the module into the container, with what it loads, and names its
+      path in `[pkcs11] module`; with SoftHSM2 also its configuration, named by `SOFTHSM2_CONF`, and
+      its token directory. A module that does not load in the container fails startup (clause 35).
+40. **An existing fleet moves to new CA keys at its ordinary renewal.** A key file cannot be
+    imported into a token without leaving a copy outside it. So the move makes a new client CA on
+    the token, with `opamp-fleetctl pki token-init` on the Server host. For a transition,
+    `client_ca_file` names the old and the new CA certificate; the handshake trusts both, and the
+    Server signs every renewal with the new key. A renewal proof is accepted when its certificate
+    was issued by any CA in `client_ca_file`, so a host whose certificate the old CA signed renews
+    to one the new key signs. Once the last certificate the old CA signed has ended, the operator
+    removes it from `client_ca_file`. A new bootstrap CA takes the old one's place as
+    [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clause 12 makes it.
+41. **Instances that share the keys reach the same ones.** A key on the token is no file, so an
+    instance whose CA keys are named by their labels need not be alone
+    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+    clause 2). Instances that sign with shared keys name the same labels on a token every one of
+    them reaches: a network HSM all of them reach, or a token that the HSM's own replication keeps
+    identical on each host.
+    - SoftHSM2 keeps its token in files on one host, and the instances on that host may share it:
+      that is redundancy of processes, not of hosts. Instances on several hosts need a network
+      HSM, or no CA key on the Server at all, the certificates then being issued outside it. The
+      Server cannot tell which host a token's files are on, so keeping a SoftHSM2 token's
+      instances on its host is the operator's. The Server does not copy keys between tokens.
+    - The audit key's label, which every instance on one database names alike, is decided by
+      [ADR-0028](0028-the-audit-record.md) clause 16.
 
 **Out of scope:** per-Agent identity beyond the host; an opt-in strict mode binding certificate
 subject to `instance_uid` where Gateway Mode and re-keying are off; proxying a CSR to an external CA
@@ -400,9 +508,11 @@ fleet that outgrows approval one host at a time may need; binding the issued cer
 putting its `instance_uid` into its own CSR; claims in CSR extensions other than the SAN; CRL and
 OCSP for third parties; what a Gateway does with the list
 ([ADR-0016](0016-client-modes-and-the-gateway.md)); shortening certificate validity; a revocation
-view in the bundled UI; the audit record of revocations and of the sessions they end, which
-[ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)
-decides.
+view in the bundled UI; the audit record of revocations and of the sessions they end, and the
+audit key with its checkpoints and the export, which [ADR-0028](0028-the-audit-record.md)
+decides; the server CA's key and the package signing key, which stay offline with the operator;
+the TLS listener's own key; a separate signing service behind the signer port; keys on the
+Client.
 
 ## Alternatives considered
 
@@ -539,10 +649,43 @@ decides.
 - **A revocation that reaches the sessions of one Server's process alone, and a revocation list
   whose `ETag` is that Server's own.** It holds while one Server holds every session. Where several
   instances serve one fleet
-  ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)),
+  ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)),
   a session another instance holds would outlive the revocation, and a Gateway that fetches the
   list from another instance would download it again for an unchanged list. Rejected; clauses 32
   and 34 reach every instance and give the list one version in the database.
+- **The CA keys as key files alone.** `[client_ca] key_file` and `[enrolment]
+  bootstrap_ca_key_file`, PKCS#8 PEM read unattended, are the simplest form and need no library
+  beside the Server. It holds for one Server whose host and backups nobody else reads. But whoever
+  reads the file once can mint members unseen until the CA is replaced, and several instances
+  would each hold a copy. Rejected as the only form; a key file stays one of the two (clauses 8,
+  17 and 36).
+- **PKCS#11 required for every installation.** One signing path to test, but every single-node
+  Server would install and run at least SoftHSM2 for a key that sits on the same host either way.
+  Rejected; it stays an option.
+- **PKCS#11 required with the PostgreSQL store.** One Server on PostgreSQL keeps its key on one
+  host as a Server on files does; the database does not make a key file more exposed. What needs
+  shared keys is several instances, and clause 2 of
+  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  makes an instance with a CA key file the only one. Rejected.
+- **Encrypted key files with a passphrase from a file.** It protects a backup, but the passphrase
+  sits on the same host as the file, and every instance holds both. Rejected.
+- **A separate signing service from the start.** It could check each justification against the
+  database itself and survive a compromised Server, but it is a second process to deploy and
+  secure, with its own transport and admission. The signer port keeps it possible. Rejected, as in
+  the working note.
+- **A cloud KMS API instead of PKCS#11.** It binds the Server to one provider's API and SDK.
+  PKCS#11 is what HSMs, cloud HSM services and SoftHSM2 all speak. Rejected.
+- **Import the existing key files into the token.** It keeps every issued certificate valid, but
+  the key has existed outside the token and may exist there still. Rejected; a new CA with a
+  transition costs one renewal cycle (clause 40).
+- **A hardware HSM from the start.** It protects the key in hardware, but every developer and CI
+  run would need one, and the interface is the same as SoftHSM2's. Rejected for the first step.
+- **SoftHSM2 refused in production.** It would force hardware on every installation that wants a
+  token, including those whose operator accepts a software token for its other properties — keys
+  that the Server cannot read and that no file copy carries. Rejected; the warning and the audit
+  entry make the choice visible.
+- **`cryptoki`'s alternatives** (`pkcs11`, `rust-pkcs11`). Older wrappers, unmaintained or with
+  raw bindings only. Rejected for `cryptoki`.
 
 ## Sources / Prior art
 
@@ -617,6 +760,22 @@ decides.
   ([kubernetes#46287](https://github.com/kubernetes/kubernetes/issues/46287), [kubelet certificate
   rotation](https://kubernetes.io/docs/tasks/tls/certificate-rotation/)) — the position of admission
   without a revocation list, and the gap this closes.
+- The working note "server split", sections D3 and D9, recorded outside the ADRs.
+- [`cryptoki`](https://docs.rs/cryptoki/0.12.1/cryptoki/) 0.12.1
+  ([repository](https://github.com/parallaxsecond/rust-cryptoki)), Apache-2.0: `Pkcs11::new` loads
+  the module at runtime through `libloading` from pre-generated bindings, so no `bindgen` and no
+  system header enter the build; `Mechanism::EccKeyPairGen`, `Mechanism::Ecdsa` and
+  `Mechanism::EcdsaSha256`; `Info::manufacturer_id` from `C_GetInfo`.
+- `rcgen` 0.14.10 (the version in `Cargo.lock`): the `SigningKey` and `PublicKeyData` traits in
+  `src/key_pair.rs`, and `Issuer::new(params, signing_key)` for any `SigningKey`.
+- [PKCS #11 Specification Version
+  3.1](https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.1/pkcs11-spec-v3.1.html)
+  (OASIS): `CKA_EXTRACTABLE`, `CKA_SENSITIVE`, `CKM_ECDSA` and its `r || s` signature format.
+- [SoftHSM2](https://github.com/softhsm/SoftHSMv2), which reports `SoftHSM` as its manufacturer.
+- RFC 5480 and RFC 5758: the DER `ECDSA-Sig-Value` an X.509 signature carries.
+- The code as it stands: `CertificateSigner` in `crates/fleet-server/src/fleet.rs`, the local CA
+  in `crates/fleet-server/src/ca.rs`, bootstrap issuance in `crates/fleet-server/src/bootstrap.rs`,
+  key generation in `crates/fleet-tools/src/pki.rs`.
 
 ## Consequences
 
@@ -637,7 +796,7 @@ decides.
   `hash-credential --bearer`, no credential in connection-settings offers
   ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)), no revocation by hash
   (clause 29), no audit events for one
-  ([ADR-0028](0028-an-append-only-audit-record-whose-failed-writes-on-postgresql-are-kept-and-tried-again.md)),
+  ([ADR-0028](0028-the-audit-record.md)),
   and no Gateway pool partitioned by credential ([ADR-0016](0016-client-modes-and-the-gateway.md)).
 - Positive: a compromised host reports only for its own Agents and holds at most three valid
   certificates; it cannot take over another host's Agent record or its renewals.
@@ -690,11 +849,26 @@ decides.
   until the certificates it obtained expire. The bounds keep the damage to one chain and away from
   enrolment. An operator tool that posts `{"credential": …}` is answered `400` and has to be
   changed.
+- Positive: where the token is used, Q-1 rests on a key no one can copy. A stolen backup, disk
+  image or database dump holds no CA key.
+- Positive: the Server is written against PKCS#11 once; SoftHSM2 now and a hardware HSM later
+  differ in configuration only.
+- Negative / trade-offs: an installation that uses the token needs SoftHSM2 or an HSM, a PIN file,
+  and a CA move at its first switch, which costs one renewal cycle with two trusted CAs.
+- Negative / trade-offs: a C library loaded at runtime, the PKCS#11 module, runs inside the
+  Server's process, and `cryptoki` is a dependency for `cargo-deny`.
+- Negative / trade-offs: every signature waits for the token; a slow or unreachable HSM delays or
+  refuses renewals and enrolments, and the Server reports it as it reports any signing error.
+- Negative / trade-offs: a compromised Server can still have the token sign while it runs; the
+  audit entries of clause 38 and the export of [ADR-0028](0028-the-audit-record.md) clause 15 are
+  what show it afterwards.
 - Follow-ups: enrolment by a per-host token; a strict per-Agent identity mode; an external-CA
   backend; running the `instance_uid` claim check against opamp-go in the interoperability suite.
 - Follow-ups: revocation by Agent as a convenience in the bundled UI; shortening certificate
   validity once renewal is proven; bounding issuance per Agent rather than per chain, which needs a
   per-Agent identity this decision leaves out.
+- Follow-ups: a separate signing service behind the signer port; a glossary entry for the HSM and
+  the token.
 
 ## Enforcement
 
@@ -844,10 +1018,38 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
   that `GET /api/v1/bootstrap-certificates` lists for it, and `PendingEnrolment` in the OpenAPI
   document carries the field (the pending list,
   [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
-- Clauses 8 and 17 as they stand here are verified by the tests
-  [ADR-0043](0043-the-servers-signing-keys-may-live-on-a-pkcs11-token-with-softhsm2-as-the-planned-one.md)
-  names, and clauses 32 and 34 by those of
-  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md).
+- Clauses 32 and 34 across instances are verified by the tests
+  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  names.
+
+Tests that carry `Verifies: ADR-0026` verify the CA keys on a token (clauses 8, 17 and 35 to 41),
+against SoftHSM2 where a token is needed:
+
+- A host certificate and a bootstrap certificate signed through a SoftHSM2 token verify against
+  the CA certificate on the token, and each signature wrote an audit entry naming the key label
+  (clauses 8, 17, 37, 38).
+- A `pin_file` that others may read, or its group may write, fails startup naming it (clause 35).
+- `[client_ca]` with both `key_file` and `key_label`, or a `key_label` without `[pkcs11]`, fails
+  startup naming the keys; with either store, a `key_file` alone starts without a token (clauses 8,
+  36).
+- A module whose manufacturer is `SoftHSM` starts with the warning and the
+  `pkcs11.software_token` audit entry (clause 39).
+- The Server starts against a SoftHSM2 token whose `softhsm2.conf` is named only by `SOFTHSM2_CONF`,
+  and `server.toml` holds no path of SoftHSM2's own beside `[pkcs11] module` (clause 39).
+- `opamp-fleetctl pki token-init` creates the client CA's, the bootstrap CA's and the audit key on
+  the token, none of them extractable, signs both CA certificates through the token, writes no key
+  file, and refuses a label the token already holds; `pki init --ca-keys-on-token` writes neither
+  the client CA nor the bootstrap CA (the commands,
+  [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 7, 8 and 16).
+- `client_ca_file` with two CA certificates admits a member of either, a renewal proof whose
+  certificate the old CA signed is accepted, and the renewal is signed by the token's key
+  (clause 40).
+- Every certificate signed with a token key writes `pkcs11.signed` naming its label and use case,
+  and with no place in the record nothing is signed (clause 38).
+- On PostgreSQL, two instances whose CA keys are named by their labels on one SoftHSM2 token,
+  sharing one `cryptoki` context in one test process, both start and both sign renewals
+  (clauses 35, 41). The check of the audit key's label across instances is
+  [ADR-0028](0028-the-audit-record.md)'s.
 
 **Not mechanically decidable:** clause 12 decides what is *not* built beyond the host — no test
 can show the absence of a per-Agent authorization the design rejects; and clause 20 rests on the

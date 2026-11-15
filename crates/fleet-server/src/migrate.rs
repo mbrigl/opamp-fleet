@@ -16,7 +16,7 @@
 //!   signatures moved onto the entries, and a Package that was not carried leaves them, named.
 //! - **Configurations** keep their content; each loses its Selector, and is listed with the
 //!   Selector it had, for the operator to place in a Deployment. One without an Agent type is not
-//!   carried, because the Server refuses it at startup (ADR-0049 clause 2): it is listed, and its
+//!   carried, because the Server refuses it at startup (ADR-0032 clause 2): it is listed, and its
 //!   file stays in the old directory for the operator to save again with a type.
 //! - **Agents** are carried with their labels moved into the record. A Package released through a
 //!   Deployment stays assigned through it, while both were carried. A 0.5 Server released every
@@ -146,7 +146,7 @@ fn carry_register(config_dir: &Path, data_dir: &Path, report: &mut Report) -> Re
     let list = old.join("revocations.json");
     if list.exists() {
         // Byte for byte: the Server reads the list as it always has, and drops a credential entry
-        // it may still hold on its first load (ADR-0040 clause 29).
+        // it may still hold on its first load (ADR-0026 clause 29).
         match copy_owner_only(&list, &data_dir.join(fs::REVOCATIONS)) {
             Ok(()) => report.line("carried: the revocation list"),
             Err(e) => report.failed(format!("the revocation list: {e}")),
@@ -444,7 +444,7 @@ fn carry_packages(
                 continue;
             }
         };
-        // A version that is a token but not SemVer is carried over as read (ADR-0035 clause 3):
+        // A version that is a token but not SemVer is carried over as read (ADR-0034 clause 3):
         // the new Server keeps it, warns about it, and writes nothing to it.
         let id = match PackageId::load(&old.agent_type, &old.version) {
             Ok(id) => id,
@@ -466,7 +466,7 @@ fn carry_packages(
             if let Some(url) = entry.source_url {
                 report.line(format!(
                     "dropped: {id} for {tag} — a referenced entry ({url}); every artifact is \
-                     uploaded now (ADR-0050)"
+                     uploaded now (ADR-0033)"
                 ));
                 continue;
             }
@@ -601,7 +601,7 @@ fn carry_configurations(
         }
         if crate::configs::check_type(&config.saved).is_err() {
             report.line(format!(
-                "listed: Configuration {} was not carried — it has no Agent type (service_name),                  which every Configuration needs (ADR-0049); save it again with a type from {},                  which stays where it is; it had the Selector {}",
+                "listed: Configuration {} was not carried — it has no Agent type (service_name),                  which every Configuration needs (ADR-0032); save it again with a type from {},                  which stays where it is; it had the Selector {}",
                 config.name,
                 path.display(),
                 selector_text(&selector)
@@ -611,7 +611,7 @@ fn carry_configurations(
         backend.put(&config)?;
         report.line(format!(
             "listed: Configuration {} had the Selector {} — put it into a Deployment whose \
-             Selector aims it (ADR-0049)",
+             Selector aims it (ADR-0032)",
             config.name,
             selector_text(&selector)
         ));

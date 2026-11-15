@@ -20,7 +20,7 @@ use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(
     name = "supervisor",
-    // The git-derived version baked in at build time (ADR-0038) — never clap's default, which
+    // The git-derived version baked in at build time (ADR-0037) — never clap's default, which
     // would silently report the static crate version.
     version = fleet_core::version::current(),
     about = "OpAMP Fleet Client — runs standalone or as a native OS service"

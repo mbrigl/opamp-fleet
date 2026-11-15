@@ -1,4 +1,4 @@
-//! Configurations on the filesystem (ADR-0049): the default adapter behind
+//! Configurations on the filesystem (ADR-0032): the default adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one JSON file per Configuration under
 //! `<data_dir>/configurations/`, owner-only, written in one step (ADR-0023).
 
@@ -59,11 +59,11 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Configuration, String> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
     if names_a_selector(&value) {
-        // The shape before ADR-0049: a Configuration aimed by itself. Read as content only,
+        // The shape before ADR-0032: a Configuration aimed by itself. Read as content only,
         // it would silently reach nobody — or, put into a Deployment, other hosts than it
         // named — so it is refused and the operator decides where it belongs.
         return Err(format!(
-            "{} carries a selector, and a Configuration has none any more (ADR-0049): put \
+            "{} carries a selector, and a Configuration has none any more (ADR-0032): put \
              it into a Deployment, whose Selector aims it, and remove the selector from \
              the file; a data directory an older Server wrote is moved by `server migrate` \
              (ADR-0023)",
@@ -75,7 +75,7 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Configuration, String> {
     if config.name != stem {
         return Err(super::misnamed(path, "name"));
     }
-    // A Configuration is written for one Agent type (ADR-0049 clause 2); one without it
+    // A Configuration is written for one Agent type (ADR-0032 clause 2); one without it
     // would reach no Agent, so the operator saves it again with a type.
     crate::configs::check_type(&config.saved).map_err(|e| {
         format!(
@@ -199,8 +199,8 @@ mod tests {
     /// No legacy reader: a file in a shape this Server does not write is a startup error that names
     /// the path, not a file quietly read as something else. The retired shapes are covered — a
     /// flat record, a two-revision one, and a saved or retained revision still carrying the
-    /// selector a Configuration no longer has (ADR-0049).
-    /// Verifies: ADR-0049
+    /// selector a Configuration no longer has (ADR-0032).
+    /// Verifies: ADR-0032
     #[test]
     fn a_file_in_a_retired_shape_refuses_to_open_and_names_it() {
         for (file, body) in [
@@ -243,8 +243,8 @@ mod tests {
     }
 
     /// A stored Configuration without an Agent type fails the start, naming its file
-    /// (ADR-0049 clause 2).
-    /// Verifies: ADR-0049
+    /// (ADR-0032 clause 2).
+    /// Verifies: ADR-0032
     #[test]
     fn a_stored_configuration_without_a_type_refuses_to_open_and_names_it() {
         for body in [

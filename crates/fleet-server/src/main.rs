@@ -33,10 +33,10 @@ fn usage() -> ! {
 /// names the first entry whose `prev` does not match the entry before it. `server audit-verify
 /// --config <server.toml> [--archive <dir>]` walks every chain of the record in the database
 /// instead, lists the open ones, and checks the archive a move from files left
-/// (ADR-0029 clauses 5 and 6). Either form, given `--audit-key <PEM file>`, checks every chain
+/// (ADR-0028 clauses 8 and 9). Either form, given `--audit-key <PEM file>`, checks every chain
 /// against the signed checkpoints too, from the saved checkpoint line in the file `--since` names
 /// where one is given, and prints the newest checkpoint's line after `checkpoint: `
-/// (ADR-0041 clause 4).
+/// (ADR-0028 clause 13).
 fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
     let (mut dir, mut config, mut archive, mut key, mut since) = (None, None, None, None, None);
     while let Some(arg) = args.next() {
@@ -197,9 +197,9 @@ fn load_config(named: Option<PathBuf>) -> Layered {
     layered
 }
 
-/// `server pki status [--config <server.toml>]` (ADR-0053 clause 22): when each certificate the
+/// `server pki status [--config <server.toml>]` (ADR-0036 clause 22): when each certificate the
 /// Server host depends on ends. The commands that make certificates are the operator tool's
-/// (ADR-0053); the Server binary makes none.
+/// (ADR-0036); the Server binary makes none.
 fn pki(mut args: impl Iterator<Item = String>) -> ! {
     use fleet_server::pki;
     let named = match (
@@ -222,7 +222,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
         println!("{}", ending.line(now));
     }
     // The audit key's public half, for the operator to keep where the Server cannot rewrite it
-    // (ADR-0041 clause 3).
+    // (ADR-0028 clause 12).
     match pki::audit_key(&config) {
         Ok(None) => {}
         Ok(Some((label, pem, sha256))) => {
@@ -422,7 +422,7 @@ fn blobs_to_s3(mut args: impl Iterator<Item = String>) -> ! {
 type Hasher = fn(&str) -> Result<String, String>;
 
 /// The hash `server hash-credential` makes for a scheme: Basic, for an operator's password in
-/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0040 clause 21).
+/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0026 clause 21).
 fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     match scheme {
         Some("--basic") => Some(fleet_server::credentials::hash_basic),
@@ -430,7 +430,7 @@ fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     }
 }
 
-/// `server hash-credential --basic` (ADR-0040 clause 21): reads the password from standard input —
+/// `server hash-credential --basic` (ADR-0026 clause 21): reads the password from standard input —
 /// without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
 fn hash_credential(scheme: Option<String>) -> ! {
     let Some(hash) = hasher(scheme.as_deref()) else {
@@ -536,7 +536,7 @@ fn parse_args() -> Option<PathBuf> {
                 None => usage(),
             },
             "--version" => {
-                // The baked version, not `CARGO_PKG_VERSION` (ADR-0038): the number in the file is
+                // The baked version, not `CARGO_PKG_VERSION` (ADR-0037): the number in the file is
                 // the release this build is *heading for*, and only `fleet_core::version::current` knows
                 // whether this is it.
                 println!("server {}", fleet_core::version::current());
@@ -610,7 +610,7 @@ fn main() {
 async fn serve() {
     // The log goes to stderr, so that stdout carries only what a command prints as its result.
     // On PostgreSQL each line names the instance id of the lease the instance holds (clause 1 of
-    // ADR-0045).
+    // ADR-0025).
     let logged = fleet_server::instance::LoggedId::default();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -628,14 +628,14 @@ async fn serve() {
     opamp::tls::install_ring_provider();
 
     // The clock a lease and a sweep measure on counts a suspend of the host
-    // (ADR-0045
+    // (ADR-0025
     // clause 3), handed to the package store and the lease.
     let elapsed = since_boot().unwrap_or_else(fleet_server::clock::Elapsed::monotonic);
 
     let Layered { config, origin, .. } = load_config(parse_args());
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
-    // to know which CA issued what (ADR-0012, ADR-0040).
+    // to know which CA issued what (ADR-0012, ADR-0026).
     let planes = match config
         .tls
         .as_ref()
@@ -656,7 +656,7 @@ async fn serve() {
     };
     // On PostgreSQL the instance id is made as soon as the store is known, so that every line
     // from here on names it, and the first lease is taken under it (clause 1 of
-    // ADR-0045).
+    // ADR-0025).
     let instance_id = if config.database.postgres().is_some() {
         match fleet_server::postgres::lease::new_instance_id() {
             Ok(id) => {
@@ -686,7 +686,7 @@ async fn serve() {
         info!(database = %database.name(), "keeping the records in PostgreSQL");
     }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
-    // ADR-0040: closed until an operator opens it; the window and its queue survive a restart
+    // ADR-0026: closed until an operator opens it; the window and its queue survive a restart
     // (ADR-0023 clause 8).
     let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
@@ -713,8 +713,8 @@ async fn serve() {
     }
     // The token the CA keys and the audit key may live on, opened before any key is read from it;
     // a module, token, PIN or key that is not there fails startup, naming it
-    // (ADR-0043
-    // clause 1).
+    // (ADR-0026
+    // clause 35).
     let (token, audit_key) = match config
         .pkcs11
         .as_ref()
@@ -744,7 +744,7 @@ async fn serve() {
     {
         Ok(ca) => {
             if let Some(ca) = &ca {
-                // ADR-0040.
+                // ADR-0026.
                 info!(
                     validity_days = ca.validity_days(),
                     "signing client certificates for Agents that ask"
@@ -784,10 +784,10 @@ async fn serve() {
     };
     // What the Server serves, trusts and signs with until it restarts, read right after the files
     // above were: the warnings below judge these, not whatever the files hold later
-    // (ADR-0053 clause 21).
+    // (ADR-0036 clause 21).
     let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
-        // ADR-0052 clause 16.
+        // ADR-0029 clause 16.
         info!("{notice}");
     }
     let telemetry_offer = config
@@ -796,10 +796,10 @@ async fn serve() {
         .map(fleet_server::fleet::TelemetryOffer::from_config)
         .unwrap_or_default();
     if config.telemetry_offer.is_some() {
-        // ADR-0054.
+        // ADR-0017.
         info!("offering the fleet somewhere to send its own telemetry");
     }
-    // What the client CA signed and what is revoked (ADR-0040), kept beside the fleet's records.
+    // What the client CA signed and what is revoked (ADR-0026), kept beside the fleet's records.
     let revocations = match records.ledger().and_then(|store| {
         fleet_server::revocation::Revocations::open(store, clock.clone(), planes.3.clone())
     }) {
@@ -809,7 +809,7 @@ async fn serve() {
             std::process::exit(1);
         }
     };
-    // The floor of each Agent type (ADR-0035), checked against the same key as the package
+    // The floor of each Agent type (ADR-0034), checked against the same key as the package
     // signatures, and served to every member.
     let floors = match config.packages.verification_key().and_then(|key| {
         fleet_server::floors::PackageFloors::open(records.floors()).map(|floors| {
@@ -834,7 +834,7 @@ async fn serve() {
         .verification_key()
         .and_then(|key| {
             if key.is_some() {
-                // ADR-0050.
+                // ADR-0033.
                 info!("checking package signatures against [packages] verification_key");
             }
             fleet_server::packages::PackageStore::open_on(
@@ -855,7 +855,7 @@ async fn serve() {
         })
         .and_then(|(store, staging)| {
             if !store.is_empty() {
-                // ADR-0050.
+                // ADR-0033.
                 info!("offering software packages to the fleet");
             }
             fleet_server::fleet::PackageOffering::on(&records, store)
@@ -869,7 +869,7 @@ async fn serve() {
         }
     };
     // The audit record's export, where `[audit.export]` names a receiver: started before the
-    // lease, whose first entry it carries too (clause 9 of ADR-0043). Without the section
+    // lease, whose first entry it carries too (clause 15 of ADR-0028). Without the section
     // the Server opens no such connection.
     let export = match config.audit.export.as_ref().map(|export| {
         fleet_server::audit_export::AuditExport::start(export, tokio::runtime::Handle::current())
@@ -883,13 +883,13 @@ async fn serve() {
     };
     // With PostgreSQL, a lease before anything is decided and before either listener opens
     // (clauses 1 to 3 of
-    // ADR-0045):
+    // ADR-0025):
     // the audit chain is the lease's.
     let lease = match &records {
         fleet_server::Records::Postgres(database) => {
             // The audit files a Server on PostgreSQL kept before its record moved into the
-            // database stay as the archive, which the first chain names (clause 6 of
-            // ADR-0029).
+            // database stay as the archive, which the first chain names (clause 9 of
+            // ADR-0028).
             // Only while the database holds no chain: a later start never reads them.
             // With S3 too there is no data directory, and no archive to offer.
             let archive = match config.data_dir().map(|data_dir| {
@@ -946,11 +946,11 @@ async fn serve() {
     }
     // The audit record (ADR-0028), opened before anything is decided: one chain in files, or on
     // PostgreSQL the chain of each lease
-    // (ADR-0029).
+    // (ADR-0028).
     let sink = export.as_ref().map(|export| export.sink());
     // With the audit key, the heads of every chain are signed about once a minute and at the
     // shutdown's close; without it the chains alone are the record, and the Server says so
-    // (ADR-0041 clauses 2 and 5).
+    // (ADR-0028 clauses 11 and 14).
     if audit_key.is_none() {
         tracing::warn!(
             "the heads of the audit record are not signed: [audit] key_label names no audit key \
@@ -1017,7 +1017,7 @@ async fn serve() {
         export.report_every(audit.clone());
     }
     // The token's signatures are written to the record, and a software token says so at every
-    // start (clauses 6 and 7 of ADR-0043).
+    // start (clauses 38 and 39 of ADR-0026).
     if let Some(token) = &token {
         token.set_audit(audit.clone());
         token.warn_if_software(audit.as_ref());
@@ -1037,7 +1037,7 @@ async fn serve() {
         enrolment.set_audit(audit.clone());
     }
     // Before a certificate the Server depends on ends, say so: at startup and once a day
-    // (ADR-0053 clause 21). Nothing stops; the hosts decide for themselves.
+    // (ADR-0036 clause 21). Nothing stops; the hosts decide for themselves.
     fleet_server::pki::warn_endings(
         &watched,
         Some(audit.as_ref()),
@@ -1109,7 +1109,7 @@ async fn serve() {
             std::process::exit(1);
         }
     }
-    // The certificate is the whole of admission (ADR-0040): the configuration was refused at load
+    // The certificate is the whole of admission (ADR-0026): the configuration was refused at load
     // without the client CA.
     info!("the OpAMP endpoint admits by client certificate");
     // Two planes, two listeners (ADR-0012): Agents reach the OpAMP endpoint and the package
@@ -1144,16 +1144,16 @@ async fn serve() {
         }
     };
     if operator_auth.is_some() {
-        // ADR-0040. Both planes serve TLS, so the password never crosses a network in clear
+        // ADR-0026. Both planes serve TLS, so the password never crosses a network in clear
         // (ADR-0012).
         info!("the REST API and the UI require authentication");
     }
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
     // The revocations, and every other change, of the other instances followed (clauses 9 to 11
-    // of ADR-0045),
+    // of ADR-0025),
     // and the presence of the Agents this instance carries written in batches under its lease
-    // (ADR-0052 clause 4).
+    // (ADR-0029 clause 4).
     let presence = match (&lease, &records) {
         (Some(lease), fleet_server::Records::Postgres(database)) => {
             state.serve_under(lease.held());
@@ -1170,7 +1170,7 @@ async fn serve() {
     };
     // A restart whose command was not sent and whose put-back failed is tried again until it
     // holds, on every store
-    // (ADR-0045
+    // (ADR-0025
     // clause 8).
     fleet_server::instance::retry_restarts(state.clone());
     // The handlers are installed before either plane is bound and logged as served, so a stop
@@ -1204,18 +1204,18 @@ async fn serve() {
     }
     // A new lease that found a schema a newer Server migrated stops the instance as a failed
     // start does, naming both versions
-    // (ADR-0045
+    // (ADR-0025
     // clause 16).
     if let fleet_server::Records::Postgres(database) = &records {
         if let Some(refusal) = database.outdated() {
             eprintln!("{refusal}");
         }
     }
-    // The graceful-shutdown flush (ADR-0052): every record's current timestamp and sequence
+    // The graceful-shutdown flush (ADR-0029): every record's current timestamp and sequence
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
     // And the presence of every Agent, its sessions ended by the drain, before the lease goes
-    // (ADR-0045
+    // (ADR-0025
     // clause 3): once the periodic batches stopped, so none commits after it.
     if let Some(presence) = presence {
         presence.stop().await;
@@ -1231,8 +1231,8 @@ async fn serve() {
     // What is still queued for the audit record is written before the process, and the writer
     // thread with it, ends (ADR-0028); on PostgreSQL the chain is closed then, and the lease
     // released only once it is, so that a chain left open is closed by the instance that takes
-    // over the lapsed lease (clause 3 of
-    // ADR-0029).
+    // over the lapsed lease (clause 7 of
+    // ADR-0028).
     // The export's count of what it dropped is written once more before the record closes, and
     // what the record holds then is given its five seconds to reach the receiver.
     if let Some(export) = &export {
@@ -1345,7 +1345,7 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     }
 }
 
-/// What a Server that signs no CSRs says once at startup (ADR-0052 clause 16): its hosts hold the
+/// What a Server that signs no CSRs says once at startup (ADR-0029 clause 16): its hosts hold the
 /// certificates an operator provisioned, and only one that names its host is served an uploaded
 /// artifact.
 fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {
@@ -1432,7 +1432,7 @@ mod tests {
 
     /// On Linux the lease's clock is `CLOCK_BOOTTIME`: it reads, it moves on as time passes, and it
     /// counts at least as much as the monotonic clock, which a suspend would leave behind.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[cfg(target_os = "linux")]
     #[test]
     fn the_leases_clock_is_the_one_that_counts_a_suspend() {
@@ -1469,7 +1469,7 @@ mod tests {
 
     /// `hash-credential` makes an operator's Basic entry and nothing else: the Agent plane has no
     /// credential to hash.
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn hash_credential_hashes_a_basic_password_alone() {
         let basic = hasher(Some("--basic")).expect("--basic is a scheme");
@@ -1482,7 +1482,7 @@ mod tests {
 
     /// Without `[client_ca]` the Server says at startup that an uploaded artifact needs a
     /// certificate naming a host, and how one is named; with it, it says nothing.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0033
     #[test]
     fn a_server_without_client_ca_says_uploaded_artifacts_need_a_host() {
         let notice = uploaded_artifacts_notice(false).expect("a notice");

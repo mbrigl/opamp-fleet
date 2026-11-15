@@ -1,4 +1,4 @@
-# ADR-0038: `Cargo.toml` decides the product's version, the internal crate's build stamps it with git's provenance, and the commit is compared nowhere
+# ADR-0037: `Cargo.toml` decides the product's version, the internal crate's build stamps it with git's provenance, and the commit is compared nowhere
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-03
@@ -113,7 +113,7 @@ compared nowhere.
    (clause 10), `same_release`, and `precedence`, SemVer ordering with build metadata ignored,
    which the self-update's downgrade refusal
    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)) and the rollout
-   ([ADR-0033](0033-deployments-and-rollouts.md)) order by. It lives in `fleet-core` because the
+   ([ADR-0032](0032-deployments-and-rollouts.md)) order by. It lives in `fleet-core` because the
    Client writes these strings and the Server displays them, and it is this project's grammar, not
    OpAMP's.
 
@@ -142,7 +142,7 @@ compared nowhere.
     keep the full string too.
 
 **Out of scope:** what a release builds and publishes (targets and artifacts,
-[ADR-0039](0039-releases-attestations-and-the-server-image.md); installers,
+[ADR-0038](0038-releases-attestations-and-the-server-image.md); installers,
 [ADR-0020](0020-the-installed-service-and-its-state.md)); whether a Managed Process's package
 version, free-form and an upstream project's own numbering, is parsed beyond what ordering needs;
 release-candidate tags (`version/1.2.3-rc.1`), refused by the grammar until a release-candidate

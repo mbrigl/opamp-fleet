@@ -72,7 +72,7 @@ ping while it handles a message.
    the bounds come from the heartbeat already in the settings. `ws::Silence` is public, so that
    the Gateway's pool derives the same bounds, and so is `ws::run_from`, `run` with every
    connection opened from a local address the caller names
-   ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-two-versions-run-side-by-side.md)
+   ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
    clause 20). Both are additions, not breaks under ADR-0008 clause 2.
    `Connection::connect_websocket` keeps its signature and fails once the bounds of clause 3 have
    passed.

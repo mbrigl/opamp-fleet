@@ -1,7 +1,7 @@
-//! Taking a version string apart (ADR-0038).
+//! Taking a version string apart (ADR-0037).
 //!
 //! A version this project produces looks like `1.2.3`, `1.2.3+a1b2c3d`, or `1.2.3-dev+a1b2c3d`
-//! (ADR-0038). Three different questions get asked of that one string, and they do not want the
+//! (ADR-0037). Three different questions get asked of that one string, and they do not want the
 //! same answer:
 //!
 //! - *Which release is this?* — the base and, when present, the pre-release. A `-dev` build is not
@@ -24,11 +24,11 @@
 
 /// The version this build reports, e.g. `1.2.3+a1b2c3d` or `1.2.3-dev+b4e5f6a`.
 ///
-/// The one place either binary states its version (ADR-0038): the OpAMP `service.version`
+/// The one place either binary states its version (ADR-0037): the OpAMP `service.version`
 /// attribute, both CLIs' `--version` output, and the install layout of ADR-0021 all call this.
 ///
 /// It is resolved at compile time by this crate's `build.rs` — the base from `Cargo.toml`
-/// (ADR-0038), the `-dev` marker and the commit short-hash from git — so a binary carries the
+/// (ADR-0037), the `-dev` marker and the commit short-hash from git — so a binary carries the
 /// answer rather than looking for a repository that is not there when it runs.
 #[must_use]
 pub fn current() -> &'static str {
@@ -121,15 +121,15 @@ fn is_dot_identifiers(field: &str) -> bool {
 }
 
 /// The longest version [`is_semver`] takes: the bound a Package's identity tokens carry
-/// (ADR-0035 clause 1), so a version that passes here also fits a Package.
+/// (ADR-0034 clause 1), so a version that passes here also fits a Package.
 pub const MAX_SEMVER_LEN: usize = 64;
 
 /// Whether `raw` is a SemVer 2.0.0 version — the one predicate the Server, `opamp-fleetctl` and the
-/// Client ask of a Package version (ADR-0035 clause 2).
+/// Client ask of a Package version (ADR-0034 clause 2).
 ///
 /// [`parse`] already holds the core and both identifier sets to SemVer. The one rule it does not
 /// check is added here: a numeric pre-release identifier has no leading zero (SemVer 2.0.0 §9).
-/// `parse` itself keeps its shape, because ADR-0038 defines it. A value longer than
+/// `parse` itself keeps its shape, because ADR-0037 defines it. A value longer than
 /// [`MAX_SEMVER_LEN`] is not taken either.
 #[must_use]
 pub fn is_semver(raw: &str) -> bool {
@@ -143,7 +143,7 @@ pub fn is_semver(raw: &str) -> bool {
         })
 }
 
-/// An upstream program's number written as SemVer, the way a Package is numbered (ADR-0035
+/// An upstream program's number written as SemVer, the way a Package is numbered (ADR-0034
 /// clause 6): fewer than three numeric components are completed with `.0` (`1.19` becomes
 /// `1.19.0`), and a leading zero is dropped from a numeric component (`24.04.1` becomes `24.4.1`).
 /// Both keep the program's own order. A pre-release or build suffix is carried as it is. `None`
@@ -173,7 +173,7 @@ pub fn written_as_semver(upstream: &str) -> Option<String> {
 }
 
 /// The identifying part of a version string — everything except the build metadata — or `None`
-/// when the value is not a version (ADR-0038).
+/// when the value is not a version (ADR-0037).
 ///
 /// `1.2.3+a1b2c3d` yields `1.2.3`; `1.2.3-dev+a1b2c3d` yields `1.2.3-dev`.
 #[must_use]
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(dev.identity(), "0.1.1-dev");
     }
 
-    /// The failure that prompted ADR-0038: a package uploaded as the release number against a
+    /// The failure that prompted ADR-0037: a package uploaded as the release number against a
     /// binary that reports the commit it was built from.
     #[test]
     fn a_release_matches_the_build_that_carries_it() {
@@ -336,8 +336,8 @@ mod tests {
         assert_eq!(precedence("", "1.0.0"), None);
     }
 
-    /// The distinction the pre-release exists for (ADR-0038), kept at the gate that can enforce it.
-    // Verifies: ADR-0038
+    /// The distinction the pre-release exists for (ADR-0037), kept at the gate that can enforce it.
+    // Verifies: ADR-0037
     #[test]
     fn a_development_build_is_not_the_release_it_heads_for() {
         assert!(!same_release("0.1.1", "0.1.1-dev+799e36a"));
@@ -405,9 +405,9 @@ mod tests {
         assert!(parse("1.2.3-rc.1+build.7").is_some());
     }
 
-    /// The baked string has the shape ADR-0038 prescribes — and, since both live here, it is
+    /// The baked string has the shape ADR-0037 prescribes — and, since both live here, it is
     /// checked with the parser the rest of the project judges it by rather than a second grammar.
-    // Verifies: ADR-0038
+    // Verifies: ADR-0037
     #[test]
     fn the_baked_version_has_the_prescribed_shape() {
         let full = current();
@@ -425,8 +425,8 @@ mod tests {
 
     /// An upstream number is written as SemVer in its own order: completed with `.0`, a leading
     /// zero dropped, a suffix carried, and a number that cannot be written so refused
-    /// (ADR-0035 clause 6).
-    /// Verifies: ADR-0035
+    /// (ADR-0034 clause 6).
+    /// Verifies: ADR-0034
     #[test]
     fn an_upstream_number_is_written_as_semver_in_its_own_order() {
         assert_eq!(written_as_semver("1.19").as_deref(), Some("1.19.0"));
@@ -442,8 +442,8 @@ mod tests {
         }
     }
 
-    /// The one predicate every end asks of a Package version (ADR-0035 clause 2).
-    /// Verifies: ADR-0035
+    /// The one predicate every end asks of a Package version (ADR-0034 clause 2).
+    /// Verifies: ADR-0034
     #[test]
     fn a_package_version_is_semver() {
         for semver in ["1.2.3", "1.19.0", "1.2.3-rc.1+abc", "0.110.0", "1.0.0-0"] {

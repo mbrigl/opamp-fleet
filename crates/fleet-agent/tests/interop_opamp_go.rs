@@ -461,7 +461,7 @@ fn our_client(dir: &Path, endpoint: &str) -> (OurClient, PathBuf) {
 /// the CA it trusts, and a member of its fleet: `member`, its certificate and key, stand in its
 /// state directory as the pair a Server issued. opamp-go signs no CSR, and a Client holding only a
 /// configured certificate enrols first over plain HTTP, sending its request and nothing else
-/// until a Server answers it (ADR-0048 clause 24), so the reports these tests read come from a
+/// until a Server answers it (ADR-0016 clause 24), so the reports these tests read come from a
 /// Client that has enrolled.
 fn our_client_with(
     dir: &Path,
@@ -926,7 +926,7 @@ fn our_client_against_go_tls_server(scheme: &str) {
     );
 }
 
-// Verifies: ADR-0011, ADR-0012, ADR-0040
+// Verifies: ADR-0011, ADR-0012, ADR-0026
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 async fn opamp_go_client_against_our_tls_and_admission() {
@@ -934,7 +934,7 @@ async fn opamp_go_client_against_our_tls_and_admission() {
     go_client_against_our_tls_server("https").await;
 }
 
-// Verifies: ADR-0011, ADR-0012, ADR-0040
+// Verifies: ADR-0011, ADR-0012, ADR-0026
 #[test]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 fn our_client_against_opamp_go_server_requiring_a_client_certificate() {

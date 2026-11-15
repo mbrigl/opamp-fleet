@@ -5,7 +5,7 @@
 **Observed.** `crates/fleet-server/src/fleet.rs` is 14 074 lines and
 `crates/fleet-server/src/api.rs` 4 539 on `main`. What an instance holds of the Agents it carries
 has moved to `fleet::held` (revision-2026-11-06 ticket 03), and the cursor paging to
-`api/paging.rs` (ADR-0031); the rest is in the two files:
+`api/paging.rs` (ADR-0030); the rest is in the two files:
 
 1. **Report processing.** `report_round` in `fleet.rs`, about 540 lines, processes an Agent's
    report; `process_presented` (near line 2863) is about 50.
@@ -14,7 +14,7 @@ has moved to `fleet::held` (revision-2026-11-06 ticket 03), and the cursor pagin
    public methods (near lines 5167 to 5280 of `fleet.rs`).
 3. **The wire shape of the views.** The view types in `fleet.rs` (near lines 5928, 6084, 6110 and
    6126) derive `Serialize`, while `api.rs` mirrors each with a response type and a
-   field-by-field `From`, the doc comments copied. The core's `Serialize` looks unused (ADR-0032).
+   field-by-field `From`, the doc comments copied. The core's `Serialize` looks unused (ADR-0031).
 4. **The REST API by resource.** Every route, view and conversion of about ten resources lives in
    `api.rs`.
 

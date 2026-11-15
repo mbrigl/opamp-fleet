@@ -187,7 +187,7 @@ impl Captured {
 /// directories of the Supervisors one apply purges, all of them together and reaching the service
 /// included: as long as a program has to end when the Client's connection closes. However many
 /// Supervisors are purged and however much the process account wrote, a purge that
-/// outlasts it leaves an orphan, as one the Client cannot delete does (ADR-0051 clause 34), and
+/// outlasts it leaves an orphan, as one the Client cannot delete does (ADR-0018 clause 34), and
 /// the Client's management goes on (ADR-0021 clause 17).
 pub(crate) const PURGE_ANSWER: Duration = CLOSE_GRACE;
 
@@ -2999,7 +2999,7 @@ mod tests {
 
     /// The second service removes what a purged Supervisor's Managed Processes wrote — read-only
     /// directories included, a link as a link — so the Client's purge that follows leaves
-    /// nothing (ADR-0021 clause 20, ADR-0035 clause 13).
+    /// nothing (ADR-0021 clause 20, ADR-0034 clause 13).
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn the_second_service_removes_what_a_purged_supervisors_processes_wrote() {
@@ -3073,7 +3073,7 @@ mod tests {
     /// The service purges the tombstone of the Supervisor it names, a directory the Client moved
     /// aside beneath the Supervisors' root, and nothing that only looks like one: another
     /// Supervisor's tombstone, a name of no tombstone, a link of that name, or the Supervisor's
-    /// own directory, which a Supervisor added again under the same name holds (ADR-0021 clause 20, ADR-0035 clause 13).
+    /// own directory, which a Supervisor added again under the same name holds (ADR-0021 clause 20, ADR-0034 clause 13).
     /// Verifies: ADR-0021
     #[test]
     fn a_purge_takes_only_the_tombstone_of_the_supervisor_it_names() {
@@ -3169,7 +3169,7 @@ mod tests {
     /// root's and the Client's account's — and not its own: it runs as the process account, which
     /// is not the Client's. Run unprivileged, a link of this test's own account is refused where
     /// the Client is another account; run as root, a link of the Client's account is followed and
-    /// one of a third account is refused (ADR-0021 clause 20, ADR-0051 clause 33).
+    /// one of a third account is refused (ADR-0021 clause 20, ADR-0018 clause 33).
     /// Verifies: ADR-0021
     #[test]
     fn a_purge_follows_the_clients_links_above_the_root_and_not_the_services() {
@@ -3210,7 +3210,7 @@ mod tests {
     /// so whoever serves the process account's socket holds it [`PURGE_ANSWER`] and no longer,
     /// however many entries the process account wrote: a service that answers each request just
     /// before the Client gives up on it is asked once, and one that never answers is given up on
-    /// (ADR-0021 clause 17, ADR-0051 clause 34).
+    /// (ADR-0021 clause 17, ADR-0018 clause 34).
     /// Verifies: ADR-0021
     #[tokio::test]
     async fn a_purge_waits_for_the_service_once_however_much_was_written() {

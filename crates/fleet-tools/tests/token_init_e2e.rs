@@ -1,7 +1,7 @@
 //! What `opamp-fleetctl pki token-init` makes on a SoftHSM2 token is what the Server signs with: the
 //! Server, configured from `token.toml.fragment`, opens the token, loads both CAs by their labels
 //! and signs a host certificate that `client-ca.pem` verifies
-//! (ADR-0053 clause 8). The program is run as an operator runs
+//! (ADR-0036 clause 8). The program is run as an operator runs
 //! it; without `FLEET_TEST_PKCS11_MODULE` the test says so and skips.
 #![cfg(unix)]
 
@@ -22,7 +22,7 @@ struct Fragment {
     audit: fleet_server::config::AuditConfig,
 }
 
-/// Verifies: ADR-0053, ADR-0043
+/// Verifies: ADR-0036, ADR-0026
 #[test]
 fn the_server_signs_with_what_token_init_made() {
     let Some(test) = token::TestToken::named() else {

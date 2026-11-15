@@ -17,7 +17,7 @@ use crate::fleet::{ConnectionOffer, TelemetryOffer};
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:4320";
 
 /// The default Operator-plane address (ADR-0012): the port above the protocol's, on loopback.
-/// Loopback because that plane is open until `[rest.auth]` guards it (ADR-0040) — until then its
+/// Loopback because that plane is open until `[rest.auth]` guards it (ADR-0026) — until then its
 /// reachability *is* its protection, so publishing it is a line an operator writes deliberately.
 pub const DEFAULT_REST_LISTEN: &str = "127.0.0.1:4321";
 
@@ -48,20 +48,20 @@ pub struct ServerConfig {
     /// `Option` only so that its absence can be named.
     pub tls: Option<TlsConfig>,
     /// Refused at startup: the Agent plane admits by client certificate alone and has no credential
-    /// of its own (ADR-0040 clause 1). Read only so that a leftover section can be named.
+    /// of its own (ADR-0026 clause 1). Read only so that a leftover section can be named.
     pub auth: Option<IgnoredAny>,
     /// Optional connection settings offered to the fleet (ADR-0013); absent means none.
     pub connection_offer: Option<ConnectionOfferConfig>,
-    /// Optional certificate authority for signing Agent CSRs (ADR-0040); absent means the Server
+    /// Optional certificate authority for signing Agent CSRs (ADR-0026); absent means the Server
     /// issues nothing and does not declare `AcceptsConnectionSettingsRequest`.
     pub client_ca: Option<ClientCaConfig>,
-    /// Optional destinations for the Agents' own telemetry (ADR-0054); absent means none is
+    /// Optional destinations for the Agents' own telemetry (ADR-0017); absent means none is
     /// offered and no Agent reports any.
     pub telemetry_offer: Option<TelemetryOfferConfig>,
     /// Refused at startup, like `config_dir` (ADR-0023). Read only so that a leftover key can be
     /// named.
     pub packages_dir: Option<IgnoredAny>,
-    /// How the Server checks the signatures on its Package entries (ADR-0050).
+    /// How the Server checks the signatures on its Package entries (ADR-0033).
     #[serde(default)]
     pub packages: PackagesConfig,
     /// Where the artifacts' bytes are kept: the filesystem under `data_dir`, or a bucket of an
@@ -73,7 +73,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub database: DatabaseConfig,
     /// Refused at startup: every package is offered as a path the Client resolves against its own
-    /// endpoint, and a Client downloads from no other host (ADR-0050). Read only so that a leftover
+    /// endpoint, and a Client downloads from no other host (ADR-0033). Read only so that a leftover
     /// key can be named.
     pub advertised_url: Option<IgnoredAny>,
     /// The largest OpAMP message the Server accepts or sends, on either transport and in either
@@ -81,26 +81,26 @@ pub struct ServerConfig {
     /// configurable — a fleet of small status reports can be served with far less.
     #[serde(default = "default_max_message_size")]
     pub max_message_size_bytes: usize,
-    /// The largest package artifact the REST API accepts on upload (ADR-0050). Nothing to do with
+    /// The largest package artifact the REST API accepts on upload (ADR-0033). Nothing to do with
     /// the OpAMP message limit above: a package is a *program*, routinely hundreds of megabytes,
     /// and it travels over the REST plane, never in an OpAMP message.
     #[serde(default = "default_max_package_size")]
     pub max_package_size_bytes: usize,
     /// The total size of all stored package artifacts the REST API keeps before it refuses a new
-    /// upload (ADR-0050). Where `max_package_size_bytes` bounds one artifact, this bounds the whole
+    /// upload (ADR-0033). Where `max_package_size_bytes` bounds one artifact, this bounds the whole
     /// store — so a caller cannot fill the disk by uploading many artifacts under distinct names.
     /// `0` is refused at load.
     #[serde(default = "default_max_total_package_size")]
     pub max_total_package_bytes: u64,
     /// How long an Agent that declares `ReportsHeartbeat` may be silent before the fleet view calls
-    /// it stale (ADR-0052). Ignored when `[connection_offer]` names a heartbeat interval — the
+    /// it stale (ADR-0029). Ignored when `[connection_offer]` names a heartbeat interval — the
     /// period this Server asked for is a better answer than a default.
     #[serde(default = "default_stale_after_secs")]
     pub stale_after_secs: u64,
     /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
-    /// this ceiling is refused `Unavailable`, so a peer minting fresh self-asserted UIDs (ADR-0040)
+    /// this ceiling is refused `Unavailable`, so a peer minting fresh self-asserted UIDs (ADR-0026)
     /// cannot exhaust memory or disk; existing Agents keep reporting. The real defence against an
-    /// anonymous flood is admission by client certificate (ADR-0040) — this is the backstop behind
+    /// anonymous flood is admission by client certificate (ADR-0026) — this is the backstop behind
     /// it. `0` is refused at load: a fleet that can hold no Agent is a misconfiguration, not a
     /// limit.
     #[serde(default = "default_max_agents")]
@@ -117,14 +117,14 @@ pub struct ServerConfig {
     pub max_new_connections_per_sec: u32,
     /// How long an orderly shutdown spreads the closing of the WebSocket sessions over, in seconds,
     /// from 0 to 300; 0 closes them all at once
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 3).
     #[serde(default = "default_drain_secs")]
     pub drain_secs: u64,
-    /// The bootstrap CA a host enrols with (ADR-0040 clause 17); absent means no host enrols, and
+    /// The bootstrap CA a host enrols with (ADR-0026 clause 17); absent means no host enrols, and
     /// an operator provisions every certificate.
     pub enrolment: Option<EnrolmentConfig>,
-    /// How repeated admission failures from one peer address are throttled (ADR-0040 clause 19).
+    /// How repeated admission failures from one peer address are throttled (ADR-0026 clause 19).
     #[serde(default)]
     pub admission_throttle: AdmissionThrottleConfig,
     /// How large the audit record grows and how much of it is kept (ADR-0028), and the audit key
@@ -132,7 +132,7 @@ pub struct ServerConfig {
     #[serde(default)]
     pub audit: AuditConfig,
     /// The PKCS#11 token the CA keys and the audit key may live on
-    /// (ADR-0043);
+    /// (ADR-0026);
     /// absent, every CA key is a file and there is no audit key.
     pub pkcs11: Option<Pkcs11Config>,
     /// How often an admitted peer may be heard on the Agent plane (ADR-0012).
@@ -224,8 +224,8 @@ pub struct AuditConfig {
 }
 
 /// The `[audit.export]` section
-/// (ADR-0043
-/// clause 9): the OTLP/HTTP endpoint every entry of the audit record is sent to as a log record,
+/// (ADR-0028
+/// clause 15): the OTLP/HTTP endpoint every entry of the audit record is sent to as a log record,
 /// over TLS 1.3, plaintext to a loopback IP literal alone. The Server authenticates to it with
 /// nothing beyond TLS.
 #[derive(Debug, Deserialize)]
@@ -262,8 +262,8 @@ impl AuditExportConfig {
 }
 
 /// The `[pkcs11]` section
-/// (ADR-0043
-/// clause 1): the module the Server loads, the token it signs on, and the file of the user PIN.
+/// (ADR-0026
+/// clause 35): the module the Server loads, the token it signs on, and the file of the user PIN.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pkcs11Config {
@@ -345,7 +345,7 @@ impl AuditConfig {
     }
 }
 
-/// The `[packages]` section (ADR-0050): the operator's public key, against which the Server checks
+/// The `[packages]` section (ADR-0033): the operator's public key, against which the Server checks
 /// every entry's signature — as feedback only. The Agent's own check decides what is installed.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -564,14 +564,14 @@ pub struct DatabaseConfig {
     /// The database, when `store = "postgres"`; refused beside `store = "fs"`.
     pub postgres: Option<PostgresConfig>,
     /// How often an instance renews its lease, in seconds; PostgreSQL only
-    /// (ADR-0045
+    /// (ADR-0025
     /// clause 3).
     pub lease_renew_secs: Option<u64>,
     /// How long after its last renewal a lease lapses, in seconds, at least three renewals;
     /// PostgreSQL only.
     pub lease_secs: Option<u64>,
     /// How often an instance writes the presence of the Agents it carries, in seconds, from 10 to
-    /// 60; PostgreSQL only (ADR-0052 clause 4).
+    /// 60; PostgreSQL only (ADR-0029 clause 4).
     pub presence_interval_secs: Option<u64>,
     /// The connections an instance's pool holds at most, from 2 to 256; PostgreSQL only
     /// (ADR-0023 clause 24).
@@ -608,7 +608,7 @@ const DEFAULT_PRESENCE_INTERVAL_SECS: u64 = 30;
 const PRESENCE_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 10..=60;
 
 /// The lease every instance on PostgreSQL holds while it serves
-/// (ADR-0045
+/// (ADR-0025
 /// clause 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseTimes {
@@ -878,7 +878,7 @@ pub fn read_secret_file(key: &str, file: &Path) -> Result<zeroize::Zeroizing<Str
 
 /// The Ed25519 adapter behind [`SignatureVerifier`](crate::packages::SignatureVerifier): the
 /// operator's public key from `[packages] verification_key`, checked with `ring`, the provider the
-/// Client verifies with (ADR-0050).
+/// Client verifies with (ADR-0033).
 pub struct Ed25519Verifier(Vec<u8>);
 
 impl Ed25519Verifier {
@@ -897,7 +897,7 @@ impl crate::packages::SignatureVerifier for Ed25519Verifier {
     }
 }
 
-/// The `[enrolment]` section (ADR-0040 clause 17).
+/// The `[enrolment]` section (ADR-0026 clause 17).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnrolmentConfig {
@@ -906,7 +906,7 @@ pub struct EnrolmentConfig {
     pub bootstrap_ca_file: PathBuf,
     /// PEM PKCS#8 key of that CA. With it, or with `bootstrap_ca_key_label`, the Server issues
     /// bootstrap certificates on an operator's request; without either enrolment works with
-    /// bootstrap certificates made elsewhere (ADR-0040 clause 17).
+    /// bootstrap certificates made elsewhere (ADR-0026 clause 17).
     #[serde(default)]
     pub bootstrap_ca_key_file: Option<PathBuf>,
     /// The label of that CA's private key on the `[pkcs11]` token, in place of
@@ -923,7 +923,7 @@ fn default_max_pending_per_bootstrap() -> usize {
     crate::enrolment::DEFAULT_MAX_PENDING_PER_BOOTSTRAP
 }
 
-/// The `[admission_throttle]` section (ADR-0040 clause 19).
+/// The `[admission_throttle]` section (ADR-0026 clause 19).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AdmissionThrottleConfig {
@@ -966,7 +966,7 @@ pub struct RestConfig {
     /// Address and port the REST API, the API docs, and the bundled UI bind.
     #[serde(default = "default_rest_listen")]
     pub listen: SocketAddr,
-    /// Optional Basic authentication over the whole plane (ADR-0040); required off the loopback.
+    /// Optional Basic authentication over the whole plane (ADR-0026); required off the loopback.
     pub auth: Option<RestAuthConfig>,
     /// The connections the Operator plane holds at once (ADR-0012). `0` is refused at load.
     #[serde(default = "default_rest_max_connections")]
@@ -998,12 +998,12 @@ impl Default for RestConfig {
     }
 }
 
-/// The `[rest.auth]` section (ADR-0040): who may reach the Operator plane. Basic only — the
+/// The `[rest.auth]` section (ADR-0026): who may reach the Operator plane. Basic only — the
 /// audience is a browser and `curl`, and Basic is the one scheme both speak without a login page.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestAuthConfig {
-    /// Accepted Basic credentials, `user = "<Argon2id hash>"` (ADR-0040 clause 21). Several allow
+    /// Accepted Basic credentials, `user = "<Argon2id hash>"` (ADR-0026 clause 21). Several allow
     /// a rotation, or an individual operator's credential to be withdrawn on its own.
     #[serde(default)]
     pub basic_users: BTreeMap<String, String>,
@@ -1022,7 +1022,7 @@ impl std::fmt::Debug for RestAuthConfig {
 }
 
 impl RestAuthConfig {
-    /// The check the Operator plane runs on every request (ADR-0040 clause 2).
+    /// The check the Operator plane runs on every request (ADR-0026 clause 2).
     ///
     /// # Errors
     /// Returns an error naming an entry that is not a hash this Server keeps.
@@ -1061,7 +1061,7 @@ impl RestAuthConfig {
 /// The `[connection_offer]` section (ADR-0013 clause 1): what every Agent declaring
 /// `AcceptsOpAMPConnectionSettings` is offered — a heartbeat interval, an endpoint. Either or both,
 /// but never neither. It carries no credential: the Agent plane admits by client certificate alone
-/// (ADR-0040), so an offered credential would be one nothing reads.
+/// (ADR-0026), so an offered credential would be one nothing reads.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionOfferConfig {
@@ -1118,13 +1118,13 @@ impl ConnectionOfferConfig {
     }
 }
 
-/// The `[telemetry_offer]` section (ADR-0054): where Agents send their own telemetry.
+/// The `[telemetry_offer]` section (ADR-0017): where Agents send their own telemetry.
 ///
 /// The endpoints are full OTLP/HTTP URLs *with path*, which is what the Baseline requires of them;
 /// this Server does not append `/v1/metrics` for you, because guessing a receiver's routing is how
 /// telemetry disappears into a 404 nobody looks at.
 ///
-/// **What this section says, it says about all three signals** (ADR-0054). A signal left out is
+/// **What this section says, it says about all three signals** (ADR-0017). A signal left out is
 /// offered no destination and is *stopped* on an Agent that was reporting it, and an endpoint set
 /// to the empty string is an explicit withdrawal — the one way to say "stop all three", since a
 /// Server that offers nothing at all is a Server that says nothing at all. Removing the section
@@ -1149,7 +1149,7 @@ impl TelemetryOfferConfig {
     /// meant, and an endpoint that is not an OTLP/HTTP URL would be refused by every Agent.
     ///
     /// An endpoint set to the empty string passes both tests deliberately — it is a withdrawal
-    /// (ADR-0054), which is a thing to be said rather than a URL to be checked.
+    /// (ADR-0017), which is a thing to be said rather than a URL to be checked.
     fn check(&self) -> Result<(), String> {
         let endpoints = [
             ("metrics_endpoint", &self.metrics_endpoint),
@@ -1183,14 +1183,14 @@ pub struct TlsConfig {
     /// PEM private key.
     pub key_file: PathBuf,
     /// PEM bundle of the certificate authorities a **client** certificate must chain to, required
-    /// (ADR-0040). The Agent plane asks for the certificate in the TLS handshake, so a peer without
+    /// (ADR-0026). The Agent plane asks for the certificate in the TLS handshake, so a peer without
     /// one, or with one this bundle (or the bootstrap CA of `[enrolment]`) does not verify, never
     /// reaches a route — the package download included. An `Option` only so its absence can be
     /// named at startup.
     pub client_ca_file: Option<PathBuf>,
 }
 
-/// The `[client_ca]` section (ADR-0040): the certificate authority this Server signs Agent CSRs
+/// The `[client_ca]` section (ADR-0026): the certificate authority this Server signs Agent CSRs
 /// with. Present is what arms the CSR flow — `AcceptsConnectionSettingsRequest` is declared only
 /// while it is, the same "declare what is actually armed" rule `[connection_offer]` follows.
 ///
@@ -1207,7 +1207,7 @@ pub struct ClientCaConfig {
     /// The label of the issuing CA's private key on the `[pkcs11]` token.
     pub key_label: Option<String>,
     /// How long an issued certificate is valid. Short is the point: validity plus renewal bounds a
-    /// certificate nobody noticed was stolen, and revocation ends one that was (ADR-0040).
+    /// certificate nobody noticed was stolen, and revocation ends one that was (ADR-0026).
     #[serde(default = "default_validity_days")]
     pub validity_days: u32,
 }
@@ -1270,15 +1270,15 @@ fn default_max_message_size() -> usize {
 }
 
 /// Long enough that a host offline over a holiday still comes back on a valid certificate, short
-/// enough that a certificate is not a permanent grant (ADR-0040).
-/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0052): one missed beat is a
+/// enough that a certificate is not a permanent grant (ADR-0026).
+/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0029): one missed beat is a
 /// lost packet, and a fleet view that flickers is one nobody trusts.
 fn default_stale_after_secs() -> u64 {
     90
 }
 
 /// A month: short enough that a certificate stolen unnoticed is good for weeks, not a quarter;
-/// long enough that a host offline for a fortnight still renews on its own (ADR-0040 clause 8).
+/// long enough that a host offline for a fortnight still renews on its own (ADR-0026 clause 8).
 fn default_validity_days() -> u32 {
     30
 }
@@ -1470,7 +1470,7 @@ impl ServerConfig {
 
     /// The startup checks every layered document passes, its source aside.
     fn check(&self) -> Result<(), String> {
-        // The Agent plane has no credential of its own (ADR-0040 clause 1). A leftover section is
+        // The Agent plane has no credential of its own (ADR-0026 clause 1). A leftover section is
         // refused rather than ignored: an operator is present at a Server upgrade, and a section
         // that silently did nothing would tell them the fleet still needs it.
         if self.auth.is_some() {
@@ -1500,7 +1500,7 @@ impl ServerConfig {
             return Err(
                 "advertised_url is removed — every package is offered as a path the Client \
                  resolves against its own Server, and a Client downloads from no other host \
-                 (ADR-0050); remove the key"
+                 (ADR-0033); remove the key"
                     .to_string(),
             );
         }
@@ -1516,7 +1516,7 @@ impl ServerConfig {
         if let Some(auth) = &self.rest.auth {
             auth.check()?;
         }
-        // A malformed key fails startup, not the first signature it would have checked (ADR-0050).
+        // A malformed key fails startup, not the first signature it would have checked (ADR-0033).
         self.packages.verification_key()?;
         self.blobs.check()?;
         self.database.check()?;
@@ -1540,7 +1540,7 @@ impl ServerConfig {
         }
         // Mutual TLS needs a TLS listener to happen on: `client_ca_file` lives inside `[tls]`, so
         // this can only be a `[client_ca]` without one — issuing certificates for a channel that
-        // will never ask for them (ADR-0040).
+        // will never ask for them (ADR-0026).
         if self.client_ca.is_some() && self.tls.is_none() {
             return Err(
                 "[client_ca] issues client certificates, which only a TLS listener can ask \
@@ -1667,7 +1667,7 @@ impl ServerConfig {
                     .to_string(),
             );
         };
-        // The certificate is the whole of admission (ADR-0040 clauses 5 and 6).
+        // The certificate is the whole of admission (ADR-0026 clauses 5 and 6).
         if tls.client_ca_file.is_none() {
             return Err(
                 "[tls] client_ca_file is required — every Agent presents a client certificate in \
@@ -1977,7 +1977,7 @@ impl ConnectionOffer {
     }
 }
 
-/// The `[telemetry_offer]` section as the destinations the fleet offers (ADR-0054).
+/// The `[telemetry_offer]` section as the destinations the fleet offers (ADR-0017).
 impl TelemetryOffer {
     pub fn from_config(config: &TelemetryOfferConfig) -> Self {
         let headers = (!config.headers.is_empty()).then(|| Headers {
@@ -1995,7 +1995,7 @@ impl TelemetryOffer {
                 .as_ref()
                 .map(|endpoint| TelemetryConnectionSettings {
                     destination_endpoint: endpoint.clone(),
-                    // A withdrawal names nothing else (ADR-0054): an empty endpoint stops that
+                    // A withdrawal names nothing else (ADR-0017): an empty endpoint stops that
                     // signal, and the backend's credential travelling with it would be a token
                     // handed out for a connection nobody is going to open.
                     headers: headers.clone().filter(|_| !endpoint.is_empty()),
@@ -2158,8 +2158,8 @@ mod tests {
 
     /// `[packages] verification_key` is the operator's public key, hex, as the Client's key of the
     /// same name: absent by default, decoded when given, and a malformed one fails startup naming
-    /// it (ADR-0050 clause 19).
-    /// Verifies: ADR-0050
+    /// it (ADR-0033 clause 19).
+    /// Verifies: ADR-0033
     #[test]
     fn a_malformed_verification_key_fails_startup() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
@@ -2187,7 +2187,7 @@ mod tests {
 
     /// Every package is offered as a path, so a leftover `advertised_url` is named and refused
     /// rather than ignored: it would tell the operator a mirror is in use that no Client reaches.
-    /// Verifies: ADR-0050
+    /// Verifies: ADR-0033
     #[test]
     fn a_leftover_advertised_url_fails_startup_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2245,9 +2245,9 @@ mod tests {
     }
 
     /// The three shapes `[telemetry_offer]` admits: a destination, a withdrawal, and a mistake.
-    /// The withdrawal is the one ADR-0054 adds — an empty endpoint is a thing to say, not a URL to
+    /// The withdrawal is the one ADR-0017 adds — an empty endpoint is a thing to say, not a URL to
     /// check — and it must not be waved through for a value that is merely wrong.
-    /// Verifies: ADR-0054
+    /// Verifies: ADR-0017
     #[test]
     fn an_empty_endpoint_is_a_withdrawal_and_a_wrong_one_is_still_an_error() {
         let section = |body: &str| {
@@ -2277,9 +2277,9 @@ mod tests {
     }
 
     /// No credential in `server.toml` authenticates on its own: an operator's password in clear is
-    /// refused at startup, the section and the user named and the value never echoed (ADR-0040
+    /// refused at startup, the section and the user named and the value never echoed (ADR-0026
     /// clause 21).
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn a_plaintext_credential_is_refused_naming_its_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2306,8 +2306,8 @@ mod tests {
     }
 
     /// The Agent plane has no credential of its own: a leftover `[auth]` is refused at startup,
-    /// named, with the reason, whatever it holds (ADR-0040 clause 1).
-    /// Verifies: ADR-0040
+    /// named, with the reason, whatever it holds (ADR-0026 clause 1).
+    /// Verifies: ADR-0026
     #[test]
     fn an_auth_section_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2330,7 +2330,7 @@ mod tests {
         ServerConfig::load(&path).expect("no [auth], no refusal");
     }
 
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn a_weak_argon2id_hash_is_refused() {
         use argon2::password_hash::PasswordHasher as _;
@@ -2348,9 +2348,9 @@ mod tests {
         assert!(err.contains("cheaper"), "{err}");
     }
 
-    /// The Operator plane's own credentials (ADR-0040), precomputed into the header values that
+    /// The Operator plane's own credentials (ADR-0026), precomputed into the header values that
     /// authenticate, with the challenge that makes a browser ask rather than give up.
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn rest_auth_verifies_its_hashes_and_carries_the_basic_challenge() {
         let cfg: ServerConfig = toml::from_str(&format!(
@@ -2374,7 +2374,7 @@ mod tests {
 
     /// A section that authenticates nobody locks the operator out of their own Server, and a
     /// half-written credential is a mistake rather than an intent — both fail at startup.
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn an_unusable_rest_auth_section_is_rejected() {
         let empty: RestAuthConfig = toml::from_str("").expect("parses; emptiness is semantic");
@@ -2388,7 +2388,7 @@ mod tests {
         let err = ServerConfig::load(&path).expect_err("an empty section must fail startup");
         assert!(err.contains("[rest.auth.basic_users]"), "{err}");
 
-        // Bearer is not a scheme this plane has, and a typo fails loudly (ADR-0008, ADR-0040).
+        // Bearer is not a scheme this plane has, and a typo fails loudly (ADR-0008, ADR-0026).
         assert!(toml::from_str::<ServerConfig>("[rest.auth]\nbearer_tokens = [\"tok\"]").is_err());
     }
 
@@ -2478,7 +2478,7 @@ mod tests {
 
     /// The certificate is the whole of admission: a Server without the client CA does not start,
     /// and neither does an `[enrolment]` without a CA to sign what it approves.
-    /// Verifies: ADR-0040, Q-1
+    /// Verifies: ADR-0026, Q-1
     #[test]
     fn the_client_ca_is_required_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2637,7 +2637,7 @@ mod tests {
         assert_eq!(cfg.listen, "127.0.0.1:4320".parse().expect("address"));
     }
 
-    /// Verifies: ADR-0012, ADR-0040, Q-1
+    /// Verifies: ADR-0012, ADR-0026, Q-1
     #[test]
     fn a_server_without_tls_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2650,7 +2650,7 @@ mod tests {
         assert!(err.contains("[tls] is required"), "{err}");
     }
 
-    /// Verifies: ADR-0012, ADR-0040
+    /// Verifies: ADR-0012, ADR-0026
     #[test]
     fn the_operator_plane_requires_authentication_off_the_loopback() {
         let tls = TLS;
@@ -3252,7 +3252,7 @@ mod tests {
 
     /// The rate of new Agent-plane connections defaults to 200 a second and the drain to 20
     /// seconds; a rate of zero and a drain past 300 seconds fail startup naming the key.
-    /// Verifies: ADR-0012, ADR-0045
+    /// Verifies: ADR-0012, ADR-0025
     #[test]
     fn the_new_connection_rate_and_the_drain_are_bounded() {
         let load = |keys: &str| {
@@ -3286,7 +3286,7 @@ mod tests {
 
     /// CA keys named by their labels on the token leave an instance free to share its database
     /// with others.
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0026
     #[test]
     fn keys_on_the_token_do_not_make_an_instance_alone() {
         let toml = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
@@ -3304,7 +3304,7 @@ mod tests {
     /// `[client_ca]` names its key as exactly one of a file and a label; a label, there or in
     /// `[enrolment]` or `[audit]`, needs `[pkcs11]`; a key file alone starts without a token on
     /// either store.
-    /// Verifies: ADR-0043, ADR-0040
+    /// Verifies: ADR-0026
     #[test]
     fn a_ca_key_is_a_file_or_a_label_and_a_label_needs_the_token() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3377,7 +3377,7 @@ mod tests {
 
     /// An instance must be alone on its database while it keeps its blobs as files or a CA key in a
     /// file, and names the key; with the blobs in S3 and no CA key on the Server it shares it.
-    /// Verifies: ADR-0045
+    /// Verifies: ADR-0025
     #[test]
     fn an_instance_with_files_of_its_own_must_be_alone() {
         let s3 = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
@@ -3462,7 +3462,7 @@ mod tests {
     /// each one set fails startup naming it; with PostgreSQL they default to 10, 30 and 30 seconds,
     /// and a lease shorter than three renewals, a renewal of zero, or a presence interval outside 10
     /// to 60 seconds fails naming the key.
-    /// Verifies: ADR-0045, ADR-0052
+    /// Verifies: ADR-0025, ADR-0029
     #[test]
     fn the_lease_keys_apply_to_postgresql_alone() {
         let load = |database: &str| {
@@ -3546,7 +3546,7 @@ mod tests {
     /// The `[audit]` keys apply to one store each: `max_file_bytes` and `keep_files` to the files,
     /// `retain_days` (default 365, at least 1) to PostgreSQL. A key set for the other store fails
     /// startup naming it (ADR-0023 clause 12).
-    /// Verifies: ADR-0023, ADR-0029
+    /// Verifies: ADR-0023, ADR-0028
     #[test]
     fn each_audit_key_applies_to_its_own_store_alone() {
         let load = |text: &str| {
@@ -3607,7 +3607,7 @@ mod tests {
     /// `[audit.export]` is off unless named; it names an `https://` endpoint, or an `http://` one
     /// on a loopback IP literal, and a `ca_file`. Plaintext elsewhere, another scheme and any other
     /// key fail startup naming the section.
-    /// Verifies: ADR-0043, ADR-0012
+    /// Verifies: ADR-0028, ADR-0012
     #[test]
     fn the_audit_export_is_off_unless_named_and_never_plaintext_off_the_loopback() {
         let load = |text: &str| {
@@ -3701,11 +3701,11 @@ mod tests {
     }
 
     /// A Server on files given a data directory it cannot create fails startup naming `data_dir`
-    /// and the directory (ADR-0039 clause 16). The
+    /// and the directory (ADR-0038 clause 16). The
     /// image's case is the default `fleet-data` under `/`, which the account cannot write; the test
     /// names the directory under an unwritable one instead, as the working directory is the whole
     /// test process's.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0038
     #[cfg(unix)]
     #[test]
     fn a_data_dir_the_account_cannot_write_fails_startup_naming_it() {

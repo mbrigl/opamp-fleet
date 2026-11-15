@@ -16,7 +16,8 @@ convenience", Q-1 "Secure by default"): the first configuration an installer wri
 authenticate and must not send plaintext beyond the loopback. Plaintext is accepted on the loopback
 alone, a host name is never the loopback, and a Client without a client certificate is refused at
 startup. The Agent plane admits a peer by its client certificate alone
-([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)), so there is no fleet
+([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)),
+so there is no fleet
 credential for an installer to ask for, write or name.
 
 Forces:
@@ -71,7 +72,7 @@ so a native package that registered a service of its own would write a second re
 all of that. Self-update and a package manager must not own the same bytes: if `dpkg`, `rpm` or the
 MSI owned the layout, every fleet update would leave the host in a state `dpkg -V` reports as
 modified and the next `apt upgrade` silently reverts. The releases that carry these packages are
-[ADR-0039](0039-releases-attestations-and-the-server-image.md)'s.
+[ADR-0038](0038-releases-attestations-and-the-server-image.md)'s.
 
 And one force on the name. The Baseline reserves `service.name` for the Agent *type* and recommends
 a reverse FQDN, a recommendation this project does not enforce
@@ -98,7 +99,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    every service verb takes `--user`. There is no environment-variable configuration: the Client is
    file-configured ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)) and a registered service
    carries the configuration's *path*, never its content. clap's `version` is wired to
-   `opamp::version::current()` ([ADR-0038](0038-the-products-version.md)). The daemon code lives
+   `opamp::version::current()` ([ADR-0037](0037-the-products-version.md)). The daemon code lives
    in `crates/fleet-agent/src/service/` (`runtime`, `layout`, `manager`, `run_as`, `enrol`, and
    the Windows-only `windows`, `windows_config`, `windows_rights`, `withdrawal`), behind the narrow
    `ServiceControl` seam (`start`, `stop`, `state`) that the self-update depends on. Errors are
@@ -138,7 +139,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    package named after the Agent type
    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md) clause 2), and a Server
    offers a package under the Agent type it is built for
-   ([ADR-0034](0034-packages-signatures-and-delivery.md)), so the release a fleet uploads for its
+   ([ADR-0033](0033-packages-signatures-and-delivery.md)), so the release a fleet uploads for its
    Clients is a Package for Agent type `supervisor`, and no per-host setting is needed. A
    Configuration carrying the Client's `[[supervisor]]` blocks
    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)) is typed `supervisor` as well.
@@ -395,7 +396,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 29. **Three classes of asset, and only one is a package artifact.** The Client's archive is opened
     by the Client on a self-update and parsed by the fleet view; the operator tool's archives
-    ([ADR-0037](0037-the-operator-program-opamp-fleetctl.md)) are downloaded to an operator's
+    ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)) are downloaded to an operator's
     machine and are no package of the fleet; the `.deb`, `.rpm` and `.msi` are opened by `dpkg`,
     `rpm` and Windows Installer and by nothing in the fleet path. The installers are **additive
     operator artifacts**: they never replace the archive, which is the only format the fleet can
@@ -430,7 +431,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
     `[package.metadata.generate-rpm]`, reading the workspace's version, licence and description;
     `cargo-deb` derives `Depends` from what the binary links (`$auto`). The RPM `Release` is `1`
     and stays `1`, and no epoch or `~` mangling is needed, because a version is released once and
-    is always `MAJOR.MINOR.PATCH` ([ADR-0038](0038-the-products-version.md)). The maintainer
+    is always `MAJOR.MINOR.PATCH` ([ADR-0037](0037-the-products-version.md)). The maintainer
     scripts live in `packaging/linux/`, the WiX sources in `packaging/windows/`.
 
 **Out of scope:** the versioned layout and its `current` pointer, the service's name, the account
@@ -446,13 +447,14 @@ published, and where their `UpgradeCode`s are recorded; how an operator discover
 on a host; a confined SELinux policy module; configuration reload on `SIGHUP`; `Type=notify`
 integration; the startup rules themselves and the Server's enrolment window and approval, which the
 installer only applies and names
-([ADR-0026](0026-admission-by-client-certificate-and-revocation.md)); hosting apt and yum
+([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md));
+hosting apt and yum
 repositories; preseeding the endpoint on Linux; a macOS `.pkg`, which needs a Developer ID and
 notarization; the files an enrolment writes as root into the state directory, which no privileged
 step writes through a link ([ADR-0021](0021-the-accounts-the-service-runs-under.md) clause 11); the
 `[tls]` files an enrolment reads as root; `[logging] dir`, which only the service's own run uses;
 the releases and the Server's image
-([ADR-0039](0039-releases-attestations-and-the-server-image.md)).
+([ADR-0038](0038-releases-attestations-and-the-server-image.md)).
 
 ## Alternatives considered
 
@@ -815,7 +817,7 @@ the releases and the Server's image
   [`cli.rs`](../../crates/fleet-agent/src/cli.rs);
   `a_leftover_auth_section_is_ignored_with_a_notice` in
   [`config.rs`](../../crates/fleet-agent/src/config.rs), shared with
-  [ADR-0026](0026-admission-by-client-certificate-and-revocation.md);
+  [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md);
   `the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_nothing` in
   [`tests/enrolment_e2e.rs`](../../crates/fleet-agent/tests/enrolment_e2e.rs);
   `the_post_install_prints_no_endpoint_the_client_refuses_at_startup` and

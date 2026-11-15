@@ -1,12 +1,12 @@
 //! The audit record's export
-//! (ADR-0043
-//! clause 9): every entry the store has accepted, sent as an OTLP log record to the OTLP/HTTP
+//! (ADR-0028
+//! clause 15): every entry the store has accepted, sent as an OTLP log record to the OTLP/HTTP
 //! endpoint `[audit.export]` names — a copy the Server cannot rewrite once it has left.
 //!
 //! The writer of the record hands each line it has written to a [`Sink`], which never waits: the
 //! line goes into a queue of [`QUEUE`] entries, and one that finds the queue full is counted as
 //! dropped. A thread of its own takes the lines out, encodes them with `opentelemetry-otlp`, the
-//! crate the Client's own telemetry uses (ADR-0054), and sends them through a `reqwest` client on
+//! crate the Client's own telemetry uses (ADR-0017), and sends them through a `reqwest` client on
 //! the TLS 1.3 *ring* configuration (ADR-0012 clauses 5 and 21); a batch the receiver does not take
 //! is tried again, until it does, while the queue fills behind it. The count of what was dropped is
 //! written into the record itself as `audit.export_dropped` ([`AuditExport::report_dropped`]),
@@ -430,7 +430,7 @@ mod tests {
     /// A full queue drops what comes after it without waiting, counts it, and the count is written
     /// into the record as `audit.export_dropped`; a count the record cannot take is kept for the
     /// next report, and nothing is written while none was dropped.
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0028
     #[test]
     fn a_full_queue_drops_counts_and_writes_the_count_into_the_record() {
         let (sink, _taken) = test_sink();
@@ -470,7 +470,7 @@ mod tests {
 
     /// At shutdown the export answers what it leaves behind: the lines dropped since the last
     /// report, counted once, and those the receiver had not taken when the time ran out.
-    /// Verifies: ADR-0043
+    /// Verifies: ADR-0028
     #[test]
     fn at_shutdown_the_export_answers_what_it_leaves_behind() {
         let (sink, _taken) = test_sink();

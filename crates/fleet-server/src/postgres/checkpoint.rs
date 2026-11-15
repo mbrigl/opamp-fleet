@@ -1,5 +1,5 @@
 //! The checkpoints of the audit record on PostgreSQL
-//! (ADR-0041 clause 2): which
+//! (ADR-0028 clause 11): which
 //! instance signs, and what its checkpoint names.
 //!
 //! The instance that holds a session-level advisory lock signs. It holds the lock on one
@@ -209,7 +209,7 @@ mod tests {
 
     /// A signer whose lease ends lets go of its lock before it answers, so another instance takes
     /// it at once rather than once the database has ended the session.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_signer_whose_lease_ends_lets_go_of_its_lock_at_once() {
         let Some(test) = TestDatabase::named() else {
@@ -231,7 +231,7 @@ mod tests {
 
     /// A signer whose session the database ends learns at its next interval that its lock is gone:
     /// it signs nothing while another session holds the lock, and signs again once it can take it.
-    /// Verifies: ADR-0041
+    /// Verifies: ADR-0028
     #[test]
     fn a_signer_whose_session_the_database_ends_learns_its_lock_is_gone() {
         let Some(test) = TestDatabase::named() else {

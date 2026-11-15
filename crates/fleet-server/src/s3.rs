@@ -1054,7 +1054,7 @@ pub(crate) mod tests {
     /// first, and each sweep deletes the blob its act let go (ADR-0023 clauses 13, 14 and 16). Which
     /// sweep found staging objects to delete is counted where it asks which leases are live, which
     /// a sweep does only once its listing found one.
-    /// Verifies: ADR-0023, ADR-0045
+    /// Verifies: ADR-0023, ADR-0025
     #[test]
     fn the_next_sweep_on_any_instance_deletes_a_released_leases_staging_object_once() {
         use crate::packages::{PackageId, PackageStore, Platform};
@@ -1193,7 +1193,7 @@ pub(crate) mod tests {
     /// Two instances whose staging cleanups, the ones each runs when it takes over a lapsed lease,
     /// run at once delete a staging object of a released lease once: the second waits for the
     /// first's hold on the blob store's lock and then finds nothing (ADR-0023 clauses 14 and 16).
-    /// Verifies: ADR-0023, ADR-0045
+    /// Verifies: ADR-0023, ADR-0025
     #[test]
     fn two_staging_cleanups_at_once_delete_a_released_leases_staging_object_once() {
         use crate::postgres::testing::TestDatabase;
