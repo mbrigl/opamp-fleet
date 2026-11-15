@@ -2,7 +2,7 @@
 name = "fleet-agent"
 description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0016)"
 # The test stubs (src/bin/stub_*.rs) are further binaries; `cargo run -p fleet-agent` means this one.
-# The operator tools are not here at all: they are `crates/fleet-tools` (ADR-0008).
+# The operator tools are not here at all: they are `crates/fleet-tools` (ADR-0041).
 default-run = "supervisor"
 version.workspace = true
 edition.workspace = true
@@ -27,7 +27,10 @@ clap.workspace = true
 # The Client is an Agent upstream and a server for the Gateway and the Supervisor Endpoint.
 opamp = { workspace = true, features = ["client", "server"] }
 fleet-core.workspace = true
-# ADR-0020, ADR-0021: service lifecycle and the content hash in the install layout's manifest.
+# What the Client shares with the operator tool: the unpackers, the reads that follow no link, the
+# password-file reader and the bootstrap identity (ADR-0041).
+fleet-util.workspace = true
+# ADR-0020, ADR-0042: service lifecycle and the content hash in the install layout's manifest.
 service-manager.workspace = true
 # ADR-0020: the questionnaire `service install --interactive` and `service config` run.
 dialoguer.workspace = true
@@ -67,16 +70,10 @@ async-trait.workspace = true
 # `host.mac` (ADR-0017).
 sysinfo = { workspace = true, features = ["network"] }
 # The downstream OpAMP endpoint of Gateway Mode (ADR-0016) is `opamp::server`'s, an axum router;
-# its WebSocket upgrade is `opamp`'s own (ADR-0008). The HTTP engine under it — hyper, tower,
+# its WebSocket upgrade is `opamp`'s own (ADR-0041). The HTTP engine under it — hyper, tower,
 # http-body — is already linked through reqwest; this adds the routing layer.
 axum.workspace = true
-# ADR-0033: a package artifact may be a `.tar.gz` or a `.7z`; the Agent unpacks it, and opens an
-# encrypted `.7z` with the key from `[packages] archive_key`.
-flate2.workspace = true
-tar.workspace = true
-sevenz-rust2.workspace = true
-zip.workspace = true
-# ADR-0014: the Client's keys, the password and bytes of a `bootstrap.p12` and the Supervisor
+# ADR-0040: the Client's keys, the password and bytes of a `bootstrap.p12` and the Supervisor
 # Endpoint token are held in buffers wiped on drop. No TLS or crypto backend comes with it
 # (ADR-0012).
 zeroize.workspace = true
@@ -96,8 +93,8 @@ windows-service.workspace = true
 # bytes in a `.deb` are the bytes in its sibling `.7z`.
 #
 # Neither ships a systemd unit — deliberately. `cargo-deb`'s `systemd-units` integration would write
-# a second registration knowing nothing of ADR-0021's service name or ADR-0020's restart policy; the
-# maintainer scripts call `service install` instead, which is the one install path (ADR-0021).
+# a second registration knowing nothing of ADR-0042's service name or ADR-0020's restart policy; the
+# maintainer scripts call `service install` instead, which is the one install path (ADR-0042).
 # The package carries the **product's** name (ADR-0020 clause 9), not the program's: a second
 # instance is a second build, and two variants that shared a package name could not be installed
 # side by side. `cargo-deb`'s `[package.metadata.deb.variants.<name>]` is the seam a variant build
@@ -117,12 +114,12 @@ packages the Server offers.
 The package delivers the binary only. `supervisor service install`, which the post-install \
 runs, lays out the versioned install root and registers the systemd service."""
 # Derived from what the binary actually links, rather than a floor somebody typed — and `passwd`,
-# which ships the `useradd` the post-install creates the account with (ADR-0021 clause 3).
+# which ships the `useradd` the post-install creates the account with (ADR-0042 clause 3).
 depends = "$auto, passwd"
 # Always spelled `target/release/`, whatever the real target directory is: cargo-deb rewrites the
 # prefix itself for a cross build, and a hand-adjusted path defeats that.
 #
-# `usr/libexec`, not `usr/bin` (ADR-0021): what an operator invokes on PATH is the symlink the
+# `usr/libexec`, not `usr/bin` (ADR-0042): what an operator invokes on PATH is the symlink the
 # maintainer scripts lay through the layout's `current` pointer, so the CLI always answers for the
 # binary the service runs. The payload itself stays off PATH.
 #
@@ -142,7 +139,7 @@ assets = [
 # taken as the scriptlet body itself — so the release job asserts with `rpm -qp --scripts` that what
 # landed in the package is the script and not its file name.
 #
-# `%posttrans` re-lays the `/usr/bin` symlink (ADR-0021): on an upgrade, rpm erases the *old*
+# `%posttrans` re-lays the `/usr/bin` symlink (ADR-0042): on an upgrade, rpm erases the *old*
 # package's files after the new `%post` has run, which deletes the link `%post` just created — the
 # transaction scriptlet runs after that erasure, so its link is the one that survives.
 post_install_script = "../../packaging/linux/postinst"
@@ -150,7 +147,7 @@ pre_uninstall_script = "../../packaging/linux/prerm"
 post_uninstall_script = "../../packaging/linux/postrm"
 post_trans_script = "../../packaging/linux/posttrans"
 
-# The post-install creates the account `opamp-fleet` with `useradd` (ADR-0021 clause 3). A file
+# The post-install creates the account `opamp-fleet` with `useradd` (ADR-0042 clause 3). A file
 # dependency, because the package that ships it is `shadow-utils` on Fedora and RHEL and `shadow`
 # on SUSE. cargo-generate-rpm writes a plain `Requires:`; it has no `Requires(post):` form.
 [package.metadata.generate-rpm.requires]
@@ -160,15 +157,15 @@ post_trans_script = "../../packaging/linux/posttrans"
 # Virtual time, so a bound measured in minutes is tested in milliseconds.
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
-# ADR-0021: a test reads the process account back from a plist as `service-manager` writes it,
+# ADR-0042: a test reads the process account back from a plist as `service-manager` writes it,
 # through the crate it writes with.
 plist = "1"
 # A test holds a TLS connection open mid-headers on the Gateway (H18), below what a client library
 # would let it do.
 rustls.workspace = true
-# Tests build the `.7z` fixtures they then open; the daemon itself only ever decompresses. The
-# encoder rides here alone, since `pack` lives in its own crate (ADR-0008) — a dev-dependency
-# reaches the tests and no shipped binary.
-sevenz-rust2 = { workspace = true, features = ["compress"] }
+# Tests build the `.tar.gz` fixtures the Client then installs; the unpackers themselves are
+# `fleet-util`'s (ADR-0041).
+flate2.workspace = true
+tar.workspace = true
 # ADR-0018: the end-to-end test runs the real Server in-process against the real Client binary.
 fleet-server = { path = "../fleet-server" }

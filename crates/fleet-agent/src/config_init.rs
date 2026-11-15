@@ -186,7 +186,7 @@ impl Beside {
                 };
                 // Beside the program or in `--fleet-files`: the administrator's path.
                 let bytes = read_pkcs12(file, &Offered::default(), (roots, &config.state_dir))?;
-                let identity = crate::tls::pkcs12_identity(file, &bytes, password)
+                let identity = fleet_util::identity::pkcs12::open(file, &bytes, password)
                     .map_err(|e| format!("{}: {e} (--bootstrap-password-file)", file.display()))?;
                 Ok(Some(Bootstrap::Pkcs12 {
                     file: file.clone(),
@@ -218,7 +218,7 @@ pub struct Answers {
     /// The questionnaire always asks for it there; `None` for a loopback `ws://` / `http://`
     /// endpoint, or where no question was put — a packaged install.
     pub ca_file: Option<PathBuf>,
-    /// The hex Ed25519 key packages are verified against (ADR-0033); `None` takes no package until
+    /// The hex Ed25519 key packages are verified against (ADR-0039); `None` takes no package until
     /// one is set.
     pub verification_key: Option<String>,
     /// `[packages] self_update` (ADR-0019): whether the Server may replace this Client's own
@@ -247,7 +247,7 @@ pub enum Bootstrap {
     /// A `bootstrap.p12`, opened under its password: the identity is held in memory only.
     Pkcs12 {
         file: PathBuf,
-        identity: crate::config::BootstrapIdentity,
+        identity: fleet_util::identity::BootstrapIdentity,
     },
 }
 
@@ -273,7 +273,7 @@ pub struct Written {
     pub answered: Option<Answered>,
     /// The endpoint `--endpoint` named over a file this run kept: no answer, but an enrolment
     /// refuses a kept file that names another
-    /// (ADR-0021 clause 28).
+    /// (ADR-0042 clause 28).
     pub named_over_kept: Option<String>,
     /// The paths this run's questions offered from the file, which the enrolment reads through no
     /// link at their name where an answer kept one. A run that answered nothing kept the file,
@@ -293,7 +293,7 @@ impl Written {
 
 /// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
 /// with these, never with what it would read back from the file the service's account owns
-/// (ADR-0021 clause 28).
+/// (ADR-0042 clause 28).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answered {
     /// The endpoint answered.
@@ -305,7 +305,7 @@ pub struct Answered {
 
 /// The paths the questionnaire offers from `supervisor.toml`, a file the service's account may
 /// write: `[tls] ca_file`, `cert_file` and `key_file`. An answer that keeps one is read through
-/// no link at its name, wherever it lies; any other answer is the administrator's (ADR-0021
+/// no link at its name, wherever it lies; any other answer is the administrator's (ADR-0042
 /// clause 11).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Offered(Vec<PathBuf>);
@@ -327,11 +327,11 @@ impl Offered {
 
     /// Whose word `path` is: the file's where it is a path offered, the administrator's else.
     #[must_use]
-    pub fn naming(&self, path: &Path) -> crate::nofollow::Named {
+    pub fn naming(&self, path: &Path) -> fleet_util::nofollow::Named {
         if self.0.iter().any(|offered| offered == path) {
-            crate::nofollow::Named::ByAccountFile
+            fleet_util::nofollow::Named::ByAccountFile
         } else {
-            crate::nofollow::Named::ByAdministrator
+            fleet_util::nofollow::Named::ByAdministrator
         }
     }
 }
@@ -389,7 +389,7 @@ pub fn run(
     report_copy(&answered);
     if existing {
         // The file may hold `[packages] archive_key`: the text read and the text written are wiped
-        // when they are dropped; what `toml_edit` keeps while it edits is its own (ADR-0014).
+        // when they are dropped; what `toml_edit` keeps while it edits is its own (ADR-0040).
         let bytes = crate::config_file::read_held(path)?;
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| format!("cannot read {}: not UTF-8 text", path.display()))?;
@@ -421,7 +421,7 @@ fn report_copy(answered: &Answered) {
 /// The configuration then depends on nothing outside its own directory for its trust: the copy
 /// survives the removal of wherever the operator brought the CA from, and it lives where the file
 /// and the state do — in the data root, which the install hands over and an uninstall keeps
-/// (ADR-0020, ADR-0021). It is written owner-only to a temporary name and renamed into place, so
+/// (ADR-0020, ADR-0042). It is written owner-only to a temporary name and renamed into place, so
 /// a later answer replaces a copy left by an earlier one, and an answer that already names the
 /// copy — the default an edit offers — is read before anything is written there.
 ///
@@ -477,14 +477,14 @@ pub fn copy_ca_beside(
 /// account's: a regular file of at most [`crate::tls::MAX_PEM_BYTES`], so a FIFO or a device the
 /// service's account placed at the name never holds this step up, and through no link the account
 /// placed in its directories, such as one at the copy an earlier answer left in the data root
-/// (ADR-0021 clause 11).
+/// (ADR-0042 clause 11).
 fn read_certificates(
     path: &Path,
     roots: &[&Path],
     state_dir: Option<&Path>,
-    named_by: crate::nofollow::Named,
+    named_by: fleet_util::nofollow::Named,
 ) -> Result<Vec<u8>, String> {
-    let bytes = crate::nofollow::read_privileged(
+    let bytes = fleet_util::nofollow::read_privileged(
         path,
         roots,
         state_dir,
@@ -501,7 +501,7 @@ fn read_certificates(
     Ok(certificates
         .iter()
         .flat_map(|der| {
-            crate::tls::pem_block("CERTIFICATE", der)
+            fleet_util::identity::pem_block("CERTIFICATE", der)
                 .as_bytes()
                 .to_vec()
         })
@@ -513,10 +513,10 @@ fn read_certificates(
 /// Through a temporary name and a rename, so a Client starting meanwhile reads the old file or the
 /// new one, never half of either. The new file is owner-only like the one it replaces (ADR-0020
 /// clause 25), and on Unix it is given back to the old file's owner: the file of a service that
-/// runs as its own account belongs to that account (ADR-0021 clause 1), and the administrator
+/// runs as its own account belongs to that account (ADR-0042 clause 1), and the administrator
 /// editing it must not take it away. The owner is set on the new file before the rename, never on
 /// the path after it, in the held directory, so a link the account put at either name is replaced
-/// and never written through (ADR-0021 clause 11).
+/// and never written through (ADR-0042 clause 11).
 fn replace(path: &Path, contents: &str) -> Result<(), String> {
     let meta = std::fs::symlink_metadata(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -728,7 +728,7 @@ pub fn ask(
         )?)
     };
 
-    // Without it nothing is installed, the Client's own updates included (ADR-0033); an empty
+    // Without it nothing is installed, the Client's own updates included (ADR-0039); an empty
     // answer is allowed and said so. A key the file holds is the default, so Enter keeps it and a
     // single `-` is how it is removed.
     let mut prompt = Input::<String>::new().allow_empty(true);
@@ -795,7 +795,7 @@ fn ask_bootstrap(
             }
         };
         if let Some(password) = password {
-            let identity = crate::tls::pkcs12_identity(&cert, &bytes, password)
+            let identity = fleet_util::identity::pkcs12::open(&cert, &bytes, password)
                 .map_err(|e| format!("{}: {e} (--bootstrap-password-file)", cert.display()))?;
             return Ok(Bootstrap::Pkcs12 {
                 file: cert,
@@ -804,14 +804,14 @@ fn ask_bootstrap(
         }
         loop {
             // `dialoguer` hands back a plain copy of what it held wiped; it moves into a buffer
-            // wiped on drop here (ADR-0014).
+            // wiped on drop here (ADR-0040).
             let typed = zeroize::Zeroizing::new(
                 Password::new()
                     .with_prompt(format!("Password of {}", cert.display()))
                     .interact()
                     .map_err(prompt_failed)?,
             );
-            match crate::tls::pkcs12_identity(&cert, &bytes, &typed) {
+            match fleet_util::identity::pkcs12::open(&cert, &bytes, &typed) {
                 Ok(identity) => {
                     return Ok(Bootstrap::Pkcs12 {
                         file: cert,
@@ -832,9 +832,9 @@ fn ask_bootstrap(
 }
 
 /// The bootstrap PKCS#12 file at `path`, read by a privileged step as
-/// [`crate::nofollow::read_privileged`] reads it, at most [`fleet_core::pkcs12::MAX_FILE_BYTES`]
+/// [`fleet_util::nofollow::read_privileged`] reads it, at most [`fleet_core::pkcs12::MAX_FILE_BYTES`]
 /// of it, with `account` — the roots and the state directory — as the service's account's
-/// (ADR-0021 clause 11). Where `path` is one `offered` names, the questionnaire offered it from a
+/// (ADR-0042 clause 11). Where `path` is one `offered` names, the questionnaire offered it from a
 /// file the account may write, and a link at its name is refused wherever it lies. Any other path
 /// the administrator gave.
 ///
@@ -845,7 +845,7 @@ fn read_pkcs12(
     offered: &Offered,
     (roots, state_dir): (&[&Path], &Path),
 ) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    crate::nofollow::read_privileged(
+    fleet_util::nofollow::read_privileged(
         path,
         roots,
         Some(state_dir),
@@ -862,42 +862,6 @@ pub fn is_pkcs12_path(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| e.eq_ignore_ascii_case("p12") || e.eq_ignore_ascii_case("pfx"))
-}
-
-/// The password a password file holds: its first line, without its `\n` or `\r\n` (ADR-0027
-/// clause 18). The file is read once and left as it is: the administrator's path, read as
-/// [`crate::nofollow::read_privileged`] reads one with `roots` as the service's account's, and a
-/// file of more than 4 KiB is refused (ADR-0021 clause 11). `flag` is the option that named it,
-/// `--bootstrap-password-file` here, for the error. The file's bytes and the password are held in
-/// buffers wiped when they are dropped (ADR-0014).
-///
-/// # Errors
-/// Returns an error naming the flag when the file cannot be read or its first line is empty.
-pub fn read_password_file(
-    path: &Path,
-    flag: &str,
-    roots: &[&Path],
-) -> Result<zeroize::Zeroizing<String>, String> {
-    const LIMIT: u64 = 4096;
-    let bytes = crate::nofollow::read_privileged(
-        path,
-        roots,
-        None,
-        crate::nofollow::Named::ByAdministrator,
-        LIMIT,
-    )
-    .map_err(|e| format!("{flag}: {e}"))?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| format!("{flag} {}: not UTF-8 text", path.display()))?;
-    let line = text.split('\n').next().unwrap_or_default();
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    if line.is_empty() {
-        return Err(format!(
-            "{flag} {}: its first line is empty",
-            path.display()
-        ));
-    }
-    Ok(zeroize::Zeroizing::new(line.to_string()))
 }
 
 /// A path to a readable file, offering `default` when there is one.
@@ -1081,6 +1045,7 @@ fn prompt_failed(e: dialoguer::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fleet_util::password::read_password_file;
 
     /// The baseline: everything optional declined, except the self-update consent, which since
     /// ADR-0019 is what declining nothing means.
@@ -1577,7 +1542,7 @@ mod tests {
     /// What an `--endpoint` install answered is handed on: the endpoint as given, and the copy
     /// with the certificates written into it; a loopback endpoint answers no CA, and a file kept
     /// answers nothing.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn what_an_endpoint_install_answered_is_handed_on() {
         let program = tempfile::tempdir().expect("tempdir");
@@ -1624,7 +1589,7 @@ mod tests {
     }
 
     /// Answers without a CA are handed on with their endpoint and no CA, and nothing is copied.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn answers_without_a_ca_hand_on_their_endpoint_and_no_ca() {
         let to = tempfile::tempdir().expect("tempdir");
@@ -1751,7 +1716,7 @@ mod tests {
     /// service's account may write, is refused where a link stands at its name, wherever it lies,
     /// and not read; the same path the administrator gave is read through the link, as the CA
     /// file is. A link in the account's directories is refused either way.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_at_the_offered_bootstrap_p12_is_refused_and_not_read() {
@@ -1787,7 +1752,7 @@ mod tests {
 
     /// A bootstrap PKCS#12 file over its bound and a password file over 4 KiB are refused,
     /// naming the file and the bound, before they are read.
-    /// Verifies: ADR-0014, ADR-0021
+    /// Verifies: ADR-0040, ADR-0042
     #[test]
     fn a_bootstrap_p12_or_a_password_file_over_its_bound_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2061,7 +2026,7 @@ mod tests {
     /// The CA file the questionnaire offers from `[tls] ca_file`, which the service's account may
     /// write, is refused where a link stands at its name, outside the account's directories too,
     /// and nothing is written; the same link the administrator typed is followed and copied.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_at_the_offered_ca_file_is_refused_and_not_read() {
@@ -2094,7 +2059,7 @@ mod tests {
     /// put a link where the file names its CA: a file that holds no certificate is refused before
     /// anything is written, and what a certificate file holds beside its certificates is not
     /// copied.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn only_certificates_are_copied() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2146,7 +2111,7 @@ mod tests {
     /// The answered CA — on a re-run the copy an earlier answer left in the data root — is read
     /// through no link the service's account placed there: a link at the copy is refused, though
     /// it leads to a file of certificates, and nothing is written.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_at_the_ca_copy_is_not_followed_by_the_answer() {
@@ -2205,7 +2170,7 @@ mod tests {
 
     /// A configuration is replaced in its held directory, owner-only and synced, and a link the
     /// service's account put at the temporary name is replaced, never written through.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_replaced_configuration_is_written_through_no_link() {

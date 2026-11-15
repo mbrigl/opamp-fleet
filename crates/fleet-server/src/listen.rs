@@ -1,5 +1,5 @@
 //! How the Server's two planes are served (ADR-0012). The listener, its TLS and its bounds on
-//! connection setup are `opamp`'s (ADR-0008); what is the Server's is that both planes share one
+//! connection setup are `opamp`'s (ADR-0041); what is the Server's is that both planes share one
 //! handle and one idea of shutting down.
 
 use std::net::TcpListener;

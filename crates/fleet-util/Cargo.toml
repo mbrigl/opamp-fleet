@@ -1,0 +1,34 @@
+[package]
+name = "fleet-util"
+description = "What the OpAMP Fleet Client and the operator tool share and the Server does not use (ADR-0041)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Only `fleet-core` of the workspace: the Server never links this crate, and the Client and the
+# operator tool both do (ADR-0041 clause 16).
+[dependencies]
+# `pkcs12_identity` opens a bootstrap PKCS#12 file through `fleet_core::pkcs12::file` (ADR-0027).
+fleet-core.workspace = true
+# The unpackers of a package's artifact: `.tar.gz`, `.7z` (an encrypted one with the key from
+# `[packages] archive_key`) and `.zip` (ADR-0039).
+flate2.workspace = true
+tar.workspace = true
+sevenz-rust2.workspace = true
+zip.workspace = true
+tracing.workspace = true
+# A PEM block written from DER, in a buffer wiped on drop (ADR-0040).
+base64.workspace = true
+zeroize.workspace = true
+
+# The file operations that follow no link go through the `*at` system calls on Unix
+# (ADR-0042).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# Tests build the `.7z` fixtures they then open; the Client itself only ever decompresses.
+sevenz-rust2 = { workspace = true, features = ["compress"] }

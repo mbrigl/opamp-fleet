@@ -116,7 +116,7 @@ fn a_command_supervisors_arguments_are_expanded_to_its_own_directories() {
     common::stop_client(&mut client);
 }
 
-/// ADR-0033 end to end: a Supervisor configured for a package that is a whole tree runs the
+/// ADR-0039 end to end: a Supervisor configured for a package that is a whole tree runs the
 /// program from inside it. The tree is put in place here rather than delivered, because what this
 /// has to prove is the half the unit tests cannot — that the path the *configuration* resolves to
 /// at startup is the path the process is actually spawned from, across the process boundary.
@@ -369,11 +369,11 @@ fn sigterm_stops_the_managed_process_and_the_client_cleanly() {
 
 /// Where the Client's command line names the second service — as the unit `service install
 /// --process-account` writes does — the shipped Client starts its Managed Process through it, not
-/// itself (ADR-0021 clause 18): the stub's parent is the second service. Run without a second
+/// itself (ADR-0042 clause 18): the stub's parent is the second service. Run without a second
 /// account: the service runs in this test, under this test's uid, which the Client is told is the
 /// process account's, and as this test's process, which a `systemctl` on the Client's `PATH`
-/// names as the one systemd runs as the second service (ADR-0021 clause 19).
-/// Verifies: ADR-0021
+/// names as the one systemd runs as the second service (ADR-0042 clause 19).
+/// Verifies: ADR-0042
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_client_told_of_the_second_service_starts_its_program_through_it() {

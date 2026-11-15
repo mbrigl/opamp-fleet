@@ -6,12 +6,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::{ClientConfig, LEGACY_CONFIG_FILE_NAME, SECRET_KEYS};
-use crate::nofollow::HeldDir;
+use fleet_util::nofollow::HeldDir;
 
 impl ClientConfig {
     /// Loads the file, or the defaults when it does not exist. A file that exists but does not
     /// parse is an error — never silently ignored. What the run-time Client reads, in a directory
-    /// its own account owns, which ADR-0021 clause 11 does not cover; a privileged step reads
+    /// its own account owns, which ADR-0042 clause 11 does not cover; a privileged step reads
     /// through [`load_held`](Self::load_held).
     pub fn load(path: &Path) -> Result<Self, String> {
         Self::load_with(path, |path| std::fs::read_to_string(path))
@@ -19,7 +19,7 @@ impl ClientConfig {
 
     /// [`load`](Self::load) for a step that runs as root or an Administrator: the file is read
     /// through its held directory and never through a link the service's account could have put
-    /// at its name (ADR-0021 clause 11). A link there is refused, naming it.
+    /// at its name (ADR-0042 clause 11). A link there is refused, naming it.
     pub fn load_held(path: &Path) -> Result<Self, String> {
         Self::load_with(path, |path| {
             let held = read_held(path).map_err(std::io::Error::other)?;
@@ -41,7 +41,7 @@ impl ClientConfig {
             });
         }
         // The file may hold `[packages] archive_key`: its text is wiped when it is dropped
-        // (ADR-0014).
+        // (ADR-0040).
         let text = read(path)
             .map(zeroize::Zeroizing::new)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -68,7 +68,7 @@ impl ClientConfig {
     /// `--state-dir`, else the one the service's registration carries, else the absolute one the
     /// file names, else `<data root>/state`.
     ///
-    /// The file is the service account's to rewrite (ADR-0021 clause 1), and the install that reads
+    /// The file is the service account's to rewrite (ADR-0042 clause 1), and the install that reads
     /// it runs as root or an Administrator and hands the state directory over to that account. So
     /// a directory the file names is taken only beneath the data root or the layout root, and one
     /// from any source that lies beneath them is reached through directories only, as
@@ -236,7 +236,7 @@ fn legacy_name_beside(path: &Path) -> Result<(), String> {
 ///
 /// Lexical rather than `canonicalize`: that needs the file to exist, and these directories are
 /// named before they are created. It also follows symbolic links, which would be wrong here — the
-/// versioned install layout (ADR-0021) points at its current version *with* a link, and resolving
+/// versioned install layout (ADR-0042) points at its current version *with* a link, and resolving
 /// it would freeze a path that stops being true at the next update.
 pub(crate) fn absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -345,11 +345,11 @@ pub(crate) fn held_file(path: &Path) -> Result<(HeldDir, &str), String> {
 }
 
 /// The bytes of the configuration at `path`, read through its held directory and never through a
-/// link at its name, at most [`crate::nofollow::MAX_READ_BYTES`] of it, in a buffer sized before
-/// it reads and wiped when it is dropped: the file may hold `[packages] archive_key` (ADR-0014).
+/// link at its name, at most [`fleet_util::nofollow::MAX_READ_BYTES`] of it, in a buffer sized before
+/// it reads and wiped when it is dropped: the file may hold `[packages] archive_key` (ADR-0040).
 pub(crate) fn read_held(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
     let (dir, name) = held_file(path)?;
-    dir.read(name, crate::nofollow::MAX_READ_BYTES)
+    dir.read(name, fleet_util::nofollow::MAX_READ_BYTES)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
 
@@ -358,7 +358,7 @@ pub(crate) fn read_held(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, Stri
 /// apply as the service's own account. Written whole to a new temporary name in the held
 /// directory, with `mode` and, on Unix, `owner` set through its descriptor, synced, and renamed
 /// over the name, so a Client starting meanwhile reads the old file or the new one, never half of
-/// either, and a link at either name is replaced and never written through (ADR-0021 clause 11).
+/// either, and a link at either name is replaced and never written through (ADR-0042 clause 11).
 /// The directory is synced after the rename, so an apply reported applied survives a power loss.
 /// The mode is the caller's: owner-only for an install or a `service config` (ADR-0020 clause
 /// 25), the operator's own for an apply (ADR-0018 clause 30).
@@ -418,7 +418,7 @@ mod tests {
     /// A secret is masked whatever TOML spelling carries it: a multi-line string, basic or
     /// literal, must not leave its continuation lines behind, and a dotted key, a quoted key, an
     /// inline table or an array of tables hides it no better. What is not secret stays as written.
-    /// Verifies: ADR-0018, ADR-0033
+    /// Verifies: ADR-0018, ADR-0039
     #[test]
     fn redaction_masks_every_spelling_of_a_secret_value() {
         let spellings = [
@@ -464,7 +464,7 @@ mod tests {
     }
 
     /// Text that does not parse cannot be taken apart, so it is reported as a placeholder.
-    /// Verifies: ADR-0018, ADR-0033
+    /// Verifies: ADR-0018, ADR-0039
     #[test]
     fn redaction_replaces_text_that_does_not_parse_whole() {
         let redacted = redact_secrets("archive_key = \"\"\"\nleak\nnot = closed\n");
@@ -566,13 +566,13 @@ mod tests {
         }
     }
 
-    /// `supervisor.toml` is the service account's to rewrite (ADR-0021 clause 1), and the install
+    /// `supervisor.toml` is the service account's to rewrite (ADR-0042 clause 1), and the install
     /// that reads it runs as root or an Administrator and hands the state directory over to that
     /// account. With nothing registered and no `--state-dir`, a state directory the file names
     /// outside the data root and the layout root, or one that leaves them by `..`, is refused, so
     /// the account cannot have another tree handed over to itself. The operator's `--state-dir`
     /// names one anywhere.
-    /// Verifies: ADR-0020, ADR-0021
+    /// Verifies: ADR-0020, ADR-0042
     #[test]
     fn a_state_directory_the_file_names_outside_the_installs_roots_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -645,7 +645,7 @@ mod tests {
     /// A link the service's account planted beneath the data root would carry the state directory
     /// out of it, so a component that is a link is refused — the default `<data root>/state` and a
     /// registered directory beneath the root included.
-    /// Verifies: ADR-0020, ADR-0021
+    /// Verifies: ADR-0020, ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_state_directory_reached_through_a_link_beneath_the_root_is_refused() {
@@ -679,13 +679,13 @@ mod tests {
 
     /// A privileged step reads `supervisor.toml` within a bound: a file over it is refused,
     /// naming the file and the bound, before it is read into a buffer that would grow.
-    /// Verifies: ADR-0014, ADR-0021
+    /// Verifies: ADR-0040, ADR-0042
     #[test]
     fn a_privileged_load_refuses_a_configuration_over_the_bound() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("supervisor.toml");
         let mut text = String::from("endpoint = 'ws://127.0.0.1:4320/v1/opamp'\n");
-        let bound = crate::nofollow::MAX_READ_BYTES;
+        let bound = fleet_util::nofollow::MAX_READ_BYTES;
         text.push_str(&"#".repeat(usize::try_from(bound).expect("bound")));
         std::fs::write(&path, text).expect("write");
 

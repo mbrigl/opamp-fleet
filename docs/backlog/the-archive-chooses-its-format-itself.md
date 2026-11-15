@@ -2,7 +2,7 @@
 
 **Kind:** idea, structure.
 
-**Observed.** `crates/fleet-agent/src/archive.rs` exposes `detect` and six format functions whose
+**Observed.** `crates/fleet-util/src/archive.rs` exposes `detect` and six format functions whose
 parameters differ: `extract_7z(archive, member, out, key)`, `extract_tar_gz(archive, member, out)`,
 `extract_zip`, `extract_tree_tar_gz(archive, program_path, kept, dest)`,
 `extract_tree_7z(archive, program_path, dest, key)` and `extract_tree_zip`. Each caller matches on

@@ -100,7 +100,7 @@ has agreed the cut.
    shortened to a line, with the new ADR, the section, and the clause number that carry it.
 3. Delete the old files, and rewrite both tables of the index.
 4. Re-cite every clause citation outside `docs/adr/` by the clause table, before the map is
-   applied. `remap.sh` moves the ADR identifier of `ADR-0021 clause 25`, never the number after
+   applied. `remap.sh` moves the ADR identifier of `ADR-0042 clause 25`, never the number after
    `clause`, and after it two old ADRs merged into one are no longer told apart. So each citation
    of an old ADR's clause is rewritten by hand to the new clause number while it still names
    the old ADR. Check 18 of [`scripts/check-docs.sh`](../../../scripts/check-docs.sh) catches only

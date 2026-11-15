@@ -332,7 +332,7 @@ pub enum Silenced {
 /// line — the rest of the Server is, by construction, unaffected.
 pub trait AgentStore: Send + Sync {
     /// Every persisted record, once, at startup. A record that cannot be read fails loudly — a
-    /// fleet that silently lost members is worse than one that refuses to start (ADR-0008).
+    /// fleet that silently lost members is worse than one that refuses to start (ADR-0041).
     fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String>;
 
     /// The record of `uid` as stored now, `None` when none is: what an instance reads again when

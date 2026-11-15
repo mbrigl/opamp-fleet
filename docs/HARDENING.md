@@ -28,7 +28,7 @@ admits only the process its Supervisor started (ADR-0016).
 Out of scope, and deliberately so: **authorization and multi-tenancy**, which the specification
 names as non-goals, with one bound on the Agent plane: a host receives from the Server only the
 configurations and packages released to an Agent it speaks for
-(ADR-0033),
+(ADR-0039),
 on the Server and from
 a Gateway's package cache alike. The boundary is worth
 stating precisely because the host binding (ADR-0027 clause 11) runs close to it — *which Agent is
@@ -61,7 +61,7 @@ has:
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
 - **TLS 1.3 alone, on every connection of both ends**
-  (ADR-0008,
+  (ADR-0041,
   ADR-0012): the process-wide
   provider carries the three TLS 1.3 suites and no other, every configuration pins TLS 1.3, and a
   peer offering only TLS 1.2 fails the handshake. Plaintext is accepted on `127.0.0.1` and `::1`
@@ -75,7 +75,7 @@ has:
   planes. On the Agent plane the TLS handshake and its client-certificate verification come
   before that, and a failed handshake is not counted as an admission failure.
 - **Nothing installed unsigned, and downloads only from the Client's own Server**
-  (ADR-0033):
+  (ADR-0039):
   a
   Client without the verification key takes no package, the Server offers no entry
   that carries no signature, and every download hop is held to `https://` and the Client's own
@@ -118,7 +118,7 @@ has:
 - **Key material and configuration readable by their owner alone** (ADR-0026 clause 7, ADR-0020
   clause 25): on Unix the private key, the stored connection settings and `supervisor.toml` are
   written `0600` in `0700` directories, a state directory `0710` that the process account's group
-  only passes through where one is registered (ADR-0021). On Windows a system-scope install gives
+  only passes through where one is registered (ADR-0042). On Windows a system-scope install gives
   the default data
   root under `%ProgramData%` to the Administrators, whoever created it, drops every right in it
   that the install does not grant, cuts it off from the read right every local user inherits
@@ -130,14 +130,14 @@ has:
   warning, and protecting it is the operator's. A local user acting while the install runs is not
   covered.
 - **On Windows the Client runs under its own virtual account unless an operator names
-  `LocalSystem`** (ADR-0021): a first registration, the MSI's included, registers
+  `LocalSystem`** (ADR-0042): a first registration, the MSI's included, registers
   `NT SERVICE\<PRODUCT_NAME>`, to which the install grants its roots and no group or privilege.
   Without a process account that account is the bound of what a Server-delivered configuration
   reaches on the host. A re-registration keeps the account the SCM holds; `--run-as LocalSystem`
   names `LocalSystem`, and every install under it warns that each Managed Process the Client
   starts itself runs as `LocalSystem`. Residual: a host registered as `LocalSystem` stays so until
   an operator moves it, and macOS runs the Client as root unless `--run-as` names an account.
-- **A Managed Process can be kept from the Client's key and program** (ADR-0021): where the
+- **A Managed Process can be kept from the Client's key and program** (ADR-0042): where the
   operator registers a process account, every program a Supervisor starts — the Managed Process,
   its version probe, a package's preflight — runs under it, started by a second service over a Unix
   socket or named pipe that admits the Client's account alone. It reads its own `program/` and
@@ -149,7 +149,7 @@ has:
   without a process account runs every Managed Process as the Client; all Managed Processes share
   the one account, so they read one another's `config/`.
 - **A Managed Process cannot take the second service's place by its socket or pipe, nor, on
-  Linux and Windows, reach into it once it has closed itself** (ADR-0021 clause 19):
+  Linux and Windows, reach into it once it has closed itself** (ADR-0042 clause 19):
   before the Client writes anything
   on a new connection it reads the process at the other end — `SO_PEERPIDFD` on Linux,
   `LOCAL_PEERPID` on macOS, `GetNamedPipeServerProcessId` on Windows — and accepts it only where
@@ -181,7 +181,7 @@ has:
   away; where the service manager cannot be asked — no system bus, a `launchctl print` that fails —
   no Managed Process starts until it answers again.
 - **An install acts only on directories an administrator named or its roots hold** (ADR-0020,
-  ADR-0021 clause 1): `supervisor.toml` belongs to the service's account, and `service install`
+  ADR-0042 clause 1): `supervisor.toml` belongs to the service's account, and `service install`
   and `service config` run as root or an Administrator. The state directory comes from
   `--state-dir`, else from the registration an earlier install wrote, and only then from the file,
   and from that only beneath the data root or the layout root. Beneath a root it is reached with no
@@ -195,7 +195,7 @@ has:
   Client refuses the names and placeholders the clause lists, and further loader variables
   (`PATHEXT`, `COMSPEC`, `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB`, `RUBYLIB`) and new values
   that start with a path under the Supervisors' root.
-- **A privileged install follows no link the service's account placed** (ADR-0021):
+- **A privileged install follows no link the service's account placed** (ADR-0042):
   `service install` and `service config` run as root or an Administrator and write into the state
   directory and the layout root, which belong to the account. Each file there is read without
   following a link and written whole to a new name, then renamed over its own, so a link at the
@@ -221,7 +221,7 @@ has:
   A test holds the modules these steps run in to no path-based read, write, removal, rename or mode
   change outside a justified list (`privileged_steps_follow_no_link.rs`).
 - **A privileged enrolment connects where its own run answered**
-  ([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md) clause 28):
+  ([ADR-0042](adr/0042-the-accounts-the-service-runs-under.md) clause 28):
   a run that answered the questionnaire or `--endpoint` enrols with the endpoint and the CA
   certificates it answered, held in memory, and does not read them back from `supervisor.toml`,
   which the service's account can rewrite meanwhile. An answer without a CA leaves the built-in
@@ -249,7 +249,7 @@ has:
 - **The Supervisor Endpoint admits only the process its Supervisor started** (ADR-0016): a token
   made at every start, handed to the process in its environment, asked of every connection.
 - **A package signature covers the Agent type, the version and the hash**
-  (ADR-0033):
+  (ADR-0039):
   a signed
   artifact installs as its own type's program at its own version and nowhere else. **A Package
   version is SemVer** (ADR-0034): the Server creates no other, `package sign` signs no other, and a
@@ -302,13 +302,13 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     `max_package_size_bytes` and the whole store, uploads still arriving included, to
     `max_total_package_bytes` · ✅ capped, HTTP/2-bounded and throttled as above
 - **Client → Server**, outbound (`opamp::client::connection`,
-  ADR-0008).
+  ADR-0041).
   - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
     ✅ reconnect backoff · ✅ message size in both directions
 - **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0016).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1), from the listener every OpAMP endpoint
     is served on
-    (ADR-0008)
+    (ADR-0041)
     · ✅ message size, gzip after decompression, per-hop exchange timeout,
     `max_carried_agents` · ✅ no downstream `Authorization` forwarded; every upstream connection
     carries the Gateway's own certificate alone (ADR-0016)
@@ -377,7 +377,7 @@ signature grows; where the Client's second verification key lives; and what has 
 the certificates move — ML-DSA in TLS 1.3 as a standard, issuance through rcgen, verification in
 the other OpAMP implementations, and a browser on the Operator plane. It would supersede
 ADR-0012 (the TLS provider),
-[ADR-0033](adr/0033-packages-signatures-and-delivery.md)
+[ADR-0039](adr/0039-packages-signatures-and-delivery.md)
 (the package
 signature), [ADR-0034](adr/0034-package-versions-high-water-mark-and-floor.md) (the floor's
 signature) and
@@ -413,7 +413,7 @@ account — a command an agent's configuration names, the configuration a `comma
 kind's program reads — is in `remote_config_disabled`; otherwise the Server can configure such a
 Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. Where a process
 account
-is registered (ADR-0021), such a command runs under it, and it cannot write `supervisor.toml`. A
+is registered (ADR-0042), such a command runs under it, and it cannot write `supervisor.toml`. A
 signed Client
 build can still replace the program that reads them where `[packages] self_update` consents
 (ADR-0019).

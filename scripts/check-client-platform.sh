@@ -4,7 +4,9 @@
 # jobs of .github/workflows/checks.yml run it on Windows and macOS. The Client carries
 # platform-specific service paths, the Windows SCM shim and launchd's semantics, that a lint on
 # Linux never compiles (ADR-0020). fleet-tools is linted too: every Client archive carries
-# `opamp-fleetctl`, Windows included (ADR-0036). On Linux, scripts/check-rust.sh lints and tests
+# `opamp-fleetctl`, Windows included (ADR-0043). fleet-util is linted and tested with them: its
+# no-follow file operations and unpackers have a Unix and a Windows path, and both the Client and
+# the tool run them (ADR-0041). On Linux, scripts/check-rust.sh lints and tests
 # the Client for Linux, so this one lints it for Windows through cargo-xwin, as README.md → "Build,
 # Test & Run" writes it, and a Windows-only compile error shows before a push rather than in CI.
 # Without cargo-xwin or its target it says so and skips; no CI job runs it on Linux.
@@ -29,10 +31,10 @@ if [[ "$(uname -s)" == Linux ]]; then
       "(cargo install cargo-xwin; rustup target add x86_64-pc-windows-msvc)."
     exit 0
   fi
-  cargo xwin clippy -p fleet-agent -p fleet-tools --all-targets --locked \
+  cargo xwin clippy -p fleet-util -p fleet-agent -p fleet-tools --all-targets --locked \
     --target x86_64-pc-windows-msvc -- -D warnings
   exit 0
 fi
 
-cargo clippy -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
-cargo test -p fleet-agent --locked
+cargo clippy -p fleet-util -p fleet-agent -p fleet-tools --all-targets --locked -- -D warnings
+cargo test -p fleet-util -p fleet-agent --locked

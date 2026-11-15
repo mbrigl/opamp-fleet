@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use fleet_agent::archive;
+use fleet_util::archive;
 use libfuzzer_sys::fuzz_target;
 
 /// Every path under `dir` that is neither the artifact, the destination, nor a directory on the

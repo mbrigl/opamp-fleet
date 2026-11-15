@@ -256,7 +256,7 @@ impl Database {
         )?;
         let tls = tls(config)?;
         // `tokio-postgres` copies the password into its own `Config`; the one read is wiped when it
-        // is dropped (ADR-0014 clauses 3 and 4).
+        // is dropped (ADR-0040 clauses 3 and 4).
         let origin = new_origin()?;
         let mut pg = pg_config(config, &password, schema);
         // Every connection names this instance as the origin of what it announces

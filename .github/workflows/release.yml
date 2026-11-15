@@ -2,7 +2,7 @@ name: Release
 
 # Builds the Client for every target it ships on and publishes one `.tar.gz` per target
 # (ADR-0038, the container and the artifact name included), and the operator tool `opamp-fleetctl`
-# for Linux and macOS beside it (ADR-0036).
+# for Linux and macOS beside it (ADR-0043).
 #
 # The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
 # `version/*` tag from it (ADR-0037) — *before* it builds, so ADR-0037's `build.rs` finds a tag on
@@ -10,9 +10,9 @@ name: Release
 # version as any build does; this workflow decides the number and types the tag.
 #
 # The artifacts are packed by this project's own `opamp-fleetctl package pack`, so each Client archive
-# is also a valid package artifact for a fleet self-update (ADR-0033, ADR-0019) — the file an operator
+# is also a valid package artifact for a fleet self-update (ADR-0039, ADR-0019) — the file an operator
 # downloads is the file they hand the Server. The operator tool's archives are not packages of the
-# fleet: they are downloaded, never uploaded (ADR-0036 clause 4).
+# fleet: they are downloaded, never uploaded (ADR-0043 clause 4).
 #
 # Every published asset is a subject of one build-provenance attestation, made and verified in
 # `publish` before the release exists, and each shipped program has a CycloneDX SBOM per target
@@ -47,11 +47,11 @@ env:
   #
   # The names that are *not* this are the ones that identify an installation rather than a program:
   # the dpkg/rpm/MSI package, the service, and the `PATH` symlink all carry the **product's** name,
-  # `opamp-fleet` (ADR-0020, ADR-0021). Keeping the program's name off the product's is what lets
+  # `opamp-fleet` (ADR-0020, ADR-0042). Keeping the program's name off the product's is what lets
   # one published Set serve every variant build. They live in crates/fleet-agent/Cargo.toml and
   # packaging/windows/supervisor.wxs, not here.
   ARTIFACT: supervisor
-  # The operator tool's program and the stem of its archives (ADR-0036 clause 3).
+  # The operator tool's program and the stem of its archives (ADR-0043 clause 3).
   OPERATOR_TOOL: opamp-fleetctl
   # The Server's image, tagged with the exact version and nothing else (ADR-0038 clause 18).
   IMAGE: ghcr.io/mbrigl/opamp-fleet-server
@@ -264,7 +264,7 @@ jobs:
       matrix:
         include:
           # `operator_tool`: this row also builds and publishes `opamp-fleetctl` for its target
-          # (ADR-0036 clause 2). Every row builds it for its runner as the packer.
+          # (ADR-0043 clause 2). Every row builds it for its runner as the packer.
           - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: amd64, suffix: "", native: true, operator_tool: true }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true, operator_tool: true }
           - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true, operator_tool: true }
@@ -273,7 +273,7 @@ jobs:
           # the version assertions below are skipped for this one row.
           - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false, operator_tool: true }
           # No operator tool for Windows: it would need its own way to keep a key readable by its
-          # owner alone (ADR-0036).
+          # owner alone (ADR-0043).
           - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: amd64, suffix: ".exe", native: true, operator_tool: false }
     steps:
       - uses: actions/checkout@v7
@@ -291,7 +291,7 @@ jobs:
       # A host build: it runs here, on this runner, to pack the artifacts.
       - name: Build the packer
         run: cargo build --release -p fleet-tools --bin opamp-fleetctl --locked
-      # A target build: the program this row publishes (ADR-0036 clause 2).
+      # A target build: the program this row publishes (ADR-0043 clause 2).
       - name: Build the operator tool
         if: matrix.operator_tool
         run: cargo build --release -p fleet-tools --bin opamp-fleetctl --target ${{ matrix.target }} --locked
@@ -358,7 +358,7 @@ jobs:
           # (ADR-0038 clause 3).
           echo "STEM=${name%.tar.gz}" >> "$GITHUB_ENV"
 
-      # ---- ADR-0036: the operator tool, one archive per target, named like the Client's. ----
+      # ---- ADR-0043: the operator tool, one archive per target, named like the Client's. ----
       - name: Pack the operator tool
         id: pack_tool
         if: matrix.operator_tool
@@ -422,10 +422,10 @@ jobs:
           echo "$scripts"
           grep -q 'service install' <<<"$scripts"
           grep -q 'service uninstall' <<<"$scripts"
-          # ADR-0021: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
+          # ADR-0042: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
           # ride the same silently-degrading path mechanism, so they are asserted the same way.
           grep -q 'ln -sfn' <<<"$scripts"
-          # The two halves of ADR-0021's remove/purge distinction, drawn across the two roots by
+          # The two halves of ADR-0042's remove/purge distinction, drawn across the two roots by
           # ADR-0020 clause 12: a removal takes the executable layout under /opt, and only a purge
           # takes the data root with the identity and the credential in it. Asserting both is what
           # makes a scriptlet that silently became its own file name fail here.
@@ -435,7 +435,7 @@ jobs:
           # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
           grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
           grep -qF 'rm -rf "$data_root"' <<<"$scripts"
-          # ADR-0021 clause 3: the account is created, a first registration names it, and the
+          # ADR-0042 clause 3: the account is created, a first registration names it, and the
           # package requires what creates it.
           grep -q 'useradd --system' <<<"$scripts"
           grep -q -- '--run-as opamp-fleet' <<<"$scripts"
@@ -472,7 +472,7 @@ jobs:
         run: |
           set -euo pipefail
           # The archive already has its checksum, from the packer's own stdout — that one is the
-          # content hash an Agent verifies (ADR-0033) and is not recomputed here.
+          # content hash an Agent verifies (ADR-0039) and is not recomputed here.
           for f in "$STEM".deb "$STEM".rpm "$STEM".msi; do
             [ -f "$f" ] || continue
             sha256sum "$f" > "$f.sha256"
@@ -735,7 +735,7 @@ jobs:
           \`${{ needs.version.outputs.version }}\`, for \`linux/amd64\` and \`linux/arm64\`.
 
           The assets come in five kinds, and picking the wrong one is the only way to get this wrong
-          (ADR-0020, ADR-0036, ADR-0038):
+          (ADR-0020, ADR-0043, ADR-0038):
 
           | you want to | take |
           |---|---|
@@ -752,7 +752,7 @@ jobs:
           arm64. It is downloaded, never uploaded to a Server: it is not a package of the fleet, and
           no Client installs it. \`${{ env.OPERATOR_TOOL }} pki\` makes the fleet's certificates and
           \`${{ env.OPERATOR_TOOL }} package\` fetches, packs and signs packages; the keys they make belong
-          on this machine, not on the Server host (ADR-0036).
+          on this machine, not on the Server host (ADR-0043).
 
           \`\`\`console
           tar xzf ${{ env.OPERATOR_TOOL }}_${{ needs.version.outputs.version }}_linux_amd64.tar.gz
@@ -824,8 +824,8 @@ jobs:
           themselves — the same install every platform gets, not a second one. \`supervisor\` is the
           **program**; what lands on your \`PATH\` is \`opamp-fleet\`, the **product**, as a symlink
           through the layout's \`current\` pointer, so the command always answers for the version the
-          service runs (ADR-0021). **They register the service and leave it stopped**: a Client with no configuration would dial the development
-          default and manage nothing (ADR-0021), so starting it is the last step and it is yours.
+          service runs (ADR-0042). **They register the service and leave it stopped**: a Client with no configuration would dial the development
+          default and manage nothing (ADR-0042), so starting it is the last step and it is yours.
 
           \`\`\`console
           # Debian, Ubuntu
@@ -870,12 +870,12 @@ jobs:
 
           Upload **all** of them into **one** Package, identified by the Agent type \`supervisor\` and
           this release's version, with one entry per platform. The Server offers each Agent the entry
-          built for the machine it reported (ADR-0033), so a mixed fleet updates from one Package.
+          built for the machine it reported (ADR-0039), so a mixed fleet updates from one Package.
           Each file is named \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0038), and the last two
           fields are exactly the pair an Agent reports as \`os.type\` and \`host.arch\`, so the upload
           reads them out of the name. Then put the Package in a Deployment, sign every entry with your
           package signing key, and roll it out; nothing reaches the fleet before that last call
-          (ADR-0033). The Deployment below reaches the hosts whose \`channel\` is \`stable\`: set it in a
+          (ADR-0039). The Deployment below reaches the hosts whose \`channel\` is \`stable\`: set it in a
           host's \`[attributes]\`, or as a Server label with \`PUT /api/v1/agents/<uid>/labels\`. The
           signatures come from the operator tool above:
 
@@ -896,7 +896,7 @@ jobs:
           \`\`\`
 
           Each Client archive holds the Client under the name it is installed as, so it needs no repacking:
-          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0033).
+          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0039).
 
           Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
           executable mode, so there is no \`chmod +x\` step. This is also the install path on macOS,

@@ -18,6 +18,7 @@ opamp = { path = "../crates/opamp", features = ["client", "server"] }
 fleet-agent = { path = "../crates/fleet-agent" }
 fleet-server = { path = "../crates/fleet-server" }
 fleet-core = { path = "../crates/fleet-core" }
+fleet-util = { path = "../crates/fleet-util" }
 prost = "0.14"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 tempfile = "3"

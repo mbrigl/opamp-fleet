@@ -71,13 +71,29 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("platform", Core),
             ("rate", Core),
             ("renewal", Core),
-            ("tree", Core),
             ("version", Core),
             // What a client certificate is known by; read with `x509-parser`, and issued with
             // `ring` and `rcgen`.
             ("x509", Core),
             ("x509::issue", Adapter),
             ("x509::read", Adapter),
+        ],
+    ),
+    (
+        "fleet-util",
+        &[
+            ("", Root),
+            // The unpackers, with `tar`, `flate2`, `zip` and `sevenz-rust2`, writing to disk.
+            ("archive", Adapter),
+            // A bootstrap identity as PEM: a value a core module of the Client names.
+            ("identity", Core),
+            // A bootstrap identity opened through `fleet_core::pkcs12::file`.
+            ("identity::pkcs12", Adapter),
+            // The file operations that follow no link, with `libc` on Unix.
+            ("nofollow", Adapter),
+            // A password file read through `nofollow`.
+            ("password", Adapter),
+            ("tree", Core),
         ],
     ),
     (
@@ -180,7 +196,6 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("supervisor::ports", Core),
             ("supervisor::restart", Core),
             ("update", Core),
-            ("archive", Adapter),
             ("cli", Adapter),
             ("config_file", Adapter),
             ("config_init", Adapter),
@@ -200,7 +215,6 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("host", Adapter),
             ("install", Adapter),
             ("logging", Adapter),
-            ("nofollow", Adapter),
             ("packages", Adapter),
             ("reconfigure", Adapter),
             ("service", Adapter),
@@ -232,7 +246,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     (
         "fleet-tools",
         &[
-            // One command-line program and no library (ADR-0036): nothing here is core, and a
+            // One command-line program and no library (ADR-0043): nothing here is core, and a
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),
@@ -246,7 +260,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
 ];
 
 /// The external crates the core may name: data formats, codecs, the logging facade, and the buffer
-/// a secret is wiped from on drop (ADR-0014) — none of them reaches a file, a socket, a process, or
+/// a secret is wiped from on drop (ADR-0040) — none of them reaches a file, a socket, a process, or
 /// a clock.
 const CORE_CRATES: &[&str] = &[
     "prost", "serde", "sha2", "hex", "base64", "uuid", "flate2", "tracing", "zeroize",
@@ -279,7 +293,11 @@ const STD_TECHNOLOGY: &[&str] = &["fs", "net", "process", "env", "thread", "os"]
 const CLOCKS: &[&str] = &["SystemTime", "Instant"];
 
 /// The workspace crates a core module may reach into, by the name code uses for them.
-const WORKSPACE_CRATES: &[(&str, &str)] = &[("opamp", "opamp"), ("fleet_core", "fleet-core")];
+const WORKSPACE_CRATES: &[(&str, &str)] = &[
+    ("opamp", "opamp"),
+    ("fleet_core", "fleet-core"),
+    ("fleet_util", "fleet-util"),
+];
 
 fn crates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")

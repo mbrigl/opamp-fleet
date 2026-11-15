@@ -87,7 +87,7 @@ pub fn verifies(key: &[u8], agent_type: &str, floor: &Floor) -> bool {
 pub struct FloorFile {
     path: PathBuf,
     /// `[packages] verification_key`: without it nothing verifies, so nothing is fetched or kept —
-    /// and no package is taken anyway (ADR-0033).
+    /// and no package is taken anyway (ADR-0039).
     key: Option<Vec<u8>>,
     kept: Mutex<Result<Floors, String>>,
     /// When a fetch was last tried, whatever came of it.
@@ -100,7 +100,7 @@ impl FloorFile {
     #[must_use]
     pub fn open(state_dir: &Path, key: Option<Vec<u8>>) -> Self {
         let path = state_dir.join(FILE);
-        let kept = match crate::nofollow::read(&path, crate::nofollow::MAX_READ_BYTES) {
+        let kept = match fleet_util::nofollow::read(&path, fleet_util::nofollow::MAX_READ_BYTES) {
             Ok(bytes) => parse_kept(&bytes),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Floors::new()),
             Err(e) => Err(e.to_string()),

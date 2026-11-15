@@ -121,7 +121,7 @@ pub struct AgentRecord {
     /// The outcome of the last connection-settings offer this Agent reported (ADR-0013); its
     /// hash is what gates re-offering.
     pub connection_settings_status: Option<ConnectionSettingsStatus>,
-    /// The package statuses this Agent last reported (ADR-0033); the
+    /// The package statuses this Agent last reported (ADR-0039); the
     /// `server_provided_all_packages_hash` inside is what gates re-offering packages.
     pub package_statuses: Option<PackageStatuses>,
     /// The WebSocket connection currently carrying this Agent; `None` for plain HTTP, whose
@@ -163,7 +163,7 @@ pub struct AgentRecord {
 /// The Deployment is carried alongside the release rather than derived from it, because a
 /// Deployment re-aimed or edited after the act must not change what an Agent was given, nor what
 /// the fleet view says it was given through. The signature a package offer travels with is the
-/// entry's own (ADR-0033).
+/// entry's own (ADR-0039).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assignment {
     /// The Deployment the release went through.
@@ -525,7 +525,7 @@ pub trait CertificateSigner: Send + Sync {
     fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String>;
 }
 
-/// Why the package store refuses an upload: its whole-store ceiling (ADR-0033).
+/// Why the package store refuses an upload: its whole-store ceiling (ADR-0039).
 #[derive(Debug, PartialEq, Eq)]
 pub enum StoreFull {
     /// The store is already at its ceiling.
@@ -551,7 +551,7 @@ impl std::fmt::Display for StoreFull {
 }
 
 /// The bytes of one upload still arriving, counted against the package store's ceiling until it is
-/// dropped (ADR-0033). Taken from [`AppState::admit_upload`].
+/// dropped (ADR-0039). Taken from [`AppState::admit_upload`].
 pub struct UploadReservation<'a> {
     state: &'a AppState,
     /// The stored artifacts' bytes when the upload began; walking the store per chunk would cost
@@ -605,9 +605,9 @@ impl Drop for UploadReservation<'_> {
     }
 }
 
-/// The package store and the Deployments that release from it (ADR-0033). Every `download_url`
+/// The package store and the Deployments that release from it (ADR-0039). Every `download_url`
 /// is a path the Client resolves against its own endpoint — the Agent plane, where the download
-/// is served behind the same handshake as `/v1/opamp` (ADR-0033).
+/// is served behind the same handshake as `/v1/opamp` (ADR-0039).
 pub struct PackageOffering {
     store: PackageStore,
     deployments: DeploymentStore,
@@ -646,7 +646,7 @@ pub struct AppState {
     /// The connection settings offered to the fleet (ADR-0013); `None` offers nothing and leaves
     /// `OffersConnectionSettings` undeclared.
     connection_offer: Option<ConnectionOffer>,
-    /// The packages offered to the fleet (ADR-0033); `None` offers nothing and leaves
+    /// The packages offered to the fleet (ADR-0039); `None` offers nothing and leaves
     /// `OffersPackages` undeclared.
     packages: Option<PackageOffering>,
     /// The authority that signs Agent CSRs (ADR-0026); `None` signs nothing and leaves
@@ -673,11 +673,11 @@ pub struct AppState {
     telemetry_offer: TelemetryOffer,
     /// The message size limit both transports enforce, in each direction (the Baseline's MUST).
     max_message_size: usize,
-    /// The largest package artifact the REST API accepts on upload (ADR-0033) — a program, not a
+    /// The largest package artifact the REST API accepts on upload (ADR-0039) — a program, not a
     /// message, so it is bounded separately and far more generously.
     max_package_size: usize,
     /// The total size of all stored artifacts the REST API keeps before it refuses a new upload
-    /// (ADR-0033): what bounds the store — and so the disk — against many uploads under distinct
+    /// (ADR-0039): what bounds the store — and so the disk — against many uploads under distinct
     /// names, where `max_package_size` bounds only one.
     max_total_package_bytes: u64,
     /// The bytes of uploads still arriving, counted against `max_total_package_bytes` beside the
@@ -939,7 +939,7 @@ impl AppState {
         self.max_message_size
     }
 
-    /// Sets the largest package artifact the REST API accepts on upload (ADR-0033).
+    /// Sets the largest package artifact the REST API accepts on upload (ADR-0039).
     #[must_use]
     pub fn with_max_package_size(mut self, limit: usize) -> Self {
         self.max_package_size = limit;
@@ -952,7 +952,7 @@ impl AppState {
     }
 
     /// Sets the whole-store size limit the REST API enforces before accepting a new upload
-    /// (ADR-0033).
+    /// (ADR-0039).
     #[must_use]
     pub fn with_max_total_package_bytes(mut self, limit: u64) -> Self {
         self.max_total_package_bytes = limit;
@@ -972,7 +972,7 @@ impl AppState {
             .map_or(0, |p| p.store().total_bytes())
     }
 
-    /// Whether the package store takes another upload at all (ADR-0033): one already at its
+    /// Whether the package store takes another upload at all (ADR-0039): one already at its
     /// ceiling, counting the uploads still arriving, takes nothing more. Asked before an upload is
     /// streamed, so a gibibyte that would only be rejected is never read. The upload's bytes are
     /// counted through the answer as they arrive, and no longer once it is dropped.
@@ -1533,7 +1533,7 @@ impl AppState {
         }
     }
 
-    /// Arms package delivery (ADR-0033); with a non-empty store the Server declares
+    /// Arms package delivery (ADR-0039); with a non-empty store the Server declares
     /// `OffersPackages` and `AcceptsPackagesStatus`.
     #[must_use]
     pub fn with_packages(mut self, packages: Option<PackageOffering>) -> Self {
@@ -1546,7 +1546,7 @@ impl AppState {
         self.packages.as_ref().map(PackageOffering::store)
     }
 
-    /// Read access to the Deployment store, armed with the package store (ADR-0033).
+    /// Read access to the Deployment store, armed with the package store (ADR-0039).
     pub fn deployment_store(&self) -> Option<&DeploymentStore> {
         self.packages.as_ref().map(PackageOffering::deployments)
     }
@@ -1634,7 +1634,7 @@ impl AppState {
         Ok(config)
     }
 
-    /// The Deployment claiming one Agent (ADR-0033), or the conflict that says why none does.
+    /// The Deployment claiming one Agent (ADR-0039), or the conflict that says why none does.
     fn deployment_of(&self, record: &AgentRecord) -> Result<Option<Deployment>, String> {
         let Some(store) = self.deployment_store() else {
             return Ok(None);
@@ -1953,8 +1953,8 @@ impl AppState {
     /// Replaces an Agent's labels (ADR-0029), which changes what Selectors match it.
     ///
     /// A key the Agent already reports is **refused**, not applied: `os.type` and `host.arch`
-    /// choose which artifact it is offered (ADR-0033) and `service.name` decides which packages fit
-    /// it at all (ADR-0033), so a label that outranked them would let a slip here offer this Agent
+    /// choose which artifact it is offered (ADR-0039) and `service.name` decides which packages fit
+    /// it at all (ADR-0039), so a label that outranked them would let a slip here offer this Agent
     /// an artifact built for another machine. Labels annotate; they do not correct.
     ///
     /// A label move changes only what the fleet view **proposes** (ADR-0032): the Agent's
@@ -2022,7 +2022,7 @@ impl AppState {
     }
 
     /// Which Deployments hold each Package, keyed by `<agent type>@<version>` — how a Package
-    /// answers "whom would this reach", since it does not aim by itself (ADR-0033).
+    /// answers "whom would this reach", since it does not aim by itself (ADR-0039).
     pub fn deployments_holding(&self) -> BTreeMap<String, Vec<String>> {
         let mut holding: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let Some(store) = self.deployment_store() else {
@@ -3245,7 +3245,7 @@ impl AppState {
             self.settings_offer(record, issued)
         };
 
-        // The package offer (ADR-0033), gated by capability and the reported
+        // The package offer (ADR-0039), gated by capability and the reported
         // server_provided_all_packages_hash — the Baseline's "compare and include" for packages.
         let packages_available = if ending.disconnected {
             None
@@ -3502,8 +3502,8 @@ impl AppState {
     }
 
     /// Whether a certificate naming `host` may fetch the artifact `(id, platform)` from the download
-    /// route (ADR-0033): it is offered to an Agent the host speaks for. The offer's own test
-    /// decides (ADR-0033 clause 35), for each such Agent — the `instance_uid`s bound to the host, or
+    /// route (ADR-0039): it is offered to an Agent the host speaks for. The offer's own test
+    /// decides (ADR-0039 clause 35), for each such Agent — the `instance_uid`s bound to the host, or
     /// every Agent for a host marked as a Gateway. Nothing is offered without package delivery or a
     /// host register.
     ///
@@ -3574,7 +3574,7 @@ impl AppState {
     }
 
     /// Why this Agent is **proposed** nothing: more than one Deployment claims it, and an Agent
-    /// belongs to at most one (ADR-0033 clause 28). `None` when nothing is wrong. Every Agent can
+    /// belongs to at most one (ADR-0039 clause 28). `None` when nothing is wrong. Every Agent can
     /// be in conflict, since a Deployment carries Configurations as well as Packages (ADR-0032).
     ///
     /// A conflict takes the *candidate* away and never a standing assignment: an Agent already
@@ -3699,7 +3699,7 @@ impl AppState {
         self.agent_store.pinning(pin)
     }
 
-    /// Puts a Package into a channel (ADR-0033 clause 25). Not gated: adding one for an Agent type
+    /// Puts a Package into a channel (ADR-0039 clause 25). Not gated: adding one for an Agent type
     /// the channel does not hold surfaces as waiting on the Agents of that type, and replacing the
     /// one it holds is how a rollout proceeds — an Agent already rolled out to keeps the Package
     /// its assignment pins until the next act. A store that other Servers write too reads the
@@ -3769,7 +3769,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Creates a Package (ADR-0033). **Nothing is distributed** (ADR-0032), and there is nothing
+    /// Creates a Package (ADR-0039). **Nothing is distributed** (ADR-0032), and there is nothing
     /// to update: a Package is its identity and its entries, so creating one that exists is the
     /// same request arriving twice.
     pub fn create_package_set(&self, id: &PackageId) -> Result<(), PackageError> {
@@ -3778,7 +3778,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Stores one streamed upload as an entry of a Package (ADR-0033, ADR-0023). Refused while the
+    /// Stores one streamed upload as an entry of a Package (ADR-0039, ADR-0023). Refused while the
     /// Package is assigned to an Agent (ADR-0032 clause 13); no push, because saving never
     /// distributes.
     pub fn put_package_entry(
@@ -3802,7 +3802,7 @@ impl AppState {
         self.packages_for_a_route()?.writable(id)
     }
 
-    /// Writes the operator's signature onto one entry of a Package (ADR-0033), and answers what the
+    /// Writes the operator's signature onto one entry of a Package (ADR-0039), and answers what the
     /// Server found when it checked it. Refused while the Package is assigned to an Agent, like
     /// any other write to its entries (ADR-0032 clause 13): the re-offer gate does not cover the
     /// signature, so one changed under a standing offer would never reach the Agent.
@@ -3820,7 +3820,7 @@ impl AppState {
         Ok(state)
     }
 
-    /// Takes one entry's signature away (ADR-0033); `Ok(false)` when it carries none. Refused
+    /// Takes one entry's signature away (ADR-0039); `Ok(false)` when it carries none. Refused
     /// while the Package is assigned to an Agent (ADR-0032 clause 13).
     pub fn remove_package_entry_signature(
         &self,
@@ -3855,7 +3855,7 @@ impl AppState {
     /// Deletes a Package (ADR-0032 clause 12); `Ok(false)` when none of that identity exists.
     /// **Refused while any Agent's assignment pins it** — the message says how many — because a
     /// deletion must not change what a running Agent receives. A deleted Package leaves every
-    /// Deployment that held it. Nothing is uninstalled either way (ADR-0033).
+    /// Deployment that held it. Nothing is uninstalled either way (ADR-0039).
     ///
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between; a store that other Servers write too counts the stored assignments again
@@ -4202,7 +4202,7 @@ impl AppState {
         let package_conflict = Self::package_conflict(&claim);
         let claimed = claim.ok().flatten();
         // Which channel claims it *now* — the other half of the answer, so "no channel" and
-        // "a channel with nothing for me" are not the same empty row (ADR-0033 clause 27).
+        // "a channel with nothing for me" are not the same empty row (ADR-0039 clause 27).
         let claiming_deployment = claimed.map(|d| d.name.clone()).unwrap_or_default();
 
         // What a press would release to it now (ADR-0032 clause 9). A conflict, or no
@@ -4327,7 +4327,7 @@ fn waiting(
 }
 
 /// Whether this Agent declared that it accepts packages — the first condition of every offer
-/// (ADR-0033 clause 35).
+/// (ADR-0039 clause 35).
 fn accepts_packages(record: &AgentRecord) -> bool {
     record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 != 0
 }
@@ -4480,7 +4480,7 @@ pub struct AgentView {
     /// none does.
     ///
     /// This is not [`assigned_deployment`](Self::assigned_deployment), and the difference is what
-    /// tells four states apart that would otherwise look alike (ADR-0033 clause 27). Empty here
+    /// tells four states apart that would otherwise look alike (ADR-0039 clause 27). Empty here
     /// with no conflict means the host is in **no channel**: label it, or give it a `channel`
     /// attribute. Set here with nothing assigned and nothing pending means the channel holds
     /// nothing this Agent can take — no Package for its type, or none for its platform. The
@@ -4522,10 +4522,10 @@ pub struct AgentView {
     pub capabilities: Vec<String>,
     /// The Agent's available components (top-level names, sorted); empty until reported.
     pub available_components: Vec<String>,
-    /// The Agent's package installations (ADR-0033), in name order; empty until reported.
+    /// The Agent's package installations (ADR-0039), in name order; empty until reported.
     pub packages: Vec<PackageStatusView>,
     /// Why this Agent is proposed nothing — more than one Deployment claims it, and an Agent
-    /// belongs to at most one (ADR-0033 clause 28). The message names every Deployment in the way.
+    /// belongs to at most one (ADR-0039 clause 28). The message names every Deployment in the way.
     /// Absent when at most one claims it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_conflict: Option<String>,
@@ -4613,7 +4613,7 @@ pub struct PendingConfigurationView {
     pub change: String,
 }
 
-/// Whom one Deployment reaches in the fleet as reported so far (ADR-0033): the Agents it claims,
+/// Whom one Deployment reaches in the fleet as reported so far (ADR-0039): the Agents it claims,
 /// the subset a rollout act would actually change, and those another Deployment also claims.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DeploymentReach {
@@ -4624,7 +4624,7 @@ pub struct DeploymentReach {
     /// up to date.
     pub targeted: usize,
     /// Agents this Deployment matches that **another one matches too**. They are offered nothing
-    /// new until an operator narrows a Selector (ADR-0033 clause 28).
+    /// new until an operator narrows a Selector (ADR-0039 clause 28).
     pub conflicting: usize,
 }
 
@@ -4644,7 +4644,7 @@ pub struct PendingPackageView {
     pub change: String,
 }
 
-/// One package's installation state as the REST API and UI see it (ADR-0033).
+/// One package's installation state as the REST API and UI see it (ADR-0039).
 #[derive(Serialize)]
 pub struct PackageStatusView {
     pub name: String,
@@ -5098,7 +5098,7 @@ fn refuse_a_package_left_out(
 }
 
 /// Refuses a rollout of a Deployment that holds nothing, or a Package with an unsigned entry —
-/// naming each such Package and its platforms; nothing is released (ADR-0032 clause 9, ADR-0033).
+/// naming each such Package and its platforms; nothing is released (ADR-0032 clause 9, ADR-0039).
 fn refuse_unreleasable(
     store: &crate::packages::PackageStore,
     deployment: &Deployment,
@@ -5196,7 +5196,7 @@ mod tests {
 
     /// Without package delivery every write of the Package routes is a `404`, the signature's
     /// included: what each route's contract names, whatever the text.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn without_package_delivery_every_package_write_is_not_found() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5652,7 +5652,7 @@ mod tests {
     /// There is no seed. A record carrying no assignment loads as **assigned nothing** — the Server
     /// never invents a rollout at startup — and what its Deployment would release shows up as
     /// waiting instead, which is the one thing an operator has to act on.
-    /// Verifies: ADR-0033, ADR-0032
+    /// Verifies: ADR-0039, ADR-0032
     #[test]
     fn a_record_without_assignments_loads_assigned_to_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -6815,7 +6815,7 @@ mod tests {
         assert_eq!(installing.download_bytes_per_second, None);
     }
 
-    /// The whole-store ceiling (ADR-0033), decided without a request: a store at its limit takes
+    /// The whole-store ceiling (ADR-0039), decided without a request: a store at its limit takes
     /// no upload, an artifact is refused when it would take the store past it, and an upload still
     /// arriving counts until it is dropped.
     #[test]
@@ -7063,7 +7063,7 @@ mod tests {
         );
     }
 
-    // ---- Who may fetch an uploaded artifact (ADR-0033) ----
+    // ---- Who may fetch an uploaded artifact (ADR-0039) ----
 
     /// A fleet delivering `otelcol@1.0.0`, uploaded and signed for linux/amd64 and held by the
     /// `stable` channel that claims every `otelcol`, with a host register.
@@ -7151,7 +7151,7 @@ mod tests {
     /// An artifact is fetched by a host only through an Agent it speaks for: the host whose Agent
     /// it was released to, not another host, not a host the register does not know, and not for
     /// another Platform or version — until that other host is marked as a Gateway.
-    /// Verifies: ADR-0033, Q-4
+    /// Verifies: ADR-0039, Q-4
     #[test]
     fn an_artifact_is_offered_to_a_host_only_through_an_agent_it_speaks_for() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7190,10 +7190,10 @@ mod tests {
         );
     }
 
-    /// The offer and the download agree on the capability half of the test (ADR-0033 clause 35): an
+    /// The offer and the download agree on the capability half of the test (ADR-0039 clause 35): an
     /// Agent that does not declare `AcceptsPackages` is offered nothing, and its host may fetch
     /// nothing through it, although its assignment names a signed Package that fits it.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn an_agent_that_accepts_no_packages_is_neither_offered_nor_fetched_for() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7232,7 +7232,7 @@ mod tests {
 
     /// An Agent that echoes the aggregate hash of its offer is not sent it again, and can still
     /// fetch it — a retry after a failed install re-reads an offer no longer re-sent.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn an_offer_still_stands_after_its_hash_is_echoed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7251,7 +7251,7 @@ mod tests {
 
     /// A version saved into the channel but not yet released by an operator's press is no one's
     /// offer: not the Agent's host's, not a Gateway's — while the version released before stays.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_version_waiting_for_its_press_is_offered_to_no_host() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -11369,7 +11369,7 @@ mod tests {
     /// it, read the Agents that arrived over the Gateway's Host through the port's `query_page`,
     /// not the whole fleet, and still find the Client Agent behind the Gateway whose labels the
     /// Agent inherits.
-    /// Verifies: ADR-0030, ADR-0033
+    /// Verifies: ADR-0030, ADR-0039
     #[test]
     fn a_gateways_download_and_an_agent_behind_it_read_the_gateways_agents_and_not_the_fleet() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

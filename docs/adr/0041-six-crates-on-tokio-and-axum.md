@@ -1,6 +1,6 @@
 # ADR-0041: Six crates in one Cargo workspace on tokio and axum, the whole OpAMP communication layer in the publishable `opamp` crate reading WebSocket frames itself, two internal shared crates chosen by who shares the code, an operator tool that depends on neither end, and a strict parse of the configuration
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
 - **Applies to:** Cargo.toml, `crates/opamp/` (its manifest and `[features]`, `build.rs`, `src/`, `LICENSE`, `NOTICE` and `README.md`), crates/fleet-core/, crates/fleet-util/, every OpAMP connection and listener of `crates/fleet-server/` and `crates/fleet-agent/` (the Server's two planes, the Client's upstream connection and its verification probe, the Gateway's downstream endpoint and upstream pool, the Supervisor Endpoint), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, the Client's `Session` in `crates/fleet-agent/src/transport/`, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, the strict parse of server.toml and supervisor.toml, the per-feature lint in `scripts/check-rust.sh` and `README.md`, and every new crate, module placement or dependency, the `[dependencies]` of `crates/fleet-tools/Cargo.toml`, and every `pub use` of a `fleet_util::` item

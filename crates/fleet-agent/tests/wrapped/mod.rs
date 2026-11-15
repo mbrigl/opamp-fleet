@@ -59,7 +59,7 @@ pub fn start(plugin: &dyn Plugin, name: &str, stub_args: &[String]) -> Harness {
 /// The program is put where the kind's `defaults()` say the install puts it: inside the unpacked
 /// tree for a kind that names a `program_path`, else as a single file named `name` in this
 /// Supervisor's own `program/` directory (ADR-0018), found in its archive at the place the kind
-/// names (ADR-0033 clause 55). This is the install's side of the
+/// names (ADR-0039 clause 55). This is the install's side of the
 /// same agreement, so a kind whose path disagreed with the install would spawn nothing here.
 ///
 /// `stub_args` are flags for the stub that the kind's own arguments cannot carry; the stub reads
@@ -75,7 +75,7 @@ pub fn start_with(
     let program_dir = dir.path().join("program");
     let defaults = plugin.defaults();
     let (program, install) = match defaults.program_path {
-        // A tree package: the program sits inside the unpacked tree (ADR-0033).
+        // A tree package: the program sits inside the unpacked tree (ADR-0039).
         Some(path) => (
             program_dir.join("tree").join(path),
             InstallTarget::Tree {

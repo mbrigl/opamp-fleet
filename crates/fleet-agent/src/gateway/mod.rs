@@ -15,10 +15,10 @@
 //! picks its transport by URL scheme, so serving only one would silently exclude half of them),
 //! [`pool`] holds the upstream connections, [`registry`] routes replies back by `instance_uid`, and
 //! [`cache`] holds the uploaded artifacts the Gateway relays offers of and serves them on the
-//! download route to the hosts they were offered to (ADR-0033), [`floors`] hands those hosts the
+//! download route to the hosts they were offered to (ADR-0039), [`floors`] hands those hosts the
 //! floors it fetched (ADR-0034), and [`rate`] counts what each downstream host sends against a
 //! bucket of its own (ADR-0022).
-//! The endpoint's communication is `opamp::server`'s, the one the Server sits on too (ADR-0008);
+//! The endpoint's communication is `opamp::server`'s, the one the Server sits on too (ADR-0041);
 //! what is the Gateway's is the [`Forwarding`] handler behind it.
 
 pub mod cache;
@@ -231,7 +231,7 @@ pub async fn run_on(
 }
 
 /// [`run_on`] with the header bound tightened — what a test waits out instead of the 30 seconds
-/// every OpAMP listener applies (ADR-0008).
+/// every OpAMP listener applies (ADR-0041).
 ///
 /// # Errors
 /// As [`run_on`].
@@ -438,7 +438,7 @@ fn server_tls(tls: &GatewayTlsConfig) -> Result<(ServerTls, Members), String> {
     Ok((
         ServerTls {
             // `opamp` takes the key as its own buffer; the copy is made here and the one read is
-            // wiped (ADR-0014 clause 3).
+            // wiped (ADR-0040 clause 3).
             identity: Identity {
                 cert_pem: crate::tls::certificates_file(&tls.cert_file)?,
                 key_pem: crate::tls::key_file(&tls.key_file)?.to_vec(),
@@ -2066,7 +2066,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         let header = "opamp-fleet-gateway-bindings 1\n";
         let write = |contents: &str| {
-            crate::nofollow::HeldDir::open(&dir)
+            fleet_util::nofollow::HeldDir::open(&dir)
                 .expect("held")
                 .write(store::NAME, contents.as_bytes(), 0o600)
                 .expect("write");
@@ -2195,8 +2195,8 @@ mod tests {
         let (uid, other) = (InstanceUid::default(), InstanceUid::default());
         let end = cache::end_of(&owner).expect("end");
         let host = cache::speaker_of(&owner).expect("host");
-        let held =
-            crate::nofollow::HeldDir::create(&dir.path().join(cache::DIR), 0o700).expect("dir");
+        let held = fleet_util::nofollow::HeldDir::create(&dir.path().join(cache::DIR), 0o700)
+            .expect("dir");
         let lines: Vec<String> = [
             policy::Change::Ends(host.clone(), end),
             policy::Change::Bound(uid, host),
@@ -2244,7 +2244,7 @@ mod tests {
 
     /// What the store under `state` reads back to.
     fn stored(state: &std::path::Path) -> policy::Bindings {
-        let held = crate::nofollow::HeldDir::open(&state.join(cache::DIR)).expect("held");
+        let held = fleet_util::nofollow::HeldDir::open(&state.join(cache::DIR)).expect("held");
         policy::Bindings::replay(store::load(&held).expect("load")).expect("replay")
     }
 

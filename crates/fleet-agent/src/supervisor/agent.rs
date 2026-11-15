@@ -67,7 +67,7 @@ pub struct Handled {
     /// machine has already acknowledged `APPLYING`; the transport owns the verification, the
     /// switch, and reporting the outcome back through the [`Engine`](crate::engine).
     pub connection_offer: Option<ConnectionSettingsOffers>,
-    /// A package to download, verify, and hand to the Supervisor (ADR-0033). The state machine
+    /// A package to download, verify, and hand to the Supervisor (ADR-0039). The state machine
     /// has acknowledged `Installing`; the transport owns the download and verification.
     pub package_download: Option<PackageDownload>,
 }
@@ -78,8 +78,8 @@ pub struct Handled {
 ///
 /// It is also the shipped program's name and its configuration file's (ADR-0020) — see
 /// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which holds the same string as a
-/// **separate** constant. It is *not* the service's name: ADR-0021 clause 17 gives the service the
-/// product's name, and ADR-0021 clause 6 keeps this one off
+/// **separate** constant. It is *not* the service's name: ADR-0042 clause 17 gives the service the
+/// product's name, and ADR-0042 clause 6 keeps this one off
 /// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME) deliberately — the archive member a self-update
 /// extracts is the same in every variant build, which is what lets one published package Set
 /// serve them all. Derive this from the product and the fleet carries N products where it has one.
@@ -90,7 +90,7 @@ pub const CLIENT_AGENT_TYPE: &str = "supervisor";
 
 pub struct AgentState {
     /// What OpAMP defines about this Agent: identity, sequence numbers, the two Capability Sets,
-    /// what the next report owes, and the status messages (ADR-0008).
+    /// what the next report owes, and the status messages (ADR-0041).
     protocol: AgentProtocol,
     /// What this Client reports about it.
     local: Local,
@@ -126,7 +126,7 @@ fn logged_hash(hash: &[u8]) -> String {
 }
 
 /// What this Client reports about one Agent, and the package bookkeeping behind its status — the
-/// content the protocol asks for (ADR-0008).
+/// content the protocol asks for (ADR-0041).
 struct Local {
     /// What the host says about itself (ADR-0017).
     host: Box<dyn HostFacts>,
@@ -158,7 +158,7 @@ struct Local {
     /// from. `None` for the Client's own Agent, whose process is this one, and for a Supervisor
     /// between restarts.
     process_pid: Option<u32>,
-    /// Whether this Agent's Managed Process is updated from Server-offered packages (ADR-0033).
+    /// Whether this Agent's Managed Process is updated from Server-offered packages (ADR-0039).
     /// Which package that is, is the Server's choice — this side only consents.
     accepts_packages: bool,
     /// The only package name this Agent will install (ADR-0019); `None` takes whichever top-level
@@ -170,7 +170,7 @@ struct Local {
     offered_name: Option<String>,
     /// The package currently installed, persisted across restarts.
     installed_package: Option<InstalledPackage>,
-    /// Progress of the artifact download in flight (ADR-0033), reported as `Downloading` with
+    /// Progress of the artifact download in flight (ADR-0039), reported as `Downloading` with
     /// `PackageDownloadDetails`; `None` once the bytes are on disk. `[Development]` upstream.
     downloading: Option<PackageDownloadDetails>,
     /// The package hash currently downloading/installing, so a repeated offer of the same hash is
@@ -187,7 +187,7 @@ struct Local {
     /// installing or after a failure).
     server_offered: Option<(String, Vec<u8>)>,
     /// The last install failure for this Agent's package, reported alongside the status — or,
-    /// while it is `Installing`, why it waits for the second service (ADR-0021 clause 17).
+    /// while it is `Installing`, why it waits for the second service (ADR-0042 clause 17).
     package_error: String,
     /// A failure in processing the *offer itself* rather than one package — the Baseline's
     /// `PackageStatuses.error_message`, "set if the Agent encountered an error when processing the
@@ -387,7 +387,7 @@ impl AgentState {
         self.name_the_wait();
     }
 
-    /// What waits for the second service says so (ADR-0021 clause 17): while the Supervisor's
+    /// What waits for the second service says so (ADR-0042 clause 17): while the Supervisor's
     /// health says that the service is not reached, a configuration that is `APPLYING` and a
     /// package that is `Installing` name that as the reason, and nothing once it is reached.
     fn name_the_wait(&mut self) {
@@ -432,7 +432,7 @@ impl AgentState {
     }
 
     /// The next `AgentToServer`: which fields it carries is the protocol's to decide, what they
-    /// hold is this Agent's (ADR-0008).
+    /// hold is this Agent's (ADR-0041).
     pub fn next_report(&mut self) -> AgentToServer {
         self.note_floor();
         self.protocol.next_report(&self.local)
@@ -554,7 +554,7 @@ impl AgentState {
             }
         }
 
-        // A package offer (ADR-0033): act only on this Agent's package. Download and verification
+        // A package offer (ADR-0039): act only on this Agent's package. Download and verification
         // are the transport's; the state machine acknowledges Installing and hands over the
         // coordinates.
         if let Some(available) = received.packages_available {
@@ -1004,7 +1004,7 @@ mod tests {
         );
     }
 
-    /// ADR-0033 twice offers "a Selector matching that host's `host.name`" as the way to pin one
+    /// ADR-0039 twice offers "a Selector matching that host's `host.name`" as the way to pin one
     /// host to one artifact. That only works if an Agent reports the attribute, which for a long
     /// time it did not.
     #[cfg(unix)]
@@ -1546,7 +1546,7 @@ mod tests {
     }
 
     /// ADR-0019: the Client's own Agent takes one named package and refuses everything else. A
-    /// package with an empty Selector reaches every consenting Agent (ADR-0033), so without this
+    /// package with an empty Selector reaches every consenting Agent (ADR-0039), so without this
     /// the first fleet-wide Collector artifact an operator uploads would be written over the
     /// Client and take the host out of reach.
     /// Verifies: ADR-0019
@@ -1817,7 +1817,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_package_offer_for_the_named_package_is_acknowledged_installing_and_handed_over() {
         use opamp::proto::{
@@ -1954,7 +1954,7 @@ mod tests {
     /// An `Addon` is not a Managed Process's binary, and the only thing this Client can do with a
     /// package is *be* that binary — so an offer carrying nothing but addons is refused rather
     /// than installed over the process they were meant to extend, and the refusal is reported.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn an_addon_package_is_refused_instead_of_overwriting_the_binary() {
         use opamp::proto::{DownloadableFile, PackageAvailable, PackagesAvailable};
@@ -2012,7 +2012,7 @@ mod tests {
 
     /// An offer of two top-level packages is refused whole: an Agent has one binary to replace,
     /// and picking one of the two would let the order of a map decide what runs.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn an_offer_of_two_top_level_packages_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2049,7 +2049,7 @@ mod tests {
 
     /// A Supervisor takes a package only for its own Agent type, and never one older than it
     /// runs: both are refused before anything is downloaded, and the reason is reported.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_package_for_another_type_or_an_older_version_is_refused() {
         use crate::supervisor::ports::AgentStorage as _;
@@ -2453,9 +2453,9 @@ mod tests {
     }
 
     /// The headers a `DownloadableFile` names travel to the download that has to use them — the
-    /// credential a referenced source needs (ADR-0033), which the Server fills from the operator's
+    /// credential a referenced source needs (ADR-0039), which the Server fills from the operator's
     /// configuration.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_package_offer_hands_its_download_headers_to_the_transport() {
         use opamp::proto::{
@@ -2520,7 +2520,7 @@ mod tests {
     /// A configuration that waits for the second service stays `APPLYING` and names why, as the
     /// Supervisor's health says it — down or refused; once a start reaches the service the reason
     /// goes, and the acknowledgement closes it. A health that comes after it changes nothing.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn a_configuration_that_waits_for_the_second_service_stays_applying_and_says_why() {
         use crate::supervisor::ports::{REFUSED, UNREACHABLE};
@@ -2570,7 +2570,7 @@ mod tests {
     /// A package that waits for the second service stays `Installing` and names why, as the
     /// Supervisor's health says it; a package still downloading does not, and the outcome
     /// replaces the reason.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn a_package_that_waits_for_the_second_service_stays_installing_and_says_why() {
         use crate::supervisor::ports::UNREACHABLE;
@@ -2621,7 +2621,7 @@ mod tests {
         assert!(installed.error_message.is_empty(), "{installed:?}");
     }
 
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_failed_package_reports_installed_failed_and_keeps_the_old_version() {
         let dir = tempfile::tempdir().expect("tempdir");

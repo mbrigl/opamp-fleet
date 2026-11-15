@@ -3,7 +3,7 @@
 **Kind:** idea, structure.
 
 **Observed.** The raw `*at` system calls are wrapped twice and called bare in two more places on
-`main`: `crates/fleet-agent/src/nofollow.rs` has its own `openat`, `mkdirat`, `renameat` and
+`main`: `crates/fleet-util/src/nofollow.rs` has its own `openat`, `mkdirat`, `renameat` and
 `unlinkat`; `storage.rs` has its own open, lstat, open-beneath and tree removal inside the
 `AgentStorage` adapter; `reconfigure.rs` and `service/manager.rs` call `libc::unlinkat`,
 `renameat` and `mkdirat` directly. `storage.rs` also carries a pure rule about an offered

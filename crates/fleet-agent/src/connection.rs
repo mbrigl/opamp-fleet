@@ -28,7 +28,7 @@ pub const SETTINGS_FILE: &str = "connection-settings.pb";
 /// once; a failed rewrite is warned about and never fails the load.
 pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
     let path = state_dir.join(SETTINGS_FILE);
-    let bytes = crate::nofollow::read(&path, crate::nofollow::MAX_READ_BYTES).ok()?;
+    let bytes = fleet_util::nofollow::read(&path, fleet_util::nofollow::MAX_READ_BYTES).ok()?;
     match ConnectionSettingsOffers::decode(bytes.as_slice()) {
         Ok(mut stored) => {
             if let Some(headers) = stored.opamp.as_mut().and_then(|s| s.headers.take()) {
@@ -64,21 +64,21 @@ pub fn load(state_dir: &Path) -> Option<ConnectionSettingsOffers> {
 /// protects it (ADR-0020); there is no mode to set.
 ///
 /// `group` is the process account's group where a process account is registered: the state
-/// directory stays passed through by it (ADR-0021 clause 21).
+/// directory stays passed through by it (ADR-0042 clause 21).
 pub fn store(
     state_dir: &Path,
     group: Option<crate::storage::ProcessAccountGroup>,
     settings: &ConnectionSettingsOffers,
 ) -> std::io::Result<()> {
     // Never through a link at the directory's name or the file's: an install enrols as root in a
-    // directory that belongs to the service's account (ADR-0021).
+    // directory that belongs to the service's account (ADR-0042).
     crate::storage::create_shared_dir(
         state_dir,
         state_dir,
         group,
         crate::storage::Shared::Traversed,
     )?;
-    crate::nofollow::HeldDir::open(state_dir)?.write(
+    fleet_util::nofollow::HeldDir::open(state_dir)?.write(
         SETTINGS_FILE,
         &settings.encode_to_vec(),
         0o600,

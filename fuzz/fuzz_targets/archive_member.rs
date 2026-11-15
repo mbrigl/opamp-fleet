@@ -1,9 +1,9 @@
 //! A downloaded package artifact unpacked for its one program: `.tar.gz`, `.zip` or `.7z`
-//! (ADR-0033). Whatever the archive holds, only the one file this Client chose is written.
+//! (ADR-0039). Whatever the archive holds, only the one file this Client chose is written.
 //! Verifies: Q-2
 #![no_main]
 
-use fleet_agent::archive;
+use fleet_util::archive;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

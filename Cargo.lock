@@ -979,6 +979,7 @@ dependencies = [
  "flate2",
  "fleet-core",
  "fleet-server",
+ "fleet-util",
  "futures-util",
  "hex",
  "libc",
@@ -998,7 +999,6 @@ dependencies = [
  "serde",
  "serde_json",
  "service-manager",
- "sevenz-rust2",
  "sha2",
  "sysinfo",
  "tar",
@@ -1015,7 +1015,6 @@ dependencies = [
  "windows-service",
  "x509-parser",
  "zeroize",
- "zip",
 ]
 
 [[package]]
@@ -1096,6 +1095,7 @@ dependencies = [
  "fleet-agent",
  "fleet-core",
  "fleet-server",
+ "fleet-util",
  "hex",
  "opamp",
  "rcgen",
@@ -1113,6 +1113,22 @@ dependencies = [
  "toml",
  "x509-parser",
  "zeroize",
+]
+
+[[package]]
+name = "fleet-util"
+version = "0.8.4"
+dependencies = [
+ "base64 0.23.1",
+ "flate2",
+ "fleet-core",
+ "libc",
+ "sevenz-rust2",
+ "tar",
+ "tempfile",
+ "tracing",
+ "zeroize",
+ "zip",
 ]
 
 [[package]]
