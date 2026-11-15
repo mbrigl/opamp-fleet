@@ -1,4 +1,4 @@
-//! The Client's upstream connection (ADR-0012, ADR-0008). The connection itself — the transport,
+//! The Client's upstream connection (ADR-0012, ADR-0040). The connection itself — the transport,
 //! its TLS, backoff, heartbeat, framing, limits, throttling, the goodbye — is `opamp::client`'s.
 //! What is the Client's is which material it is built from, in [`connection`], and [`Upstream`]:
 //! the session over the [`Engine`], with the flows that follow a reply.
@@ -148,7 +148,7 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
     }
 }
 
-/// The Client's own flows after a reply, the same for both transports (ADR-0008): what the reply
+/// The Client's own flows after a reply, the same for both transports (ADR-0040): what the reply
 /// left to do, in one order.
 ///
 /// 1. A connection-settings offer (ADR-0013) — verified OpAMP settings end the
@@ -157,7 +157,7 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 ///    certificate is in force (ADR-0026).
 /// 3. The floors are fetched when they are due — at the first reply, once an hour, and within the
 ///    minute before an offer is decided — and a queued download below its floor is refused
-///    (ADR-0034 clause 17). Offered packages are downloaded and verified (ADR-0033).
+///    (ADR-0034 clause 17). Offered packages are downloaded and verified (ADR-0039).
 /// 4. **The self-update restart, before anything is applied after it.** The `Installing` the
 ///    package step just owed is the last thing this version says (ADR-0019). It ends the run, so
 ///    `AfterReply::End` means exactly this.
@@ -217,7 +217,7 @@ pub async fn after_reply<S: ReportSink>(
     AfterReply::Continue
 }
 
-/// Downloads, verifies, and applies any package the Engine has queued (ADR-0033). Each is handled
+/// Downloads, verifies, and applies any package the Engine has queued (ADR-0039). Each is handled
 /// in turn — download and verification are the transport's, the swap is the Supervisor's — and its
 /// outcome (`Installed`/`InstallFailed`) is reported back through the Engine. Returns whether any
 /// package was processed, so the caller flushes the owed status reports.
@@ -227,7 +227,7 @@ pub async fn after_reply<S: ReportSink>(
 /// caller on the next exchange.
 ///
 /// A shutdown ends a download where it stands — on the wire or waiting out a `Retry-After`
-/// (ADR-0033 clause 47) — and nothing is reported for it.
+/// (ADR-0039 clause 47) — and nothing is reported for it.
 pub async fn process_package_downloads<S: ReportSink>(
     engine: &mut Engine,
     config: &ClientConfig,
@@ -694,7 +694,7 @@ mod tests {
 
     /// A shutdown ends a download that is waiting out a `Retry-After` from its Server origin: the
     /// call returns at once, and no failure is reported for the download.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[tokio::test]
     async fn a_shutdown_stops_a_download_waiting_out_retry_after() {
         opamp::tls::install_ring_provider();
@@ -792,13 +792,13 @@ mod tests {
     /// The Baseline permits interim status reports while a package downloads, and this is what
     /// they are for: a transfer that takes longer than a moment stays visible instead of looking
     /// like a stuck install. Driven by a server that trickles the artifact out.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[tokio::test]
     async fn a_slow_download_is_reported_as_downloading_with_progress() {
         opamp::tls::install_ring_provider();
         let artifact = vec![7u8; 3072];
         let content_hash = Sha256::digest(&artifact).to_vec();
-        // Signed with a key of the test's own: a Client takes nothing unsigned (ADR-0033).
+        // Signed with a key of the test's own: a Client takes nothing unsigned (ADR-0039).
         let keypair = {
             let rng = ring::rand::SystemRandom::new();
             let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).expect("keygen");
@@ -852,7 +852,7 @@ mod tests {
         let mut engine = Engine::new(vec![state]);
         let uid = engine.poll_reports()[0].instance_uid.clone();
         // A Client that takes packages holds a key, and fetches from its own Server's origin
-        // (ADR-0033).
+        // (ADR-0039).
         let config = ClientConfig {
             endpoint: format!("ws://{addr}/v1/opamp"),
             state_dir: dir.path().to_path_buf(),

@@ -12,7 +12,8 @@ version probe; telegraf only `gpgv`. Until then the `#[allow(dead_code)]` marker
 The core repack (#179, 834010bff) added mechanisms that no kind on `main` calls. ADRs decide each
 of them, so none is dead by mistake:
 
-- **The kept-link chain** (ADR-0033 clause 57). `KindDefaults::tree_links`
+- **The kept-link chain** (clause 57 of
+  ADR-0039). `KindDefaults::tree_links`
   (`crates/fleet-agent/src/supervisor/ports.rs`, near line 423) is `&[]` for every kind. The empty
   list still runs through `install_target`, `InstallTarget::Tree`, `stage_tree` and
   `archive::extract_tree_tar_gz`'s kept-link checks for every tree package. `KeptLink` values are
@@ -63,7 +64,8 @@ The choice must be settled before the next normalization of the ADR record.
 - Touches: `crates/fleet-agent/src/supervisor/`, `crates/fleet-agent/src/archive.rs`,
   `crates/fleet-tools/src/fetch.rs`, `crates/fleet-tools/src/gpgv.rs`,
   `crates/fleet-core/src/tree.rs`, `crates/fleet-core/src/version.rs`, `scripts/check-rust.sh`
-- ADR-0033 clause 57, ADR-0036 clauses 27 to 29, ADR-0018 (the kinds), ADR-0034 clause 6.
+- ADR-0039 clause 57, ADR-0036 clauses 27 to 29, ADR-0018
+  (the kinds), ADR-0034 clause 6.
 
 **Its mode.**
 

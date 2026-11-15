@@ -43,7 +43,7 @@ pub struct ClientCa {
 
 impl ClientCa {
     /// Loads the CA from `[client_ca]`, its key from a file. Either file being unreadable, or a key
-    /// that is not PKCS#8, fails startup rather than the first enrolment (ADR-0008), and so does a
+    /// that is not PKCS#8, fails startup rather than the first enrolment (ADR-0040), and so does a
     /// CA whose name gives its certificates a common name longer than 64 characters (ADR-0036
     /// clause 19). Whether the key belongs to the certificate is not checked here.
     ///

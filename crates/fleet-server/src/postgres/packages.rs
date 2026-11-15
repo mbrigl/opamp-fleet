@@ -415,19 +415,52 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Vec<Package>
             },
         );
     }
+    // Two rows whose spellings fold onto one platform: the one stored under the canonical
+    // spelling is served, else the first in this order, so every read and every instance serves
+    // the same one.
+    let mut stored: BTreeMap<(PackageId, Platform), (String, String)> = BTreeMap::new();
+    let mut hidden: Vec<((PackageId, Platform), (String, String))> = Vec::new();
     for row in client
-        .query(&format!("SELECT {ENTRY} FROM package_entries"), &[])
+        .query(
+            &format!(
+                "SELECT {ENTRY} FROM package_entries ORDER BY agent_type, version, os, arch, sha256"
+            ),
+            &[],
+        )
         .await
         .map_err(sql)?
     {
         let (id, entry) = entry(&row)?;
-        packages
+        let spelling: (String, String) = (row.get(2), row.get(3));
+        let entries = &mut packages
             .get_mut(&id)
             .ok_or_else(|| {
                 format!("package {id} in the database: an entry of a Package that is not there")
             })?
-            .entries
-            .insert(entry.platform.clone(), entry);
+            .entries;
+        let platform = entry.platform.clone();
+        let canonical =
+            |(os, arch): &(String, String)| *os == platform.os && *arch == platform.arch;
+        let key = (id.clone(), platform.clone());
+        match stored.get(&key).cloned() {
+            None => {
+                entries.insert(platform, entry);
+                stored.insert(key, spelling);
+            }
+            Some(held) if canonical(&spelling) && !canonical(&held) => {
+                entries.insert(platform, entry);
+                stored.insert(key.clone(), spelling);
+                hidden.push((key, held));
+            }
+            Some(_) => hidden.push((key, spelling)),
+        }
+    }
+    // Named once the choice is made, so a row is never said to be served and then not.
+    for ((id, platform), (os, arch)) in &stored {
+        crate::packages::warn_stored_spelling(id, os, arch, platform, false);
+    }
+    for ((id, platform), (os, arch)) in &hidden {
+        crate::packages::warn_stored_spelling(id, os, arch, platform, true);
     }
     Ok(packages.into_values().collect())
 }
@@ -699,6 +732,52 @@ mod tests {
         contract(&|| Box::new(PgPackageBackend::new(database.clone())));
     }
 
+    /// Rows an older Server stored under `linux/arm` and `linux/armv7` load, and so does a row
+    /// stored as `linux/arm32` beside them: all fold onto `linux/arm32`, the row stored under the
+    /// canonical spelling is served, and the load does not fail. Without one, the row of the
+    /// first spelling in their order is served, whichever instance reads them
+    /// (ADR-0039 clause 6).
+    /// Verifies: ADR-0039
+    #[test]
+    fn rows_stored_under_an_older_spelling_load_folded() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let backend = PgPackageBackend::new(test.open());
+        test.sql(&format!(
+            "INSERT INTO packages (agent_type, version) VALUES ('otelcol', '0.140.0'); \
+             INSERT INTO package_entries (agent_type, version, os, arch, sha256, size) VALUES \
+             ('otelcol', '0.140.0', 'linux', 'arm', '{a}', 1), \
+             ('otelcol', '0.140.0', 'linux', 'armv7', '{b}', 2); \
+             INSERT INTO packages (agent_type, version) VALUES ('otelcol', '0.141.0'); \
+             INSERT INTO package_entries (agent_type, version, os, arch, sha256, size) VALUES \
+             ('otelcol', '0.141.0', 'linux', 'arm', '{a}', 1), \
+             ('otelcol', '0.141.0', 'linux', 'arm32', '{b}', 2), \
+             ('otelcol', '0.141.0', 'linux', 'armv7', '{c}', 3)",
+            a = "ab".repeat(32),
+            b = "cd".repeat(32),
+            c = "ef".repeat(32),
+        ));
+        let arm32 = Platform::new("linux", "arm32").expect("platform");
+        for _ in 0..3 {
+            let loaded = backend.load().expect("an older spelling loads");
+            let served = |version: &str| {
+                let package = loaded
+                    .iter()
+                    .find(|package| package.id.version == version)
+                    .expect("the Package");
+                assert_eq!(package.entries.len(), 1, "{version}");
+                package.entries[&arm32].size
+            };
+            assert_eq!(
+                served("0.140.0"),
+                1,
+                "the first spelling in order, `arm`, is served"
+            );
+            assert_eq!(served("0.141.0"), 2, "the row stored as `arm32` is served");
+        }
+    }
+
     /// A Package created with its entry through another instance between the two statements of
     /// `load` is read whole or not at all: the entries are read in the snapshot the Packages were,
     /// so none names a Package the read did not see, and the load does not fail.
@@ -830,7 +909,7 @@ mod tests {
     /// On PostgreSQL an entry whose blob went while it was uploaded is refused as an invalid
     /// request and one for a Package that is not stored as not found, whatever the database
     /// wrote around the message: what the REST API answers `400` and `404`, as on the filesystem.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn an_entry_refused_on_postgres_keeps_its_kind() {
         use crate::packages::Refusal;

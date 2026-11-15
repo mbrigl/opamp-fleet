@@ -7,7 +7,7 @@
 //! Supervisor's. It is not a Server in the specification's sense — it manages no fleet, holds
 //! no configuration, and serves exactly one local process; for a Foreign Agent nothing ever
 //! connects, and that is the whole of the handling. The communication itself is
-//! `opamp::server`'s, the same endpoint the Server and the Gateway sit on (ADR-0008).
+//! `opamp::server`'s, the same endpoint the Server and the Gateway sit on (ADR-0040).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -75,7 +75,7 @@ impl Endpoint {
     }
 
     /// Tightens the header bound — what a test waits out instead of the 30 seconds every OpAMP
-    /// listener applies (ADR-0008).
+    /// listener applies (ADR-0040).
     #[must_use]
     pub fn with_header_read_timeout(mut self, timeout: Duration) -> Self {
         self.header_read_timeout = timeout;
@@ -110,7 +110,7 @@ impl Endpoint {
                 any_path: true,
             },
         );
-        // On the listener every OpAMP endpoint is served on (ADR-0008), so a local process that
+        // On the listener every OpAMP endpoint is served on (ADR-0040), so a local process that
         // falls silent mid-request is bounded as a remote one is.
         let handle = Handle::new();
         let trigger = handle.clone();
@@ -512,7 +512,7 @@ mod tests {
     /// the WebSocket upgrade is dropped, other connections are served while it hangs, and the
     /// endpoint serves the next one afterwards — the measure, since a listener that died would
     /// drop the first connection too.
-    /// Verifies: ADR-0008
+    /// Verifies: ADR-0040
     #[tokio::test]
     async fn a_half_finished_upgrade_is_dropped_and_the_endpoint_keeps_serving() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

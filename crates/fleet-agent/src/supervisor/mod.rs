@@ -395,16 +395,16 @@ pub fn start_supervisor(
             .with_high_water(marks.clone()),
     );
     // Every Managed Process is the fleet's (ADR-0018), so every Supervisor takes whichever
-    // top-level package the Server selects for it (ADR-0033). There is no second branch:
+    // top-level package the Server selects for it (ADR-0039). There is no second branch:
     // a block naming a program on the machine does not parse, so the consent is discharged by the
     // type system rather than by a rule. The log line says *where* the program is, which is the
     // thing an operator reading a startup log actually wants.
     //
     // What the target itself needs — for a tree that is its root and nothing below it, since the
-    // live tree arrives by renaming a directory over that name (ADR-0033).
+    // live tree arrives by renaming a directory over that name (ADR-0039).
     install.prepare(config.process_account_group)?;
     // Only a Client holding the operator's verification key takes packages: there is no unsigned
-    // posture (ADR-0033). Without it the program stays as installed, and the startup notice says
+    // posture (ADR-0039). Without it the program stays as installed, and the startup notice says
     // why.
     if config.package_key().is_some() {
         state.accept_packages();
@@ -571,9 +571,9 @@ fn forward_shutdown(mut global: Shutdown, stop_tx: watch::Sender<bool>) {
 }
 
 /// What a package replaces: one file, or — when the block says where the program sits inside the
-/// package — the whole tree under this Supervisor's `program/` (ADR-0033). A single file is found
+/// package — the whole tree under this Supervisor's `program/` (ADR-0039). A single file is found
 /// by its name, or at the place in the archive its kind knows
-/// (ADR-0033 clause 55).
+/// (ADR-0039 clause 55).
 fn install_target(
     program_path: Option<std::path::PathBuf>,
     member: Option<&'static str>,
@@ -615,7 +615,7 @@ mod tests {
     }
 
     /// A configuration as `ClientConfig::load` leaves it when `[packages] verification_key` is set:
-    /// the decoded key is what decides whether anything takes packages (ADR-0033).
+    /// the decoded key is what decides whether anything takes packages (ADR-0039).
     fn keyed(mut config: ClientConfig) -> ClientConfig {
         config.package_key = Some(vec![7u8; 32]);
         config
@@ -995,7 +995,7 @@ mod tests {
     ///
     /// The `program/` directory is created either way, before the first package: the swap renames
     /// inside it, so it has to exist beforehand rather than after.
-    /// Verifies: ADR-0018, ADR-0033
+    /// Verifies: ADR-0018, ADR-0039
     #[tokio::test]
     async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1029,8 +1029,8 @@ mod tests {
 
     /// Without the operator's verification key, no Agent of this Client takes packages — neither a
     /// Supervisor nor the Client's own Agent, whose self-update consent stands — so nothing can be
-    /// installed unsigned (ADR-0033, ADR-0019).
-    /// Verifies: ADR-0033, ADR-0019, Q-1
+    /// installed unsigned (ADR-0039, ADR-0019).
+    /// Verifies: ADR-0039, ADR-0019, Q-1
     #[tokio::test]
     async fn without_a_verification_key_no_agent_takes_packages() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     /// The side-effect-free `installs_packages()` that the startup signature-posture warning reads
-    /// (ADR-0033) agrees with the `AcceptsPackages` capability an Agent actually declares.
+    /// (ADR-0039) agrees with the `AcceptsPackages` capability an Agent actually declares.
     #[tokio::test]
     async fn installs_packages_reflects_declared_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1091,7 +1091,7 @@ mod tests {
         );
     }
 
-    /// A tree Supervisor owns its `program/` directory and *nothing inside it* (ADR-0033). The
+    /// A tree Supervisor owns its `program/` directory and *nothing inside it* (ADR-0039). The
     /// live tree arrives by renaming a staging directory over `program/tree`, and a rename cannot
     /// replace a directory something else created and filled — so preparing the program's parent,
     /// which is right for a single file, would make every first install of a tree fail.
@@ -1684,8 +1684,8 @@ mod tests {
     }
 
     /// The place a kind names for its member reaches the install, and a `program_path` still makes
-    /// it a tree (ADR-0033 clause 55).
-    /// Verifies: ADR-0033
+    /// it a tree (ADR-0039 clause 55).
+    /// Verifies: ADR-0039
     #[test]
     fn a_kinds_member_reaches_the_single_file_install() {
         use crate::supervisor::ports::InstallTarget;

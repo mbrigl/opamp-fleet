@@ -136,7 +136,7 @@
       </section>
       </div>
 
-      <!-- Packages as Sets (ADR-0033): one table of Sets, and a detail form for the *current* one.
+      <!-- Packages as Sets (ADR-0039): one table of Sets, and a detail form for the *current* one.
            A Set is identified by name, agent type, and version — stated at creation, never edited;
            it holds one entry per platform. Saving never distributes (ADR-0032): a Set reaches an
            agent only through a rollout act. The table is the master, the form the detail; while
@@ -176,7 +176,7 @@
         <div class="config-fields">
           <label class="field"><span class="field-cap">Agent type <b class="need req">required</b></span>
             <input required aria-required="true" id="set-type" class="required" placeholder="agent type: the service.name its agents report (e.g. otelcol-contrib)" autocomplete="off"
-                   title="Matched for equality against the service.name an agent reports (ADR-0033), and half this package's identity together with the version (ADR-0033) — frozen once created. It is also the name the package carries on the wire, which is why it never holds the version. While it is empty, choosing an artifact file fills it from the file's name." />
+                   title="Matched for equality against the service.name an agent reports (ADR-0039), and half this package's identity together with the version (ADR-0039) — frozen once created. It is also the name the package carries on the wire, which is why it never holds the version. While it is empty, choosing an artifact file fills it from the file's name." />
           </label>
           <label class="field narrow"><span class="field-cap">Version <b class="need req">required</b></span>
             <input required aria-required="true" id="set-version" placeholder="version (e.g. 1.2.3)" autocomplete="off"
@@ -235,7 +235,7 @@
       </div>
 
 
-      <!-- Deployments (ADR-0033): what reaches a channel of hosts, and the only thing rolled out. The
+      <!-- Deployments (ADR-0039): what reaches a channel of hosts, and the only thing rolled out. The
            table is the master, the form the detail; while nothing is current the form is not on
            screen. The rollout press sits on the row, never in the form — ADR-0032's seam: the
            press that changes the fleet is never the press that saves. -->
@@ -718,12 +718,12 @@
         if (a.remote_config_status === "APPLIED") return `<span class="pill green">Applied</span>`;
         return `<span class="pill gray">Unset</span>`;
       }
-      // The platform this agent reports, `os.type`-`host.arch` — the exact pair a package artifact
-      // is stored under, so it can be read off a row and typed into the packages form. Empty when
-      // the agent reports neither, which is also why it would be offered no package at all.
+      // The platform this agent is offered packages for, as the Server reads and folds it: the pair
+      // a package artifact is stored under, so it can be read off a row, typed into the packages
+      // form, and searched for. Empty when the agent reports neither, which is also why it would
+      // be offered no package at all.
       function platformOf(a) {
-        const n = a.non_identifying_attributes || {};
-        return n["os.type"] && n["host.arch"] ? `${n["os.type"]}-${n["host.arch"]}` : "";
+        return a.platform || "";
       }
       // The host's addresses (ADR-0017), first of each on the row: the row answers "which host is
       // this" at a glance, while the full lists stay in the details chips below and in the
@@ -863,7 +863,7 @@
           chips.push(`<span class="chip" title="rolled out to this agent — pinned as of that act, so putting a newer package in the channel changes nothing here">pkg ${esc(a.assigned_package)}</span>`);
         }
         // Three states that would otherwise be the same empty cell, and the operator's next move
-        // differs in each (ADR-0033 clause 27). Calm, not alarming: a freshly enrolled host is in
+        // differs in each (ADR-0039 clause 27). Calm, not alarming: a freshly enrolled host is in
         // no channel yet, which is the ordinary state and not a fault.
         const pending = (a.pending_configurations || []).length + (a.pending_packages || []).length + (a.pending_deployment ? 1 : 0);
         if (!a.package_conflict) {
@@ -1339,7 +1339,7 @@
         });
       }
 
-      // Packages as Sets (ADR-0033): a master table of every Set, and a detail form for the
+      // Packages as Sets (ADR-0039): a master table of every Set, and a detail form for the
       // *current* one. The form enforces no rule of its own — what it greys out is what the
       // Server answers 409 to — and the identity (name, agent type, version) is writable only
       // while a new Set is being created, because a new version is a new Set, never an edit.
@@ -1361,17 +1361,17 @@
       // rides on the act it aims, and is a button only where it is a count the act can reach.
       // Zero has two meanings (ADR-0032), and only one of them is a mistake: a set that aims
       // at nobody is the amber warning, a set everyone already runs is a plain statement.
-      // A package aims at nobody by itself (ADR-0033): what answers "whom would this reach" is
+      // A package aims at nobody by itself (ADR-0039): what answers "whom would this reach" is
       // the channels that hold it, and an empty list means stored, and unreachable.
       function ringsCell(p) {
         const channels = p.deployments || [];
         if (!channels.length) {
-          return `<span class="pill amber" title="no deployment holds this package, so it reaches nobody — put it in one on the Deployments tab (ADR-0033)">in no deployment</span>`;
+          return `<span class="pill amber" title="no deployment holds this package, so it reaches nobody — put it in one on the Deployments tab (ADR-0039)">in no deployment</span>`;
         }
         return channels.map((r) => `<span class="pill">${esc(r)}</span>`).join(" ");
       }
 
-      // An entry's signature as the Server found it (ADR-0033): checked against the Server's
+      // An entry's signature as the Server found it (ADR-0039): checked against the Server's
       // verification key when it holds one. An invalid one is a warning, never a refusal — the
       // Client's own check decides.
       const SIG_STATES = {
@@ -1385,7 +1385,7 @@
         return `<span class="pill ${tone}" title="${esc(why)}">${label}</span>`;
       }
 
-      // Whether every entry carries a valid signature (ADR-0033 clause 13), in one pill per row.
+      // Whether every entry carries a valid signature (ADR-0039 clause 13), in one pill per row.
       function signaturesCell(p) {
         const entries = p.entries || [];
         if (!entries.length) return "";
@@ -1421,7 +1421,7 @@
 
       // The entries of the current Set, one row each: platform, size, the full SHA-256 —
       // selectable on its own, since it is what an operator compares against the file they sign —
-      // and the signature (ADR-0033): its state, with a ✕ to take it away, or a field to give it.
+      // and the signature (ADR-0039): its state, with a ✕ to take it away, or a field to give it.
       // Each entry carries a ✕ that deletes it; on a Set that is assigned to an agent the entries
       // are frozen and the Server answers 409 with the reason — one rule, held where the
       // assignments are known (ADR-0032). What is typed survives a re-render.
@@ -1441,7 +1441,7 @@
       }
 
       // Fills (or hides) the detail form from the current Set. With no current Set and nothing
-      // being created, the form is not on screen — the master–detail rule of ADR-0033.
+      // being created, the form is not on screen — the master–detail rule of ADR-0039.
       function showSetDetail() {
         const p = creatingSet ? null : currentSetView();
         if (!creatingSet && !p) {
@@ -1453,7 +1453,7 @@
         $("set-detail-title").textContent = creatingSet
           ? "New package set — saved, distributed by a rollout act"
           : `Package ${p.display_name}`;
-        // The identity: writable only while creating. Afterwards it *is* the Set (ADR-0033),
+        // The identity: writable only while creating. Afterwards it *is* the Set (ADR-0039),
         // and another version is another Create.
         for (const [id, value] of [["set-type", p ? p.agent_type : ""], ["set-version", p ? p.version : ""]]) {
           $(id).value = value;
@@ -1490,7 +1490,7 @@
         put(path, { headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
       // The file the editor holds, sent to a Set that now exists as the entry for the platform
-      // named (ADR-0033: every artifact is uploaded). No file is nothing to send. Returns the
+      // named (ADR-0039: every artifact is uploaded). No file is nothing to send. Returns the
       // message to show, "" when it went through or was empty.
       async function sendPendingEntry(type, version) {
         const file = $("entry-file").files[0];
@@ -1532,7 +1532,7 @@
 
       // Selecting a row makes its Package current and shows it in the form; selecting it again
       // lets it go, and the form leaves the screen with it. There is no rollout button here any
-      // more: a Package is not rolled out (ADR-0033), its Deployment is.
+      // more: a Package is not rolled out (ADR-0039), its Deployment is.
       $("sets").addEventListener("click", async (e) => {
         const tr = e.target.closest("tr.agent");
         if (!tr) return;
@@ -1548,7 +1548,7 @@
 
       // OK: create the Package if it is new, then store the entry the editor holds, if any. The
       // identity is all a Package has, so there is nothing else to persist — and never a release:
-      // the rollout act belongs to a Deployment (ADR-0033).
+      // the rollout act belongs to a Deployment (ADR-0039).
       $("set-ok").addEventListener("click", async () => {
         $("set-error").textContent = "";
         const type = $("set-type").value.trim();
@@ -1583,10 +1583,10 @@
         $("set-detail").style.display = "none";
       });
 
-      // The signing file's one format (ADR-0033): written by the download, required by the import.
+      // The signing file's one format (ADR-0039): written by the download, required by the import.
       const SIGNING_FORMAT = "opamp-fleet-signing-v1";
 
-      // What a signature covers (ADR-0033 clause 52), as a file to take to where the key is: the
+      // What a signature covers (ADR-0039 clause 52), as a file to take to where the key is: the
       // Agent type, the version and each entry's SHA-256. Built from what the page already read —
       // the Server is not asked again, so the file is exactly what the operator saw.
       $("set-signing").addEventListener("click", () => {
@@ -1608,7 +1608,7 @@
       });
 
       // Delete: the Set goes — entries, artifacts, metadata — and with it the current record, so
-      // the form leaves the screen. Nothing is uninstalled on any host (ADR-0033).
+      // the form leaves the screen. Nothing is uninstalled on any host (ADR-0039).
       $("set-delete").addEventListener("click", async () => {
         const p = currentSetView();
         if (!p) return;
@@ -1625,7 +1625,7 @@
       });
 
       // An entry's ✕, its Sign, and the ✕ of its signature, each one request against the current
-      // Set; the Server refuses each while the Set is assigned (ADR-0032, ADR-0033).
+      // Set; the Server refuses each while the Set is assigned (ADR-0032, ADR-0039).
       $("set-entries").addEventListener("click", async (e) => {
         const p = currentSetView();
         if (!p) return;
@@ -1661,12 +1661,12 @@
 
       $("set-entries").addEventListener("input", () => { setFormDirty = true; });
 
-      // A signed signing file (ADR-0033) matched to the package it names and to each entry by its
+      // A signed signing file (ADR-0039) matched to the package it names and to each entry by its
       // platform and SHA-256: a signature for other bytes than the entry's is not taken. Each goes
       // through the entry's signature route, one request each, and the Server's answer is reported
-      // per entry with what its check found (ADR-0033 clause 24). Nothing is checked against a key
+      // per entry with what its check found (ADR-0039 clause 24). Nothing is checked against a key
       // here — the Server does when it holds one, and every Client does before it opens the
-      // artifact (ADR-0033 clause 52).
+      // artifact (ADR-0039 clause 52).
       $("set-sig-import").addEventListener("click", async () => {
         const file = $("set-sig-file").files[0];
         if (!file) {
@@ -1750,7 +1750,7 @@
 
       // What an artifact's file name already says. A release is `<name><sep><version><sep><os>`
       // `<sep><arch>.7z` (ADR-0038), and the last two fields are exactly the platform
-      // pair an entry is keyed by (ADR-0033) — so naming the file answers the fields. The platform
+      // pair an entry is keyed by (ADR-0039) — so naming the file answers the fields. The platform
       // is found by matching the known tokens at the end, not by splitting: `linux-x86_64` must
       // not come apart at its own underscore. A tail the vocabulary does not know returns null
       // rather than a guess, because a wrong platform is an entry no agent is ever offered.
@@ -1779,7 +1779,7 @@
       // the name, the agent type, and the version is still empty. The type is not picked from a
       // list; it is read out of the file's name, which for a release artifact is the type its
       // agents report (`otelcol-contrib_…`, `opamp-fleet-client_…`). A suggestion in a visible,
-      // editable identity field that OK confirms — not the silent server-side default ADR-0033
+      // editable identity field that OK confirms — not the silent server-side default ADR-0039
       // rejected — so a package named for the rollout rather than the type (a canary) is one
       // correction in the field before OK. It never rewrites a value already given, never an
       // identity already frozen, and clears nothing it cannot answer.
@@ -1799,7 +1799,7 @@
       });
 
 
-      // ── Deployments (ADR-0033, ADR-0032) ───────────────────────────────────
+      // ── Deployments (ADR-0039, ADR-0032) ───────────────────────────────────
       let deployments = [];
       let currentDep = null;      // the channel whose detail form is on screen
       let creatingDep = false;    // the form is defining a new one: the name is writable
@@ -1830,7 +1830,7 @@
         $("deployment-count").textContent = deployments.length;
         $("deps-empty").style.display = deployments.length ? "none" : "block";
         $("deps").innerHTML = deployments.map((d) => {
-          // A package's signatures are its entries' own (ADR-0033); the chip warns while one is
+          // A package's signatures are its entries' own (ADR-0039); the chip warns while one is
           // missing, because the channel is not rolled out until every entry is signed.
           const pkgs = (d.packages || []).map((h) => {
             const p = packages.find((x) => x.agent_type === h.agent_type && x.version === h.version);
@@ -1868,7 +1868,7 @@
       }
 
       // Every package with all its entries, one row each: platform, size, the full SHA-256 and the
-      // entry's signature state — read here, written on the Packages tab (ADR-0033).
+      // entry's signature state — read here, written on the Packages tab (ADR-0039).
       function renderDepPackages(d) {
         $("dep-packages").innerHTML = depHeld(d).map((h) => {
           const p = packages.find((x) => x.agent_type === h.type && x.version === h.version);

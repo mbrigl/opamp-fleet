@@ -18,6 +18,11 @@ once its tag exists.
 
 ### Added
 
+- **The Server warns about a token key that could leave the token, and about a PKCS#11 module
+  others may replace.** At startup it names a key loaded by its label that is not sensitive, is
+  extractable, or was extractable once, and a `[pkcs11] module`, or a directory above it, that its
+  group or others may write. Keys made by `opamp-fleetctl pki token-init` raise neither. **What to
+  do:** nothing, unless the log shows the warning; then replace the key, or tighten the modes.
 - **`opamp-fleetctl package fetch --repack <n>` numbers a later repack of one version**
   ([ADR-0036](docs/adr/0036-the-operator-program-opamp-fleetctl.md)
   clause 28), for an agent whose artifact the tool repacks; an agent the tool uploads as upstream
@@ -34,6 +39,9 @@ once its tag exists.
 
 ### Changed
 
+- **The 7z reader takes up `sevenz-rust2` 0.25.** It bounds each decoded entry by its declared
+  size, rejects an entry that ends short of it and checks the block's CRC where 0.24 skipped it, so
+  a malformed `.7z` artifact is refused rather than unpacked short. **What to do:** nothing.
 - **An instance on PostgreSQL takes up the Agents a notice names in one read**
   ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   clauses 8 and 9). When another instance changes the records of Agents this instance holds, it
@@ -122,8 +130,10 @@ once its tag exists.
   attributes. An Agent that reports `linux` and `x86_64` is now found by `linux-amd64`, and an
   Agent that reports its platform only among its identifying attributes by its platform too. A
   search for `linux-x86_64` no longer finds it; `x86_64` still does. The OS column of the Agents
-  tab still shows the pair as reported. On PostgreSQL, an Agent's search text takes the new
-  platform with the next write of its record.
+  tab shows the same platform, so what a row shows is what finds it, and an Agent that reports
+  its platform only among its identifying attributes no longer shows "no platform reported".
+  `GET /api/v1/agents` names it in the new field `platform`, empty when the Agent reports none.
+  On PostgreSQL, an Agent's search text takes the new platform with the next write of its record.
   **What to do:** nothing.
 
 - **`opamp-fleetctl package fetch` names a platform as the Server does**
@@ -131,10 +141,17 @@ once its tag exists.
   platform table of its own: it passed over an asset named `osx`, `win64` or `x64`, and every
   platform it had no name for, such as `linux/s390x`. It now folds an asset's platform through the
   table the Server stores an entry under, and offers a platform the table does not know under its
-  own name. `--platform macos/x86_64` now picks the artifact listed as `darwin/amd64`.
-  **What to do:** nothing. A release with such assets now lists them in the platform menu. A
-  `linux/armv7` entry is offered to no Agent yet, because an Agent reports that machine as `arm`;
-  do not fetch it.
+  own name. `--platform macos/x86_64` now picks the artifact listed as `darwin/amd64`. A 32-bit
+  ARM build is spelled `arm32`, the semantic conventions' `host.arch` value, on both sides: a
+  Collector's `linux_armv7` asset is listed as `linux/arm32` and offered to an Agent that reports
+  `arm`, and a Client on 32-bit ARM reports `arm32`
+  ([ADR-0039](docs/adr/0039-a-32-bit-arm-build-is-spelled-arm32.md)
+  clause 6). `armv6` keeps its own name. **What to do:** nothing, unless a Package holds an entry
+  uploaded as `linux/arm` or `linux/armv7`. Such an entry is served as `linux/arm32`, but it can
+  no longer be removed or signed on its own, and of two such entries in one Package only one is
+  served. The Server names each at startup; delete that Package and upload it again, and its
+  entries are stored under `arm32`. A release with such assets now lists them in the platform
+  menu.
 
 - **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
   ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)

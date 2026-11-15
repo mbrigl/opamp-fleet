@@ -688,7 +688,10 @@ The PIN file may be read by its owner and its group, and written by its owner al
 others may read, or its group may write, stops the Server at startup, naming it. So do a module
 that does not load, a token no slot carries, a PIN the token refuses, and a key label the token
 does not hold. A `key_label`, `bootstrap_ca_key_label` or `[audit] key_label` without `[pkcs11]`
-stops it too. `[pkcs11]` is the same whichever store keeps the records.
+stops it too. A module, or a directory above it, that its group or others may write is named by
+a warning at startup, as is a key that is not sensitive or could leave the token, or whose token
+will not say ([CA keys on a PKCS#11 token](#ca-keys-on-a-pkcs11-token)). `[pkcs11]` is the same
+whichever store keeps the records.
 
 ### `[admission_throttle]`
 
@@ -1292,6 +1295,12 @@ signature into the [audit record](#the-audit-record). No key is on the Server's 
 backup, disk image or database dump holds none, and instances that reach the same token serve side
 by side ([From a standby to side by side](#from-a-standby-to-side-by-side)). The keys are P-256,
 made on the token, sensitive and never extractable.
+
+At startup the Server warns, naming the setting and the label, when a key it loads from the token
+is not sensitive, is extractable, or was extractable once, as a key imported from a file or made
+by another tool may be. It also warns when the module, or a directory above it, is writable by its
+group or by others: such an account could have the Server load code of its own. Both are warnings,
+not refusals; fix the key or the modes and start again to be rid of them.
 
 A Server on the token names it in [`[pkcs11]`](#pkcs11) and each key by its label:
 
@@ -2373,8 +2382,15 @@ $ curl --cacert ca.pem -X PUT --data-binary @otelcol-contrib_0.109.0_linux_amd64
 
 Platform spellings are accepted and stored canonically, so the tokens off an upstream release's
 file name work as they are: `macos` and `osx` mean `darwin`, `x86_64` and `x64` mean `amd64`,
-`aarch64` means `arm64`. An `os`/`arch` this Server has never heard of is stored as given rather
-than refused — the fleet may run a system nobody here anticipated.
+`aarch64` means `arm64`, and `arm` and `armv7` mean `arm32`, the 32-bit ARM build; `armv6` is
+not folded, since an ARMv7 build does not run on it. An `os`/`arch` this Server has never heard of
+is stored as given rather than refused — the fleet may run a system nobody here anticipated.
+
+An entry an older Server stored under a spelling this one folds, such as `linux/arm`, is served
+under the folded platform, but it cannot be removed or signed on its own, and of two such
+spellings in one Package only one is served: the one stored under the folded spelling, else the
+first in order. The Server names each such entry in its log at startup. Delete the Package and
+upload it again, and its entries are stored under the folded spelling.
 
 **Every artifact is uploaded.** The Server holds what it offers and sends no request for a package
 anywhere; a Client fetches from its own Server's origin alone (see

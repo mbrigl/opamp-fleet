@@ -233,7 +233,9 @@ latter. Metric names are stored unmodified — `process.memory.usage`, `process.
 `process.uptime` — with no Prometheus-style normalisation to unpick.
 
 **The platform is on the Resource too.** `ResourceAttributes['os.type']` and `['host.arch']` — the
-two halves ADR-0033 selects a package variant by — plus `['os.description']` for the readable form.
+two halves
+ADR-0039
+selects a package variant by — plus `['os.description']` for the readable form.
 They describe the *host*, not one Agent: this Client samples its own process and the Managed
 Processes it holds the pids of, so everything in one export runs on the machine the Resource names.
 Nothing else from the `AgentDescription`'s non-identifying attributes is sent — not the host's

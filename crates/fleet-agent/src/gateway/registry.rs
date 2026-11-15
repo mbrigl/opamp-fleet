@@ -47,7 +47,7 @@ pub struct Registry {
     routes: Mutex<HashMap<InstanceUid, Route>>,
     /// The number the next plain-HTTP exchange is registered under.
     exchanges: AtomicU64,
-    /// What sees every offer on its way down (ADR-0033 clause 41).
+    /// What sees every offer on its way down (ADR-0039 clause 41).
     cache: Arc<PackageCache>,
 }
 
@@ -236,7 +236,7 @@ impl Registry {
 
     /// Hands one reply to whoever is waiting for that Agent, once the package cache has seen what
     /// it offers — so an artifact the Agent asks for next is already recorded as offered to its host
-    /// (ADR-0033 clause 41 and ADR-0016 clause 15).
+    /// (ADR-0039 clause 41 and ADR-0016 clause 15).
     pub async fn deliver(&self, uid: InstanceUid, reply: ServerToAgent) {
         // Taken out under the lock, awaited outside it: a slow downstream peer must not hold the
         // routing table while every other Agent's replies queue behind it.

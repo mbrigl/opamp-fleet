@@ -82,6 +82,14 @@ impl Token {
     pub fn open(config: &Pkcs11Config) -> Result<Arc<Self>, String> {
         let pin = crate::config::read_secret_file("[pkcs11] pin_file", &config.pin_file)?;
         let pin = AuthPin::from(pin.as_str());
+        for writable in writable_by_others(&config.module) {
+            tracing::warn!(
+                module = %config.module.display(),
+                path = %writable.display(),
+                "[pkcs11] module: an account other than its owner may write this path, so it could \
+                 have the Server load code of its own with the token's session at hand"
+            );
+        }
         let context = fleet_core::pkcs11::context(&config.module)
             .map_err(|e| format!("[pkcs11] module {}: {}", config.module.display(), text(&e)))?;
         let software = context
@@ -259,8 +267,50 @@ impl Token {
                     }),
                 _ => (None, None),
             };
-            Ok((private.len(), public.len(), point))
+            // An attribute the token will not answer is a gap to name, never a reason to refuse
+            // the key: the human chose warnings here.
+            let protection = match private.as_slice() {
+                [one] => session
+                    .get_attributes(
+                        *one,
+                        &[
+                            AttributeType::Sensitive,
+                            AttributeType::Extractable,
+                            AttributeType::NeverExtractable,
+                        ],
+                    )
+                    .ok()
+                    .map(|attributes| {
+                        attributes.into_iter().fold(
+                            (false, true, false),
+                            |(sens, extr, never), attribute| match attribute {
+                                Attribute::Sensitive(v) => (v, extr, never),
+                                Attribute::Extractable(v) => (sens, v, never),
+                                Attribute::NeverExtractable(v) => (sens, extr, v),
+                                _ => (sens, extr, never),
+                            },
+                        )
+                    }),
+                _ => Some((true, false, true)),
+            };
+            Ok((private.len(), public.len(), point, protection))
         })?;
+        let (private, public, point, protection) = point;
+        let gaps = match protection {
+            Some((sensitive, extractable, never_extractable)) => {
+                protection_gaps(sensitive, extractable, never_extractable)
+            }
+            None => vec!["does not say whether it is sensitive or extractable"],
+        };
+        if private == 1 && !gaps.is_empty() {
+            tracing::warn!(
+                token = %self.label,
+                "{key} {label:?}: the key on the token {}; a key made by `opamp-fleetctl pki \
+                 token-init` is sensitive and was never extractable",
+                gaps.join(", ")
+            );
+        }
+        let point = (private, public, point);
         match point {
             (0, _, _) => Err(missing("no private key carries this label")),
             (1, 1, (Some(params), Some(point))) => {
@@ -388,4 +438,132 @@ pub fn signed_entry(
         .with("issuer", id.map(|id| id.issuer.clone()))
         .with("serial", id.map(|id| id.serial.clone()))
         .with("use_case", use_case.as_str())
+}
+
+/// What a private key's attributes leave open: `CKA_SENSITIVE` false, `CKA_EXTRACTABLE` true, or
+/// `CKA_NEVER_EXTRACTABLE` false, each as the words a warning names it by. Empty for a key that is
+/// sensitive and was never extractable. An attribute the token does not answer counts as the
+/// weaker value.
+fn protection_gaps(
+    sensitive: bool,
+    extractable: bool,
+    never_extractable: bool,
+) -> Vec<&'static str> {
+    let mut gaps = Vec::new();
+    if !sensitive {
+        gaps.push("is not sensitive");
+    }
+    if extractable {
+        gaps.push("is extractable");
+    } else if !never_extractable {
+        gaps.push("was extractable once");
+    }
+    gaps
+}
+
+/// The module and every directory above it, as configured and as resolved, that an account other
+/// than its owner may write: the group or others hold the write bit. A directory with the sticky
+/// bit does not count, since only the owner of an entry may replace it there. A path that cannot be
+/// read is skipped; loading the module reports it.
+#[cfg(unix)]
+fn writable_by_others(module: &std::path::Path) -> Vec<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    // The directories of the path as configured hold a link that could be swapped, and those of
+    // the path it resolves to hold the library itself; both are read.
+    let resolved = module.canonicalize().ok();
+    let mut paths: Vec<std::path::PathBuf> = module
+        .ancestors()
+        .skip(1)
+        .filter(|p| !p.as_os_str().is_empty())
+        .chain(resolved.iter().flat_map(|r| r.ancestors()))
+        .map(std::path::Path::to_path_buf)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .filter(|p| {
+            std::fs::metadata(p).is_ok_and(|m| {
+                let mode = m.permissions().mode();
+                mode & 0o022 != 0 && !(m.is_dir() && mode & 0o1000 != 0)
+            })
+        })
+        .collect()
+}
+
+/// The Server runs on Linux alone; elsewhere, as when the workspace is linted for Windows, there are
+/// no mode bits to read and nothing is named.
+#[cfg(not(unix))]
+fn writable_by_others(_module: &std::path::Path) -> Vec<std::path::PathBuf> {
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A key made by `pki token-init` passes; one that is not sensitive, is extractable, or was
+    /// extractable once is named.
+    #[test]
+    fn a_key_that_could_leave_the_token_is_named() {
+        assert!(protection_gaps(true, false, true).is_empty());
+        assert_eq!(protection_gaps(false, false, true), ["is not sensitive"]);
+        assert_eq!(protection_gaps(true, true, false), ["is extractable"]);
+        assert_eq!(
+            protection_gaps(true, false, false),
+            ["was extractable once"]
+        );
+        assert_eq!(
+            protection_gaps(false, true, false),
+            ["is not sensitive", "is extractable"]
+        );
+    }
+
+    /// The module, or a directory above it, that its group or others may write is named; a sticky
+    /// directory is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_module_others_may_replace_is_named() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lib = dir.path().join("lib");
+        std::fs::create_dir(&lib).expect("lib");
+        let module = lib.join("libtoken.so");
+        std::fs::write(&module, b"").expect("module");
+        let chmod = |p: &std::path::Path, mode| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).expect("chmod");
+        };
+        chmod(dir.path(), 0o755);
+        chmod(&lib, 0o755);
+        chmod(&module, 0o644);
+        let below = |found: Vec<std::path::PathBuf>| -> Vec<std::path::PathBuf> {
+            let root = dir.path().canonicalize().expect("root");
+            found.into_iter().filter(|p| p.starts_with(&root)).collect()
+        };
+        assert!(below(writable_by_others(&module)).is_empty());
+        chmod(&module, 0o664);
+        assert_eq!(
+            below(writable_by_others(&module)),
+            [module.canonicalize().expect("module")]
+        );
+        chmod(&module, 0o644);
+        chmod(&lib, 0o777);
+        assert_eq!(
+            below(writable_by_others(&module)),
+            [lib.canonicalize().expect("lib")]
+        );
+        chmod(&lib, 0o1777);
+        assert!(below(writable_by_others(&module)).is_empty());
+        chmod(&lib, 0o755);
+        // A link in a directory others may write could be pointed at another library.
+        let links = dir.path().join("links");
+        std::fs::create_dir(&links).expect("links");
+        let link = links.join("libtoken.so");
+        std::os::unix::fs::symlink(&module, &link).expect("link");
+        chmod(&links, 0o777);
+        assert_eq!(
+            below(writable_by_others(&link)),
+            [links.canonicalize().expect("links")]
+        );
+    }
 }

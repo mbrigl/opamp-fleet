@@ -858,7 +858,7 @@ mod tests {
     }
 
     /// A block the startup parser would refuse is refused here, naming the entry — the same
-    /// strictness ADR-0008 asks of the file.
+    /// strictness ADR-0040 asks of the file.
     #[test]
     fn a_malformed_block_names_its_entry() {
         let offer = offer_of(&[(

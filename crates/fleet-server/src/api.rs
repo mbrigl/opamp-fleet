@@ -1,4 +1,4 @@
-//! The REST API v1 — the Server's integration contract (ADR-0008, ADR-0031) — and the bundled
+//! The REST API v1 — the Server's integration contract (ADR-0040, ADR-0031) — and the bundled
 //! rudimentary UI. Both belong to the Operator plane and are served on its own listener
 //! (ADR-0012); the one exception, the Agent-facing artifact download, is [`download_router`].
 //!
@@ -47,12 +47,12 @@ use paging::Asked;
         (name = "fleet", description = "The fleet as the Server sees it"),
         (name = "configurations", description = "Configurations: content an Agent type runs, \
                                                  released only through a Deployment (ADR-0032)"),
-        (name = "packages", description = "Software packages the Server delivers (ADR-0033), \
+        (name = "packages", description = "Software packages the Server delivers (ADR-0039), \
                                             and the signed floor below which no Client takes \
                                             one (ADR-0034)"),
         (name = "deployments", description = "What reaches a channel of hosts — Packages and \
                                               Configurations under one Selector, and the only \
-                                              thing rolled out (ADR-0033, ADR-0032)"),
+                                              thing rolled out (ADR-0039, ADR-0032)"),
         (name = "enrolment", description = "How a host gets its first certificate: a window an \
                                             operator opens, and requests an operator decides \
                                             (ADR-0026)"),
@@ -222,7 +222,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         ))
         // The one route that legitimately carries a program: the framework's 2 MiB default would
         // refuse every real agent binary, so the upload streams past it and the handler bounds it
-        // by `max_package_size_bytes` instead (ADR-0008). No other route is unbounded.
+        // by `max_package_size_bytes` instead (ADR-0040). No other route is unbounded.
         .routes(routes!(put_package_entry, delete_package_entry).layer(DefaultBodyLimit::disable()))
         .routes(routes!(put_entry_signature, delete_entry_signature))
         .routes(routes!(list_package_floors))
@@ -370,7 +370,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
 /// The one route of `/api/v1` that is not the operator's: the artifact bytes an Agent downloads.
 /// It is served on the **Agent plane** (ADR-0012), because that is the audience — the
 /// `download_url` in a package offer is a path the Client resolves against its own OpAMP endpoint
-/// (ADR-0033), so this listener is where the offer already points. It keeps its `/api/v1` path,
+/// (ADR-0039), so this listener is where the offer already points. It keeps its `/api/v1` path,
 /// which every offered Package's `download_url` names.
 ///
 /// Consequently it is not in the OpenAPI document: that document describes the Operator plane.
@@ -383,7 +383,7 @@ pub fn download_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// The bundled UI: one embedded page, no frontend toolchain (ADR-0008).
+/// The bundled UI: one embedded page, no frontend toolchain (ADR-0040).
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }
@@ -560,6 +560,11 @@ struct AgentResponse {
     service_build: String,
     /// The reported `os.description` (e.g. "Ubuntu 24.04.2 LTS"), falling back to `os.type`.
     os: String,
+    /// The platform this Agent is offered packages for, `os.type`-`host.arch` as the offer reads
+    /// and folds them (`linux-amd64`), an identifying copy standing in for a non-identifying one;
+    /// empty when it reports neither, so it is offered no package. The fleet search finds the
+    /// Agent by this value.
+    platform: String,
     /// Every reported identifying attribute — what a Selector can match on (ADR-0031).
     identifying_attributes: BTreeMap<String, String>,
     /// Every reported non-identifying attribute — Selectors match these too.
@@ -575,7 +580,7 @@ struct AgentResponse {
     /// none does.
     ///
     /// This is not [`assigned_deployment`](Self::assigned_deployment), and the difference is what
-    /// tells four states apart that would otherwise look alike (ADR-0033 clause 27). Empty here
+    /// tells four states apart that would otherwise look alike (ADR-0039 clause 27). Empty here
     /// with no conflict means the host is in **no channel**: label it, or give it a `channel`
     /// attribute. Set here with nothing assigned and nothing pending means the channel holds
     /// nothing this Agent can take — no Package for its type, or none for its platform. The
@@ -617,10 +622,10 @@ struct AgentResponse {
     capabilities: Vec<String>,
     /// The Agent's available components (top-level names, sorted); empty until reported.
     available_components: Vec<String>,
-    /// The Agent's package installations (ADR-0033), in name order; empty until reported.
+    /// The Agent's package installations (ADR-0039), in name order; empty until reported.
     packages: Vec<PackageStatusResponse>,
     /// Why this Agent is proposed nothing — more than one Deployment claims it, and an Agent
-    /// belongs to at most one (ADR-0033 clause 28). The message names every Deployment in the way.
+    /// belongs to at most one (ADR-0039 clause 28). The message names every Deployment in the way.
     /// Absent when at most one claims it.
     #[serde(skip_serializing_if = "Option::is_none")]
     package_conflict: Option<String>,
@@ -705,6 +710,7 @@ impl From<fleet::AgentView> for AgentResponse {
             service_version: view.service_version,
             service_build: view.service_build,
             os: view.os,
+            platform: view.platform,
             identifying_attributes: view.identifying_attributes,
             non_identifying_attributes: view.non_identifying_attributes,
             matched_configurations: view.matched_configurations,
@@ -802,7 +808,7 @@ impl From<fleet::PendingPackageView> for PendingPackageResponse {
     }
 }
 
-/// One package's installation state as the REST API and UI see it (ADR-0033).
+/// One package's installation state as the REST API and UI see it (ADR-0039).
 #[derive(Serialize, ToSchema)]
 #[schema(as = PackageStatusView)]
 struct PackageStatusResponse {
@@ -1437,17 +1443,17 @@ async fn delete_configuration(
     }
 }
 
-/// One stored **Package** as the API shows it (ADR-0033) — never its artifact bytes.
+/// One stored **Package** as the API shows it (ADR-0039) — never its artifact bytes.
 ///
 /// A Package is identified by *(Agent type, version)*, stated at creation and never edited: a new
 /// version is a new Package. It holds one entry per platform and aims at nobody — the Deployments
-/// that hold it do (ADR-0033). **Saving never distributes anything** (ADR-0032): a Package reaches
+/// that hold it do (ADR-0039). **Saving never distributes anything** (ADR-0032): a Package reaches
 /// an Agent only through a rollout act, and which Agents run it is answered per Agent by
 /// `GET /api/v1/agents`.
 #[derive(Serialize, ToSchema)]
 struct PackageSetView {
     /// The Agent type this Package is built for, matched raw against the `service.name` an Agent
-    /// reports before anything else is considered (ADR-0033). Half its identity — and the name it
+    /// reports before anything else is considered (ADR-0039). Half its identity — and the name it
     /// carries on the wire, which is why it never holds the version.
     agent_type: String,
     /// The version every entry of this Package shares. The other half of its identity.
@@ -1455,16 +1461,16 @@ struct PackageSetView {
     /// What an operator reads: the Agent type and the version together. Derived, never stored.
     display_name: String,
     /// One entry per platform. An Agent is offered the one built for the machine it reported, and
-    /// never another (ADR-0033).
+    /// never another (ADR-0039).
     entries: Vec<PackageEntryView>,
     /// The Deployments that hold this Package, in name order.
     ///
     /// This is where "whom does it reach" is answered: a Package aims at nobody by itself
-    /// (ADR-0033), so an empty list means it is stored and no rollout act can release it.
+    /// (ADR-0039), so an empty list means it is stored and no rollout act can release it.
     deployments: Vec<String>,
 }
 
-/// One platform's entry of a Package: an uploaded artifact and its signature (ADR-0033).
+/// One platform's entry of a Package: an uploaded artifact and its signature (ADR-0039).
 #[derive(Serialize, ToSchema)]
 struct PackageEntryView {
     /// The operating system, as `os.type` reports it: `linux`, `darwin`, `windows`.
@@ -1474,7 +1480,7 @@ struct PackageEntryView {
     /// The artifact's size in bytes.
     size: u64,
     /// The artifact's SHA-256, hex — **the exact value the Agent verifies what it downloaded
-    /// against** (ADR-0033). Reading it is how an operator answers "did this host take my bytes"
+    /// against** (ADR-0039). Reading it is how an operator answers "did this host take my bytes"
     /// without trusting a status field: it is the same string the Agent reports back in its
     /// `PackageStatuses`, and the same one `opamp-fleetctl package sha256` prints locally.
     content_hash: String,
@@ -1483,17 +1489,17 @@ struct PackageEntryView {
     /// travel is answered here rather than by reading logs.
     package_hash: String,
     /// The operator's Ed25519 signature over this entry, hex, as `opamp-fleetctl package sign`
-    /// prints it (ADR-0033); absent while the entry is unsigned. An unsigned entry is offered to
+    /// prints it (ADR-0039); absent while the entry is unsigned. An unsigned entry is offered to
     /// nobody.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signature: Option<String>,
     /// What the Server found when it checked that signature against `[packages] verification_key`
-    /// (ADR-0033). Feedback only: an `invalid` one is stored and offered, and the Agent's own check
+    /// (ADR-0039). Feedback only: an `invalid` one is stored and offered, and the Agent's own check
     /// decides.
     signature_state: SignatureStateView,
 }
 
-/// What the Server found when it checked an entry's signature (ADR-0033).
+/// What the Server found when it checked an entry's signature (ADR-0039).
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 enum SignatureStateView {
@@ -1543,7 +1549,7 @@ impl PackageSetView {
     }
 }
 
-/// The Platform the download route names (ADR-0033): the artifact endpoint serves bytes, and a
+/// The Platform the download route names (ADR-0039): the artifact endpoint serves bytes, and a
 /// request naming bytes names the Platform they are for.
 #[derive(Deserialize)]
 struct PlatformQuery {
@@ -1648,7 +1654,7 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
     path = "/api/v1/packages/{agent_type}/{version}",
     tag = "packages",
     params(
-        ("agent_type" = String, Path, description = "The Agent type the Set is built for (ADR-0033)"),
+        ("agent_type" = String, Path, description = "The Agent type the Set is built for (ADR-0039)"),
         ("version" = String, Path, description = "The Set's version")
     ),
     responses(
@@ -1667,7 +1673,7 @@ async fn get_package_set(
     }
 }
 
-/// Creates a Package (ADR-0033). **Saving never distributes** (ADR-0032): the Package reaches an
+/// Creates a Package (ADR-0039). **Saving never distributes** (ADR-0032): the Package reaches an
 /// Agent only through a rollout act of a Deployment that holds it. The identity in the path is the
 /// whole identity and there is nothing else to write, so creating one that exists answers it
 /// unchanged: a new version is a new Package, never a mutation of an old one.
@@ -1703,7 +1709,7 @@ async fn put_package_set(
 
 /// Deletes a Package — entries, artifacts and metadata — refused with `409` while an Agent's
 /// assignment pins it, saying how many (ADR-0032 clause 12). A deleted Package leaves every
-/// Deployment that held it; nothing is ever uninstalled (ADR-0033).
+/// Deployment that held it; nothing is ever uninstalled (ADR-0039).
 #[utoipa::path(
     delete,
     path = "/api/v1/packages/{agent_type}/{version}",
@@ -1745,7 +1751,7 @@ async fn delete_package_set(
     }
 }
 
-/// Stores one platform's artifact as an entry of a Package (ADR-0033). The artifact is
+/// Stores one platform's artifact as an entry of a Package (ADR-0039). The artifact is
 /// the raw request body; the Package and the platform are the path. New bytes remove the entry's
 /// signature, which covered the old hash. Nothing is distributed: the Package reaches nobody until
 /// a rollout act releases it (ADR-0032). Refused while the Package is assigned to an Agent — an
@@ -1901,7 +1907,7 @@ async fn delete_package_entry(
     }
 }
 
-/// Writes the operator's Ed25519 signature onto one entry of a Package (ADR-0033), as
+/// Writes the operator's Ed25519 signature onto one entry of a Package (ADR-0039), as
 /// `opamp-fleetctl package sign` prints it. One signature serves every Deployment that holds the
 /// Package; an entry without one is offered to nobody.
 ///
@@ -1956,7 +1962,7 @@ async fn put_entry_signature(
     }
 }
 
-/// Takes one entry's signature away (ADR-0033): the entry is offered to nobody until it is signed
+/// Takes one entry's signature away (ADR-0039): the entry is offered to nobody until it is signed
 /// again. Refused while the Package is assigned to an Agent (ADR-0032).
 #[utoipa::path(
     delete,
@@ -2217,7 +2223,7 @@ async fn download_package(
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
     // One answer for every artifact this requester may not fetch, whether or not the store holds
-    // it, so the store cannot be listed by probing (ADR-0033 clause 37).
+    // it, so the store cannot be listed by probing (ADR-0039 clause 37).
     let not_found = || {
         error(
             StatusCode::NOT_FOUND,
@@ -2227,7 +2233,7 @@ async fn download_package(
             ),
         )
     };
-    // A member certificate fetches only what is offered to an Agent its host speaks for (ADR-0033
+    // A member certificate fetches only what is offered to an Agent its host speaks for (ADR-0039
     // clause 2). The download guard admitted the certificate and hands over what it proves; a
     // request without one exists only where no certificate is required, and is tested here no
     // more than at admission.
@@ -2401,7 +2407,7 @@ fn read_chunks(
 }
 
 // -------------------------------------------------------------------------------------------
-// Deployments (ADR-0033, ADR-0032): the aim and the act — what a Package and a Configuration do
+// Deployments (ADR-0039, ADR-0032): the aim and the act — what a Package and a Configuration do
 // not have.
 // -------------------------------------------------------------------------------------------
 
@@ -2436,7 +2442,7 @@ struct DeploymentView {
 }
 
 /// One Package a Deployment holds. Its entries and their signatures are the Package's own
-/// (`GET /api/v1/packages`, ADR-0033).
+/// (`GET /api/v1/packages`, ADR-0039).
 #[derive(Serialize, ToSchema)]
 struct DeploymentPackageView {
     /// The Agent type this Package is built for — also the key under which this Deployment holds
@@ -2479,7 +2485,7 @@ struct DeploymentSpec {
     selector: std::collections::BTreeMap<String, String>,
 }
 
-/// One artifact's Ed25519 signature, as the operator supplies it (ADR-0033).
+/// One artifact's Ed25519 signature, as the operator supplies it (ADR-0039).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct SignatureSpec {
@@ -4540,7 +4546,7 @@ mod tests {
     /// A store refusal of the Package routes is answered with the status its kind names, whatever
     /// its text: a refusal whose message a database prefixed keeps its status, and a failure whose
     /// message begins as a refusal's does is a `500`.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_package_refusal_is_answered_with_its_status() {
         use crate::packages::Refusal;
