@@ -107,7 +107,7 @@ once its tag exists.
 
 ### Fixed
 
-- **`opamp-fleetctl package fetch` names a platform as the Server and the Agents do**
+- **`opamp-fleetctl package fetch` names a platform as the Server does**
   ([ADR-0050](docs/adr/0050-packages-signatures-and-delivery.md) clause 6). The tool kept a
   platform table of its own: it passed over an asset named `osx`, `win64` or `x64`, and every
   platform it had no name for, such as `linux/s390x`. It now folds an asset's platform through the

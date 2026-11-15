@@ -66,8 +66,8 @@ pub fn arch_token(raw: &str) -> Result<String, String> {
 }
 
 /// Unknown tokens are not refused, only checked for shape: what is refused is a token that could
-/// not be half of a file name, since that is what a Server stores an entry as. Every end that
-/// names a Platform reads this one rule, so an artifact the tool fetches is one the Server takes.
+/// not be half of a file name, since that is what a Server stores an entry as. The Server and
+/// `opamp-fleetctl` both read this rule, so an artifact the tool fetches is one the Server takes.
 fn token(raw: &str, what: &str, canonicalise: fn(&str) -> &str) -> Result<String, String> {
     let lowered = raw.trim().to_ascii_lowercase();
     let canonical = canonicalise(&lowered).to_string();
@@ -130,6 +130,19 @@ mod tests {
             "rustc's spelling and the convention's are one machine"
         );
         assert_eq!(canonical_os("macos"), canonical_os("darwin"));
+    }
+
+    /// A token is trimmed, lower-cased and folded, and one that cannot be half of a file name is
+    /// refused (ADR-0050 clause 6).
+    /// Verifies: ADR-0050
+    #[test]
+    fn a_token_is_folded_and_held_to_its_shape() {
+        assert_eq!(os_token(" MacOS ").as_deref(), Ok("darwin"));
+        assert_eq!(arch_token("X86_64").as_deref(), Ok("amd64"));
+        assert_eq!(arch_token("s390x").as_deref(), Ok("s390x"));
+        for bad in ["", "arm-v7", "a/b", "seventeen_letters"] {
+            assert!(arch_token(bad).is_err(), "{bad:?}");
+        }
     }
 
     /// A system the table has never heard of is served under its own name rather than refused: a
