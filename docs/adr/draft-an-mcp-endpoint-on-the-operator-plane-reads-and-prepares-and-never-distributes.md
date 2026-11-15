@@ -9,7 +9,7 @@
 
 The Server's Operator plane serves the REST API and the bundled UI
 ([ADR-0031](0031-configurations-and-the-rest-api.md),
-[ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)).
+[ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 7).
 The specification's goal G-5 makes that API the contract through which any client drives the
 fleet. An assistant that speaks the Model Context Protocol (MCP) can use the REST API only through
 code written for it; an MCP endpoint lets such a client discover what it may do as typed tools and
@@ -57,13 +57,19 @@ secret.
    offers tools only — no resources, prompts, sampling or elicitation.
 
 2. **The plane's guard and limits apply.** `/mcp` is a route of the Operator plane: TLS 1.3, the
-   body and connection bounds of ADR-0012, the throttle, and the guard of
+   body and connection bounds of
+   [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)
+   clauses 15, 18 and 19, the throttle of
+   [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+   clause 19, and the guard of
    [ADR-draft-the-operator-plane-also-signs-in-with-oidc-beside-basic](draft-the-operator-plane-also-signs-in-with-oidc-beside-basic.md)
    clause 42 — Basic credentials in the `Authorization` header, a bearer token validated as that
    ADR's clause 71 says, or both, as configured. A request whose `Origin` header is present and is
    not the Operator plane's own origin is answered `403`. A request whose `Host` names neither a DNS
    name nor an address of the Operator plane's certificate is answered `403`. The MCP client's
-   self-reported `clientInfo` is a label, never an identity.
+   self-reported `clientInfo` is a label, never an identity. That draft supersedes ADR-0012 and
+   ADR-0026; if it is accepted, the bounds become its clauses 15, 18 and 19 and the throttle its
+   clause 48.
 
 3. **With OIDC, `/mcp` is its own protected resource.** When OIDC is configured:
    - The Server serves `/.well-known/oauth-protected-resource/mcp` without credentials. It names

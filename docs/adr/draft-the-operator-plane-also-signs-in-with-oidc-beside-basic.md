@@ -3,7 +3,7 @@
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
-- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, the reconnect delays in `crates/opamp/src/client/backoff.rs` and `crates/opamp/src/client/ws.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the `rustls` features in `Cargo.toml`, the `listen`, `max_connections`, `max_new_connections_per_sec`, `[rest]`, `[tls]` and `[rest.tls]` keys of `server.toml` and their parsing and startup checks in `crates/fleet-server/src/config.rs`, the certificates `server pki status` lists and the running Server watches in `crates/fleet-server/src/pki.rs`, `config/server.toml`, the message limit in `crates/fleet-server/src/agent_rate.rs`, `on_message` and `on_unreadable` of the Server's handler, the enrolment refusals in `Fleet::enrol` and the download guard `admit_download` in `crates/fleet-server/src/transport.rs`, every `Unavailable` reply in `crates/fleet-server/src/fleet.rs`, the `[agent_rate_limit]` section of `server.toml` and its startup warning, the `agent_rate.throttled` audit event, every outbound connection the Server opens, and every document that tells an operator which certificate the Operator plane serves or how a browser or `opamp-fleetctl` trusts it; Admission on `/v1/opamp`, the package download route and `/v1/gateway/revocations` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential and guard in `crates/fleet-server/src/credentials.rs` and `api.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the WebSocket session loop and the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the `/api/v1/revocations` route, the reading of a CSR in `crates/fleet-server/src/ca.rs` and its handling in `crates/fleet-server/src/fleet.rs`, the Client's identity, CSR and renewal in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity it presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, the Server's `hash-credential` and `pki status` commands in `crates/fleet-server/src/main.rs`, the `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` and every PKCS#11 adapter beside the local CA in `crates/fleet-server/src/pkcs11.rs` and `crates/fleet-core/src/pkcs11.rs`, the signing of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the `[pkcs11]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `pki init`, `pki token-init` and `pki bootstrap-ca` commands in `crates/fleet-tools/src/pki.rs`, the `cryptoki` dependency of the Server and of `crates/fleet-tools` in `Cargo.toml` and `deny.toml`, SoftHSM2 with its `softhsm2.conf` and token directory in the Dev Container and on the CI runner, `docs/ARCHITECTURE.md`, and every document that tells an operator where the CA keys live; the Operator plane's guard and its `401` in `crates/fleet-server/src/api.rs`, the token validation and the issuer's key cache beside it, the actor of every Operator-plane audit entry, the sign-in of the bundled UI under `crates/fleet-server/static/`, the Operator plane's Content Security Policy, the `[rest.auth]` and `[rest.auth.oidc]` sections of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `jsonwebtoken` dependency in `Cargo.toml` and `deny.toml`, the outbound connection to the issuer, and every document that tells an operator how to sign in
+- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, the reconnect delays in `crates/opamp/src/client/backoff.rs` and `crates/opamp/src/client/ws.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the `rustls` features in `Cargo.toml`, the `listen`, `max_connections`, `max_new_connections_per_sec`, `[rest]`, `[tls]` and `[rest.tls]` keys of `server.toml` and their parsing and startup checks in `crates/fleet-server/src/config.rs`, the certificates `server pki status` lists and the running Server watches in `crates/fleet-server/src/pki.rs`, `config/server.toml`, the message limit in `crates/fleet-server/src/agent_rate.rs`, `on_message` and `on_unreadable` of the Server's handler, the enrolment refusals in `Fleet::enrol` and the download guard `admit_download` in `crates/fleet-server/src/transport.rs`, every `Unavailable` reply in `crates/fleet-server/src/fleet.rs`, the `[agent_rate_limit]` section of `server.toml` and its startup warning, the `agent_rate.throttled` audit event, every outbound connection the Server opens, and every document that tells an operator which certificate the Operator plane serves or how a browser or `opamp-fleetctl` trusts it; admission on `/v1/opamp`, the package download route and `/v1/gateway/revocations` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential and guard in `crates/fleet-server/src/credentials.rs` and `api.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the WebSocket session loop and the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the `/api/v1/revocations` route, the reading of a CSR in `crates/fleet-server/src/ca.rs` and its handling in `crates/fleet-server/src/fleet.rs`, the Client's identity, CSR and renewal in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity it presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, the Server's `hash-credential` and `pki status` commands in `crates/fleet-server/src/main.rs`, the `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` and every PKCS#11 adapter beside the local CA in `crates/fleet-server/src/pkcs11.rs` and `crates/fleet-core/src/pkcs11.rs`, the signing of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the `[pkcs11]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, the `pki init`, `pki token-init` and `pki bootstrap-ca` commands in `crates/fleet-tools/src/pki.rs`, the `cryptoki` dependency of the Server and of `crates/fleet-tools` in `Cargo.toml` and `deny.toml`, SoftHSM2 with its `softhsm2.conf` and token directory in the Dev Container and on the CI runner, `docs/ARCHITECTURE.md`, and every document that tells an operator where the CA keys live; the Operator plane's guard and its `401` in `crates/fleet-server/src/api.rs`, the token validation and the issuer's key cache beside it, the actor of every Operator-plane audit entry, the sign-in of the bundled UI under `crates/fleet-server/static/`, the Operator plane's Content Security Policy, the `[rest.auth.oidc]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, the `jsonwebtoken` dependency in `Cargo.toml` and `deny.toml`, the outbound connection to the issuer, and every document that tells an operator how to sign in
 - **Supersedes:** [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md), [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
 
 ## Context
@@ -171,7 +171,9 @@ input be bounded, and an admitted peer's message is still input from the network
 Forces that shape the rate limit:
 
 - **The host is the unit admission knows.** A certificate names the host it was issued to as
-  `urn:opamp-fleet:host:<id>` (clause 41, the host a certificate names). `instance_uid` is
+  `urn:opamp-fleet:host:<id>`
+  ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+  clause 11). `instance_uid` is
   self-asserted (clause 41), so a limit keyed on it alone binds nothing: a peer chooses a new uid
   for each message. A certificate an operator provisioned outside the CSR flow names no host until
   it is first renewed. It is still one certificate, told apart by its issuer and serial (`CertId` in
@@ -194,8 +196,11 @@ Forces that shape the rate limit:
   - *"The minimum recommended retry interval is 30 seconds."*
   - This Server answers `Unavailable` with `retry_info` of 30 s (`RETRY_AFTER` in
     [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)) in four places besides the rate limit:
-    at the Agent-record ceiling, when the enrolment queue is full, when no enrolment window is
-    open (clause 38), and when the audit record holds back a CSR
+    at the Agent-record ceiling (clause 19 and
+    [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)
+    clause 2), when the enrolment queue is full or no enrolment window is open
+    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+    clause 9), and when the audit record holds back a CSR
     ([ADR-0028](0028-the-audit-record.md)).
 - **The Client honours `Unavailable` on both transports.**
   [`opamp::client::protocol`](../../crates/opamp/src/client/protocol.rs) turns it into a wait,
@@ -214,7 +219,8 @@ Forces that shape the rate limit:
   [`pool.rs`](../../crates/fleet-agent/src/gateway/pool.rs)). An `Unavailable` reply built
   without an `instance_uid` reaches no Agent, and the Client never waits as told.
 - **A host speaks for at most 256 Agents**
-  ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+  ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+  clause 11),
   and after a reconnect the Client sends one
   full report for each of them. At the Baseline's 30 s heartbeat or poll, 256 Agents send about 8.5
   messages a second.
@@ -248,7 +254,7 @@ in constant time.
 G-17 asks that every connection a Client opens to the Server be TLS 1.3 with a client certificate in
 its handshake, that the Server admit an Agent only over an unrevoked certificate of the fleet's
 client CA, and that a certificate speak only for the Agents of its own host. TLS
-(clauses 1–29) protects the channel and authenticates
+(clause 5) protects the channel and authenticates
 nobody. The Baseline treats authentication as transport-level: methods MAY be used and `401` MUST be
 returned on failure. Its CSR flow — a regular TLS connection, a keypair and CSR generated by the
 Agent, a certificate issued by the Server as a local CA or by a CA it proxies to, `BadRequest` when
@@ -592,7 +598,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     | Key | Default | Rule |
     |---|---|---|
     | `messages_per_sec` | `10` | Tokens added to a host's or an Agent's bucket per second, continuously. `0` is refused at startup with a message naming the key. |
-    | `burst` | `300` | That bucket's capacity, enough for one full report from each of the 256 Agents a host may speak for (ADR-0027) after a reconnect. A new bucket starts full. `0` is refused at startup with a message naming the key. |
+    | `burst` | `300` | That bucket's capacity, enough for one full report from each of the 256 Agents a host may speak for (ADR-0027 clause 11) after a reconnect. A new bucket starts full. `0` is refused at startup with a message naming the key. |
     | `gateway_messages_per_sec` | `500` | Tokens added per second to the aggregate bucket of a host marked as a Gateway. `0` is refused at startup with a message naming the key. |
     | `gateway_burst` | `10000` | The aggregate bucket's capacity: one full report from each Agent at the default `max_carried_agents` (ADR-0016). `0` is refused at startup with a message naming the key. |
 
@@ -656,13 +662,15 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 27. **Every `Unavailable` reply carries the `instance_uid` of the message it answers.** The Client
     and a Gateway route replies by that field alone and drop a reply without it. The throttled
     reply of clause 25 therefore names the Agent that sent the message, and only that Agent. The
-    other `Unavailable` replies carry it too, within
-    clause 41 and
-    [ADR-0028](0028-the-audit-record.md).
-    Those replies are:
-    - the Agent-record ceiling in `fleet.rs`;
-    - a CSR held back for its audit record;
-    - the full enrolment queue and the closed enrolment window in `Fleet::enrol`.
+    other `Unavailable` replies carry it too. Those replies are:
+    - the Agent-record ceiling in `fleet.rs` (clause 19 and
+      [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)
+      clause 2);
+    - a CSR held back for its audit record
+      ([ADR-0028](0028-the-audit-record.md));
+    - the full enrolment queue and the closed enrolment window in `Fleet::enrol`
+      ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+      clause 9).
 
     An undecodable message has no `instance_uid`, so its throttled reply carries none, and no Agent
     receives it.
@@ -1108,14 +1116,14 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 
 **Out of scope:**
 
-- Where the package download route is served and what it requires
-  ([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)), and which hosts a Client downloads from
-  (ADR-0039).
+- Where the package download route is served and which hosts a Client downloads from
+  ([ADR-0039](0039-a-32-bit-arm-build-is-spelled-arm32.md)); the certificate it requires is clause
+  47's.
 - Connection settings and the heartbeat offer
   ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)).
 - Which bucket a message or a download is counted in
   ([ADR-0016](0016-client-modes-and-the-gateway.md)).
-- The rate of admission attempts.
+- The rate of successful admission attempts; repeated failures are throttled by clause 48.
 - Where the Client's own telemetry goes ([ADR-0017](0017-what-an-agent-reports-about-itself.md)).
 - Response compression on plain HTTP.
 - A connection cap on the Client's own listeners, the Gateway endpoint and the Supervisor
