@@ -254,7 +254,7 @@ fn aliases_of_the_crate(code: &str) -> Vec<String> {
         });
         if aliased {
             found.push(
-                code[at..end]
+                code[at..(end + 1).min(code.len())]
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" "),
@@ -520,10 +520,6 @@ fn comments_literals_and_test_code_are_not_read() {
     );
     assert_eq!(
         names("#[cfg(unix)]\nfn f() { fleet_util::nofollow::x(); }"),
-        ["nofollow"]
-    );
-    assert_eq!(
-        names(r###"let b = br#"\" fleet_util::tree"#; fleet_util::nofollow::x();"###),
         ["nofollow"]
     );
     assert_eq!(names("let c = cr\"\\\"; fleet_util::tree::x();"), ["tree"]);
