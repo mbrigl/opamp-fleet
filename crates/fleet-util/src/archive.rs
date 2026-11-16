@@ -2314,7 +2314,7 @@ mod tests {
         assert_eq!(mode("bin/helper"), 0o755);
     }
 
-    // ── Zip (ADR-0039 clause 62) ──────────────────────────────────────────────────────────
+    // ── The entry points ──────────────────────────────────────────────────────────────────
 
     /// The two entry points open every container by what `detect` finds, the key reaching an
     /// encrypted `.7z`, and refuse the program itself as no archive.
@@ -2357,6 +2357,8 @@ mod tests {
             extract_tree(&raw, Path::new("agent"), &[], dir.path(), None).expect_err("no archive");
         assert!(refused.contains("not an archive"), "{refused}");
     }
+
+    // ── Zip (ADR-0039 clause 62) ──────────────────────────────────────────────────────────
 
     /// Builds a `.zip` holding `members` — (path inside the archive, contents). A name ending in
     /// `/` becomes a directory entry, the way zip spells one.
