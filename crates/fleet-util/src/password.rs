@@ -7,8 +7,8 @@ use std::path::Path;
 /// clause 18). The file is read once and left as it is: the administrator's path, read as
 /// [`crate::nofollow::read_privileged`] reads one with `roots` as the service's account's, and a
 /// file of more than 4 KiB is refused (ADR-0042 clause 11). `flag` is the option that named it,
-/// such as the Client's `--bootstrap-password-file`, for the error. The file's bytes and the password are held in
-/// buffers wiped when they are dropped (ADR-0040).
+/// such as the Client's `--bootstrap-password-file`, for the error. The file's bytes and the
+/// password are held in buffers wiped when they are dropped (ADR-0040).
 ///
 /// # Errors
 /// Returns an error naming the flag when the file cannot be read or its first line is empty.
