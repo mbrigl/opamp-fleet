@@ -177,11 +177,11 @@ tokio-postgres = { version = "0.7.18", default-features = false, features = ["ru
 deadpool-postgres = { version = "0.14.2", default-features = false, features = ["rt_tokio_1"] }
 tokio-postgres-rustls = { version = "0.14.0", default-features = false, features = ["ring"] }
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
-axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
 # The hyper timer the HTTP/1 header-read timeout needs to exist at all (ADR-0012): hyper defaults
-# that timeout to 30 seconds but resolves it to *nothing* while no `Timer` is installed, and
-# neither axum nor axum-server installs one. `tokio` is the only feature asked for — it is what
-# `rt::TokioTimer` sits behind. The crate is already in the tree as axum's own dependency, so this
+# that timeout to 30 seconds but resolves it to *nothing* while no `Timer` is installed; axum
+# installs none, axum-server none before 0.9, and the listener installs its own either way. `tokio`
+# is the only feature asked for — it is what `rt::TokioTimer` sits behind. The crate is already in the tree as axum's own dependency, so this
 # adds an entry to a manifest and no code to either binary.
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 # The upgrade `opamp` takes a WebSocket over with, so it reads the frames itself (ADR-0041). Already
