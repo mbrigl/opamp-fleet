@@ -5,9 +5,10 @@
 //! Every other limit an endpoint enforces starts at a request. A peer that completes the TCP
 //! connection, sends a request line and falls silent reaches none of them, and would hold a task and
 //! hyper's read buffer for as long as it likes. hyper defaults its HTTP/1 `header_read_timeout` to
-//! 30 seconds, but the default is inert while no `Timer` is installed, and neither `axum::serve`
-//! nor `axum_server` installs one. Configuring the timeout without a timer is worse: hyper panics.
-//! So [`Listener::serve`] installs both, and every OpAMP listener goes through it.
+//! 30 seconds, but the default is inert while no `Timer` is installed: `axum::serve` installs none,
+//! and `axum_server` 0.9 installs one but turns the timeout off. Configuring the timeout without a
+//! timer is worse: hyper panics. So [`Listener::serve`] sets both itself, resting on no
+//! dependency's default, and every OpAMP listener goes through it.
 //!
 //! The bound is on **connection setup**, not on a request. A WebSocket session is long-lived and a
 //! package download is as large as its artifact; a request timeout would break exactly those and
@@ -629,7 +630,7 @@ struct Tls {
 }
 
 impl Accept<TcpStream, Router> for Tls {
-    type Stream = <RustlsAcceptor as Accept<Counted, Router>>::Stream;
+    type Stream = <RustlsAcceptor as Accept<Counted, ()>>::Stream;
     type Service = Router;
     type Future = Pin<Box<dyn Future<Output = io::Result<(Self::Stream, Router)>> + Send>>;
 
@@ -648,7 +649,10 @@ impl Accept<TcpStream, Router> for Tls {
         let pace = self.slots.pace();
         Box::pin(async move {
             let stream = counted.ok_or_else(full)?;
-            let (stream, service) = inner.accept(stream, service).await?;
+            // The acceptor completes the handshake alone: what it would wrap the service in
+            // (`TlsService`, axum-server 0.9) hands the router no extensions of this connection, so
+            // it wraps nothing, and the router is the one chosen above.
+            let (stream, _) = inner.accept(stream, ()).await?;
             // What is here was verified against the client CA: rustls completed the handshake, and
             // a certificate it could not chain never gets this far.
             let certificate = stream
