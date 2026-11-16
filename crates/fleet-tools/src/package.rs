@@ -623,8 +623,12 @@ mod tests {
 
         // The Client refuses the wrong key rather than installing something it could not read.
         let mut out = std::fs::File::create(dir.path().join("nope")).expect("create");
-        assert!(archive::extract(&artifact, "promtail", &mut out, Some("wrong")).is_err());
-        assert!(archive::extract(&artifact, "promtail", &mut out, None).is_err());
+        let wrong = archive::extract(&artifact, "promtail", &mut out, Some("wrong"))
+            .expect_err("the wrong key");
+        assert!(wrong.contains("archive_key is wrong"), "{wrong}");
+        let none =
+            archive::extract(&artifact, "promtail", &mut out, None).expect_err("no key at all");
+        assert!(none.contains("the archive is encrypted"), "{none}");
     }
 
     /// An operator who unpacks a published artifact by hand must get a file that runs — the release
@@ -710,10 +714,9 @@ mod tests {
         );
         // And the file name it was built from is *not* what the archive holds.
         let mut out = std::fs::File::create(dir.path().join("nope")).expect("create");
-        assert!(
-            archive::extract(&artifact, "promtail-3.0.0-linux-amd64", &mut out, None).is_err(),
-            "only the configured member name is in the archive"
-        );
+        let missing = archive::extract(&artifact, "promtail-3.0.0-linux-amd64", &mut out, None)
+            .expect_err("only the configured member name is in the archive");
+        assert!(missing.contains("holds no member named"), "{missing}");
     }
 
     /// Packing the same program twice must give the same bytes. A hash decides whether a package
