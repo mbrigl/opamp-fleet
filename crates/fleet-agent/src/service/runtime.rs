@@ -570,10 +570,12 @@ fn heal_torn_pointer() {
 /// Returns an error when the database names no account for `uid`, or cannot be read: the Client
 /// does not start rather than share its files with a group it cannot name.
 #[cfg(unix)]
-fn process_account_group(uid: &u32) -> Result<crate::storage::ProcessAccountGroup, String> {
+fn process_account_group(
+    uid: &u32,
+) -> Result<crate::supervisor::ports::ProcessAccountGroup, String> {
     let uid = *uid;
     match crate::service::run_as::account_of(uid) {
-        Ok(Some(account)) => Ok(crate::storage::ProcessAccountGroup(account.gid)),
+        Ok(Some(account)) => Ok(crate::supervisor::ports::ProcessAccountGroup(account.gid)),
         Ok(None) => Err(format!(
             "the process account (uid {uid}) the registration names does not exist; create it, or \
              drop it with `service install --no-process-account`"
@@ -592,10 +594,10 @@ fn process_account_group(uid: &u32) -> Result<crate::storage::ProcessAccountGrou
 #[cfg(windows)]
 fn process_account_group(
     sid: &crate::win32::Sid,
-) -> Result<crate::storage::ProcessAccountGroup, String> {
+) -> Result<crate::supervisor::ports::ProcessAccountGroup, String> {
     // Once per run, for a value every Supervisor copies.
     let sid: &'static str = Box::leak(sid.as_str().to_string().into_boxed_str());
-    Ok(crate::storage::ProcessAccountGroup(sid))
+    Ok(crate::supervisor::ports::ProcessAccountGroup(sid))
 }
 
 /// What resolves once the second service tells this Client that a self-update left it behind.

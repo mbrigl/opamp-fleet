@@ -512,17 +512,14 @@ mod tests {
         let dir = archive.parent().expect("a parent");
         let out_path = dir.join(format!("unpacked-{member}"));
         let mut out = std::fs::File::create(&out_path).expect("create");
-        match archive::detect(archive).expect("detect") {
-            archive::Kind::TarGz => {
-                archive::extract_tar_gz(archive, member, &mut out).expect("extract tar.gz")
-            }
-            archive::Kind::SevenZ => {
-                archive::extract_7z(archive, member, &mut out, key).expect("extract 7z")
-            }
-            archive::Kind::Raw | archive::Kind::Zip => {
-                panic!("the packer wrote something it never produces (a bare program or a zip)")
-            }
-        };
+        assert!(
+            matches!(
+                archive::detect(archive).expect("detect"),
+                archive::Kind::TarGz | archive::Kind::SevenZ
+            ),
+            "the packer wrote something it never produces (a bare program or a zip)"
+        );
+        archive::extract(archive, member, &mut out, key).expect("extract");
         drop(out);
         std::fs::read(&out_path).expect("read the unpacked member")
     }
@@ -626,8 +623,8 @@ mod tests {
 
         // The Client refuses the wrong key rather than installing something it could not read.
         let mut out = std::fs::File::create(dir.path().join("nope")).expect("create");
-        assert!(archive::extract_7z(&artifact, "promtail", &mut out, Some("wrong")).is_err());
-        assert!(archive::extract_7z(&artifact, "promtail", &mut out, None).is_err());
+        assert!(archive::extract(&artifact, "promtail", &mut out, Some("wrong")).is_err());
+        assert!(archive::extract(&artifact, "promtail", &mut out, None).is_err());
     }
 
     /// An operator who unpacks a published artifact by hand must get a file that runs — the release
@@ -693,7 +690,7 @@ mod tests {
         // The tree path is the one that validates every member before writing anything, and a
         // member whose mode said `S_IFLNK` would refuse the whole archive there.
         let dest = dir.path().join("tree");
-        archive::extract_tree_7z(&artifact, Path::new("client"), &dest, None)
+        archive::extract_tree(&artifact, Path::new("client"), &[], &dest, None)
             .expect("no link was seen");
     }
 
@@ -714,7 +711,7 @@ mod tests {
         // And the file name it was built from is *not* what the archive holds.
         let mut out = std::fs::File::create(dir.path().join("nope")).expect("create");
         assert!(
-            archive::extract_tar_gz(&artifact, "promtail-3.0.0-linux-amd64", &mut out).is_err(),
+            archive::extract(&artifact, "promtail-3.0.0-linux-amd64", &mut out, None).is_err(),
             "only the configured member name is in the archive"
         );
     }

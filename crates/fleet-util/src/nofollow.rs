@@ -477,25 +477,53 @@ fn refused_link(path: &Path) -> io::Error {
     ))
 }
 
+/// The `*at` system calls this module and the Client share on Unix, each wrapped once here: a
+/// directory held by its handle, and an entry in it named and never followed where the flags say
+/// so. The rest of this module and the Client's state, its reconfiguration and its service manager
+/// work by directory handle through these (ADR-0042 clauses 11 to 15).
 #[cfg(unix)]
-mod sys {
-    use std::ffi::{CString, OsStr};
-    use std::fs::File;
-    use std::io::{self, Write as _};
+pub mod at {
+    use std::ffi::CStr;
+    use std::io;
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::path::Path;
 
-    use super::{refused_link, HeldDir};
-
-    const DIRECTORY: libc::c_int =
+    /// A directory, opened as one and never through a link.
+    pub const DIRECTORY: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
-    fn c_name(name: &OsStr) -> io::Result<CString> {
-        CString::new(name.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+    /// `name` in `dir`, opened with `flags`; the last component never follows a link where
+    /// `flags` says `O_NOFOLLOW`.
+    pub fn open(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
+        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; no `O_CREAT`, so no mode.
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `openat` returned a new descriptor that nothing else owns.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
-    fn openat(dir: RawFd, name: &CString, flags: libc::c_int, mode: u32) -> io::Result<OwnedFd> {
+    /// The entry `name` in `dir` itself, a link as a link.
+    pub fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: a valid descriptor, a NUL-terminated name and room for one `stat`.
+        let rc = unsafe {
+            libc::fstatat(
+                dir,
+                name.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fstatat` succeeded and filled it.
+        Ok(unsafe { st.assume_init() })
+    }
+
+    /// `name` in `dir`, created with `flags`, which name `O_CREAT`, at `mode` before the umask.
+    pub fn create(dir: RawFd, name: &CStr, flags: libc::c_int, mode: u32) -> io::Result<OwnedFd> {
         // SAFETY: a descriptor or `AT_FDCWD`, a NUL-terminated name, and the mode `O_CREAT` reads.
         let fd = unsafe { libc::openat(dir, name.as_ptr(), flags, mode as libc::c_uint) };
         if fd < 0 {
@@ -503,6 +531,85 @@ mod sys {
         }
         // SAFETY: `openat` returned a new descriptor that nothing else owns.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Creates the directory `name` in `dir` at `mode` before the umask. A name that exists, a
+    /// link included, is `AlreadyExists`: `mkdirat` never follows a link at the name.
+    pub fn mkdir(dir: RawFd, name: &CStr, mode: u32) -> io::Result<()> {
+        // The mode is at most `0o7777`, which every `mode_t` holds.
+        #[allow(clippy::cast_possible_truncation)]
+        let mode = mode as libc::mode_t;
+        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name.
+        if unsafe { libc::mkdirat(dir, name.as_ptr(), mode) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Removes the entry `name` in `dir`; a link is removed as a link.
+    pub fn unlink(dir: RawFd, name: &CStr) -> io::Result<()> {
+        // SAFETY: a valid descriptor and a NUL-terminated name; without `AT_REMOVEDIR` a link is
+        // removed as a link.
+        if unsafe { libc::unlinkat(dir, name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Removes the empty directory `name` in `dir`.
+    pub fn rmdir(dir: RawFd, name: &CStr) -> io::Result<()> {
+        // SAFETY: a valid descriptor and a NUL-terminated name; only an empty directory goes.
+        if unsafe { libc::unlinkat(dir, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Renames `from` in `from_dir` to `to` in `to_dir`; neither name is followed.
+    pub fn rename(from_dir: RawFd, from: &CStr, to_dir: RawFd, to: &CStr) -> io::Result<()> {
+        // SAFETY: valid descriptors and two NUL-terminated names.
+        if unsafe { libc::renameat(from_dir, from.as_ptr(), to_dir, to.as_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Sets the mode of what `handle` holds.
+    pub fn fchmod(handle: &OwnedFd, mode: u32) -> io::Result<()> {
+        // The mode is at most `0o7777`, which every `mode_t` holds.
+        #[allow(clippy::cast_possible_truncation)]
+        let mode = mode as libc::mode_t;
+        // SAFETY: a valid descriptor.
+        if unsafe { libc::fchmod(handle.as_raw_fd(), mode) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Flushes what `handle` holds to the disk.
+    pub fn sync(handle: &OwnedFd) -> io::Result<()> {
+        // SAFETY: a valid descriptor.
+        if unsafe { libc::fsync(handle.as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+mod sys {
+    use std::ffi::{CString, OsStr};
+    use std::fs::File;
+    use std::io::{self, Write as _};
+    use std::os::fd::{AsRawFd as _, RawFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::Path;
+
+    use super::at::{self, DIRECTORY};
+    use super::{refused_link, HeldDir};
+
+    fn c_name(name: &OsStr) -> io::Result<CString> {
+        CString::new(name.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
     }
 
     /// A link at the last component opened with `O_NOFOLLOW` reads as `ELOOP`.
@@ -514,35 +621,20 @@ mod sys {
         }
     }
 
+    /// Creates the directory, or finds it there: `mkdirat` never follows a link at the name, so one
+    /// there is `EEXIST`, and the open after it refuses it.
     fn mkdirat(dir: RawFd, name: &CString, mode: u32) -> io::Result<()> {
-        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name.
-        if unsafe { libc::mkdirat(dir, name.as_ptr(), mode as libc::mode_t) } == 0 {
-            return Ok(());
+        match at::mkdir(dir, name, mode) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+            _ => Ok(()),
         }
-        let e = io::Error::last_os_error();
-        // `mkdirat` never follows a link at the name: one there is `EEXIST`, and the open after it
-        // refuses it.
-        if e.kind() == io::ErrorKind::AlreadyExists {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    }
-
-    fn fchmod(fd: &OwnedFd, mode: u32) -> io::Result<()> {
-        // SAFETY: a valid descriptor.
-        if unsafe { libc::fchmod(fd.as_raw_fd(), mode as libc::mode_t) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
     }
 
     pub(super) fn open_root(path: &Path) -> io::Result<HeldDir> {
-        let fd = openat(
+        let fd = at::open(
             libc::AT_FDCWD,
             &c_name(path.as_os_str())?,
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            0,
         )?;
         Ok(HeldDir {
             path: path.to_path_buf(),
@@ -557,19 +649,18 @@ mod sys {
         mode: u32,
     ) -> io::Result<HeldDir> {
         let path = parent.join(name);
-        let parent_fd = openat(
+        let parent_fd = at::open(
             libc::AT_FDCWD,
             &c_name(parent.as_os_str())?,
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            0,
         )?;
         let name = c_name(name)?;
         if create {
             mkdirat(parent_fd.as_raw_fd(), &name, mode)?;
         }
-        let fd = openat(parent_fd.as_raw_fd(), &name, DIRECTORY, 0).map_err(|e| named(e, &path))?;
+        let fd = at::open(parent_fd.as_raw_fd(), &name, DIRECTORY).map_err(|e| named(e, &path))?;
         if create {
-            fchmod(&fd, mode)?;
+            at::fchmod(&fd, mode)?;
         }
         Ok(HeldDir { path, fd })
     }
@@ -578,7 +669,7 @@ mod sys {
         let path = held.path.join(name);
         let c = c_name(OsStr::new(name))?;
         mkdirat(held.fd.as_raw_fd(), &c, mode)?;
-        let fd = openat(held.fd.as_raw_fd(), &c, DIRECTORY, 0).map_err(|e| named(e, &path))?;
+        let fd = at::open(held.fd.as_raw_fd(), &c, DIRECTORY).map_err(|e| named(e, &path))?;
         Ok(HeldDir { path, fd })
     }
 
@@ -593,11 +684,10 @@ mod sys {
     fn open_regular(held: &HeldDir, name: &str, access: libc::c_int) -> io::Result<File> {
         let path = held.path.join(name);
         // `O_NONBLOCK`: a FIFO at the name must not stall a privileged run; a regular file ignores it.
-        let fd = openat(
+        let fd = at::open(
             held.fd.as_raw_fd(),
             &c_name(OsStr::new(name))?,
             access | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-            0,
         )
         .map_err(|e| named(e, &path))?;
         let file = File::from(fd);
@@ -621,11 +711,11 @@ mod sys {
         let dir = held.fd.as_raw_fd();
         let temporary = c_name(OsStr::new(temporary))?;
         // A leftover from an interrupted run would make `O_EXCL` refuse; a link there goes as a link.
-        match unlinkat(dir, &temporary) {
+        match at::unlink(dir, &temporary) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
             _ => {}
         }
-        let written = openat(
+        let written = at::create(
             dir,
             &temporary,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
@@ -633,7 +723,7 @@ mod sys {
         )
         .and_then(|fd| {
             // The umask may have narrowed the mode the open asked for.
-            fchmod(&fd, mode)?;
+            at::fchmod(&fd, mode)?;
             if let Some((uid, gid)) = owner {
                 std::os::unix::fs::fchown(&fd, Some(uid), Some(gid))?;
             }
@@ -641,9 +731,9 @@ mod sys {
             file.write_all(contents)?;
             file.sync_all()
         })
-        .and_then(|()| renameat(dir, &temporary, &c_name(OsStr::new(name))?));
+        .and_then(|()| at::rename(dir, &temporary, dir, &c_name(OsStr::new(name))?));
         if written.is_err() {
-            let _ = unlinkat(dir, &temporary);
+            let _ = at::unlink(dir, &temporary);
         }
         written
     }
@@ -657,58 +747,39 @@ mod sys {
         let dir = held.fd.as_raw_fd();
         let c = c_name(OsStr::new(name))?;
         // `O_EXCL` fails on any name that exists, a link included, and never follows one.
-        let fd = openat(
+        let fd = at::create(
             dir,
             &c,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             mode,
         )?;
-        let written = fchmod(&fd, mode).and_then(|()| {
+        let written = at::fchmod(&fd, mode).and_then(|()| {
             let mut file = File::from(fd);
             file.write_all(contents)?;
             file.sync_all()
         });
         if written.is_err() {
-            let _ = unlinkat(dir, &c);
+            let _ = at::unlink(dir, &c);
         }
         written
     }
 
-    fn unlinkat(dir: RawFd, name: &CString) -> io::Result<()> {
-        // SAFETY: a valid descriptor and a NUL-terminated name; without `AT_REMOVEDIR` a link is
-        // removed as a link.
-        if unsafe { libc::unlinkat(dir, name.as_ptr(), 0) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    fn renameat(dir: RawFd, from: &CString, to: &CString) -> io::Result<()> {
-        // SAFETY: a valid descriptor and two NUL-terminated names; neither is followed.
-        if unsafe { libc::renameat(dir, from.as_ptr(), dir, to.as_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
     pub(super) fn rename(held: &HeldDir, from: &str, to: &str) -> io::Result<()> {
-        renameat(
-            held.fd.as_raw_fd(),
+        let dir = held.fd.as_raw_fd();
+        at::rename(
+            dir,
             &c_name(OsStr::new(from))?,
+            dir,
             &c_name(OsStr::new(to))?,
         )
     }
 
     pub(super) fn remove(held: &HeldDir, name: &str) -> io::Result<()> {
-        unlinkat(held.fd.as_raw_fd(), &c_name(OsStr::new(name))?)
+        at::unlink(held.fd.as_raw_fd(), &c_name(OsStr::new(name))?)
     }
 
     pub(super) fn sync(held: &HeldDir) -> io::Result<()> {
-        // SAFETY: a valid descriptor.
-        if unsafe { libc::fsync(held.fd.as_raw_fd()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        at::sync(&held.fd)
     }
 }
 

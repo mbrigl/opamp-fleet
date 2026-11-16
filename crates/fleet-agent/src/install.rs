@@ -101,18 +101,10 @@ pub fn write_program(
             std::io::copy(&mut source, &mut out)
                 .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
         }
-        kind @ (fleet_util::archive::Kind::TarGz
+        fleet_util::archive::Kind::TarGz
         | fleet_util::archive::Kind::SevenZ
-        | fleet_util::archive::Kind::Zip) => {
-            let written = match kind {
-                fleet_util::archive::Kind::SevenZ => {
-                    fleet_util::archive::extract_7z(artifact, member, &mut out, archive_key)?
-                }
-                fleet_util::archive::Kind::Zip => {
-                    fleet_util::archive::extract_zip(artifact, member, &mut out)?
-                }
-                _ => fleet_util::archive::extract_tar_gz(artifact, member, &mut out)?,
-            };
+        | fleet_util::archive::Kind::Zip => {
+            let written = fleet_util::archive::extract(artifact, member, &mut out, archive_key)?;
             info!(archive = %artifact.display(), member = %member, bytes = written, "unpacked the program from the archive");
         }
     }

@@ -19,9 +19,9 @@ of them, so none is dead by mistake:
 - **The kept-link chain** (clause 57 of
   ADR-0039). `KindDefaults::tree_links`
   (`crates/fleet-agent/src/supervisor/ports.rs`, near line 423) is `&[]` for every kind. The empty
-  list still runs through `install_target`, `InstallTarget::Tree`, `stage_tree` and
-  `archive::extract_tree_tar_gz`'s kept-link checks for every tree package. `KeptLink` values are
-  made only in tests.
+  list still runs through `install_target`, `InstallTarget::Tree`, `stage_tree` and the kept-link
+  checks `archive::extract_tree` runs on every `.tar.gz` tree package. `KeptLink` values are made
+  only in tests.
 - **`gpgv` and the repack** (ADR-0043 clauses 27 to 29). `crates/fleet-tools/src/gpgv.rs` carries
   `#[allow(dead_code)]` throughout, and no command calls it. In `crates/fleet-tools/src/fetch.rs`,
   `pack_tree`, `write_members`, `Member` and `collect_members` (near lines 1037 to 1180) carry it

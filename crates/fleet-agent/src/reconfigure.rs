@@ -331,22 +331,25 @@ pub(crate) fn reap_tombstones(
 fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
     use crate::storage::handle;
     use std::os::fd::AsRawFd as _;
-    let at = match handle::open_beneath(root, root, handle::DIRECTORY, None, handle::own()) {
+    let at = match handle::open_beneath(
+        root,
+        root,
+        fleet_util::nofollow::at::DIRECTORY,
+        None,
+        handle::own(),
+    ) {
         Ok(at) => at,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Aside::Nothing),
         Err(e) => return Err(e),
     };
     let entry = std::ffi::CString::new(name)?;
-    let st = match handle::lstat_at(at.as_raw_fd(), &entry) {
+    let st = match fleet_util::nofollow::at::lstat_at(at.as_raw_fd(), &entry) {
         Ok(st) => st,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Aside::Nothing),
         Err(e) => return Err(e),
     };
     if handle::is(&st, libc::S_IFLNK) {
-        // SAFETY: a valid descriptor and a NUL-terminated name.
-        if unsafe { libc::unlinkat(at.as_raw_fd(), entry.as_ptr(), 0) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        fleet_util::nofollow::at::unlink(at.as_raw_fd(), &entry)?;
         return Ok(Aside::Link);
     }
     if !handle::is(&st, libc::S_IFDIR) {
@@ -358,23 +361,12 @@ fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
     loop {
         let tomb = tombstone_name(name);
         let tomb_entry = std::ffi::CString::new(tomb.as_str())?;
-        match handle::lstat_at(at.as_raw_fd(), &tomb_entry) {
+        match fleet_util::nofollow::at::lstat_at(at.as_raw_fd(), &tomb_entry) {
             Ok(_) => continue,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
-        // SAFETY: valid descriptors and NUL-terminated names.
-        let rc = unsafe {
-            libc::renameat(
-                at.as_raw_fd(),
-                entry.as_ptr(),
-                at.as_raw_fd(),
-                tomb_entry.as_ptr(),
-            )
-        };
-        if rc != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        fleet_util::nofollow::at::rename(at.as_raw_fd(), &entry, at.as_raw_fd(), &tomb_entry)?;
         return Ok(Aside::Moved(tomb));
     }
 }
@@ -471,7 +463,13 @@ fn remove_tomb(path: &Path) -> std::io::Result<()> {
     let (Some(root), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
     };
-    let at = handle::open_beneath(root, root, handle::DIRECTORY, None, handle::own())?;
+    let at = handle::open_beneath(
+        root,
+        root,
+        fleet_util::nofollow::at::DIRECTORY,
+        None,
+        handle::own(),
+    )?;
     handle::remove_tree_at(&at, &std::ffi::CString::new(name.as_bytes())?, path)
 }
 
