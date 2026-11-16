@@ -3,9 +3,9 @@
 //! `fleet-util` holds what the Client and the operator tool share and the Server does not use;
 //! `fleet-core` holds what the Server shares with either. This test reads the code under `src/` of
 //! the Server, the Client and the tool, without comments, string and character literals, and code
-//! under a `cfg` that names `test`, and decides from the module paths each names where every module
-//! of the two crates belongs. It also refuses a `pub use` of a `fleet_util::` item and an alias of
-//! the crate, so an item has one path in use; a manifest of the Server that names `fleet-util`; and
+//! under a `cfg` that cannot hold without `test`, and decides from the module paths each names
+//! where every module of the two crates belongs. It also refuses a `pub use` of a `fleet_util::`
+//! item and an alias of the crate, `self as` in a group included, so an item has one path in use; a manifest of the Server that names `fleet-util`; and
 //! a manifest of `fleet-util` that names a workspace crate but `fleet-core`. The tests of a crate
 //! are not read: the tool's end-to-end tests run the Client.
 
@@ -44,7 +44,11 @@ fn without_literals(text: &str) -> String {
     while i < chars.len() {
         let c = chars[i];
         let next = chars.get(i + 1).copied();
-        let after_ident = i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_');
+        let ident_char = |k: usize| chars[k].is_alphanumeric() || chars[k] == '_';
+        let after_ident = i > 0 && ident_char(i - 1);
+        // A byte or C string prefix, b or c, may stand before the r of a raw string: br"…", cr"…".
+        let after_prefix =
+            i > 0 && matches!(chars[i - 1], 'b' | 'c') && !(i > 1 && ident_char(i - 2));
         let end = if c == '/' && next == Some('/') {
             chars[i..]
                 .iter()
@@ -68,8 +72,9 @@ fn without_literals(text: &str) -> String {
                 }
             }
             j
-        } else if c == 'r' && !after_ident && matches!(next, Some('"' | '#')) {
-            // A raw string, r"…" or r#"…"#, closed by a quote and as many hashes as opened it.
+        } else if c == 'r' && (!after_ident || after_prefix) && matches!(next, Some('"' | '#')) {
+            // A raw string, r"…", r#"…"#, br"…" or cr"…", closed by a quote and as many hashes as
+            // opened it.
             let hashes = chars[i + 1..].iter().take_while(|&&x| x == '#').count();
             let open = i + 1 + hashes;
             if chars.get(open) == Some(&'"') {
@@ -113,8 +118,9 @@ fn without_literals(text: &str) -> String {
     out
 }
 
-/// `code` with every item under a `#[cfg(…)]` that names `test` blanked, up to the end of its
-/// braced body or its `;`.
+/// `code` with every item under a `#[cfg(…)]` that cannot hold without `test` blanked, up to the
+/// end of its braced body or its `;`: `cfg(test)` and `cfg(all(test, unix))` are test code,
+/// `cfg(not(test))` and `cfg(any(test, unix))` are not.
 fn without_test_items(code: &str) -> String {
     let mut out = code.to_string();
     let mut from = 0;
@@ -123,10 +129,8 @@ fn without_test_items(code: &str) -> String {
         let Some(close) = out[at..].find(")]").map(|c| at + c + 2) else {
             break;
         };
-        let names_test = out[at..close]
-            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .any(|word| word == "test");
-        if !names_test {
+        let predicate = &out[at + "#[cfg(".len()..close - ")]".len()];
+        if holds_without_test(predicate) != Some(false) {
             from = close;
             continue;
         }
@@ -157,6 +161,102 @@ fn without_test_items(code: &str) -> String {
         from = end;
     }
     out
+}
+
+/// Whether the `cfg` predicate `text` holds in a build without `test`: `Some(false)` where it
+/// cannot, `None` where it depends on what else the build sets, such as `unix` or a feature.
+fn holds_without_test(text: &str) -> Option<bool> {
+    let (value, _) = predicate(text.trim());
+    value
+}
+
+/// The value of the predicate `text` starts with, and the text after it.
+fn predicate(text: &str) -> (Option<bool>, &str) {
+    let text = text.trim_start();
+    let name_len = text
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(text.len());
+    let (name, rest) = text.split_at(name_len);
+    let rest = rest.trim_start();
+    if let Some(mut inner) = rest.strip_prefix('(') {
+        let mut values = Vec::new();
+        loop {
+            inner = inner.trim_start();
+            if let Some(after) = inner.strip_prefix(')') {
+                inner = after;
+                break;
+            }
+            if inner.is_empty() {
+                break;
+            }
+            let (value, after) = predicate(inner);
+            values.push(value);
+            inner = after.trim_start().strip_prefix(',').unwrap_or(after);
+        }
+        let value = match name {
+            "not" => values.first().copied().flatten().map(|v| !v),
+            "all" if values.contains(&Some(false)) => Some(false),
+            "all" if values.iter().all(|v| *v == Some(true)) => Some(true),
+            "any" if values.contains(&Some(true)) => Some(true),
+            "any" if values.iter().all(|v| *v == Some(false)) => Some(false),
+            _ => None,
+        };
+        return (value, inner);
+    }
+    if let Some(after) = rest.strip_prefix('=') {
+        // `key = "value"`; the literal is blanked to spaces by now, up to the next , or ).
+        let end = after.find([',', ')']).unwrap_or(after.len());
+        return (None, &after[end..]);
+    }
+    let value = (name == "test").then_some(false);
+    (value, rest)
+}
+
+/// What in `code` aliases the crate `fleet_util`, so that a path could name its items without
+/// `fleet_util::`: `fleet_util as …`, and `self as …` in a `fleet_util::{…}` group.
+fn aliases_of_the_crate(code: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (at, _) in code.match_indices("fleet_util as ") {
+        found.push(
+            code[at..]
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        );
+    }
+    for (at, group) in code.match_indices("fleet_util::{") {
+        let start = at + group.len();
+        let (mut depth, mut top, mut end) = (1, String::new(), code.len());
+        for (k, c) in code[start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + k;
+                        break;
+                    }
+                }
+                _ if depth == 1 => top.push(c),
+                _ => {}
+            }
+        }
+        let aliased = top.split(',').any(|item| {
+            let mut words = item.split_whitespace();
+            words.next() == Some("self") && words.next() == Some("as")
+        });
+        if aliased {
+            found.push(
+                code[at..=end.min(code.len() - 1)]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+    }
+    found
 }
 
 /// The code of every source file under `crates/<krate>/src/`, with the file it came from.
@@ -350,10 +450,10 @@ fn each_shared_module_sits_in_the_crate_its_users_choose() {
                 {
                     wrong.push(format!("{}: re-exports: {line}", file.display()));
                 }
-                // An alias would let a `pub use` name the crate's items by another path.
-                if line.contains("fleet_util as ") {
-                    wrong.push(format!("{}: aliases fleet_util: {line}", file.display()));
-                }
+            }
+            // An alias would let a `pub use` name the crate's items by another path.
+            for alias in aliases_of_the_crate(&code) {
+                wrong.push(format!("{}: aliases fleet_util: {alias}", file.display()));
             }
         }
     }
@@ -417,4 +517,40 @@ fn comments_literals_and_test_code_are_not_read() {
         names("#[cfg(unix)]\nfn f() { fleet_util::nofollow::x(); }"),
         ["nofollow"]
     );
+    assert!(names(r###"let b = br#"\" fleet_util::tree"#; let c = br"\";"###).is_empty());
+    assert_eq!(
+        names("let b = br\"\\\"; fleet_util::archive::x();"),
+        ["archive"]
+    );
+    assert_eq!(
+        names("#[cfg(not(test))]\nfn f() { fleet_util::nofollow::x(); }"),
+        ["nofollow"]
+    );
+    assert_eq!(
+        names("#[cfg(any(test, unix))]\nfn f() { fleet_util::tree::x(); }"),
+        ["tree"]
+    );
+    assert!(
+        names("#[cfg(all(unix, not(not(test))))]\nfn t() { fleet_util::tree::x(); }").is_empty()
+    );
+    assert_eq!(
+        names("#[cfg(all(unix, feature = \"x\"))]\nfn f() { fleet_util::archive::x(); }"),
+        ["archive"]
+    );
+}
+
+/// An alias of the crate is found whether it stands alone or as `self` in a group.
+#[test]
+fn an_alias_of_the_crate_is_found() {
+    assert_eq!(aliases_of_the_crate("use fleet_util as u;").len(), 1);
+    assert_eq!(
+        aliases_of_the_crate("use fleet_util::{self as u};").len(),
+        1
+    );
+    assert_eq!(
+        aliases_of_the_crate("use fleet_util::{\n    tree,\n    self as u,\n};").len(),
+        1
+    );
+    assert!(aliases_of_the_crate("use fleet_util::{self, tree};").is_empty());
+    assert!(aliases_of_the_crate("use fleet_util::{nofollow::{self as nf}, tree};").is_empty());
 }
