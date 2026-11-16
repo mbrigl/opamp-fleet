@@ -492,9 +492,17 @@ pub mod at {
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
     /// `name` in `dir`, opened with `flags`; the last component never follows a link where
-    /// `flags` says `O_NOFOLLOW`.
+    /// `flags` says `O_NOFOLLOW`. A flag that creates, `O_CREAT` or `O_TMPFILE`, is refused as
+    /// `InvalidInput`: `openat` would read a mode this call does not pass, which [`create`] does.
     pub fn open(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
-        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; no `O_CREAT`, so no mode.
+        if creates(flags) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a flag that creates needs a mode: at::create",
+            ));
+        }
+        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; no flag that creates, so
+        // no mode.
         let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
@@ -520,6 +528,15 @@ pub mod at {
         }
         // SAFETY: `fstatat` succeeded and filled it.
         Ok(unsafe { st.assume_init() })
+    }
+
+    /// Whether `flags` create a file, so that `openat` reads a mode.
+    fn creates(flags: libc::c_int) -> bool {
+        #[cfg(target_os = "linux")]
+        let tmpfile = flags & libc::O_TMPFILE == libc::O_TMPFILE;
+        #[cfg(not(target_os = "linux"))]
+        let tmpfile = false;
+        flags & libc::O_CREAT != 0 || tmpfile
     }
 
     /// `name` in `dir`, created with `flags`, which name `O_CREAT`, at `mode` before the umask.
@@ -945,6 +962,7 @@ mod sys {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::fd::AsRawFd as _;
 
     /// A link at the file's own name is refused for a path the account's file offered, and
     /// followed for the administrator's; a file over the bound is refused, naming the bound.
@@ -970,5 +988,31 @@ mod tests {
             over.contains("larger than") && over.contains("4 bytes"),
             "{over}"
         );
+    }
+    /// `at::open` passes no mode, so it refuses a flag that creates rather than let `openat` read
+    /// one; `at::create` is the call that does.
+    #[test]
+    fn a_flag_that_creates_is_refused_by_the_open_that_passes_no_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let held = at::open(
+            libc::AT_FDCWD,
+            &std::ffi::CString::new(dir.path().as_os_str().as_encoded_bytes()).expect("path"),
+            at::DIRECTORY,
+        )
+        .expect("the directory");
+        let refused = at::open(
+            held.as_raw_fd(),
+            c"new",
+            libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+        )
+        .expect_err("O_CREAT without a mode");
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        assert!(!dir.path().join("new").exists());
+        #[cfg(target_os = "linux")]
+        {
+            let refused = at::open(held.as_raw_fd(), c".", libc::O_RDWR | libc::O_TMPFILE)
+                .expect_err("O_TMPFILE without a mode");
+            assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        }
     }
 }
