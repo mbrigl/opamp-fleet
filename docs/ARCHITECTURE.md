@@ -66,7 +66,7 @@ The parts the system is made of, each with one responsibility, named in the voca
 [`GLOSSARY.md`](GLOSSARY.md). One level deep, deeper only where the size of a part earns it. The
 golden path and the test pattern an agent copies from are named here.
 
-Five crates in one workspace
+Six crates in one workspace
 ([ADR-0041](adr/0041-six-crates-on-tokio-and-axum.md)):
 
 - **`opamp`** — the OpAMP communication layer, publishable on its own
