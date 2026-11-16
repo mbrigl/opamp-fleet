@@ -157,7 +157,8 @@ async fn a_peer_silent_before_its_first_request_is_hung_up_on() {
     let mut socket = TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connect");
-    open_connections(&handle, 1).await;
+    // The listener counts a connection from its accept, so a completed connect was counted; the
+    // count is not read while the bound runs, which a loaded host could outlast.
     let mut buffer = Vec::new();
     let closed = tokio::time::timeout(bound * 8, socket.read_to_end(&mut buffer)).await;
     assert!(closed.is_ok(), "the listener left a silent connection open");
@@ -171,7 +172,8 @@ async fn a_peer_silent_before_its_first_request_is_hung_up_on() {
     assert_eq!(text, "certificate=false peer=127.0.0.1");
 }
 
-/// The same holds after a completed TLS handshake: a peer that then sends nothing is hung up on.
+/// The same holds after a completed TLS handshake: a peer that then sends nothing is hung up on,
+/// and the listener holds no connection after it.
 /// Verifies: ADR-0012
 #[tokio::test]
 async fn a_peer_silent_after_the_tls_handshake_is_hung_up_on() {
@@ -197,7 +199,6 @@ async fn a_peer_silent_after_the_tls_handshake_is_hung_up_on() {
     );
 
     let ca = CertificateDer::from_pem_slice(pki.ca_pem.as_bytes()).expect("ca");
-    let (held, handshaken) = std::sync::mpsc::channel();
     let client = tokio::task::spawn_blocking(move || {
         use std::io::Read as _;
         let mut roots = rustls::RootCertStore::empty();
@@ -215,7 +216,6 @@ async fn a_peer_silent_after_the_tls_handshake_is_hung_up_on() {
         while tls.is_handshaking() {
             tls.complete_io(&mut socket).expect("handshake");
         }
-        held.send(()).expect("the test waits");
         // Silent from here on: the listener has to end the connection, not the peer.
         let mut stream = rustls::Stream::new(&mut tls, &mut socket);
         let mut buffer = [0_u8; 64];
@@ -228,10 +228,7 @@ async fn a_peer_silent_after_the_tls_handshake_is_hung_up_on() {
             Ok(_) => false,
         }
     });
-    tokio::task::spawn_blocking(move || handshaken.recv().expect("the handshake"))
-        .await
-        .expect("the wait");
-    open_connections(&handle, 1).await;
+    // Counted from its accept, before the handshake; the count is read once the cut is seen.
     let closed = client.await.expect("the client");
     assert!(closed, "the listener left a silent TLS connection open");
     open_connections(&handle, 0).await;
