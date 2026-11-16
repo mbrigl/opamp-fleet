@@ -604,7 +604,7 @@ fn builder(
             let secret =
                 crate::config::read_secret_file("[blobs.s3] secret_access_key_file", file)?;
             // `object_store` takes the key as its own `String`: the copy is made at this call, and
-            // the one read is wiped when it is dropped (ADR-0014 clauses 3 and 4).
+            // the one read is wiped when it is dropped (ADR-0040 clauses 3 and 4).
             builder = builder
                 .with_access_key_id(key_id.clone())
                 .with_secret_access_key(secret.as_str());

@@ -18,10 +18,10 @@ use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 use crate::config::ClientConfig;
-use crate::nofollow::HeldDir;
 use crate::tls::{
     ISSUED_CERT_FILE, ISSUED_KEY_FILE, PENDING_CERT_FILE, PENDING_CSR_FILE, PENDING_KEY_FILE,
 };
+use fleet_util::nofollow::HeldDir;
 
 /// A certificate is renewed once it is this far through its validity — early enough that a Server
 /// that cannot sign for a while costs nothing, and that the attempt can fail twice before the
@@ -76,9 +76,9 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
         ));
     }
     // Whole or not at all, through a temporary name and a rename in the held directory, so a link
-    // the service's account put at either name is replaced rather than written through (ADR-0021).
+    // the service's account put at either name is replaced rather than written through (ADR-0042).
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0021 clause 21).
+    // may pass through (ADR-0042 clause 21).
     held(state_dir)?
         .write(PENDING_CERT_FILE, cert_pem, 0o600)
         .map_err(|e| format!("cannot store the issued certificate: {e}"))?;
@@ -86,7 +86,7 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
 }
 
 /// The state directory, held without following a link at its name: an install enrols as root in a
-/// directory that belongs to the service's account (ADR-0021).
+/// directory that belongs to the service's account (ADR-0042).
 fn held(state_dir: &Path) -> Result<HeldDir, String> {
     HeldDir::open(state_dir).map_err(|e| format!("cannot open {}: {e}", state_dir.display()))
 }
@@ -163,7 +163,8 @@ fn certifies(dir: &HeldDir, cert_pem: &[u8], key_name: &str) -> bool {
 pub fn pending_fingerprint(state_dir: &Path) -> Option<String> {
     use sha2::{Digest, Sha256};
     let pem =
-        crate::nofollow::read(&state_dir.join(PENDING_KEY_FILE), crate::tls::MAX_PEM_BYTES).ok()?;
+        fleet_util::nofollow::read(&state_dir.join(PENDING_KEY_FILE), crate::tls::MAX_PEM_BYTES)
+            .ok()?;
     let key = KeyPair::from_pem(std::str::from_utf8(&pem).ok()?).ok()?;
     Some(hex::encode(Sha256::digest(key.public_key_raw())))
 }
@@ -173,7 +174,7 @@ fn pending(config: &ClientConfig) -> Option<Vec<u8>> {
     if !config.state_dir.join(PENDING_KEY_FILE).exists() {
         return None;
     }
-    crate::nofollow::read(
+    fleet_util::nofollow::read(
         &config.state_dir.join(PENDING_CSR_FILE),
         crate::tls::MAX_PEM_BYTES,
     )
@@ -204,7 +205,7 @@ fn needs_certificate(config: &ClientConfig) -> bool {
 ///
 /// Read with `x509-parser` — the parser rcgen itself uses, whose own X.509 entry point is private.
 fn renewal_due(cert_file: &Path) -> Result<bool, String> {
-    let pem = crate::nofollow::read(cert_file, crate::tls::MAX_PEM_BYTES)
+    let pem = fleet_util::nofollow::read(cert_file, crate::tls::MAX_PEM_BYTES)
         .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
     let (_, block) = x509_parser::pem::parse_x509_pem(&pem)
         .map_err(|e| format!("cannot read {}: {e}", cert_file.display()))?;
@@ -258,7 +259,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
 
     // Held without following a link at its name, and each file written whole over a link at its
     // own: an install enrols as root in a directory that belongs to the service's account
-    // (ADR-0021). Passed through by the process group where one is registered (ADR-0021 clause 21).
+    // (ADR-0042). Passed through by the process group where one is registered (ADR-0042 clause 21).
     crate::storage::create_shared_dir(
         &config.state_dir,
         &config.state_dir,
@@ -279,7 +280,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     )
     .map_err(|e| format!("cannot store the private key: {e}"))?;
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0021 clause 21).
+    // may pass through (ADR-0042 clause 21).
     dir.write(PENDING_CSR_FILE, csr.as_bytes(), 0o600)
         .map_err(|e| format!("cannot store the certificate request: {e}"))?;
     // What the operator matches in the enrolment queue (ADR-0027 clause 10): the same SHA-256 the
@@ -332,7 +333,7 @@ fn bootstrap_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
         return None;
     }
     let identity = crate::tls::client_tls(config).ok()?.identity?;
-    // Read here only to sign: the key moves into a buffer wiped on drop (ADR-0014).
+    // Read here only to sign: the key moves into a buffer wiped on drop (ADR-0040).
     let key_pem = Zeroizing::new(identity.key_pem);
     let certificate = opamp::tls::certificates(&identity.cert_pem).ok()?;
     let leaf = certificate.first()?;
@@ -422,7 +423,7 @@ mod tests {
 
     /// Where a process account is registered, its group passes through the state directory, and
     /// the request and the certificate are the Client's alone: `0600`, beside the key.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn with_a_process_account_the_request_and_the_certificate_are_owner_only() {
@@ -705,7 +706,7 @@ mod tests {
 
         let p12_state = dir.path().join("p12-state");
         let from_p12 = ClientConfig {
-            bootstrap_identity: Some(crate::config::BootstrapIdentity {
+            bootstrap_identity: Some(fleet_util::identity::BootstrapIdentity {
                 cert_pem: cert.pem().into_bytes(),
                 key_pem: zeroize::Zeroizing::new(key.serialize_pem().into_bytes()),
             }),

@@ -1,4 +1,4 @@
-//! The package store's metadata on the filesystem (ADR-0033, ADR-0023): the default adapter behind
+//! The package store's metadata on the filesystem (ADR-0039, ADR-0023): the default adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one JSON file per Package under
 //! `<data_dir>/packages/`, its entries inside, each naming its artifact by hash. The bytes are the
 //! blob store's.
@@ -91,7 +91,7 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Package, String> {
             .map(hex::decode)
             .transpose()
             .map_err(|e| format!("invalid signature in {}: {e}", path.display()))?;
-        // Held to the length a write is held to (ADR-0033 clause 18).
+        // Held to the length a write is held to (ADR-0039 clause 18).
         if let Some(signature) = &signature {
             if signature.len() != crate::packages::ED25519_SIGNATURE_LEN {
                 return Err(format!(
@@ -236,7 +236,7 @@ struct EntryMeta {
     /// The SHA-256 of the artifact, lowercase hex: the blob's name, and what the Agent verifies.
     sha256: String,
     size: u64,
-    /// The operator's Ed25519 signature over this entry, hex (ADR-0033); absent while unsigned.
+    /// The operator's Ed25519 signature over this entry, hex (ADR-0039); absent while unsigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signature_hex: Option<String>,
 }
@@ -268,8 +268,8 @@ mod tests {
     /// A Package an older Server stored with a `linux/arm` and a `linux/armv7` entry opens: both
     /// spellings fold onto `linux/arm32`, the first is served under it, and the second is not, so
     /// nothing fails the start and nothing serves the wrong bytes under one platform
-    /// (ADR-0033 clause 6).
-    /// Verifies: ADR-0033
+    /// (ADR-0039 clause 6).
+    /// Verifies: ADR-0039
     #[test]
     fn entries_stored_under_an_older_spelling_open_folded() {
         let hash = |c: char| c.to_string().repeat(64);

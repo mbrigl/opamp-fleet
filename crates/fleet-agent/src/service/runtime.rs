@@ -32,14 +32,14 @@ pub struct RunSpec {
     /// and the whole of the condition for writing the log file: it says no terminal is watching.
     pub service: bool,
     /// The second service every Managed Process is started through, where a process account is
-    /// registered (ADR-0021 clause 18): from the hidden `--agents-socket` and `--process-uid` — on
+    /// registered (ADR-0042 clause 18): from the hidden `--agents-socket` and `--process-uid` — on
     /// Windows `--process-sid` — that `service install --process-account` writes into the command
     /// line.
     pub agents: Option<AgentsChannel>,
 }
 
 /// Where the second service listens — its socket, or its named pipe on Windows — and the account
-/// it must answer as: its uid, or its SID (ADR-0021 clause 19).
+/// it must answer as: its uid, or its SID (ADR-0042 clause 19).
 #[derive(Debug, Clone)]
 pub struct AgentsChannel {
     pub socket: PathBuf,
@@ -100,7 +100,7 @@ fn daemon_builder() -> tokio::runtime::Builder {
 }
 
 /// The runtime the second service runs on under the SCM: [`daemon_runtime`]'s, each of whose
-/// threads closes itself to the process account as its first act (ADR-0021).
+/// threads closes itself to the process account as its first act (ADR-0042).
 ///
 /// # Errors
 /// Returns an error if the runtime cannot be built.
@@ -199,7 +199,7 @@ fn start_log_file(config: &crate::config::ClientConfig) {
 /// What this process is and what it will use, in one line each, before it uses any of it.
 ///
 /// **The version is the point of the first line.** It rides in every report to the Server and names
-/// the directory this binary runs from (ADR-0021), and logged here it lets the file a self-update
+/// the directory this binary runs from (ADR-0042), and logged here it lets the file a self-update
 /// leaves behind (ADR-0019, ADR-0020) be attributed to the version that wrote it, which is the
 /// situation that file exists for. The rest of the line is what an operator otherwise has to
 /// reconstruct from the command line of a service they did not start.
@@ -315,7 +315,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         Err(error) => return unreadable_config(&spec, error),
     };
     // What the Client shares with the Managed Processes belongs to the process account's group
-    // (ADR-0021 clause 21), from before anything is written.
+    // (ADR-0042 clause 21), from before anything is written.
     if let Some(agents) = &spec.agents {
         config.process_account_group = Some(process_account_group(&agents.process)?);
     }
@@ -351,7 +351,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     };
 
     // A Client the self-update left behind ends as for its own update, through the shutdown that
-    // stops its Supervisors and says goodbye (ADR-0021 clause 17).
+    // stops its Supervisors and says goodbye (ADR-0042 clause 17).
     let left_behind = Arc::new(AtomicBool::new(false));
     let spawner = match &spec.agents {
         Some(agents) => {
@@ -379,7 +379,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
             .with_floors(agent_type, floors.clone()),
         );
     }
-    // There is no unsigned posture (ADR-0033, ADR-0019): without `[packages] verification_key` no
+    // There is no unsigned posture (ADR-0039, ADR-0019): without `[packages] verification_key` no
     // Agent of this Client takes packages, its own self-update included. Said once at startup, since
     // the Server only sees an Agent that declares no package capability.
     if config.package_key().is_none() {
@@ -542,7 +542,7 @@ fn load_effective_config(spec: &RunSpec) -> Result<ClientConfig, String> {
     Ok(config)
 }
 
-/// ADR-0021 self-heal: when running from a versioned install layout, make sure `current`
+/// ADR-0042 self-heal: when running from a versioned install layout, make sure `current`
 /// resolves to the directory this binary actually runs from — a crash mid-switch otherwise
 /// leaves the pointer torn. Best-effort: a plain foreground run outside a layout is untouched.
 fn heal_torn_pointer() {
@@ -563,17 +563,19 @@ fn heal_torn_pointer() {
 }
 
 /// The primary group of the process account `uid` names, from the password database: the group
-/// the Client shares what the Managed Processes read with (ADR-0021 clause 21). The registration
+/// the Client shares what the Managed Processes read with (ADR-0042 clause 21). The registration
 /// names the account by its uid alone.
 ///
 /// # Errors
 /// Returns an error when the database names no account for `uid`, or cannot be read: the Client
 /// does not start rather than share its files with a group it cannot name.
 #[cfg(unix)]
-fn process_account_group(uid: &u32) -> Result<crate::storage::ProcessAccountGroup, String> {
+fn process_account_group(
+    uid: &u32,
+) -> Result<crate::supervisor::ports::ProcessAccountGroup, String> {
     let uid = *uid;
     match crate::service::run_as::account_of(uid) {
-        Ok(Some(account)) => Ok(crate::storage::ProcessAccountGroup(account.gid)),
+        Ok(Some(account)) => Ok(crate::supervisor::ports::ProcessAccountGroup(account.gid)),
         Ok(None) => Err(format!(
             "the process account (uid {uid}) the registration names does not exist; create it, or \
              drop it with `service install --no-process-account`"
@@ -585,23 +587,23 @@ fn process_account_group(uid: &u32) -> Result<crate::storage::ProcessAccountGrou
 }
 
 /// On Windows the process account itself, by the SID the registration names: what the Client
-/// shares with the Managed Processes is granted to it (ADR-0021 clause 21).
+/// shares with the Managed Processes is granted to it (ADR-0042 clause 21).
 ///
 /// # Errors
 /// Never; the SID was read when the command line was.
 #[cfg(windows)]
 fn process_account_group(
     sid: &crate::win32::Sid,
-) -> Result<crate::storage::ProcessAccountGroup, String> {
+) -> Result<crate::supervisor::ports::ProcessAccountGroup, String> {
     // Once per run, for a value every Supervisor copies.
     let sid: &'static str = Box::leak(sid.as_str().to_string().into_boxed_str());
-    Ok(crate::storage::ProcessAccountGroup(sid))
+    Ok(crate::supervisor::ports::ProcessAccountGroup(sid))
 }
 
 /// What resolves once the second service tells this Client that a self-update left it behind.
 type LeftBehind = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Every Managed Process of this run is started by the second service (ADR-0021 clause 18). The
+/// Every Managed Process of this run is started by the second service (ADR-0042 clause 18). The
 /// channel connects at the first start; a Client that cannot reach the service reports it per
 /// Supervisor and never starts a program itself. Beside the spawner: what resolves once the
 /// service turns out to be the build `current` names while this Client is not.
@@ -618,7 +620,7 @@ fn through_the_second_service(
     #[allow(clippy::clone_on_copy)]
     let process = agents.process.clone();
     // Each connection is also checked against the process the service manager runs as the second
-    // service (ADR-0021 clause 19).
+    // service (ADR-0042 clause 19).
     watched(Channel::new(
         &agents.socket,
         process,
@@ -640,7 +642,7 @@ fn watched(
 
 /// The run's shutdown where the second service starts its programs: `shutdown`, or `told`
 /// resolving — the self-update left this Client behind, and `left_behind` then says so, which
-/// ends the run for the restart that starts the version `current` names (ADR-0021 clause 17).
+/// ends the run for the restart that starts the version `current` names (ADR-0042 clause 17).
 fn or_left_behind(
     mut shutdown: Shutdown,
     told: LeftBehind,
@@ -727,10 +729,10 @@ mod tests {
 
     /// A Client whose start meets a second service of another build, while `current` no longer
     /// names its own version, ends its run as for its own update; one the operator stops ends as
-    /// stopped (ADR-0021 clause 17). From the start through the Spawner the run hands its
+    /// stopped (ADR-0042 clause 17). From the start through the Spawner the run hands its
     /// Supervisors to the end of the run's shutdown; what the run returns on it is the one line
     /// after, reached only by a whole run against a Server.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[tokio::test]
     async fn a_client_left_behind_ends_its_run_for_the_restart() {

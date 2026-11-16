@@ -17,12 +17,12 @@ The core repack (#179, 834010bff) added mechanisms that no kind on `main` calls.
 of them, so none is dead by mistake:
 
 - **The kept-link chain** (clause 57 of
-  ADR-0033). `KindDefaults::tree_links`
+  ADR-0039). `KindDefaults::tree_links`
   (`crates/fleet-agent/src/supervisor/ports.rs`, near line 423) is `&[]` for every kind. The empty
-  list still runs through `install_target`, `InstallTarget::Tree`, `stage_tree` and
-  `archive::extract_tree_tar_gz`'s kept-link checks for every tree package. `KeptLink` values are
-  made only in tests.
-- **`gpgv` and the repack** (ADR-0036 clauses 27 to 29). `crates/fleet-tools/src/gpgv.rs` carries
+  list still runs through `install_target`, `InstallTarget::Tree`, `stage_tree` and the kept-link
+  checks `archive::extract_tree` runs on every `.tar.gz` tree package. `KeptLink` values are made
+  only in tests.
+- **`gpgv` and the repack** (ADR-0043 clauses 27 to 29). `crates/fleet-tools/src/gpgv.rs` carries
   `#[allow(dead_code)]` throughout, and no command calls it. In `crates/fleet-tools/src/fetch.rs`,
   `pack_tree`, `write_members`, `Member` and `collect_members` (near lines 1037 to 1180) carry it
   too, as do `MAX_TREE_MEMBERS` (near line 39), `Resolution`, `MAX_LINK_HOPS`, `resolve_inside` and
@@ -65,10 +65,10 @@ The choice was settled before the normalization of 2026-11-15: the mechanisms st
 
 **Its reading.**
 
-- Touches: `crates/fleet-agent/src/supervisor/`, `crates/fleet-agent/src/archive.rs`,
+- Touches: `crates/fleet-agent/src/supervisor/`, `crates/fleet-util/src/archive.rs`,
   `crates/fleet-tools/src/fetch.rs`, `crates/fleet-tools/src/gpgv.rs`,
-  `crates/fleet-core/src/tree.rs`, `crates/fleet-core/src/version.rs`, `scripts/check-rust.sh`
-- ADR-0033 clause 57, ADR-0036 clauses 27 to 29, ADR-0018
+  `crates/fleet-util/src/tree.rs`, `crates/fleet-core/src/version.rs`, `scripts/check-rust.sh`
+- ADR-0039 clause 57, ADR-0043 clauses 27 to 29, ADR-0018
   (the kinds), ADR-0034 clause 6.
 
 **Its mode.**

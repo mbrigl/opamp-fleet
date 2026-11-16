@@ -1,5 +1,5 @@
 //! File operations in a directory the Client's service account can write, which never follow a
-//! link that account could have planted (ADR-0021).
+//! link that account could have planted (ADR-0042).
 //!
 //! `service install` and `service config` run as root or as an Administrator, and they write into
 //! the state directory and the executable layout, which belong to the service's account. A plain
@@ -24,7 +24,7 @@
 //! writes. A directory below it is reached through [`HeldDir::dir`], one held name at a time.
 //!
 //! Every file is read one way: opened as a regular file, through no link at its name, and read
-//! within a bound into a buffer sized before it reads and wiped when it is dropped (ADR-0014), so
+//! within a bound into a buffer sized before it reads and wiped when it is dropped (ADR-0040), so
 //! a privileged step never reads more than it expects, and no grown copy of a secret is left
 //! behind. A path a privileged step did not choose itself is resolved by [`read_privileged`].
 
@@ -217,13 +217,13 @@ pub fn read(path: &Path, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
 
 /// What the opened `file` holds, where it is a regular file of at most `limit` bytes: the one read
 /// of this module. The buffer is sized before it reads, so it is never grown and a copy left
-/// behind, and it is wiped when it is dropped (ADR-0014). A file that grew past the bound since
+/// behind, and it is wiped when it is dropped (ADR-0040). A file that grew past the bound since
 /// is refused.
 ///
 /// # Errors
 /// Returns an error when the file is no regular file, holds more than `limit` bytes, or cannot be
 /// read. It leaves naming the file to the caller.
-pub(crate) fn read_opened(file: std::fs::File, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
+pub fn read_opened(file: std::fs::File, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
     use std::io::Read as _;
     let over = || {
         io::Error::new(
@@ -274,7 +274,7 @@ const MAX_LINKS: usize = 40;
 ///
 /// - **A root or the state directory** that the walk reaches must hold the file directly: the
 ///   name after it is opened in that directory, held, and a link at the name is refused. A root
-///   is held as [`HeldDir::open_root`] holds it (ADR-0021 clause 13), the state directory without
+///   is held as [`HeldDir::open_root`] holds it (ADR-0042 clause 13), the state directory without
 ///   following a link at its own name (clauses 11 and 12). The state directory directly in a root
 ///   is reached by that name too, and counts as the account's where it is missing.
 /// - **A path that goes on beneath one of them** is refused: a directory there could be a link
@@ -477,25 +477,70 @@ fn refused_link(path: &Path) -> io::Error {
     ))
 }
 
+/// The `*at` system calls this module and the Client share on Unix, each wrapped once here: a
+/// directory held by its handle, and an entry in it named and never followed where the flags say
+/// so. The rest of this module and the Client's state, its reconfiguration and its service manager
+/// work by directory handle through these (ADR-0042 clauses 11 to 15).
 #[cfg(unix)]
-mod sys {
-    use std::ffi::{CString, OsStr};
-    use std::fs::File;
-    use std::io::{self, Write as _};
+pub mod at {
+    use std::ffi::CStr;
+    use std::io;
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::path::Path;
 
-    use super::{refused_link, HeldDir};
-
-    const DIRECTORY: libc::c_int =
+    /// A directory, opened as one and never through a link.
+    pub const DIRECTORY: libc::c_int =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
-    fn c_name(name: &OsStr) -> io::Result<CString> {
-        CString::new(name.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+    /// `name` in `dir`, opened with `flags`; the last component never follows a link where
+    /// `flags` says `O_NOFOLLOW`. A flag that creates, `O_CREAT` or `O_TMPFILE`, is refused as
+    /// `InvalidInput`: `openat` would read a mode this call does not pass, which [`create`] does.
+    pub fn open(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
+        if creates(flags) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a flag that creates needs a mode: at::create",
+            ));
+        }
+        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; no flag that creates, so
+        // no mode.
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `openat` returned a new descriptor that nothing else owns.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
-    fn openat(dir: RawFd, name: &CString, flags: libc::c_int, mode: u32) -> io::Result<OwnedFd> {
+    /// The entry `name` in `dir` itself, a link as a link.
+    pub fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: a valid descriptor, a NUL-terminated name and room for one `stat`.
+        let rc = unsafe {
+            libc::fstatat(
+                dir,
+                name.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fstatat` succeeded and filled it.
+        Ok(unsafe { st.assume_init() })
+    }
+
+    /// Whether `flags` create a file, so that `openat` reads a mode.
+    fn creates(flags: libc::c_int) -> bool {
+        #[cfg(target_os = "linux")]
+        let tmpfile = flags & libc::O_TMPFILE == libc::O_TMPFILE;
+        #[cfg(not(target_os = "linux"))]
+        let tmpfile = false;
+        flags & libc::O_CREAT != 0 || tmpfile
+    }
+
+    /// `name` in `dir`, created with `flags`, which name `O_CREAT`, at `mode` before the umask.
+    pub fn create(dir: RawFd, name: &CStr, flags: libc::c_int, mode: u32) -> io::Result<OwnedFd> {
         // SAFETY: a descriptor or `AT_FDCWD`, a NUL-terminated name, and the mode `O_CREAT` reads.
         let fd = unsafe { libc::openat(dir, name.as_ptr(), flags, mode as libc::c_uint) };
         if fd < 0 {
@@ -503,6 +548,85 @@ mod sys {
         }
         // SAFETY: `openat` returned a new descriptor that nothing else owns.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Creates the directory `name` in `dir` at `mode` before the umask. A name that exists, a
+    /// link included, is `AlreadyExists`: `mkdirat` never follows a link at the name.
+    pub fn mkdir(dir: RawFd, name: &CStr, mode: u32) -> io::Result<()> {
+        // The mode is at most `0o7777`, which every `mode_t` holds.
+        #[allow(clippy::cast_possible_truncation)]
+        let mode = mode as libc::mode_t;
+        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name.
+        if unsafe { libc::mkdirat(dir, name.as_ptr(), mode) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Removes the entry `name` in `dir`; a link is removed as a link.
+    pub fn unlink(dir: RawFd, name: &CStr) -> io::Result<()> {
+        // SAFETY: a valid descriptor and a NUL-terminated name; without `AT_REMOVEDIR` a link is
+        // removed as a link.
+        if unsafe { libc::unlinkat(dir, name.as_ptr(), 0) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Removes the empty directory `name` in `dir`.
+    pub fn rmdir(dir: RawFd, name: &CStr) -> io::Result<()> {
+        // SAFETY: a valid descriptor and a NUL-terminated name; only an empty directory goes.
+        if unsafe { libc::unlinkat(dir, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Renames `from` in `from_dir` to `to` in `to_dir`; neither name is followed.
+    pub fn rename(from_dir: RawFd, from: &CStr, to_dir: RawFd, to: &CStr) -> io::Result<()> {
+        // SAFETY: valid descriptors and two NUL-terminated names.
+        if unsafe { libc::renameat(from_dir, from.as_ptr(), to_dir, to.as_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Sets the mode of what `handle` holds.
+    pub fn fchmod(handle: &OwnedFd, mode: u32) -> io::Result<()> {
+        // The mode is at most `0o7777`, which every `mode_t` holds.
+        #[allow(clippy::cast_possible_truncation)]
+        let mode = mode as libc::mode_t;
+        // SAFETY: a valid descriptor.
+        if unsafe { libc::fchmod(handle.as_raw_fd(), mode) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Flushes what `handle` holds to the disk.
+    pub fn sync(handle: &OwnedFd) -> io::Result<()> {
+        // SAFETY: a valid descriptor.
+        if unsafe { libc::fsync(handle.as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+mod sys {
+    use std::ffi::{CString, OsStr};
+    use std::fs::File;
+    use std::io::{self, Write as _};
+    use std::os::fd::{AsRawFd as _, RawFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::Path;
+
+    use super::at::{self, DIRECTORY};
+    use super::{refused_link, HeldDir};
+
+    fn c_name(name: &OsStr) -> io::Result<CString> {
+        CString::new(name.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
     }
 
     /// A link at the last component opened with `O_NOFOLLOW` reads as `ELOOP`.
@@ -514,35 +638,20 @@ mod sys {
         }
     }
 
+    /// Creates the directory, or finds it there: `mkdirat` never follows a link at the name, so one
+    /// there is `EEXIST`, and the open after it refuses it.
     fn mkdirat(dir: RawFd, name: &CString, mode: u32) -> io::Result<()> {
-        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name.
-        if unsafe { libc::mkdirat(dir, name.as_ptr(), mode as libc::mode_t) } == 0 {
-            return Ok(());
+        match at::mkdir(dir, name, mode) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+            _ => Ok(()),
         }
-        let e = io::Error::last_os_error();
-        // `mkdirat` never follows a link at the name: one there is `EEXIST`, and the open after it
-        // refuses it.
-        if e.kind() == io::ErrorKind::AlreadyExists {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    }
-
-    fn fchmod(fd: &OwnedFd, mode: u32) -> io::Result<()> {
-        // SAFETY: a valid descriptor.
-        if unsafe { libc::fchmod(fd.as_raw_fd(), mode as libc::mode_t) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
     }
 
     pub(super) fn open_root(path: &Path) -> io::Result<HeldDir> {
-        let fd = openat(
+        let fd = at::open(
             libc::AT_FDCWD,
             &c_name(path.as_os_str())?,
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            0,
         )?;
         Ok(HeldDir {
             path: path.to_path_buf(),
@@ -557,19 +666,18 @@ mod sys {
         mode: u32,
     ) -> io::Result<HeldDir> {
         let path = parent.join(name);
-        let parent_fd = openat(
+        let parent_fd = at::open(
             libc::AT_FDCWD,
             &c_name(parent.as_os_str())?,
             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            0,
         )?;
         let name = c_name(name)?;
         if create {
             mkdirat(parent_fd.as_raw_fd(), &name, mode)?;
         }
-        let fd = openat(parent_fd.as_raw_fd(), &name, DIRECTORY, 0).map_err(|e| named(e, &path))?;
+        let fd = at::open(parent_fd.as_raw_fd(), &name, DIRECTORY).map_err(|e| named(e, &path))?;
         if create {
-            fchmod(&fd, mode)?;
+            at::fchmod(&fd, mode)?;
         }
         Ok(HeldDir { path, fd })
     }
@@ -578,7 +686,7 @@ mod sys {
         let path = held.path.join(name);
         let c = c_name(OsStr::new(name))?;
         mkdirat(held.fd.as_raw_fd(), &c, mode)?;
-        let fd = openat(held.fd.as_raw_fd(), &c, DIRECTORY, 0).map_err(|e| named(e, &path))?;
+        let fd = at::open(held.fd.as_raw_fd(), &c, DIRECTORY).map_err(|e| named(e, &path))?;
         Ok(HeldDir { path, fd })
     }
 
@@ -593,11 +701,10 @@ mod sys {
     fn open_regular(held: &HeldDir, name: &str, access: libc::c_int) -> io::Result<File> {
         let path = held.path.join(name);
         // `O_NONBLOCK`: a FIFO at the name must not stall a privileged run; a regular file ignores it.
-        let fd = openat(
+        let fd = at::open(
             held.fd.as_raw_fd(),
             &c_name(OsStr::new(name))?,
             access | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-            0,
         )
         .map_err(|e| named(e, &path))?;
         let file = File::from(fd);
@@ -621,11 +728,11 @@ mod sys {
         let dir = held.fd.as_raw_fd();
         let temporary = c_name(OsStr::new(temporary))?;
         // A leftover from an interrupted run would make `O_EXCL` refuse; a link there goes as a link.
-        match unlinkat(dir, &temporary) {
+        match at::unlink(dir, &temporary) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
             _ => {}
         }
-        let written = openat(
+        let written = at::create(
             dir,
             &temporary,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
@@ -633,7 +740,7 @@ mod sys {
         )
         .and_then(|fd| {
             // The umask may have narrowed the mode the open asked for.
-            fchmod(&fd, mode)?;
+            at::fchmod(&fd, mode)?;
             if let Some((uid, gid)) = owner {
                 std::os::unix::fs::fchown(&fd, Some(uid), Some(gid))?;
             }
@@ -641,9 +748,9 @@ mod sys {
             file.write_all(contents)?;
             file.sync_all()
         })
-        .and_then(|()| renameat(dir, &temporary, &c_name(OsStr::new(name))?));
+        .and_then(|()| at::rename(dir, &temporary, dir, &c_name(OsStr::new(name))?));
         if written.is_err() {
-            let _ = unlinkat(dir, &temporary);
+            let _ = at::unlink(dir, &temporary);
         }
         written
     }
@@ -657,58 +764,39 @@ mod sys {
         let dir = held.fd.as_raw_fd();
         let c = c_name(OsStr::new(name))?;
         // `O_EXCL` fails on any name that exists, a link included, and never follows one.
-        let fd = openat(
+        let fd = at::create(
             dir,
             &c,
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             mode,
         )?;
-        let written = fchmod(&fd, mode).and_then(|()| {
+        let written = at::fchmod(&fd, mode).and_then(|()| {
             let mut file = File::from(fd);
             file.write_all(contents)?;
             file.sync_all()
         });
         if written.is_err() {
-            let _ = unlinkat(dir, &c);
+            let _ = at::unlink(dir, &c);
         }
         written
     }
 
-    fn unlinkat(dir: RawFd, name: &CString) -> io::Result<()> {
-        // SAFETY: a valid descriptor and a NUL-terminated name; without `AT_REMOVEDIR` a link is
-        // removed as a link.
-        if unsafe { libc::unlinkat(dir, name.as_ptr(), 0) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    fn renameat(dir: RawFd, from: &CString, to: &CString) -> io::Result<()> {
-        // SAFETY: a valid descriptor and two NUL-terminated names; neither is followed.
-        if unsafe { libc::renameat(dir, from.as_ptr(), dir, to.as_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
     pub(super) fn rename(held: &HeldDir, from: &str, to: &str) -> io::Result<()> {
-        renameat(
-            held.fd.as_raw_fd(),
+        let dir = held.fd.as_raw_fd();
+        at::rename(
+            dir,
             &c_name(OsStr::new(from))?,
+            dir,
             &c_name(OsStr::new(to))?,
         )
     }
 
     pub(super) fn remove(held: &HeldDir, name: &str) -> io::Result<()> {
-        unlinkat(held.fd.as_raw_fd(), &c_name(OsStr::new(name))?)
+        at::unlink(held.fd.as_raw_fd(), &c_name(OsStr::new(name))?)
     }
 
     pub(super) fn sync(held: &HeldDir) -> io::Result<()> {
-        // SAFETY: a valid descriptor.
-        if unsafe { libc::fsync(held.fd.as_raw_fd()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        at::sync(&held.fd)
     }
 }
 
@@ -874,10 +962,11 @@ mod sys {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::fd::AsRawFd as _;
 
     /// A link at the file's own name is refused for a path the account's file offered, and
     /// followed for the administrator's; a file over the bound is refused, naming the bound.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn a_privileged_read_holds_a_link_at_the_name_to_whose_word_the_path_is() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -899,5 +988,31 @@ mod tests {
             over.contains("larger than") && over.contains("4 bytes"),
             "{over}"
         );
+    }
+    /// `at::open` passes no mode, so it refuses a flag that creates rather than let `openat` read
+    /// one; `at::create` is the call that does.
+    #[test]
+    fn a_flag_that_creates_is_refused_by_the_open_that_passes_no_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let held = at::open(
+            libc::AT_FDCWD,
+            &std::ffi::CString::new(dir.path().as_os_str().as_encoded_bytes()).expect("path"),
+            at::DIRECTORY,
+        )
+        .expect("the directory");
+        let refused = at::open(
+            held.as_raw_fd(),
+            c"new",
+            libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+        )
+        .expect_err("O_CREAT without a mode");
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        assert!(!dir.path().join("new").exists());
+        #[cfg(target_os = "linux")]
+        {
+            let refused = at::open(held.as_raw_fd(), c".", libc::O_RDWR | libc::O_TMPFILE)
+                .expect_err("O_TMPFILE without a mode");
+            assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+        }
     }
 }

@@ -197,9 +197,9 @@ fn load_config(named: Option<PathBuf>) -> Layered {
     layered
 }
 
-/// `server pki status [--config <server.toml>]` (ADR-0036 clause 22): when each certificate the
+/// `server pki status [--config <server.toml>]` (ADR-0043 clause 22): when each certificate the
 /// Server host depends on ends. The commands that make certificates are the operator tool's
-/// (ADR-0036); the Server binary makes none.
+/// (ADR-0043); the Server binary makes none.
 fn pki(mut args: impl Iterator<Item = String>) -> ! {
     use fleet_server::pki;
     let named = match (
@@ -444,7 +444,7 @@ fn hash_credential(scheme: Option<String>) -> ! {
         }
     };
     let hashed = hash(&secret);
-    // `exit` runs no destructor: the secret is wiped before it (ADR-0014).
+    // `exit` runs no destructor: the secret is wiped before it (ADR-0040).
     drop(secret);
     match hashed {
         Ok(entry) => {
@@ -460,7 +460,7 @@ fn hash_credential(scheme: Option<String>) -> ! {
 
 /// One line from standard input, the trailing newline dropped. On a Unix terminal echo is off while
 /// it is typed, so the secret does not stand on the screen. It is held in a buffer wiped when it is
-/// dropped, sized for any password a person types so it is not grown and left behind (ADR-0014).
+/// dropped, sized for any password a person types so it is not grown and left behind (ADR-0040).
 /// The copy in the buffer of the process-wide standard input, which the standard library keeps,
 /// is not wiped.
 fn read_secret() -> std::io::Result<zeroize::Zeroizing<String>> {
@@ -784,7 +784,7 @@ async fn serve() {
     };
     // What the Server serves, trusts and signs with until it restarts, read right after the files
     // above were: the warnings below judge these, not whatever the files hold later
-    // (ADR-0036 clause 21).
+    // (ADR-0043 clause 21).
     let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
         // ADR-0029 clause 16.
@@ -834,7 +834,7 @@ async fn serve() {
         .verification_key()
         .and_then(|key| {
             if key.is_some() {
-                // ADR-0033.
+                // ADR-0039.
                 info!("checking package signatures against [packages] verification_key");
             }
             fleet_server::packages::PackageStore::open_on(
@@ -855,7 +855,7 @@ async fn serve() {
         })
         .and_then(|(store, staging)| {
             if !store.is_empty() {
-                // ADR-0033.
+                // ADR-0039.
                 info!("offering software packages to the fleet");
             }
             fleet_server::fleet::PackageOffering::on(&records, store)
@@ -1037,7 +1037,7 @@ async fn serve() {
         enrolment.set_audit(audit.clone());
     }
     // Before a certificate the Server depends on ends, say so: at startup and once a day
-    // (ADR-0036 clause 21). Nothing stops; the hosts decide for themselves.
+    // (ADR-0043 clause 21). Nothing stops; the hosts decide for themselves.
     fleet_server::pki::warn_endings(
         &watched,
         Some(audit.as_ref()),
@@ -1482,7 +1482,7 @@ mod tests {
 
     /// Without `[client_ca]` the Server says at startup that an uploaded artifact needs a
     /// certificate naming a host, and how one is named; with it, it says nothing.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn a_server_without_client_ca_says_uploaded_artifacts_need_a_host() {
         let notice = uploaded_artifacts_notice(false).expect("a notice");

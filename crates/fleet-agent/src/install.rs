@@ -1,12 +1,12 @@
 //! Turning a verified artifact into a runnable program on disk.
 //!
 //! The Client installs programs in two quite different ways: a Managed Process is replaced by a
-//! Supervisor that outlives it (ADR-0033), and the Client's own binary is staged beside the running
+//! Supervisor that outlives it (ADR-0039), and the Client's own binary is staged beside the running
 //! version and reached by a restart (ADR-0019). Those two lifecycles are genuinely different and
 //! stay where they are — `supervisor::process` owns the first, [`crate::update`] the second.
 //!
 //! What they share is the step in the middle, and they shared it by writing it twice: unpack the
-//! artifact — raw bytes or an archive holding the program (ADR-0033) — to a path, make the result
+//! artifact — raw bytes or an archive holding the program (ADR-0039) — to a path, make the result
 //! executable, and cope with the kernel refusing to exec a file that was written moments ago. That
 //! is what lives here, so each rule is stated once.
 
@@ -74,7 +74,7 @@ pub fn make_executable(path: &Path) -> Result<(), String> {
 
 /// Writes the program held by `artifact` to `dest` and makes it executable.
 ///
-/// The artifact is the program itself or an archive holding it under `member` (ADR-0033), decided
+/// The artifact is the program itself or an archive holding it under `member` (ADR-0039), decided
 /// by the leading bytes rather than by a file name. `dest` is overwritten if it exists; its parent
 /// directory must already be there.
 ///
@@ -94,25 +94,17 @@ pub fn write_program(
     let mut out =
         std::fs::File::create(dest).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
 
-    match crate::archive::detect(artifact)? {
-        crate::archive::Kind::Raw => {
+    match fleet_util::archive::detect(artifact)? {
+        fleet_util::archive::Kind::Raw => {
             let mut source = std::fs::File::open(artifact)
                 .map_err(|e| format!("cannot read {}: {e}", artifact.display()))?;
             std::io::copy(&mut source, &mut out)
                 .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
         }
-        kind @ (crate::archive::Kind::TarGz
-        | crate::archive::Kind::SevenZ
-        | crate::archive::Kind::Zip) => {
-            let written = match kind {
-                crate::archive::Kind::SevenZ => {
-                    crate::archive::extract_7z(artifact, member, &mut out, archive_key)?
-                }
-                crate::archive::Kind::Zip => {
-                    crate::archive::extract_zip(artifact, member, &mut out)?
-                }
-                _ => crate::archive::extract_tar_gz(artifact, member, &mut out)?,
-            };
+        fleet_util::archive::Kind::TarGz
+        | fleet_util::archive::Kind::SevenZ
+        | fleet_util::archive::Kind::Zip => {
+            let written = fleet_util::archive::extract(artifact, member, &mut out, archive_key)?;
             info!(archive = %artifact.display(), member = %member, bytes = written, "unpacked the program from the archive");
         }
     }

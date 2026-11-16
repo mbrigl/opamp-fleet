@@ -50,7 +50,7 @@ Cargo.toml            # the Cargo workspace and the product's version
 Cargo.lock            # the resolved dependency graph, committed
 rust-toolchain.toml   # the pinned Rust toolchain
 deny.toml             # cargo-deny: advisories, licences, sources and banned crates
-crates/               # opamp (shared) · fleet-core · fleet-server · fleet-agent · fleet-tools
+crates/               # opamp (shared) · fleet-core · fleet-util · fleet-server · fleet-agent · fleet-tools
 config/               # annotated example configuration files (server.toml, supervisor.toml)
 packaging/            # what the release packs with: Linux maintainer scripts, WiX, Containerfile
 fuzz/                 # the fuzz targets of every parser that reads untrusted bytes

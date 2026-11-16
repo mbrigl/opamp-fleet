@@ -47,7 +47,7 @@ pub fn written(state_dir: &Path) -> Vec<PathBuf> {
 /// `config` is the configuration the service will run with, its `state_dir` the service's.
 /// `written` is what this run asked and wrote: the bootstrap identity it enrols with, an endpoint
 /// and trust it answered, which replace the file's, and an endpoint named over a kept file, which
-/// holds the file to it (ADR-0021 clause 28).
+/// holds the file to it (ADR-0042 clause 28).
 /// `roots` are the data root and the layout root. The CA file and the bootstrap pair are read
 /// once, before anything connects; one in a root or the state directory, which the service's
 /// account owns, is read through that directory, never through a link at its name.
@@ -169,9 +169,9 @@ async fn connect(mut config: ClientConfig, mut shutdown: Shutdown) -> Result<(),
 }
 
 /// `config` as the enrolment connects with it: what the run answered in place of what the file
-/// says (ADR-0021 clause 28),
+/// says (ADR-0042 clause 28),
 /// and the CA file and the bootstrap pair read once, before anything connects, never again by a
-/// path the account gave (ADR-0021 clause 11). `None` where `written` holds no bootstrap identity,
+/// path the account gave (ADR-0042 clause 11). `None` where `written` holds no bootstrap identity,
 /// and so nothing to enrol with.
 fn prepare(
     config: &ClientConfig,
@@ -187,7 +187,7 @@ fn prepare(
     }
     holds_to_named(&config, written)?;
     // A run that answered nothing kept the file, and each `[tls]` path in it is the file's word,
-    // which the service's account may have written, not the administrator's (ADR-0021 clause 11).
+    // which the service's account may have written, not the administrator's (ADR-0042 clause 11).
     let offered = match &written.answered {
         None => Offered::of(&config),
         Some(_) => written.offered.clone(),
@@ -198,7 +198,7 @@ fn prepare(
 
 /// Refuses the enrolment where `--endpoint` named, over a file the install kept, another endpoint
 /// than the file's: such a run answered nothing, and the file stands for the service
-/// (ADR-0021 clause 28).
+/// (ADR-0042 clause 28).
 ///
 /// # Errors
 /// Returns an error naming both endpoints.
@@ -215,7 +215,7 @@ pub fn holds_to_named(config: &ClientConfig, written: &Written) -> Result<(), St
 
 /// Puts what the run answered in place of what `config` read from the file: the endpoint, and the
 /// CA copy with the certificates written into it, or no CA where none was answered
-/// (ADR-0021 clause 28).
+/// (ADR-0042 clause 28).
 fn take_answered(config: &mut ClientConfig, answered: &Answered) {
     config.endpoint.clone_from(&answered.endpoint);
     let ca_file = answered.ca.as_ref().map(|(copy, _)| copy.clone());
@@ -239,7 +239,7 @@ fn take_answered(config: &mut ClientConfig, answered: &Answered) {
 ///
 /// `service install` and `service config` run as root or an Administrator, and these paths come
 /// from answers whose defaults `supervisor.toml` gives, a file the service's account can rewrite
-/// (ADR-0021 clause 11). So each is read as [`crate::nofollow::read_privileged`] reads it: a path
+/// (ADR-0042 clause 11). So each is read as [`fleet_util::nofollow::read_privileged`] reads it: a path
 /// the questionnaire offered from the file and the answer kept, through no link at its name; any
 /// other as an administrator's path. A file that is no certificate or no key is named.
 fn read_once(
@@ -250,7 +250,7 @@ fn read_once(
 ) -> Result<(), String> {
     let state_dir = config.state_dir.clone();
     let read = |path: &Path| {
-        crate::nofollow::read_privileged(
+        fleet_util::nofollow::read_privileged(
             path,
             roots,
             Some(&state_dir),
@@ -263,7 +263,7 @@ fn read_once(
         config.ca_pem = Some(crate::tls::certificates_in(ca, read(ca)?.to_vec())?);
     }
     config.bootstrap_identity = Some(match bootstrap {
-        Bootstrap::Pair { cert, key } => crate::config::BootstrapIdentity {
+        Bootstrap::Pair { cert, key } => fleet_util::identity::BootstrapIdentity {
             cert_pem: crate::tls::certificates_in(cert, read(cert)?.to_vec())?,
             key_pem: crate::tls::key_in(key, std::mem::take(&mut *read(key)?))?,
         },
@@ -347,7 +347,7 @@ mod tests {
 
     /// A `[tls]` path that names a device is refused, naming it, without reading it: the CA file
     /// and either file of the bootstrap pair alike (HARDENING.md H21).
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_device_a_tls_path_names_is_refused_unread() {
@@ -389,7 +389,7 @@ mod tests {
     }
 
     /// A `[tls]` file over the bound is refused, naming it.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn a_tls_file_over_the_bound_is_refused() {
         let account = tempfile::tempdir().expect("account");
@@ -409,7 +409,7 @@ mod tests {
 
     /// A link the account placed at the CA copy in the data root is not followed, even to a file
     /// of certificates (HARDENING.md H21).
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_at_the_ca_copy_is_not_followed() {
@@ -431,7 +431,7 @@ mod tests {
 
     /// A file beneath a directory of the account's but not directly in it is refused, naming it,
     /// since a directory between could be a link.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn a_tls_path_deeper_in_the_account_s_directory_is_refused() {
         let account = tempfile::tempdir().expect("account");
@@ -453,7 +453,7 @@ mod tests {
     /// A directory of the root's that the account swapped for a link to a directory elsewhere
     /// carries no read past the root: the path is refused as lying deeper beneath it, as it is
     /// while the directory is a real one.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_in_place_of_a_directory_of_the_root_s_is_not_read_through() {
@@ -502,7 +502,7 @@ mod tests {
     /// A file the administrator named outside the account's directories may be reached through a
     /// link, as a distribution's CA bundle often is; where the link leads is judged again, so one
     /// that leads to a link at the CA copy is refused.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn an_administrator_s_link_outside_the_account_s_directories_is_followed() {
@@ -542,7 +542,7 @@ mod tests {
     /// The bootstrap pair the questionnaire offers from `[tls] cert_file` and `key_file`, which
     /// the service's account may write, is refused where a link stands at either name, outside
     /// the account's directories too; the same links the administrator typed are followed.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_at_an_offered_bootstrap_pair_file_is_refused_and_not_read() {
@@ -607,7 +607,7 @@ mod tests {
     /// A run that asked nothing kept the file, so a link at the `[tls] ca_file` it names is
     /// refused, outside the account's directories too; the same path on a run that answered
     /// another CA is not read at all.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_at_a_kept_file_s_ca_file_is_refused_on_a_run_that_asked_nothing() {
@@ -646,8 +646,8 @@ mod tests {
     }
 
     /// A state directory the account swapped for a link is not read through: a file named in it
-    /// is refused, though the link leads to a plain directory (ADR-0021 clause 12).
-    /// Verifies: ADR-0021
+    /// is refused, though the link leads to a plain directory (ADR-0042 clause 12).
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_state_directory_that_is_a_link_is_not_read_through() {
@@ -672,7 +672,7 @@ mod tests {
 
     /// A file directly in a real state directory beneath a root, the default layout, is read
     /// through the state directory.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn a_file_in_the_state_directory_beneath_a_root_is_read() {
         let account = tempfile::tempdir().expect("account");
@@ -696,7 +696,7 @@ mod tests {
 
     /// A path that reaches a root through a link outside it is read as a file of that root: a
     /// link at the CA copy is refused however the path spells the directory.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_path_through_a_link_to_a_root_is_held_to_the_root() {
@@ -719,7 +719,7 @@ mod tests {
 
     /// What the enrolment connects with is read once, into memory: once read, the files can go
     /// and the connection's TLS is still built.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn the_enrolment_s_trust_and_identity_are_read_once_into_memory() {
         let account = tempfile::tempdir().expect("account");
@@ -748,7 +748,7 @@ mod tests {
     /// The run that answered enrols with its answers: a `supervisor.toml` rewritten after the
     /// write, to another endpoint and another CA, changes neither the endpoint the enrolment
     /// connects to nor the trust it connects with, and the rewritten CA is not read at all.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn a_run_that_answered_enrols_with_its_answers_whatever_the_file_says_by_now() {
         let account = tempfile::tempdir().expect("account");
@@ -822,7 +822,7 @@ mod tests {
 
     /// A run that answered nothing takes the endpoint and the CA from the file: the residual the
     /// decision names.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn a_run_that_answered_nothing_enrols_with_what_the_file_says() {
         let account = tempfile::tempdir().expect("account");
@@ -845,7 +845,7 @@ mod tests {
 
     /// `--endpoint` over a kept file that names another endpoint refuses the enrolment, naming
     /// both; where the two are the same, the run enrols with what the file says.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn an_endpoint_named_over_a_kept_file_that_names_another_refuses_the_enrolment() {
         let account = tempfile::tempdir().expect("account");

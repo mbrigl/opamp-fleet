@@ -24,7 +24,7 @@ name: Checks
 # scripts/check-fuzz-targets.sh: the fuzz matrix, fuzz/Cargo.toml and fuzz/seeds/ name one set.
 #
 # The rust job builds, tests, and lints the Cargo workspace with scripts/check-rust.sh, the commands
-# of README.md → "Build, Test & Run" on the stack of ADR-0008, the same script scripts/check-all.sh
+# of README.md → "Build, Test & Run" on the stack of ADR-0041, the same script scripts/check-all.sh
 # runs, so the build and the tests gate a push as they gate a merge. rustup reads
 # rust-toolchain.toml on first use, and the cache keeps the build within its timeout. The four
 # jobs after it check the Client on Windows and macOS and the stores against a real S3 and
@@ -248,7 +248,7 @@ jobs:
   # check by the job's rendered name, and the job id is what scripts/check-docs.sh compares with
   # the contributing guide.
   # fleet-tools too: the release packs every Client archive with `opamp-fleetctl`, Windows
-  # included, and publishes it for macOS (ADR-0036).
+  # included, and publishes it for macOS (ADR-0043).
   client-windows:
     runs-on: windows-latest
     timeout-minutes: 60

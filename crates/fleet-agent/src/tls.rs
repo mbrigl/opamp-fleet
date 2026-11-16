@@ -1,5 +1,5 @@
 //! Which TLS material the Client uses (ADR-0012, ADR-0026), read from disk and handed to `opamp` as
-//! [`ClientTls`] (ADR-0008).
+//! [`ClientTls`] (ADR-0041).
 //!
 //! The decisions are the Client's: an optional CA file that *replaces* the built-in roots, and the
 //! identity in force — the one the Server issued, else the one the operator configured. Building a
@@ -67,7 +67,7 @@ pub fn client_tls_for(
                 ));
             }
             // `opamp` takes the key as its own buffer; the copy is made here and the one read
-            // is wiped (ADR-0014 clause 3).
+            // is wiped (ADR-0040 clause 3).
             Some(Identity {
                 cert_pem: cert.to_vec(),
                 key_pem: key_in(&key, state_file(&key)?)?.to_vec(),
@@ -131,7 +131,7 @@ pub(crate) fn certificates_in(path: &Path, pem: Vec<u8>) -> Result<Vec<u8>, Stri
 }
 
 /// A PEM file holding a private key, parsed here so that a bad one is named by its path. The key
-/// is held, and parsed, in buffers wiped when they are dropped (ADR-0014).
+/// is held, and parsed, in buffers wiped when they are dropped (ADR-0040).
 pub(crate) fn key_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
     key_in(path, read(path)?)
 }
@@ -144,58 +144,9 @@ pub(crate) fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, St
     Ok(pem)
 }
 
-/// The identity in `bytes`, the PKCS#12 file at `path`, under `password`, as PEM in memory
-/// (ADR-0027 clause 15). The caller reads the file, through no link the service's account placed
-/// and at most [`fleet_core::pkcs12::MAX_FILE_BYTES`] of it (ADR-0021 clause 11).
-///
-/// # Errors
-/// [`OpenError::WrongPassword`](fleet_core::pkcs12::file::OpenError) when the password does not
-/// open it, and `Invalid` naming the file for everything else.
-pub fn pkcs12_identity(
-    path: &Path,
-    bytes: &[u8],
-    password: &str,
-) -> Result<crate::config::BootstrapIdentity, fleet_core::pkcs12::file::OpenError> {
-    use fleet_core::pkcs12::file::OpenError;
-    let invalid = |why: String| OpenError::Invalid(format!("{}: {why}", path.display()));
-    let opened = fleet_core::pkcs12::file::open(bytes, password).map_err(|e| match e {
-        OpenError::WrongPassword => OpenError::WrongPassword,
-        OpenError::Invalid(why) => invalid(why),
-    })?;
-    let mut cert_pem = pem_block("CERTIFICATE", &opened.certificate_der);
-    let mut key_pem = pem_block("PRIVATE KEY", &opened.private_key_der);
-    Ok(crate::config::BootstrapIdentity {
-        cert_pem: std::mem::take(&mut *cert_pem).into_bytes(),
-        // The buffer moves; nothing is copied.
-        key_pem: Zeroizing::new(std::mem::take(&mut *key_pem).into_bytes()),
-    })
-}
-
-/// `der` as one PEM block, in buffers wiped when they are dropped and sized up front, so none is
-/// grown and left behind (ADR-0014).
-pub(crate) fn pem_block(label: &str, der: &[u8]) -> Zeroizing<String> {
-    use base64::Engine as _;
-    let body = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(der));
-    let (begin, end) = (
-        format!("-----BEGIN {label}-----\n"),
-        format!("-----END {label}-----\n"),
-    );
-    let lines = body.len().div_ceil(64);
-    let mut pem = Zeroizing::new(String::with_capacity(
-        begin.len() + body.len() + lines + end.len(),
-    ));
-    pem.push_str(&begin);
-    for line in body.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
-        pem.push('\n');
-    }
-    pem.push_str(&end);
-    pem
-}
-
 /// A file `[tls]` names, read by its path: the run-time Client's own files, which its operator
 /// may reach through a link. A privileged enrolment reads them through
-/// [`crate::nofollow::read_privileged`] instead, and never by this path (ADR-0021 clause 11).
+/// [`fleet_util::nofollow::read_privileged`] instead, and never by this path (ADR-0042 clause 11).
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     read_bounded(path)
         .map(|mut bytes| std::mem::take(&mut *bytes))
@@ -207,7 +158,7 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 pub(crate) const MAX_PEM_BYTES: u64 = 1 << 20;
 
 /// The bytes of the regular file at `path`, of at most [`MAX_PEM_BYTES`], in a buffer wiped when
-/// it is dropped (ADR-0014). The error says why, and leaves naming the file to the caller.
+/// it is dropped (ADR-0040). The error says why, and leaves naming the file to the caller.
 ///
 /// Anything but a regular file is refused before it is opened, and again by what was opened, so
 /// a FIFO or a device at the name — `/dev/zero` — is never read. On Unix the open does not block,
@@ -222,7 +173,7 @@ pub(crate) fn read_bounded(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
     open.read(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, libc::O_NONBLOCK);
-    crate::nofollow::read_opened(open.open(path).map_err(|e| e.to_string())?, MAX_PEM_BYTES)
+    fleet_util::nofollow::read_opened(open.open(path).map_err(|e| e.to_string())?, MAX_PEM_BYTES)
         .map_err(|e| e.to_string())
 }
 
@@ -239,9 +190,9 @@ fn not_regular() -> String {
 }
 
 /// A file of the state directory, never read through a link: an install reads it as root, and the
-/// directory belongs to the service's account (ADR-0021).
+/// directory belongs to the service's account (ADR-0042).
 fn state_file(path: &Path) -> Result<Vec<u8>, String> {
-    crate::nofollow::read(path, MAX_PEM_BYTES)
+    fleet_util::nofollow::read(path, MAX_PEM_BYTES)
         .map(|mut bytes| std::mem::take(&mut *bytes))
         .map_err(|e| format!("cannot read {}: {e}", path.display()))
 }
@@ -302,10 +253,11 @@ mod tests {
         .expect("write");
         let bytes = std::fs::read(&p12).expect("read");
         assert_eq!(
-            pkcs12_identity(&p12, &bytes, "not the password"),
+            fleet_util::identity::pkcs12::open(&p12, &bytes, "not the password"),
             Err(OpenError::WrongPassword)
         );
-        let identity = pkcs12_identity(&p12, &bytes, "twelve chars").expect("opens");
+        let identity =
+            fleet_util::identity::pkcs12::open(&p12, &bytes, "twelve chars").expect("opens");
         assert_eq!(
             opamp::tls::certificates(&identity.cert_pem).expect("pem")[0].as_ref(),
             cert.der().as_ref()
@@ -348,10 +300,10 @@ mod tests {
     /// bootstrap identity, a key file, a bootstrap password, the Supervisor Endpoint token and
     /// `[packages] archive_key`.
     /// Were any of them a plain buffer again, this would not compile.
-    /// Verifies: ADR-0014
+    /// Verifies: ADR-0040
     #[test]
     fn the_clients_secrets_are_held_in_zeroizing_buffers() {
-        use crate::config::BootstrapIdentity;
+        use fleet_util::identity::BootstrapIdentity;
         fn bootstrap_key(identity: BootstrapIdentity) -> Zeroizing<Vec<u8>> {
             identity.key_pem
         }
@@ -360,7 +312,7 @@ mod tests {
         }
         let reads_key: fn(&Path) -> Result<Zeroizing<Vec<u8>>, String> = key_file;
         let reads_password = |path: &Path| -> Result<Zeroizing<String>, String> {
-            crate::config_init::read_password_file(path, "--flag", &[])
+            fleet_util::password::read_password_file(path, "--flag", &[])
         };
         let makes_token: fn() -> Result<Zeroizing<String>, String> =
             crate::supervisor::endpoint::new_token;

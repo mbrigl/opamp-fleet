@@ -26,7 +26,7 @@ use std::io::{self, BufRead as _, Read as _, Seek as _, Write as _};
 use opamp::uid::InstanceUid;
 
 use crate::gateway::policy::{Change, End};
-use crate::nofollow::HeldDir;
+use fleet_util::nofollow::HeldDir;
 
 /// The store's file name in the Gateway's directory.
 pub const NAME: &str = "bindings";

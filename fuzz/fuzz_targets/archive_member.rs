@@ -1,9 +1,9 @@
 //! A downloaded package artifact unpacked for its one program: `.tar.gz`, `.zip` or `.7z`
-//! (ADR-0033). Whatever the archive holds, only the one file this Client chose is written.
+//! (ADR-0039). Whatever the archive holds, only the one file this Client chose is written.
 //! Verifies: Q-2
 #![no_main]
 
-use fleet_agent::archive;
+use fleet_util::archive;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -18,12 +18,7 @@ fuzz_target!(|data: &[u8]| {
     let Ok(mut out) = std::fs::File::create(&out_path) else {
         return;
     };
-    let _ = match archive::detect(&artifact) {
-        Ok(archive::Kind::TarGz) => archive::extract_tar_gz(&artifact, "agent", &mut out),
-        Ok(archive::Kind::Zip) => archive::extract_zip(&artifact, "agent", &mut out),
-        Ok(archive::Kind::SevenZ) => archive::extract_7z(&artifact, "agent", &mut out, None),
-        _ => Ok(0),
-    };
+    let _ = archive::extract(&artifact, "agent", &mut out, None);
     let mut names: Vec<_> = std::fs::read_dir(work.path())
         .into_iter()
         .flatten()

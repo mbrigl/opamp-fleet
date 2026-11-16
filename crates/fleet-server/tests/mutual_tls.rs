@@ -176,7 +176,7 @@ struct Setup<'a> {
     max_agents: Option<usize>,
     /// The clock the enrolment window and the rate limit run on; the system's by default.
     clock: Option<Arc<dyn fleet_server::fleet::Clock>>,
-    /// Package delivery over an empty store (ADR-0033).
+    /// Package delivery over an empty store (ADR-0039).
     packages: bool,
     /// The bootstrap CA's key on the Server, which then issues bootstrap certificates (ADR-0027).
     issue_bootstrap: bool,
@@ -504,7 +504,7 @@ async fn post(
 /// trust, never reaches the Agent plane — neither the OpAMP endpoint nor the package download —
 /// while the Operator plane on its own listener serves a browser that presents none (ADR-0012,
 /// ADR-0026).
-/// Verifies: ADR-0026, ADR-0012, ADR-0033, G-17
+/// Verifies: ADR-0026, ADR-0012, ADR-0039, G-17
 #[tokio::test]
 async fn a_client_certificate_is_required_in_the_handshake_on_the_agent_plane() {
     let pki = Pki::new();
@@ -3951,7 +3951,7 @@ async fn every_unavailable_reply_names_the_agent_it_answers() {
     names_its_agent(&reply, &uid, "the closed enrolment window");
 }
 
-// ---- A host fetches only what is offered to its own Agents (ADR-0033) ----
+// ---- A host fetches only what is offered to its own Agents (ADR-0039) ----
 
 /// The Agent type the delivery tests release.
 const OTELCOL: &str = "otelcol";
@@ -4047,7 +4047,7 @@ async fn released_to(served: &Served, host: &reqwest::Client, version: &str, art
 }
 
 /// A host fetches the artifact released to the Agent that reported with its certificate.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 #[tokio::test]
 async fn a_host_fetches_the_artifact_offered_to_its_own_agent() {
     let pki = Pki::new();
@@ -4063,7 +4063,7 @@ async fn a_host_fetches_the_artifact_offered_to_its_own_agent() {
 }
 
 /// Another member of the fleet is answered `404` for what was released to one host's Agent alone.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 #[tokio::test]
 async fn a_host_is_answered_404_for_an_artifact_offered_only_to_another_host() {
     let pki = Pki::new();
@@ -4103,9 +4103,9 @@ async fn answer(response: reqwest::Response) -> (u16, Vec<(String, Vec<u8>)>, Ve
 }
 
 /// The same request is answered byte for byte alike whether the store holds nothing under it,
-/// holds only an unsigned entry (ADR-0033), holds an artifact released to nobody, or holds one
+/// holds only an unsigned entry (ADR-0039), holds an artifact released to nobody, or holds one
 /// released to another host's Agent.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 #[tokio::test]
 async fn an_artifact_not_offered_and_one_not_held_are_answered_alike() {
     let pki = Pki::new();
@@ -4159,7 +4159,7 @@ async fn an_artifact_not_offered_and_one_not_held_are_answered_alike() {
 
 /// A host marked as a Gateway speaks for any Agent, so it fetches what is offered to any; before
 /// it is marked, it fetches nothing of another host's.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 #[tokio::test]
 async fn a_marked_gateway_fetches_what_is_offered_to_any_agent() {
     let pki = Pki::new();
@@ -4195,7 +4195,7 @@ async fn a_marked_gateway_fetches_what_is_offered_to_any_agent() {
 
 /// A certificate that names no host speaks for no Agent — not even the one it reported, to which
 /// the artifact was released.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 #[tokio::test]
 async fn a_certificate_naming_no_host_fetches_nothing() {
     let pki = Pki::new();
@@ -4214,7 +4214,7 @@ async fn a_certificate_naming_no_host_fetches_nothing() {
 /// A fetch that is not offered leaves one `download.refused` entry naming the check, the host, the
 /// certificate's serial and the artifact asked for; it is no failure the admission throttle counts,
 /// which here backs off after one.
-/// Verifies: ADR-0033, ADR-0028
+/// Verifies: ADR-0039, ADR-0028
 #[tokio::test]
 async fn a_refused_fetch_leaves_one_download_refused_entry_naming_its_check() {
     let pki = Pki::new();
@@ -4276,7 +4276,7 @@ async fn a_refused_fetch_leaves_one_download_refused_entry_naming_its_check() {
 
 /// A malformed identity or Platform token is a `400`, decided before any offer is tested: no
 /// `download.refused` entry follows it.
-/// Verifies: ADR-0033
+/// Verifies: ADR-0039
 #[tokio::test]
 async fn a_malformed_token_is_answered_400_before_the_offer_is_tested() {
     let pki = Pki::new();
@@ -4314,7 +4314,7 @@ async fn a_malformed_token_is_answered_400_before_the_offer_is_tested() {
 
 /// A download takes a token from the bucket of the host its certificate names — the bucket its
 /// Agent's messages draw on.
-/// Verifies: ADR-0033, ADR-0012
+/// Verifies: ADR-0039, ADR-0012
 #[tokio::test]
 async fn a_download_costs_a_token_of_the_hosts_bucket() {
     let pki = Pki::new();
@@ -4970,8 +4970,8 @@ async fn a_revoked_bootstrap_certificate_is_deleted_from_the_list_and_stays_refu
 
 /// Without the bootstrap CA's key the Server issues nothing and says why, a request outside the
 /// bounds is refused, and one naming only a customer, a site and a password is issued (ADR-0027
-/// clauses 1 and 3, ADR-0036 clause 14 and ADR-0026 clause 17).
-/// Verifies: ADR-0027, ADR-0036
+/// clauses 1 and 3, ADR-0043 clause 14 and ADR-0026 clause 17).
+/// Verifies: ADR-0027, ADR-0043
 #[tokio::test]
 async fn issuing_needs_the_key_and_a_request_within_bounds() {
     let pki = Pki::new();
@@ -5048,7 +5048,7 @@ async fn issuing_needs_the_key_and_a_request_within_bounds() {
     let issued: serde_json::Value = issued.json().await.expect("json");
     assert_eq!(
         issued["subject"], "O=Kunde GmbH, OU=Werk Nord, CN=acme bootstrap Certificate",
-        "the Server sets the common name from the CA's (ADR-0036 clause 19)"
+        "the Server sets the common name from the CA's (ADR-0043 clause 19)"
     );
 }
 

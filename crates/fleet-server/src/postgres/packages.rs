@@ -736,8 +736,8 @@ mod tests {
     /// stored as `linux/arm32` beside them: all fold onto `linux/arm32`, the row stored under the
     /// canonical spelling is served, and the load does not fail. Without one, the row of the
     /// first spelling in their order is served, whichever instance reads them
-    /// (ADR-0033 clause 6).
-    /// Verifies: ADR-0033
+    /// (ADR-0039 clause 6).
+    /// Verifies: ADR-0039
     #[test]
     fn rows_stored_under_an_older_spelling_load_folded() {
         let Some(test) = TestDatabase::named() else {
@@ -909,7 +909,7 @@ mod tests {
     /// On PostgreSQL an entry whose blob went while it was uploaded is refused as an invalid
     /// request and one for a Package that is not stored as not found, whatever the database
     /// wrote around the message: what the REST API answers `400` and `404`, as on the filesystem.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn an_entry_refused_on_postgres_keeps_its_kind() {
         use crate::packages::Refusal;

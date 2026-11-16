@@ -18,12 +18,12 @@ use tokio::sync::mpsc;
 
 use crate::shutdown::Shutdown;
 
-/// The health status a Supervisor reports while the second service cannot be reached (ADR-0021
+/// The health status a Supervisor reports while the second service cannot be reached (ADR-0042
 /// clause 17).
 pub const UNREACHABLE: &str = "the second service cannot be reached";
 
 /// What a Supervisor reports while the second service is reached and refused: another account
-/// serves its socket, it is another build, or it refuses the Client (ADR-0021 clauses 19 and 20).
+/// serves its socket, it is another build, or it refuses the Client (ADR-0042 clauses 19 and 20).
 /// Not an outage that ends by itself, so it is told apart from [`UNREACHABLE`].
 pub const REFUSED: &str =
     "the second service is refused: another account, another build, or it refuses this Client";
@@ -31,7 +31,7 @@ pub const REFUSED: &str =
 /// Why `health` says that the second service is not reached — [`UNREACHABLE`] or [`REFUSED`] —
 /// or `None` where it says nothing of the kind. While it says so, a configuration that is
 /// `APPLYING` and a package that is `Installing` wait for the service, and the Agent names it as the
-/// reason (ADR-0021 clause 17).
+/// reason (ADR-0042 clause 17).
 #[must_use]
 pub fn waiting_reason(health: &ComponentHealth) -> Option<&str> {
     let waits = !health.healthy && (health.status == UNREACHABLE || health.status == REFUSED);
@@ -45,7 +45,7 @@ pub enum ProcessCommand {
     /// to the adapter's [`config_dir`](SupervisorContext::config_dir). Apply it, which for a
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`] — where the start does not reach the second service, once
-    /// a start does (ADR-0021 clause 17).
+    /// a start does (ADR-0042 clause 17).
     ApplyConfig {
         config: AgentRemoteConfig,
         /// The span of the apply this command is one half of (ADR-0017). The core opens it when the
@@ -53,7 +53,7 @@ pub enum ProcessCommand {
         /// the restart and its health gate rather than ending where the message does.
         span: tracing::Span,
     },
-    /// A package was downloaded and verified (content hash and signature; ADR-0033): swap its
+    /// A package was downloaded and verified (content hash and signature; ADR-0039): swap its
     /// bytes over the Managed Process's binary, restart, and health-gate exactly as `ApplyConfig`
     /// does — a binary that will not stay up is rolled back to the previous one. Answered with
     /// [`ProcessEvent::PackageApplied`]. `staged` is the path of the verified artifact — a file,
@@ -61,7 +61,7 @@ pub enum ProcessCommand {
     /// hash the status refers to; `version` is what the Agent then reports it has. While the
     /// second service cannot be reached, the package is staged and kept, never swapped in, and
     /// the answer follows its swap once a start reaches the service; a newer package replaces it
-    /// unanswered (ADR-0021 clause 17).
+    /// unanswered (ADR-0042 clause 17).
     ApplyPackage {
         staged: PathBuf,
         version: String,
@@ -111,7 +111,7 @@ pub enum ProcessEvent {
         result: Result<(), String>,
     },
     /// Outcome of an [`ProcessCommand::ApplyPackage`]: `Ok(version)` reports `Installed` at that
-    /// version, `Err` reports `InstallFailed` with the error after rolling back (ADR-0033).
+    /// version, `Err` reports `InstallFailed` with the error after rolling back (ADR-0039).
     PackageApplied {
         hash: Vec<u8>,
         result: Result<String, String>,
@@ -147,7 +147,7 @@ impl EventSender {
 /// The two shapes share their whole lifecycle — set the old one aside, install the new one, prove
 /// it starts, put the old one back if it does not — and differ only in what "it" is. Keeping that
 /// difference in this type rather than inside the process adapter's swap is what lets the health
-/// gate and the rollback stay one piece of code for both (ADR-0033). How each shape is set aside,
+/// gate and the rollback stay one piece of code for both (ADR-0039). How each shape is set aside,
 /// installed and put back is the adapter's, in [`process`](super::process).
 #[derive(Debug, Clone)]
 pub enum InstallTarget {
@@ -156,7 +156,7 @@ pub enum InstallTarget {
         /// Where the program lives.
         path: PathBuf,
         /// Where its archive holds it, where its kind knows the place
-        /// (ADR-0033 clause 55): the one member whose trailing
+        /// (ADR-0039 clause 55): the one member whose trailing
         /// path components are this, `/`-separated and without the archive's wrapping directory
         /// (`usr/bin/agent`), so a release that carries further files of the program's name
         /// installs the program and not one of those. `None` finds the member by the program's
@@ -172,8 +172,8 @@ pub enum InstallTarget {
         /// Where the program sits inside the tree, as written in the configuration.
         program_path: PathBuf,
         /// The absolute links the kind's tree keeps, the only links the install creates
-        /// (ADR-0033 clause 57).
-        links: &'static [fleet_core::tree::KeptLink],
+        /// (ADR-0039 clause 57).
+        links: &'static [fleet_util::tree::KeptLink],
     },
 }
 
@@ -185,24 +185,24 @@ impl InstallTarget {
     }
 }
 
-/// The process account's primary group, where a process account is registered (ADR-0021 clause 21).
+/// The process account's primary group, where a process account is registered (ADR-0042 clause 21).
 /// What the Client shares with the Managed Processes belongs to this group, and nothing else does.
 ///
 /// Resolved from the `--process-uid` of the Client's command line when it starts, never from the
 /// configuration file: the registration that names the process account is the only place it is
-/// stated (ADR-0021 clause 6).
+/// stated (ADR-0042 clause 6).
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub u32);
 
 /// On Windows the process account itself, by its SID, from the `--process-sid` of the Client's
 /// command line: what the Client shares with the Managed Processes is granted to it by ACL, where
-/// Unix gives it to the account's group (ADR-0021 clause 21). Made once per run.
+/// Unix gives it to the account's group (ADR-0042 clause 21). Made once per run.
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub &'static str);
 
-/// The package this Supervisor's Managed Process currently runs (ADR-0033), persisted so a
+/// The package this Supervisor's Managed Process currently runs (ADR-0039), persisted so a
 /// restarted Client reports the version it has and is not re-offered it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstalledPackage {
@@ -244,7 +244,7 @@ pub trait PackageFloors: Send + Sync {
 }
 
 /// What an Agent persists across restarts (ADR-0009): its identity, the remote configuration it
-/// last applied, and the package its Managed Process runs (ADR-0033). The filesystem adapter is
+/// last applied, and the package its Managed Process runs (ADR-0039). The filesystem adapter is
 /// [`Storage`](crate::storage::Storage).
 pub trait AgentStorage: Send + Sync {
     /// The persisted `instance_uid`, or a new one, persisted, when there is none.
@@ -329,7 +329,7 @@ pub struct SupervisorContext {
     pub name: String,
     /// What the Supervisor Endpoint asks the Managed Process to present (ADR-0016); handed to the
     /// process as [`ENDPOINT_TOKEN_ENV`](crate::supervisor::process::ENDPOINT_TOKEN_ENV). Wiped
-    /// when it is dropped (ADR-0014).
+    /// when it is dropped (ADR-0040).
     pub endpoint_token: zeroize::Zeroizing<String>,
     /// Everything this Supervisor owns: its state, its `program/`, its package staging
     /// (ADR-0018). Placed by `supervisor_dir`, so nothing may assume where it is.
@@ -341,7 +341,7 @@ pub struct SupervisorContext {
     /// directory (ADR-0018). The plugin spawns this rather than reading its own
     /// `binary`/`command` key, so the path rule lives in one place instead of once per plugin.
     pub program: PathBuf,
-    /// What an offered package replaces (ADR-0033) — resolved beside `program` and for
+    /// What an offered package replaces (ADR-0039) — resolved beside `program` and for
     /// the same reason: a plugin that decided this for itself could disagree with where the core
     /// put the program.
     pub install: InstallTarget,
@@ -350,15 +350,15 @@ pub struct SupervisorContext {
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
     /// `Ok` — the health-gated acknowledgement (ADR-0018). Zero acknowledges on start.
     pub apply_grace: Duration,
-    /// How long the version a successful update supersedes is kept before deletion (ADR-0033),
+    /// How long the version a successful update supersedes is kept before deletion (ADR-0039),
     /// resolved from the per-Supervisor override or the global `[updates]` default. Zero deletes on
     /// success.
     pub retain_previous: Duration,
-    /// The key that opens an encrypted `.7z` package artifact (ADR-0033); `None` when none is
+    /// The key that opens an encrypted `.7z` package artifact (ADR-0039); `None` when none is
     /// configured. Client-wide, like the package verification key.
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// The process account's primary group, where a process account is registered: what the
-    /// Supervisor shares with its Managed Process belongs to it (ADR-0021 clause 21).
+    /// Supervisor shares with its Managed Process belongs to it (ADR-0042 clause 21).
     pub process_account_group: Option<ProcessAccountGroup>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
@@ -408,19 +408,19 @@ pub struct KindDefaults {
     /// The program's file name in this Supervisor's own `program/` directory (ADR-0018).
     /// `None` leaves it to the block's program key.
     pub program: Option<&'static str>,
-    /// Where the program sits inside an unpacked package tree (ADR-0033); `None` is a single-file
+    /// Where the program sits inside an unpacked package tree (ADR-0039); `None` is a single-file
     /// package, or a kind that leaves the question to the block.
     pub program_path: Option<&'static str>,
     /// Where a single-file package's archive holds the program, as trailing path components
     /// (`usr/bin/agent`), for an archive that carries more than one file of the program's name.
-    /// `None` finds the member by its file name alone (ADR-0033
+    /// `None` finds the member by its file name alone (ADR-0039
     /// clause 55).
     pub member: Option<&'static str>,
     /// The absolute links a tree package of this kind keeps as links, each by its exact path in
     /// the tree and its exact target: the only links the tree's install creates, and the only
     /// links leading out that `opamp-fleetctl` packs
-    /// (ADR-0033 clause 57). Empty for nearly every kind.
-    pub tree_links: &'static [fleet_core::tree::KeptLink],
+    /// (ADR-0039 clause 57). Empty for nearly every kind.
+    pub tree_links: &'static [fleet_util::tree::KeptLink],
     /// The Agent *type* this kind presents (ADR-0017). `None` falls back to the program's file
     /// name, which is what the block already said.
     pub service_name: Option<&'static str>,
@@ -448,7 +448,7 @@ pub struct KindTiming {
     pub stop_timeout: Option<Duration>,
     /// Overrides `[supervisors] apply_grace_secs`.
     pub apply_grace: Option<Duration>,
-    /// Overrides `[updates] retain_previous_secs` (ADR-0033).
+    /// Overrides `[updates] retain_previous_secs` (ADR-0039).
     pub retain_previous: Option<Duration>,
 }
 
@@ -473,7 +473,7 @@ pub type Purged<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Result<(), String>>> + Send + 'a>>;
 
 /// The plugins a run starts its Supervisors with (ADR-0018 clause 2), as the composition root
-/// made them: every one starts its Managed Process the way the run does (ADR-0021 clause 18). The
+/// made them: every one starts its Managed Process the way the run does (ADR-0042 clause 18). The
 /// Engine keeps it, so a Supervisor that a Supervisor-set apply starts later is started the same
 /// way as those started with the Client.
 pub trait PluginRegistry: Send + Sync {
@@ -482,7 +482,7 @@ pub trait PluginRegistry: Send + Sync {
 
     /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
     /// directory — that the Client cannot remove itself, before the purge deletes the rest
-    /// (ADR-0034 clause 13, ADR-0021 clause 20), all of them within one wait (ADR-0021 clause 17).
+    /// (ADR-0034 clause 13, ADR-0042 clause 20), all of them within one wait (ADR-0042 clause 17).
     /// Nothing where the Client starts its programs itself.
     ///
     /// # Errors

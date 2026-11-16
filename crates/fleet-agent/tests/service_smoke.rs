@@ -118,7 +118,7 @@ fn agent(state: &AppState) -> Option<AgentView> {
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running
 /// under that name — which is itself an answer the assertions below use.
 fn service_pid() -> Option<u32> {
-    // One name on every platform (ADR-0021 clause 17), so this is what systemd, launchd, and the SCM
+    // One name on every platform (ADR-0042 clause 17), so this is what systemd, launchd, and the SCM
     // are each asked about.
     let qualified = service_name();
     #[cfg(windows)]
@@ -229,7 +229,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     let (addr, state, _server) = spawn_server();
     let config = dir.path().join("supervisor.toml");
     // The identity lies under the root, which the install hands to the service's account: on
-    // Windows that is the virtual account, which reads nothing else of the runner's (ADR-0021).
+    // Windows that is the virtual account, which reads nothing else of the runner's (ADR-0042).
     std::fs::create_dir_all(&root).expect("the root");
     std::fs::write(
         &config,
@@ -246,7 +246,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     )
     .expect("install the service");
     let _registered = Registered;
-    // A first registration on Windows runs as the service's own virtual account (ADR-0021), and
+    // A first registration on Windows runs as the service's own virtual account (ADR-0042), and
     // the start below proves the Client works under it.
     #[cfg(windows)]
     assert!(
@@ -441,7 +441,7 @@ fn shared_tempdir() -> tempfile::TempDir {
 /// the service still runs as the account, and the unit the Client wrote leaves it the privileges
 /// a Managed Process needs for `sudo` and setuid helpers — no `no_new_privs`, and `/` not mounted
 /// `nosuid`. `systemd-analyze verify` accepts the unit.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0042
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -552,7 +552,7 @@ fn a_reregistration_keeps_the_account_and_the_service_keeps_its_privileges() {
 }
 
 /// Adds the account `member` to the group `group`, as the operator does before naming a process
-/// account (ADR-0021 clause 21).
+/// account (ADR-0042 clause 21).
 #[cfg(target_os = "linux")]
 fn add_to_group(member: &str, group: &str) {
     let status = Command::new("usermod")
@@ -632,7 +632,7 @@ fn owner_and_mode(path: &Path) -> (u32, u32, u32) {
     (meta.uid(), meta.gid(), meta.mode() & 0o7777)
 }
 
-/// A Managed Process under a process account (ADR-0021): installed with `--run-as` and
+/// A Managed Process under a process account (ADR-0042): installed with `--run-as` and
 /// `--process-account` naming two real accounts, the Client starts its program through the second
 /// service, and the program runs as the process account. It reads its `config/`, writes into its
 /// data directory, and can neither read the Client's `client-key.pem` or its log nor write its own
@@ -643,7 +643,7 @@ fn owner_and_mode(path: &Path) -> (u32, u32, u32) {
 /// service under the test's own uid; this is the one place the shipped binary starts a program
 /// over the socket under another account. On Linux under systemd, and on macOS under launchd with
 /// role accounts made as the refusal of a missing account says.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0042
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -670,7 +670,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     let data = supervisor.join("data");
     std::fs::create_dir_all(&program).expect("program/");
     std::fs::create_dir_all(&config_dir).expect("config/");
-    // A data directory as ADR-0021 clause 21 gives it: the process account's group, `2770`. The
+    // A data directory as ADR-0042 clause 21 gives it: the process account's group, `2770`. The
     // command kind names none, so the test makes it as a kind would.
     std::fs::create_dir_all(&data).expect("data/");
     let chgrp = Command::new("chgrp")
@@ -689,7 +689,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o777)).expect("chmod out/");
     let result = out.join("result");
 
-    // The Client's key where ADR-0021 protects it: in the state directory, owner-only.
+    // The Client's key where ADR-0042 protects it: in the state directory, owner-only.
     common::client_identity(dir.path());
     let key = state.join("client-key.pem");
     let cert = state.join("client.pem");
@@ -792,7 +792,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(user_of(&again["pid"]), process_account.0, "{again:?}");
 
     // Re-registered without either flag, as every package upgrade does: both accounts are kept,
-    // and the hand-over leaves the process account its data (ADR-0021 clause 1).
+    // and the hand-over leaves the process account its data (ADR-0042 clause 1).
     let again_pid: u32 = again["pid"].parse().expect("a pid");
     client(&["service", "stop"], &config).expect("stop the service");
     let reinstalled = client(&["service", "install", "--root", &root_arg], &config)
@@ -819,7 +819,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(upgraded["key"], "denied", "{upgraded:?}");
 
     // Dropped while both run: the install stops them before it re-owns, and starts the Client
-    // again once it has succeeded, with no `service start` (ADR-0021 clause 26). The Client then
+    // again once it has succeeded, with no `service start` (ADR-0042 clause 26). The Client then
     // starts its program itself again, under its own account.
     let again_pid: u32 = upgraded["pid"].parse().expect("a pid");
     let dropping = client(
@@ -913,13 +913,13 @@ fn restart(name: &str) {
     assert!(restarted.success(), "cannot restart {name}");
 }
 
-/// A Managed Process takes the second service's place (ADR-0021 clause 19): it leaves its process
+/// A Managed Process takes the second service's place (ADR-0042 clause 19): it leaves its process
 /// group, so it outlives the Client's connection, removes the second service's socket and listens
 /// at its name. The Client, restarted, finds a peer of the process account there and refuses it —
 /// it writes it nothing and logs the impostor's process id — and starts no Managed Process until
 /// the second service is restarted and serves the socket again. On Linux the second service is not
 /// dumpable, and the program it starts is.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0042
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -1293,9 +1293,9 @@ fn acl_names(path: &Path, who: &str) -> bool {
 /// On Windows a first install without `--run-as` registers the service's own virtual account and
 /// grants it the root; a re-install without the flag, as an MSI upgrade makes, keeps it;
 /// `--run-as LocalSystem` registers `LocalSystem` and withdraws what the virtual account was
-/// granted; and a re-install without the flag then keeps `LocalSystem` (ADR-0021 clause 1). The
+/// granted; and a re-install without the flag then keeps `LocalSystem` (ADR-0042 clause 1). The
 /// runner's shell is elevated, as `service install` needs.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0042
 #[cfg(windows)]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -1367,7 +1367,7 @@ fn on_windows_a_first_install_runs_as_the_virtual_account_and_local_system_is_na
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
 
-/// A Managed Process under a process account on Windows (ADR-0021): installed with `--run-as`
+/// A Managed Process under a process account on Windows (ADR-0042): installed with `--run-as`
 /// naming the Client's own virtual account and `--process-account` the second service's, the
 /// Client starts its program through the second service, on its named pipe, and the program runs
 /// as `NT SERVICE\<PRODUCT_NAME>-agents` without `SeImpersonatePrivilege`. It reads its `config/`
@@ -1378,7 +1378,7 @@ fn on_windows_a_first_install_runs_as_the_virtual_account_and_local_system_is_na
 ///
 /// A re-registration without either flag, as an upgrade makes, rewrites both SCM entries in place
 /// and keeps both accounts; `--no-process-account` returns the program to the Client's account.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0042
 #[cfg(windows)]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -1776,14 +1776,14 @@ impl Drop for ScheduledTask {
 }
 
 /// On Windows a pipe of the second service's name, made by a task under the process account, `NT
-/// AUTHORITY\LocalService`, while the second service is stopped (ADR-0021 clause 19): the Client,
+/// AUTHORITY\LocalService`, while the second service is stopped (ADR-0042 clause 19): the Client,
 /// restarted, refuses it as a peer the SCM names no process for, writes it nothing and logs it, and
 /// starts no Managed Process; once the task has ended and the second service runs again, the Client
 /// reaches it and the program runs. The second service is stopped first because a client that opens
 /// a pipe both serve would reach either one; the case of a differing process is decided by the test
 /// with a fake service manager. A failure midway leaves the second service stopped until
 /// `Registered` uninstalls both services.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0042
 #[cfg(windows)]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -1931,7 +1931,7 @@ while ($true) {
     scm_to("start", service_name(), "RUNNING");
     let pipe_text = pipe.display().to_string();
     // The impostor's process carries the default security of its account, which grants the
-    // Client nothing: the Client cannot open it to hold it (ADR-0021) and refuses it as a process
+    // Client nothing: the Client cannot open it to hold it (ADR-0042) and refuses it as a process
     // it cannot read, before the SCM's answer; were it opened, the SCM would name no process.
     wait_telling(
         "the restarted Client to refuse the impostor",
@@ -1991,14 +1991,14 @@ while ($true) {
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
 
-/// On Windows the second service's process and threads are closed to its own account (ADR-0021):
+/// On Windows the second service's process and threads are closed to its own account (ADR-0042):
 /// with `NT AUTHORITY\LocalService` as the process account, a task scheduled under that account —
 /// as a Managed Process would be — is refused `ERROR_ACCESS_DENIED` when it opens the second
 /// service's process with `PROCESS_VM_READ`, `PROCESS_DUP_HANDLE` or `PROCESS_CREATE_THREAD`, and
 /// any of its threads with `THREAD_SET_CONTEXT`, while it may still open the process to ask about
 /// it (`PROCESS_QUERY_LIMITED_INFORMATION`), and the Managed Process the second service started
 /// still runs.
-/// Verifies: ADR-0021
+/// Verifies: ADR-0042
 #[cfg(windows)]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]

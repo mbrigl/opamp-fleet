@@ -52,11 +52,11 @@ than anywhere else, and none beats one that has stopped being true.
 - **Package downloads** come from the Server alone: every artifact is uploaded to it, and a
   Client fetches only from its own Server's origin, or from its Gateway. What arrives is checked
   against its hash and the operator's signature
-  ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)).
+  ([ADR-0039](adr/0039-packages-signatures-and-delivery.md)).
 - **The service manager** starts the Client and restarts it after a self-update
   ([ADR-0019](adr/0019-the-client-updates-itself-from-a-signed-package.md)). Where a process
   account is registered, it also runs the second service, which starts the Managed Processes
-  under that account (ADR-0021).
+  under that account (ADR-0042).
 - **Upstream**, the opamp-spec release named as the Protocol Baseline in
   [`CONFORMANCE.md`](CONFORMANCE.md) fixes the wire format.
 
@@ -66,11 +66,11 @@ The parts the system is made of, each with one responsibility, named in the voca
 [`GLOSSARY.md`](GLOSSARY.md). One level deep, deeper only where the size of a part earns it. The
 golden path and the test pattern an agent copies from are named here.
 
-Five crates in one workspace
-([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)):
+Six crates in one workspace
+([ADR-0041](adr/0041-six-crates-on-tokio-and-axum.md)):
 
 - **`opamp`** — the OpAMP communication layer, publishable on its own
-  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)).
+  ([ADR-0041](adr/0041-six-crates-on-tokio-and-axum.md)).
   Always the
   generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
   machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
@@ -101,15 +101,22 @@ Five crates in one workspace
   `x509-parser` by the adapter `x509::read`, with the random serial and the clock skew every issued
   certificate gets, the shape of a leaf by its role and the loading of a CA from its certificate
   and key file, by the Server's two CAs and the operator tool alike, in the adapter `x509::issue`;
-  the first certificate of a CA file is read by `opamp::tls::first_certificate` — the links a kind's
-  tree package keeps, which `opamp-fleetctl` packs and the Client creates (`tree`), though no kind
-  on `main` states one yet — and the
+  the first certificate of a CA file is read by `opamp::tls::first_certificate` — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
   `p12-keystore` is the adapter `pkcs12::file` (ADR-0027) — and, behind the feature `pkcs11` that
   only the Server and the operator tool turn on, what both do alike on a PKCS#11 token with
   `cryptoki` in the adapter `pkcs11`: the module's one context per process, the slot of a token by
   its label, the login, the curve P-256, a key's point and the DER of a token's signature
   ([ADR-0026](adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+- **`fleet-util`** — what the Client and the operator tool share and the Server does not use
+  ([ADR-0041](adr/0041-six-crates-on-tokio-and-axum.md)):
+  the unpackers of a package's artifact and the 7z Unix-mode convention (`archive`), the links a
+  kind's tree package keeps, which `opamp-fleetctl` packs and the Client creates (`tree`), though
+  no kind on `main` states one yet, the file operations that follow no link (`nofollow`), whose
+  Unix `*at` system calls, wrapped once in `nofollow::at`, the Client's work by directory handle
+  calls too, the reader of a password file (`password`), and a bootstrap identity as PEM
+  (`identity`), opened from a PKCS#12 file by the adapter `identity::pkcs12`. A test decides from
+  who names a module whether it belongs here or in `fleet-core`.
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the
   effective description Selectors match (`labels`), packages and Deployments, the Agent plane, and
   the Operator plane, whose credential check is `credentials`.
@@ -118,14 +125,14 @@ Five crates in one workspace
 - **`fleet-tools`** — the operator tool, the one program `opamp-fleetctl`: its `package` commands
   fetch (`fetch`), pack, hash and sign package artifacts — or sign a Package's signing file from
   the UI (`signing`,
-  ADR-0033)
+  ADR-0039)
   — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
-  of a PKCS#12 file (ADR-0036). `gpgv` verifies an upstream's OpenPGP signature (ADR-0036 clause
-  29); no command calls it yet. The tool takes from the Client a helper of its archive module
-  (`archive::unix_mode_attributes`, for a 7z entry; its tests also use the unpacker), its
-  PKCS#12 reader (`tls::pkcs12_identity`), and its reads of an administrator's file
-  (`nofollow::read_privileged`, `config_init::read_password_file`).
+  of a PKCS#12 file (ADR-0043). `gpgv` verifies an upstream's OpenPGP signature (ADR-0043 clause
+  29); no command calls it yet. It depends on neither end: what it shares with the Client — the 7z
+  Unix-mode convention (`archive::unix_mode_attributes`; its tests also use the unpacker), the
+  PKCS#12 reader (`identity::pkcs12::open`), and the reads of an administrator's file
+  (`nofollow::read_privileged`, `password::read_password_file`) — it takes from `fleet-util`.
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
@@ -235,7 +242,7 @@ no module.
   from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
   ([ADR-0012](adr/0012-tls-1-3-two-planes-and-bounded-input.md)). `pki` is `server pki status`
-  and the running Server's warnings before a certificate it depends on ends (ADR-0036).
+  and the running Server's warnings before a certificate it depends on ends (ADR-0043).
 - **Server admission** — `transport::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Behind
@@ -332,7 +339,7 @@ no module.
   Supervisors' root as an absolute path too. When a failed process is started again or held is
   `supervisor::restart`'s decision; the runner reads the clock and starts it. Who starts the
   program is the runner's `Spawner`: the Client itself, or the second service of
-  [ADR-0021](adr/0021-the-accounts-the-service-runs-under.md),
+  [ADR-0042](adr/0042-the-accounts-the-service-runs-under.md),
   `supervisor run --agents`, through `supervisor::channel`, which holds the private protocol, the
   service and the Client's end of its socket — on Windows of its named pipe, in
   `supervisor::channel::windows`, which runs each program in a job object. The Windows system
@@ -345,12 +352,12 @@ no module.
   `supervisor::ports`, so a Supervisor a Supervisor-set apply starts later starts its program
   the same way, and a Supervisor it purges has the same `Spawner` remove first what its
   programs wrote under their own account, in the directory the purge first moved aside to a name
-  no Supervisor carries. What the Client changes where the process account
-  writes, it reaches through `storage::handle`, one directory handle at a time from a root of its
-  own — the state directory, the Supervisors' root, a Supervisor's directory — beneath which no
-  link is followed. On Windows that is `win32::files`, which sets a DACL on one handle at a time
-  and walks a tree itself, never into a link, with the ACE inheritance rules in `win32::acl`; the
-  install's hand-over and its take-over of the data root walk the same way.
+  no Supervisor carries. What the Client changes where the process account writes, it reaches
+  through `storage::handle`, on top of `fleet_util::nofollow::at`, one directory handle at a time
+  from a root of its own — the state directory, the Supervisors' root, a Supervisor's directory —
+  beneath which no link is followed. On Windows that is `win32::files`, which sets a DACL on one
+  handle at a time and walks a tree itself, never into a link, with the ACE inheritance rules in
+  `win32::acl`; the install's hand-over and its take-over of the data root walk the same way.
   `supervisor::agent`, an Agent's decisions, names four more ports there: `AgentStorage`, which
   `storage::Storage` implements on the state directory, `HighWaterMarks`, which
   `storage::HighWaterFile` implements on `state_dir` and every Supervisor of the Client shares
@@ -368,9 +375,9 @@ no module.
   root through the adapter `nofollow`: a directory held open without following a link at its name,
   read from and written to by name, each file written whole and renamed into place, because a
   privileged install works in directories the service's account owns
-  ([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md)). `nofollow` reads every file one
+  ([ADR-0042](adr/0042-the-accounts-the-service-runs-under.md)). `nofollow` reads every file one
   way: a regular file within a bound the caller names, into a buffer sized before it reads and
-  wiped when dropped ([ADR-0014](adr/0014-secrets-in-memory-are-wiped-on-drop.md)). A path a
+  wiped when dropped ([ADR-0040](adr/0040-secrets-in-memory-are-wiped-on-drop.md)). A path a
   privileged step did not choose itself is resolved by `nofollow::read_privileged`, described
   below. The test
   `privileged_steps_follow_no_link` holds `main.rs`, `config_init`, `config_file`, `service/`,
@@ -399,7 +406,7 @@ no module.
   `install`, the Gateway's package cache, and the second service's purge on Windows, which goes
   by path — works by path in directories that account owns and no other account may write.
 - **Client configuration** — `config` is what `supervisor.toml` may say and the rules it must meet
-  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md));
+  ([ADR-0041](adr/0041-six-crates-on-tokio-and-axum.md));
   `config_file` reads it from disk, makes
   its
   directories absolute, finds the identity the state directory holds, and redacts the text the
@@ -409,7 +416,7 @@ no module.
   settings verification in `connection`, the Gateway's upstream pool (`gateway::pool`) and its
   downstream listener, and the Supervisor Endpoint (`supervisor::endpoint`) use the same `opamp`
   building blocks
-  ([ADR-0008](adr/0008-five-crates-on-tokio-and-axum.md)).
+  ([ADR-0041](adr/0041-six-crates-on-tokio-and-axum.md)).
   The Gateway's
   `revocations` keeps the list it fetches from its Server and refuses what that list names
   ([ADR-0016](adr/0016-client-modes-and-the-gateway.md)),
@@ -419,7 +426,7 @@ no module.
   The Gateway's `cache` sees every offer `registry` hands down, fetches each artifact offered on
   the Server's route once into the state directory, and serves it on the downstream download route
   to the hosts it was offered to
-  ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)).
+  ([ADR-0039](adr/0039-packages-signatures-and-delivery.md)).
   Which host the Gateway takes to speak for an `instance_uid` is decided in the core module
   `gateway::policy`; the cache holds the bindings and keeps them across restarts in the journal
   `gateway::store` reads and writes beside the artifacts; while that journal cannot be read the
@@ -439,7 +446,7 @@ no module.
   `service::manager` registers, starts, stops and deregisters the Client's
   service and, where a process account is named, the second service `<PRODUCT_NAME>-agents` beside
   it, and writes both systemd units, or both launchd plists, itself
-  ([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md)). `service::run_as`
+  ([ADR-0042](adr/0042-the-accounts-the-service-runs-under.md)). `service::run_as`
   decides and checks the Client's account and the process account, and hands the roots over,
   leaving what the process account owns. On Windows `service::windows_config` sets the SCM's
   accounts, recovery actions and required privileges, `service::windows_rights` restricts the data
@@ -495,7 +502,7 @@ with its entry's signature; the Client downloads it
 from its own Server's origin and nowhere else, and `api` serves it only when `fleet` finds it
 offered to an Agent the certificate's host speaks for, by the test `packages` shares with the
 offer
-([ADR-0033](adr/0033-packages-signatures-and-delivery.md));
+([ADR-0039](adr/0039-packages-signatures-and-delivery.md));
 behind a Gateway the
 Client downloads it from the Gateway's cache, which `gateway` fetched once from the Server. The
 Client checks hash and signature in `packages`, and the
@@ -552,12 +559,12 @@ alone by the peer's credentials or the pipe client's token, and stops every prog
 process group on Unix, by job object on Windows — when that connection closes. Before it writes
 anything, the Client accepts the connection only from the process the service manager runs as the
 second service, which `service::manager::agents_process` asks of systemd, launchd or the SCM
-([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md) clause 19).
+([ADR-0042](adr/0042-the-accounts-the-service-runs-under.md) clause 19).
 Both ends refuse a peer of another build, and the one that `current` no longer names exits so its
 service manager starts it from the new version. While the second service is away, a delivered
 package is staged and
 waits, and the Supervisor retries with backoff
-([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md)).
+([ADR-0042](adr/0042-the-accounts-the-service-runs-under.md)).
 
 **Where state lives.** The Server keeps all of its state under one `data_dir`, one directory per
 domain and owner-only: `configurations/`, `deployments/`, `packages/` (metadata) and `blobs/` (the
@@ -580,4 +587,4 @@ state
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,
 and per Supervisor a directory with `config/` and `program/`. An installed Client runs from
 `versions/<version>/` through the `current` pointer
-([ADR-0021](adr/0021-the-accounts-the-service-runs-under.md)).
+([ADR-0042](adr/0042-the-accounts-the-service-runs-under.md)).

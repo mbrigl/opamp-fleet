@@ -44,7 +44,7 @@ pub const SUPPLEMENTARY_FILE: &str = ".supplementary";
 
 pub struct Storage {
     dir: PathBuf,
-    /// The process account's group, where a process account is registered (ADR-0021 clause 21): the
+    /// The process account's group, where a process account is registered (ADR-0042 clause 21): the
     /// directory is passed through by it, and what is stored is kept from it.
     group: Option<ProcessAccountGroup>,
     /// Whether `config/` is read by the Managed Process, and so shared with the process account's
@@ -55,7 +55,7 @@ pub struct Storage {
 impl Storage {
     /// The storage in `dir`, kept to the Client alone, as where no process account is registered:
     /// created owner-only where it is missing. A link at `dir` is refused: an install writes here
-    /// as root, and the directory belongs to the service's account (ADR-0021).
+    /// as root, and the directory belongs to the service's account (ADR-0042).
     ///
     /// # Errors
     /// Returns an error when the directory cannot be created, or is a link.
@@ -68,7 +68,7 @@ impl Storage {
     /// passed through by that account's group — is kept so, with the group it has, and anything
     /// else is narrowed to the Client alone as [`Storage::new`] does. A running Client's Managed
     /// Processes keep reaching their directories while `service config` enrols, and the next
-    /// start lays the directory out as its registration says either way (ADR-0021 clause 21).
+    /// start lays the directory out as its registration says either way (ADR-0042 clause 21).
     pub fn enrolling(dir: PathBuf) -> io::Result<Self> {
         #[cfg(unix)]
         {
@@ -83,14 +83,14 @@ impl Storage {
     }
 
     /// The Client's own storage in the state directory: passed through by the process account's
-    /// group on the way to the Supervisors' directories, and nothing in it shared (ADR-0021
+    /// group on the way to the Supervisors' directories, and nothing in it shared (ADR-0042
     /// clause 21).
     pub fn client(dir: PathBuf, group: Option<ProcessAccountGroup>) -> io::Result<Self> {
         Storage::open(dir, group, false)
     }
 
     /// A Supervisor's storage in its own directory: passed through by the process account's
-    /// group, with `config/` read by its Managed Process and the rest kept from it (ADR-0021
+    /// group, with `config/` read by its Managed Process and the rest kept from it (ADR-0042
     /// clause 21).
     pub fn supervised(dir: PathBuf, group: Option<ProcessAccountGroup>) -> io::Result<Self> {
         Storage::open(dir, group, true)
@@ -140,14 +140,14 @@ impl Storage {
         self.group.filter(|_| self.config_shared)
     }
 
-    /// Writes one of the Client's own records, never through a link (ADR-0021). In a directory the
+    /// Writes one of the Client's own records, never through a link (ADR-0042). In a directory the
     /// process account's group passes through it is kept from that group, `0600`; elsewhere it is
     /// `0644`.
     fn write_record(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
         if self.group.is_some() {
             write_private(path, contents)
         } else {
-            crate::nofollow::write(path, contents, 0o644)
+            fleet_util::nofollow::write(path, contents, 0o644)
         }
     }
 
@@ -293,7 +293,7 @@ impl AgentStorage for Storage {
     /// The persisted identity, or a fresh UUID v7 persisted on first start.
     fn load_or_create_uid(&self) -> io::Result<InstanceUid> {
         let path = self.dir.join(UID_FILE);
-        if let Ok(bytes) = crate::nofollow::read(&path, crate::nofollow::MAX_READ_BYTES) {
+        if let Ok(bytes) = fleet_util::nofollow::read(&path, fleet_util::nofollow::MAX_READ_BYTES) {
             if let Some(uid) = InstanceUid::parse(&String::from_utf8_lossy(&bytes)) {
                 return Ok(uid);
             }
@@ -338,7 +338,7 @@ impl AgentStorage for Storage {
         // The protobuf and the entry files can carry secret material (a roled `${file:...}` entry
         // that is a certificate or key), so both the config directory and the files are owner-only.
         // Where a process account is registered, a Supervisor's `config/` is what its Managed
-        // Process reads: shared with the process account's group to read, never to write (ADR-0021
+        // Process reads: shared with the process account's group to read, never to write (ADR-0042
         // clause 21).
         let config_dir = self.dir.join(CONFIG_DIR);
         create_shared_dir(&self.dir, &config_dir, self.config_group(), Shared::Read)?;
@@ -357,11 +357,11 @@ impl AgentStorage for Storage {
         write_private(&self.dir.join(CONFIG_PB_FILE), &config.encode_to_vec())
     }
 
-    /// The installed package (ADR-0033), if one survived a previous run.
+    /// The installed package (ADR-0039), if one survived a previous run.
     fn load_package(&self) -> Option<InstalledPackage> {
-        let bytes = crate::nofollow::read(
+        let bytes = fleet_util::nofollow::read(
             &self.dir.join(PACKAGE_FILE),
-            crate::nofollow::MAX_READ_BYTES,
+            fleet_util::nofollow::MAX_READ_BYTES,
         )
         .ok()?;
         match serde_json::from_slice(&bytes) {
@@ -470,9 +470,9 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub use crate::supervisor::ports::ProcessAccountGroup;
+use crate::supervisor::ports::ProcessAccountGroup;
 
-/// How a directory the Client creates is shared with the process account's group (ADR-0021
+/// How a directory the Client creates is shared with the process account's group (ADR-0042
 /// clause 21).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Shared {
@@ -498,15 +498,15 @@ impl Shared {
 }
 
 /// Create `dir` (and its parents) shared with `group` as `shared` says: owned by the group, at the
-/// mode of ADR-0021 clause 21. Where no process account is registered it is made as before: a
+/// mode of ADR-0042 clause 21. Where no process account is registered it is made as before: a
 /// kind's data directory ([`Shared::Written`]) by [`create_private_dir`], one of the Client's own
-/// directories owner-only and never through a link at its name (ADR-0021).
+/// directories owner-only and never through a link at its name (ADR-0042).
 ///
 /// `dir` is `root` or beneath it, and `root` is a directory of the Client's that the process
 /// account writes neither in nor above: the state directory, the Supervisors' root, a
 /// Supervisor's directory. Every component beneath `root` is opened through the handle of the one
 /// before it and none through a link, whoever owns it, so a link the process account placed in a
-/// directory it writes cannot turn the Client's change on something else of its own (ADR-0021
+/// directory it writes cannot turn the Client's change on something else of its own (ADR-0042
 /// clause 21); on the way to `root` only the links of root's and of the Client's own account are
 /// followed, in a directory nobody else may write ([`handle::open_beneath`]). The group and the
 /// mode are changed through the directory's own handle. A parent this creates is passed through,
@@ -526,7 +526,7 @@ pub(crate) fn create_shared_dir(
         return match shared {
             Shared::Written => create_private_dir(dir),
             Shared::Traversed | Shared::Read => {
-                crate::nofollow::HeldDir::create(dir, 0o700).map(drop)
+                fleet_util::nofollow::HeldDir::create(dir, 0o700).map(drop)
             }
         };
     };
@@ -537,7 +537,7 @@ pub(crate) fn create_shared_dir(
         let made = handle::open_beneath(
             root,
             dir,
-            handle::DIRECTORY,
+            fleet_util::nofollow::at::DIRECTORY,
             Some(&traversed),
             handle::own(),
         )
@@ -559,10 +559,10 @@ pub(crate) fn create_shared_dir(
     Ok(())
 }
 
-/// The ACEs that grant the process account `sid` what `shared` says, on Windows (ADR-0021
+/// The ACEs that grant the process account `sid` what `shared` says, on Windows (ADR-0042
 /// clause 21): for the directory itself, for a directory and for a file already in it. `None` for
 /// `Traversed`: the process account passes through a directory of the Client's by the
-/// `SeChangeNotifyPrivilege` the second service keeps (ADR-0021 clause 17), and is granted nothing
+/// `SeChangeNotifyPrivilege` the second service keeps (ADR-0042 clause 17), and is granted nothing
 /// there, so it lists nothing and reads nothing of the Client's own.
 ///
 /// `Read` is read and execute, inherited by everything in the directory. `Written` is modify on
@@ -593,7 +593,7 @@ pub(crate) fn grant_aces(sid: &str, shared: Shared) -> Option<[Vec<String>; 3]> 
 }
 
 /// Creates `dir` beneath `root` where it is missing and grants the process account `group` — its
-/// SID, on Windows — what `shared` says of it (ADR-0021 clause 21). Every component from `root` to
+/// SID, on Windows — what `shared` says of it (ADR-0042 clause 21). Every component from `root` to
 /// `dir` is opened as itself and held while the next is opened, none a link
 /// ([`crate::win32::files::open_beneath`]), and the DACL is set on the handle of `dir`. What is
 /// already in it is granted the same where `dir` was not granted it yet — a directory a Managed
@@ -638,35 +638,33 @@ fn grant(root: &Path, dir: &Path, group: ProcessAccountGroup, shared: Shared) ->
 }
 
 /// Directories reached through handles, never through a link: what the Client changes where the
-/// process account may write (ADR-0021 clauses 1, 20 and 21).
+/// process account may write (ADR-0042 clauses 1, 20 and 21).
 #[cfg(unix)]
 pub(crate) mod handle {
     use std::ffi::{CStr, CString, OsStr};
     use std::io;
-    use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _, OwnedFd, RawFd};
+    use std::os::fd::{AsRawFd as _, IntoRawFd as _, OwnedFd, RawFd};
     use std::os::unix::ffi::OsStrExt as _;
     use std::path::{Component, Path, PathBuf};
 
     use tracing::warn;
 
-    use super::ProcessAccountGroup;
+    use fleet_util::nofollow::at::{self, lstat_at, open, DIRECTORY};
 
-    /// A directory, opened as one and never through a link.
-    pub(crate) const DIRECTORY: libc::c_int =
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    use super::ProcessAccountGroup;
 
     /// A directory passed through on the way to another, never through a link, opened with no
     /// right to read it, only to search it. Every walk opens each directory it passes this way:
     /// [`open_beneath`] each component before the last, and [`step_trusting`] each on the way to
     /// a root, from `/` on. So the Client passes through what it may only search, and the second
-    /// service, as the process account, through a Supervisor's directory (`0710`, ADR-0021
+    /// service, as the process account, through a Supervisor's directory (`0710`, ADR-0042
     /// clause 21) to what it purges. On Linux a path-only handle.
     #[cfg(target_os = "linux")]
     pub(crate) const SEARCH: libc::c_int =
         libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     /// On macOS `O_SEARCH` (`O_EXEC | O_DIRECTORY`), which XNU authorizes as a search of the
     /// directory and not as a read (`vn_authorize_open_existing`). macOS has it from macOS 13 on,
-    /// the oldest macOS a Client runs on (ADR-0021 clause 7); an older kernel would open for
+    /// the oldest macOS a Client runs on (ADR-0042 clause 7); an older kernel would open for
     /// reading (`FFLAGS`), and a walk through a directory it may only search would fail there
     /// rather than reach further.
     #[cfg(target_os = "macos")]
@@ -680,18 +678,6 @@ pub(crate) mod handle {
     const FILE: libc::c_int =
         libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
 
-    /// `name` in `dir`, opened with `flags`; the last component never follows a link where
-    /// `flags` says `O_NOFOLLOW`.
-    pub(crate) fn open(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
-        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; no `O_CREAT`, so no mode.
-        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `openat` returned a new descriptor that nothing else owns.
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-
     /// What `handle` holds, as the kernel sees it.
     pub(crate) fn fstat(handle: &OwnedFd) -> io::Result<libc::stat> {
         let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -700,25 +686,6 @@ pub(crate) mod handle {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: `fstat` succeeded and filled it.
-        Ok(unsafe { st.assume_init() })
-    }
-
-    /// The entry `name` in `dir` itself, a link as a link.
-    pub(crate) fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
-        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: a valid descriptor, a NUL-terminated name and room for one `stat`.
-        let rc = unsafe {
-            libc::fstatat(
-                dir,
-                name.as_ptr(),
-                st.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `fstatat` succeeded and filled it.
         Ok(unsafe { st.assume_init() })
     }
 
@@ -946,13 +913,14 @@ pub(crate) mod handle {
         let Some(made) = made.filter(|_| error.raw_os_error() == Some(libc::ENOENT)) else {
             return Err(error);
         };
-        // SAFETY: a valid descriptor and a NUL-terminated name.
-        if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) } == 0 {
-            // Opened as `flags` says of links: one swapped in since is refused here too.
-            let read = (DIRECTORY & !libc::O_NOFOLLOW) | (flags & libc::O_NOFOLLOW);
-            made(&open(dir.as_raw_fd(), name, read)?)?;
-        } else if io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
-            return Err(io::Error::last_os_error());
+        match at::mkdir(dir.as_raw_fd(), name, 0o700) {
+            Ok(()) => {
+                // Opened as `flags` says of links: one swapped in since is refused here too.
+                let read = (DIRECTORY & !libc::O_NOFOLLOW) | (flags & libc::O_NOFOLLOW);
+                made(&open(dir.as_raw_fd(), name, read)?)?;
+            }
+            Err(e) if e.raw_os_error() != Some(libc::EEXIST) => return Err(e),
+            Err(_) => {}
         }
         open(dir.as_raw_fd(), name, flags)
     }
@@ -967,14 +935,9 @@ pub(crate) mod handle {
         let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
         let st = lstat_at(dir.as_raw_fd(), name).map_err(named)?;
         if !is(&st, libc::S_IFDIR) {
-            // SAFETY: a valid descriptor and a NUL-terminated name.
-            if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
-                return Err(named(io::Error::last_os_error()));
-            }
-            return Ok(());
+            return at::unlink(dir.as_raw_fd(), name).map_err(named);
         }
-        // SAFETY: geteuid(2) cannot fail and touches no memory.
-        if st.st_uid == unsafe { libc::geteuid() } && mode(&st) & 0o700 != 0o700 {
+        if st.st_uid == own() && mode(&st) & 0o700 != 0o700 {
             // By name, as the directory may not be readable yet: an entry this account owns, in a
             // directory it writes, which only this account could have swapped.
             // SAFETY: a valid descriptor and a NUL-terminated name.
@@ -996,28 +959,14 @@ pub(crate) mod handle {
             }
         }
         drop(inner);
-        // SAFETY: a valid descriptor and a NUL-terminated name.
-        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-            return Err(named(io::Error::last_os_error()));
-        }
-        Ok(())
+        at::rmdir(dir.as_raw_fd(), name).map_err(named)
     }
 
     /// Gives what `handle` holds to `group` at `mode`: the group first, since a change of group
     /// may clear the set-group-ID bit the mode sets.
     pub(crate) fn share(handle: &OwnedFd, group: ProcessAccountGroup, mode: u32) -> io::Result<()> {
-        // SAFETY: a valid descriptor; `uid_t::MAX` (-1) leaves the owner as it is.
-        if unsafe { libc::fchown(handle.as_raw_fd(), libc::uid_t::MAX, group.0) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // The mode is at most `0o7777`, which every `mode_t` holds.
-        #[allow(clippy::cast_possible_truncation)]
-        let mode = mode as libc::mode_t;
-        // SAFETY: a valid descriptor.
-        if unsafe { libc::fchmod(handle.as_raw_fd(), mode) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        std::os::unix::fs::fchown(handle, None, Some(group.0))?;
+        at::fchmod(handle, mode)
     }
 
     /// The names in `dir`, read from the handle, without `.` and `..`.
@@ -1075,7 +1024,7 @@ pub(crate) mod handle {
 
     /// Gives every directory and regular file under `dir` to `group`, each at the mode it has
     /// without the group's and others' write bits: what an unpacked package holds, read and run
-    /// by the process account through its group (ADR-0021 clauses 21 and 23). A link, which no
+    /// by the process account through its group (ADR-0042 clauses 21 and 23). A link, which no
     /// unpacked tree holds, and a file with a second hard link are left as they are.
     ///
     /// # Errors
@@ -1112,7 +1061,7 @@ pub(crate) mod handle {
 
     /// The directories beneath `dir` that this account — the Client — owns and lets its group
     /// write, its data directories: the outermost of each branch, by their paths relative to
-    /// `dir`. Where alone the process account can have written beneath `dir` (ADR-0021 clause 21).
+    /// `dir`. Where alone the process account can have written beneath `dir` (ADR-0042 clause 21).
     /// Walked through handles from `dir`, its own root ([`open_beneath`]), through the Client's
     /// own directories alone and never through a link; one it cannot read is passed over.
     ///
@@ -1206,7 +1155,7 @@ pub(crate) mod handle {
 /// Makes the regular file at `path` readable by `group` and no wider: `0640`, owned by the group.
 ///
 /// A file with a second hard link is left as it is and named in a warning, as the hand-over leaves
-/// one (ADR-0021 clause 1): its other name may be one of the Client's own records — a link to
+/// one (ADR-0042 clause 1): its other name may be one of the Client's own records — a link to
 /// `client-key.pem` placed while the Managed Process still ran as the Client — and sharing it would
 /// share that record too.
 #[cfg(unix)]
@@ -1231,7 +1180,7 @@ fn share_file(path: &Path, group: ProcessAccountGroup) -> io::Result<()> {
     file.set_permissions(std::fs::Permissions::from_mode(0o640))
 }
 
-/// Write `contents` to `path` readable by `group`: `0640`, owned by the group (ADR-0021 clause 21).
+/// Write `contents` to `path` readable by `group`: `0640`, owned by the group (ADR-0042 clause 21).
 /// Written owner-only as [`write_private`] writes it, never through a link, and only then given to
 /// the group. Where no process account is registered it is [`write_private`].
 pub(crate) fn write_shared(
@@ -1255,9 +1204,9 @@ pub(crate) fn write_shared(
 /// world-readable, and it replaces a file of any mode whole. Written through a temporary name and a
 /// rename in the directory, never through a link at `path` or at its directory's name: an install
 /// writes the state directory as root, and the directory belongs to the service's account
-/// (ADR-0021).
+/// (ADR-0042).
 pub(crate) fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    crate::nofollow::write(path, contents, 0o600)
+    fleet_util::nofollow::write(path, contents, 0o600)
 }
 
 /// Refuses a configuration whose entries cannot each be stored as a file of their own on every
@@ -1431,7 +1380,7 @@ mod windows_grants {
     /// On Windows a shared directory is reached through no junction: one on the way from the root
     /// is refused, and a data directory is granted to the process account — `LocalService`
     /// standing in — modify for what it holds and everything of it but `DELETE` on itself.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(windows)]
     #[test]
     fn on_windows_a_share_is_made_through_no_junction() {
@@ -1468,11 +1417,11 @@ mod windows_grants {
         assert!(dacl.holds("(A;OICIIO;0x1301bf;;;S-1-5-19)"), "{dacl:?}");
     }
 
-    /// On Windows the split of ADR-0021 clause 21 is made by ACL grants to the process account's
+    /// On Windows the split of ADR-0042 clause 21 is made by ACL grants to the process account's
     /// SID: `program/`, the preflight's staging and `config/` read and executed, a kind's data
     /// directory modified beneath it but not removed itself, each inherited by what is in them,
     /// and the directories passed through granted nothing.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[test]
     fn the_process_account_is_granted_what_it_reads_and_writes_and_nothing_else() {
         let sid = "S-1-5-80-1-2-3-4-5";
@@ -1593,7 +1542,7 @@ mod tests {
     /// directory are passed through, `0710`; a Supervisor's `config/` and its entries are read,
     /// `0750` and `0640`; a data directory is written, `2770`. The Client's own `config/`, the
     /// stored protobuf, the identity and the package record stay the Client's, `0700` and `0600`.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn with_a_process_account_its_group_reads_only_what_it_runs_on() {
@@ -1651,7 +1600,7 @@ mod tests {
     /// What `config/` held before a process account was registered is shared when the
     /// Supervisor's storage opens, so its Managed Process reads it before the next configuration
     /// arrives; a link there is left alone.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn what_config_held_before_is_shared_when_the_storage_opens() {
@@ -1676,8 +1625,8 @@ mod tests {
 
     /// A link in a directory the process account writes is never followed on the way to a
     /// directory the Client shares: the link is refused, and what it names is neither created nor
-    /// changed (ADR-0021 clause 21).
-    /// Verifies: ADR-0021
+    /// changed (ADR-0042 clause 21).
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_on_the_way_to_a_shared_directory_is_not_followed() {
@@ -1730,8 +1679,8 @@ mod tests {
     /// every link here is root's; run as anyone else, the account's own. A link of the Client's
     /// own account on the way to the Supervisor's directory, in a directory only that account
     /// writes, is followed, and a directory that is not beneath it by plain names is refused
-    /// (ADR-0021 clause 21).
-    /// Verifies: ADR-0021
+    /// (ADR-0042 clause 21).
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn no_link_beneath_the_root_is_followed_whoever_owns_it() {
@@ -1801,8 +1750,8 @@ mod tests {
     /// A link on the way to a root is trusted only where root or the Client's own account owns it
     /// and the directory it is in, and nobody else may write that directory: one another account
     /// placed, or one in a directory its group or anybody may write — `/tmp` among them — is not
-    /// (ADR-0021 clause 21).
-    /// Verifies: ADR-0021
+    /// (ADR-0042 clause 21).
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_link_above_a_root_is_followed_only_where_it_is_trusted() {
@@ -1831,8 +1780,8 @@ mod tests {
 
     /// Every entry the Client keeps in its state directory under a name a Supervisor could carry
     /// is one the configuration refuses as a Supervisor's name there: the core's list is the
-    /// adapters' constants (ADR-0021 clause 21).
-    /// Verifies: ADR-0021
+    /// adapters' constants (ADR-0042 clause 21).
+    /// Verifies: ADR-0042
     #[test]
     fn every_entry_of_the_clients_a_supervisor_could_be_named_after_is_listed() {
         let listed: Vec<&str> = crate::config::CLIENT_ENTRIES
@@ -1863,8 +1812,8 @@ mod tests {
 
     /// A root reached through the system's own link — `/var/run` → `/run` on Linux, `/var` →
     /// `private/var` on macOS — is reached: the link is root's, in a directory only root writes
-    /// (ADR-0021 clause 21).
-    /// Verifies: ADR-0021
+    /// (ADR-0042 clause 21).
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_root_reached_through_a_link_of_the_systems_is_reached() {
@@ -1885,8 +1834,8 @@ mod tests {
 
     /// What a purge names to the second service is where alone the process account can have
     /// written: the outermost directories the Client shares for writing, found through the
-    /// Client's own directories and through no link (ADR-0021 clauses 20 and 21).
-    /// Verifies: ADR-0021
+    /// Client's own directories and through no link (ADR-0042 clauses 20 and 21).
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn the_directories_shared_for_writing_are_found_through_no_link() {
@@ -1918,7 +1867,7 @@ mod tests {
 
     /// A parent the Client creates on the way to a shared directory is passed through by the
     /// process account's group, `0710`, and no wider.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_parent_made_on_the_way_is_passed_through_and_no_more() {
@@ -1943,7 +1892,7 @@ mod tests {
     /// owns in it to the process account's group, writable by it, once it is first shared: the
     /// Managed Process goes on writing its own state. A link is not followed, and a file with a
     /// second hard link is left as it is.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_data_directory_written_before_is_given_to_the_group_once_shared() {
@@ -1978,8 +1927,8 @@ mod tests {
 
     /// An enrolment keeps a state directory a Client with a process account laid out as it is —
     /// `0710`, in the process account's group — and writes its records `0600`; any other state
-    /// directory it narrows to the Client alone, as before (ADR-0021 clause 21).
-    /// Verifies: ADR-0021
+    /// directory it narrows to the Client alone, as before (ADR-0042 clause 21).
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn an_enrolment_keeps_a_shared_state_directory_shared() {
@@ -2003,7 +1952,7 @@ mod tests {
     /// A hard link in `config/` to one of the Client's records — placed while the Managed Process
     /// still ran as the Client — is not shared when the storage opens: the record behind it stays
     /// `0600`, and the Client's alone.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_hard_link_in_config_to_a_private_file_is_not_shared() {
@@ -2033,7 +1982,7 @@ mod tests {
     /// Without a process account every mode is what it was before there was one: directories
     /// `0700`, the stored configuration `0600`, and the identity and the package record at the
     /// umask, as a plain write leaves them.
-    /// Verifies: ADR-0021
+    /// Verifies: ADR-0042
     #[cfg(unix)]
     #[test]
     fn without_a_process_account_every_mode_stays_as_it_was() {
@@ -2174,7 +2123,7 @@ mod tests {
     /// Every entry is written through a temporary name and a rename, and that name is never one an
     /// entry is stored under: an entry named like another's temporary file stays on disk in
     /// whichever order the map yields the two.
-    /// Verifies: ADR-0018, ADR-0021
+    /// Verifies: ADR-0018, ADR-0042
     #[test]
     fn no_entry_is_lost_to_another_entrys_temporary_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2193,7 +2142,7 @@ mod tests {
 
     /// An entry replaced by a rename is a new file: it belongs to the account the Client runs as,
     /// and it is owner-only like the one it replaces, whatever mode that one was left at.
-    /// Verifies: ADR-0018, ADR-0021
+    /// Verifies: ADR-0018, ADR-0042
     #[cfg(unix)]
     #[test]
     fn a_replaced_entry_is_the_runtimes_own_and_owner_only() {

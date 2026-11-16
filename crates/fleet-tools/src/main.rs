@@ -1,4 +1,4 @@
-//! `opamp-fleetctl` — the operator tool (ADR-0036): what an operator makes before a fleet does
+//! `opamp-fleetctl` — the operator tool (ADR-0043): what an operator makes before a fleet does
 //! anything useful, on the operator's own machine. `package` fetches, packs, hashes and signs
 //! package artifacts and makes the signing key; `pki` makes the fleet's certificates and says when
 //! they end. Neither the Server nor a Client depends on it, and a managed host never runs it.
@@ -73,7 +73,7 @@ mod tests {
             .collect()
     }
 
-    // Verifies: ADR-0036, ADR-0034
+    // Verifies: ADR-0043, ADR-0034
     #[test]
     fn the_program_has_two_trees_holding_the_operator_commands() {
         let cli = Cli::command();
@@ -109,7 +109,7 @@ mod tests {
         );
     }
 
-    // Verifies: ADR-0036
+    // Verifies: ADR-0043
     #[test]
     fn the_version_flag_reports_the_baked_version() {
         let err = Cli::try_parse_from(["opamp-fleetctl", "--version"])
@@ -122,7 +122,7 @@ mod tests {
     /// `sign` has two forms and no mixture of them: the artifact form names the type, the version
     /// and the file; the signing-file form names the file alone, since the type and version are in
     /// it. A mixture would leave a reader guessing which statement got signed.
-    /// Verifies: ADR-0033
+    /// Verifies: ADR-0039
     #[test]
     fn sign_takes_an_artifact_or_a_signing_file_and_never_both() {
         let parse = |args: &[&str]| {

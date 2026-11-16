@@ -12,7 +12,7 @@ use tracing::debug;
 use crate::supervisor::ports::{parse_settings, Plugin, ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
 
-/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0008.
+/// The block's plugin-specific keys, parsed strictly — a typo fails startup, per ADR-0041.
 ///
 /// `command` is not among them: the core takes it out and resolves it (ADR-0018), and what
 /// arrives here is [`SupervisorContext::program`].
@@ -53,7 +53,7 @@ const RETIRED: &[(&str, &str)] = &[
     ),
 ];
 
-/// The `command` kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0021).
+/// The `command` kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0042).
 #[derive(Default)]
 pub struct CommandPlugin {
     pub spawner: Spawner,
@@ -142,7 +142,7 @@ impl Plugin for CommandPlugin {
             stop_timeout: ctx.stop_timeout,
             apply_grace: ctx.apply_grace,
             retain_previous: ctx.retain_previous,
-            // A package (ADR-0033) swaps this command's program — one file, or a whole tree.
+            // A package (ADR-0039) swaps this command's program — one file, or a whole tree.
             install: Some(install),
             archive_key: ctx.archive_key,
             version_probe,
@@ -151,7 +151,7 @@ impl Plugin for CommandPlugin {
             // configuration by restarting, which is ADR-0018's generic behaviour.
             reload_signal: None,
             // The Client itself, or the second service where a process account is registered
-            // (ADR-0021 clause 18): the registry says which.
+            // (ADR-0042 clause 18): the registry says which.
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
             supervisor_dir: ctx.supervisor_dir.clone(),
