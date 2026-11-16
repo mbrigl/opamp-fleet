@@ -137,16 +137,22 @@ async fn a_connection_that_never_finishes_its_headers_is_hung_up_on() {
 }
 
 /// A peer that connects and sends nothing at all is hung up on, and its place under the cap is
-/// freed: hyper's reading of the first bytes, which tells HTTP/1 from HTTP/2, has no timer of its
-/// own, and the header-read bound starts only after it.
+/// freed: with a cap of one, a request after it is served. hyper's reading of the first bytes,
+/// which tells HTTP/1 from HTTP/2, has no timer of its own, and the header-read bound starts only
+/// after it.
 /// Verifies: ADR-0012
 #[tokio::test]
 async fn a_peer_silent_before_its_first_request_is_hung_up_on() {
+    opamp::tls::install_ring_provider();
     // timed: the bound is what the test decides; the wait below gives it eight times over.
     let bound = Duration::from_secs(1);
     let (listener, port) = bind();
     let handle = Handle::new();
-    spawn(Listener::new(listener, handle.clone()).with_header_read_timeout(bound));
+    spawn(
+        Listener::new(listener, handle.clone())
+            .with_header_read_timeout(bound)
+            .with_max_connections(1),
+    );
 
     let mut socket = TcpStream::connect(("127.0.0.1", port))
         .await
@@ -156,6 +162,13 @@ async fn a_peer_silent_before_its_first_request_is_hung_up_on() {
     let closed = tokio::time::timeout(bound * 8, socket.read_to_end(&mut buffer)).await;
     assert!(closed.is_ok(), "the listener left a silent connection open");
     open_connections(&handle, 0).await;
+    let text = reqwest::get(format!("http://127.0.0.1:{port}/"))
+        .await
+        .expect("the place under the cap is free again")
+        .text()
+        .await
+        .expect("text");
+    assert_eq!(text, "certificate=false peer=127.0.0.1");
 }
 
 /// The same holds after a completed TLS handshake: a peer that then sends nothing is hung up on.
@@ -184,7 +197,8 @@ async fn a_peer_silent_after_the_tls_handshake_is_hung_up_on() {
     );
 
     let ca = CertificateDer::from_pem_slice(pki.ca_pem.as_bytes()).expect("ca");
-    let closed = tokio::task::spawn_blocking(move || {
+    let (held, handshaken) = std::sync::mpsc::channel();
+    let client = tokio::task::spawn_blocking(move || {
         use std::io::Read as _;
         let mut roots = rustls::RootCertStore::empty();
         roots.add(ca).expect("root");
@@ -201,6 +215,7 @@ async fn a_peer_silent_after_the_tls_handshake_is_hung_up_on() {
         while tls.is_handshaking() {
             tls.complete_io(&mut socket).expect("handshake");
         }
+        held.send(()).expect("the test waits");
         // Silent from here on: the listener has to end the connection, not the peer.
         let mut stream = rustls::Stream::new(&mut tls, &mut socket);
         let mut buffer = [0_u8; 64];
@@ -212,9 +227,12 @@ async fn a_peer_silent_after_the_tls_handshake_is_hung_up_on() {
             ),
             Ok(_) => false,
         }
-    })
-    .await
-    .expect("the client");
+    });
+    tokio::task::spawn_blocking(move || handshaken.recv().expect("the handshake"))
+        .await
+        .expect("the wait");
+    open_connections(&handle, 1).await;
+    let closed = client.await.expect("the client");
     assert!(closed, "the listener left a silent TLS connection open");
     open_connections(&handle, 0).await;
 }

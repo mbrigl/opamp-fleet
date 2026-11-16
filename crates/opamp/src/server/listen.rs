@@ -41,8 +41,9 @@ use super::pace::{self, Pace, MIN_PACE_BYTES, PACE_WINDOW};
 use crate::endpoint::is_loopback_literal;
 use crate::tls::{certificates, private_key, provider, root_store, server_builder, Identity};
 
-/// How long a connection may take to send its request line and headers: hyper's own default,
-/// with the timer that makes it take effect. It bounds the request line and the headers only.
+/// How long a connection may take to its first request, and an HTTP/1 request to its request line
+/// and headers: hyper's own default, with the timer that makes it take effect. It bounds nothing
+/// after a request is dispatched: not a WebSocket session, not a download.
 pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The connections a listener holds at once unless the application states another cap
