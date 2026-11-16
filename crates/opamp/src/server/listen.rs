@@ -286,8 +286,9 @@ impl Listener {
         self
     }
 
-    /// Replaces [`HEADER_READ_TIMEOUT`] — the seam a test drives, since nothing else makes a
-    /// 30-second bound observable in a suite.
+    /// Replaces [`HEADER_READ_TIMEOUT`], which also bounds the time to a connection's first
+    /// request — the seam a test drives, since nothing else makes a 30-second bound observable in
+    /// a suite.
     #[must_use]
     pub fn with_header_read_timeout(mut self, timeout: Duration) -> Self {
         self.header_read_timeout = timeout;
@@ -403,11 +404,15 @@ impl Listener {
 
 /// The header-read bound, with the timer it needs first: without the timer hyper discards the
 /// default, and with the timeout set but no timer it panics. HTTP/2 has no header phase to time,
-/// so it is bounded by its streams and its pings instead (ADR-0012).
+/// so it is bounded by its streams and its pings instead (ADR-0012). Before either, hyper reads the
+/// first bytes to tell the two apart with no timer of its own, so a peer that falls silent before
+/// its first request, after the TCP connection or the TLS handshake, would hold its slot of the
+/// cap for good; the same bound covers the time to the first request.
 fn bounded<A>(
-    mut server: Server<SocketAddr, A>,
+    server: Server<SocketAddr, A>,
     header_read_timeout: Duration,
 ) -> Server<SocketAddr, A> {
+    let mut server = server.first_request_timeout(header_read_timeout);
     let builder = server.http_builder();
     builder
         .http1()
