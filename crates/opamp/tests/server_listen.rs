@@ -142,6 +142,7 @@ async fn a_connection_that_never_finishes_its_headers_is_hung_up_on() {
 /// Verifies: ADR-0012
 #[tokio::test]
 async fn a_peer_silent_before_its_first_request_is_hung_up_on() {
+    // timed: the bound is what the test decides; the wait below gives it eight times over.
     let bound = Duration::from_secs(1);
     let (listener, port) = bind();
     let handle = Handle::new();
@@ -164,6 +165,7 @@ async fn a_peer_silent_after_the_tls_handshake_is_hung_up_on() {
     use rustls::pki_types::pem::PemObject as _;
     use rustls::pki_types::{CertificateDer, ServerName};
 
+    // timed: the bound is what the test decides; the wait below gives it eight times over.
     let bound = Duration::from_secs(1);
     let pki = Pki::new();
     opamp::tls::install_ring_provider();
