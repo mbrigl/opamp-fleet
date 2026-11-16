@@ -5,9 +5,10 @@
 //! the Server, the Client and the tool, without comments, string and character literals, and code
 //! under a `cfg` that cannot hold without `test`, and decides from the module paths each names
 //! where every module of the two crates belongs. It also refuses a `pub use` of a `fleet_util::`
-//! item and an alias of the crate, `self as` in a group included, so an item has one path in use; a manifest of the Server that names `fleet-util`; and
-//! a manifest of `fleet-util` that names a workspace crate but `fleet-core`. The tests of a crate
-//! are not read: the tool's end-to-end tests run the Client.
+//! item and an alias of the crate, `self as` in a group included, so an item has one path in use;
+//! a manifest of the Server that names `fleet-util`; and a manifest of `fleet-util` that names a
+//! workspace crate but `fleet-core`. The tests of a crate are not read: the tool's end-to-end tests
+//! run the Client.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -29,8 +30,8 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The code of a text: comments, string and character literals blanked, and every item under a
-/// `cfg` attribute that names `test` cut. A comment, a message, or a unit test that names a module
-/// uses nothing in the shipped code. Line breaks are kept.
+/// `cfg` attribute that cannot hold without `test` cut. A comment, a message, or a unit test that
+/// names a module uses nothing in the shipped code. Line breaks are kept.
 fn code_of(text: &str) -> String {
     without_test_items(&without_literals(text))
 }
@@ -190,6 +191,10 @@ fn predicate(text: &str) -> (Option<bool>, &str) {
                 break;
             }
             let (value, after) = predicate(inner);
+            if after.len() == inner.len() {
+                // A token no predicate starts with, such as a macro's `$m`: the rest is unknown.
+                return (None, "");
+            }
             values.push(value);
             inner = after.trim_start().strip_prefix(',').unwrap_or(after);
         }
@@ -249,7 +254,7 @@ fn aliases_of_the_crate(code: &str) -> Vec<String> {
         });
         if aliased {
             found.push(
-                code[at..=end.min(code.len() - 1)]
+                code[at..end]
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" "),
@@ -517,7 +522,15 @@ fn comments_literals_and_test_code_are_not_read() {
         names("#[cfg(unix)]\nfn f() { fleet_util::nofollow::x(); }"),
         ["nofollow"]
     );
-    assert!(names(r###"let b = br#"\" fleet_util::tree"#; let c = br"\";"###).is_empty());
+    assert_eq!(
+        names(r###"let b = br#"\" fleet_util::tree"#; fleet_util::nofollow::x();"###),
+        ["nofollow"]
+    );
+    assert_eq!(names("let c = cr\"\\\"; fleet_util::tree::x();"), ["tree"]);
+    assert_eq!(
+        names("#[cfg(not($m))]\nfn f() { fleet_util::tree::x(); }"),
+        ["tree"]
+    );
     assert_eq!(
         names("let b = br\"\\\"; fleet_util::archive::x();"),
         ["archive"]
