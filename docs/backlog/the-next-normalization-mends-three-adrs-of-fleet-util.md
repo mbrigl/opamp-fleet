@@ -16,8 +16,15 @@ accepted ADR changes only by a normalization or by superseding it
 - ADR-0039 names `crates/fleet-util/src/archive.rs` as plain code near its line 1556, where its
   predecessor, ADR-0033, linked the file (its line 1553); near line 1209 both write it as code.
 
-**Idea.** The next normalization restates the three with the count method stated, the lines
-rewrapped, and the file linked; until then they stand as they are.
+- ADR-0041's Consequences say "`axum-server`'s `Handle` and `tokio-tungstenite`'s socket are part
+  of" `opamp`'s published API, "so a breaking bump of either waits for the next Baseline" (near
+  line 476). `listen::Handle` holds `axum_server::Handle` in a private field, and no public item of
+  `opamp` names an `axum_server` type; axum-server 0.9 was taken up on that reading (2026-11-16).
+  Its Sources cite the axum-server docs of 0.7 (near line 429).
+
+**Idea.** The next normalization restates them with the count method stated, the lines
+rewrapped, the file linked, and the published API as the code has it; until then they stand as
+they are.
 
 **From.** The review of PR #193 (2026-11-15/16), lesser findings the human asked to act on on
-2026-11-16.
+2026-11-16, and the review of the axum-server 0.9 bump (2026-11-16).
