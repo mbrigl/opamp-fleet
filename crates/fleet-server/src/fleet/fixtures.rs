@@ -185,3 +185,12 @@ pub(super) fn put_signed(state: &AppState, id: &PackageId) {
         .put_deployment_package("stable", id, true)
         .expect("package");
 }
+
+/// A top-level revision of `text` for the Agent type `report` describes.
+pub(super) fn body(text: &str) -> Revision {
+    Revision {
+        body: text.to_string(),
+        role: String::new(),
+        service_name: "otelcol".to_string(),
+    }
+}

@@ -243,6 +243,10 @@ no module.
   offer of a Package to an Agent and of an artifact to a Host, and the Packages a Deployment holds
   ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)) — are the core module
   `fleet::delivery`, behind the same `AppState` entry points.
+  Configurations, Deployments and rollouts — the catalogue of Configurations, what a Deployment
+  releases, the rollout acts that assign it, what waits for an Agent's next press, labels, and the
+  restart an operator requests ([ADR-0032](adr/0032-deployments-and-rollouts.md)) — are the core
+  module `fleet::rollout`, behind the same `AppState` entry points.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
