@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# Sensor: the ADRs a branch's commits implement (AGENTS.md, section 3).
+# Sensor: the ADRs a branch's commits implement (AGENTS.md, section 4: commits name the ADR
+# they implement).
 #
 # Lists the commits between a base and a head whose message names, on a line that says
 # 'Implements', capitalized, an ADR that is neither accepted nor proposed at the head: one a
-# later ADR superseded, one rejected, or one the head does not have. Such a commit names the decision it
-# replaced instead of its successor. An ADR is 'ADR-NNNN', read from the status line of
+# later ADR superseded, one rejected, or one the head does not have. Such a commit names the
+# decision it replaced instead of its successor. An ADR is 'ADR-NNNN', read from the status line of
 # docs/adr/NNNN-*.md, or a draft, 'ADR-draft-<slug>': proposed while docs/adr/draft-<slug>.md
 # exists, and once numbered the ADR the map of the numbering commit gives it
 # ('ADR-draft-<slug> → ADR-NNNN'). Only the commits of the change are read: the history before

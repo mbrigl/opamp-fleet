@@ -11,7 +11,7 @@ name: Checks
 #
 # The sensors report for the reviewer and fail on nothing they count, except the action
 # references once a project runs that sensor with --require; their self-tests fail like any
-# check's. The sensors job checks out the full history because five sensors read it. The review
+# check's. The sensors job checks out the full history because seven sensors read it. The review
 # binding sensor runs in review-binding.yml, the repository settings sensor on a human's
 # instruction (ADR-0002); this workflow runs the self-test of each.
 #

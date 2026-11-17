@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 #
-# Sensor: the commits the plan and the backlog cite (ADR-0006).
+# Sensor: the commits the plan and the backlog cite (ADR-0002, the sensors the template ships).
 #
 # Lists the commit hashes written in the files under docs/plan/ and docs/backlog/ that the head
 # does not reach. A rework that rewrites a branch leaves the old hashes in a ticket or an entry;
 # such a hash still resolves, since the rewritten commit stays in the object store, so whether the
 # head reaches it decides, not whether it resolves. A hash is a word of 7 to 40 hexadecimal digits
 # with at least one digit and one of a to f, so 'decade' and '1234567' are none. A hash that
-# resolves to no commit is listed apart: it may be a commit of another repository, or one the
-# object store dropped; in a shallow clone every older one is. It reports and never fails.
+# resolves to no commit is listed apart, and is as likely the same mistake: a fresh clone, as CI
+# makes, fetches only what a branch or tag reaches, so there a rewritten commit resolves to
+# nothing. Only a clone that still holds the old object tells the two apart; the rest of that
+# list is a commit of another repository, a dropped object, or a word that only looks like a
+# hash. It reports and never fails.
 #
 # Pure bash + git + grep. Usage:
 #     scripts/sensor-cited-commits.sh [--root <dir>] [head]
@@ -55,7 +58,7 @@ if ((${#unreached[@]})); then
   printf '  - %s\n' "${unreached[@]}"
 fi
 if ((${#unknown[@]})); then
-  echo "Resolving to no commit — another repository, a dropped object, or a shallow clone:"
+  echo "Resolving to no commit — rewritten (in a fresh clone), another repository, or no hash:"
   printf '  - %s\n' "${unknown[@]}"
 fi
 exit 0

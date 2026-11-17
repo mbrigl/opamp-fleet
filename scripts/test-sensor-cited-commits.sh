@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-cited-commits.sh. Verifies: ADR-0006
+# Self-test of scripts/sensor-cited-commits.sh.
 #
 # Verifies: ADR-0002
 #
@@ -99,7 +99,7 @@ expect 0 "a commit of another branch: reached from that branch" "$r" \
 r="$(repo unknown)"
 cite "$r" docs/backlog/entry.md "Upstream fixed it in 0123abc4567."
 expect 0 "a hash that resolves to no commit: listed apart" "$r" \
-  "Resolving to no commit — another repository, a dropped object, or a shallow clone:"
+  "Resolving to no commit — rewritten (in a fresh clone), another repository, or no hash:"
 expect 0 "a hash that resolves to no commit: its line" "$r" "  - docs/backlog/entry.md:3: 0123abc4567"
 
 r="$(repo lookalikes)"
