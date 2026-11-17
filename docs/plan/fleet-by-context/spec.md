@@ -63,7 +63,9 @@ after an architecture review (2026-11-17).
 - The test helpers several contexts share go into a test-only submodule of `fleet` in the
   tracer bullet. A helper only one context uses goes with that context.
 - Every `#[cfg(test)]` of a module comes after all of its production code, because the capability
-  matrix test reads each source file only up to the first one.
+  matrix test reads each source file only up to the first one. `fleet::held` and
+  `fleet::placement` already carried test-only items among their production code before this
+  work. They stay as they are, since neither names a capability.
 - Every new module gets its role in the structural test of ADR-0009 in the change that adds it.
 - Which context a method belongs to is decided by what it changes, not by what it reads. A
   method two contexts would claim stays in the module root, and the ticket says so in its

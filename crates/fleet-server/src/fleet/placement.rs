@@ -746,6 +746,7 @@ pub(super) fn elsewhere_from(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fleet::fixtures::*;
 
     /// The one rule for a group: one Client Agent places every member and the others inherit its
     /// labels; several place nobody and mark every member ambiguous; none places nobody.
@@ -819,5 +820,154 @@ mod tests {
         let s = described(&[("supervisor.kind.y", "true"), ("host.name", "m1")]);
         let two = place_on_host(true, &[agents[0], agents[1], (second, Some(&s), &none)]);
         assert_eq!(two[&fellow], (None, true, BTreeMap::new()), "ambiguous");
+    }
+
+    /// Instance A on a database of its own, and B on another that follows the notifications on a
+    /// runtime of its own, once it has read everything; both on the schema of `test`.
+    struct FollowingB {
+        a: Arc<AppState>,
+        a_database: Arc<crate::postgres::Database>,
+        b: Arc<AppState>,
+        following: crate::instance::Following,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl FollowingB {
+        fn on(test: &crate::postgres::testing::TestDatabase) -> Self {
+            let a_database = test.shared();
+            let a = Arc::new(on_postgres(
+                &a_database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(
+                    a_database.clone(),
+                )),
+            ));
+            a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+            let b_database = test.shared();
+            let b = Arc::new(on_postgres(
+                &b_database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(
+                    b_database.clone(),
+                )),
+            ));
+            b.serve_under(tokio::sync::watch::channel(Some(LEASE_B.to_string())).1);
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let following = {
+                let _entered = runtime.enter();
+                crate::instance::follow(&b_database, b.clone(), None)
+            };
+            until("B's first read once listening", || following.reads() > 0);
+            FollowingB {
+                a,
+                a_database,
+                b,
+                following,
+                _runtime: runtime,
+            }
+        }
+
+        /// Whether `agent`, as B holds it, inherits `labels` from `client`.
+        fn inherits(
+            &self,
+            agent: &InstanceUid,
+            client: &InstanceUid,
+            labels: &[(&str, &str)],
+        ) -> bool {
+            let fleet = self.b.fleet.lock().expect("fleet lock");
+            fleet.get(agent).is_some_and(|record| {
+                record.placement.client_agent == Some(*client)
+                    && record.placement.inherited
+                        == labels
+                            .iter()
+                            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                            .collect::<BTreeMap<_, _>>()
+            })
+        }
+
+        /// The Client Agent `agent` is placed under in B's memory.
+        fn client_of(&self, agent: &InstanceUid) -> Option<InstanceUid> {
+            self.b
+                .fleet
+                .lock()
+                .expect("fleet lock")
+                .get(agent)
+                .and_then(|record| record.placement.client_agent)
+        }
+    }
+
+    /// A fellow Agent B placed before the binding of its Host's Client Agent through A reached B
+    /// inherits the Client Agent's labels in B's memory once the binding's notice reaches B. The
+    /// notice is held back from B, as one still on its way is, until the test sends it.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn a_fellow_agent_inherits_once_the_notice_of_its_client_agents_binding_arrives() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let pair = FollowingB::on(&test);
+        let (client, fellow) = (InstanceUid([0xb1; 16]), InstanceUid([0xb2; 16]));
+        let subject = crate::revocation::SubjectValues::default;
+        // A's notices after a commit, its binding's among them, do not reach B.
+        pair.a_database.afterwards().drop_all(true);
+        report_over(
+            &pair.a,
+            "h1",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        let reads = pair.following.reads();
+        label(&pair.a, &client, &[("tier", "edge")]);
+        until("B took up the labels' notice", || {
+            pair.following.reads() > reads
+        });
+        report_over(&pair.b, "h1", subject(), fellow, &[]);
+        assert_eq!(
+            pair.client_of(&fellow),
+            None,
+            "B placed the fellow Agent before it knew of the binding"
+        );
+
+        test.sql(
+            "SELECT pg_notify('opamp_fleet:' || coalesce(current_schema(), ''), \
+             '{\"kind\": \"host\", \"id\": \"h1\"}')",
+        );
+        until("the fellow Agent inherits in B's memory", || {
+            pair.inherits(&fellow, &client, &[("tier", "edge")])
+        });
+    }
+
+    /// A fellow Agent behind a Gateway that B placed inherits in B's memory the labels of its
+    /// Client Agent that arrives behind the same Gateway through A afterwards.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn a_fellow_agent_behind_a_gateway_inherits_from_a_client_agent_arriving_on_another_instance() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let pair = FollowingB::on(&test);
+        let (gateway, client, fellow) = (
+            InstanceUid([0xb3; 16]),
+            InstanceUid([0xb4; 16]),
+            InstanceUid([0xb5; 16]),
+        );
+        let subject = crate::revocation::SubjectValues::default;
+        report_over(&pair.a, "g", subject(), gateway, &[]);
+        assert_eq!(pair.a.set_gateway("g", true), Ok(true));
+        let marked = pair.b.revocations().expect("register").clone();
+        until("B took up the Gateway's mark", || marked.is_gateway("g"));
+        report_over(&pair.b, "g", subject(), fellow, &[("host.name", "m1")]);
+        assert_eq!(pair.client_of(&fellow), None, "no Client Agent yet");
+
+        report_over(
+            &pair.a,
+            "g",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true"), ("host.name", "m1")],
+        );
+        label(&pair.a, &client, &[("tier", "edge")]);
+        until("the fellow Agent inherits in B's memory", || {
+            pair.inherits(&fellow, &client, &[("tier", "edge")])
+        });
     }
 }

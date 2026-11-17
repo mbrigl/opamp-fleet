@@ -1111,38 +1111,6 @@ fn is_silent(record: &AgentRecord, budget: Duration, now_ms: u64) -> bool {
     now_ms.saturating_sub(record.last_seen_ms) > budget.as_millis() as u64
 }
 
-/// When a kept put-back of a restart is tried again, counted in calls of
-/// [`AppState::retry_restarts`].
-#[derive(Debug, Clone, Copy)]
-struct Backoff {
-    /// Calls until the next try.
-    left: u32,
-    /// Calls the next failure waits.
-    wait: u32,
-}
-
-impl Backoff {
-    /// The longest wait between two tries: a minute, at one call a second.
-    const MAX_WAIT: u32 = 60;
-
-    /// After the first failure: tried again at the next call.
-    fn first() -> Self {
-        Backoff { left: 1, wait: 2 }
-    }
-
-    /// Counts one call down, and answers whether a try is due.
-    fn tick(&mut self) -> bool {
-        self.left = self.left.saturating_sub(1);
-        self.left == 0
-    }
-
-    /// The try failed: the next waits twice as long, up to the bound.
-    fn failed(&mut self) {
-        self.left = self.wait;
-        self.wait = (self.wait * 2).min(Self::MAX_WAIT);
-    }
-}
-
 // The test helpers the contexts share, declared here and not above: a reader of the production
 // code that stops at the first test attribute must see all of it.
 #[cfg(test)]
@@ -1217,22 +1185,6 @@ mod tests {
             Duration::from_secs(30),
             "three intervals"
         );
-    }
-
-    /// The wait between two tries of a put-back doubles and stops at a minute of calls.
-    #[test]
-    fn the_wait_between_tries_of_a_put_back_grows_to_a_minute() {
-        let mut backoff = Backoff::first();
-        let mut waits = Vec::new();
-        for _ in 0..8 {
-            let mut calls = 1;
-            while !backoff.tick() {
-                calls += 1;
-            }
-            waits.push(calls);
-            backoff.failed();
-        }
-        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60]);
     }
 
     use super::*;
@@ -1368,48 +1320,6 @@ mod tests {
         // The Client Agent's labels cleared, nothing is inherited any more.
         label(&state, &client, &[]);
         assert!(!selects(&state, &supervisor, &[("site", "wien")]));
-    }
-
-    /// What another Server wrote to a held record is taken up from the store: a Client Agent's
-    /// labels place its Client's other Agent again, so it inherits them, a queued restart is held,
-    /// and a record the store no longer holds is dropped.
-    /// Verifies: ADR-0025
-    #[test]
-    fn what_another_server_wrote_is_taken_up_and_places_the_group_again() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let (client, supervisor) = (InstanceUid::default(), InstanceUid::default());
-        let state = hosted_fleet(dir.path());
-        report_over(
-            &state,
-            "h1",
-            organization("Kunde GmbH"),
-            client,
-            &[("supervisor.kind.collector", "true")],
-        );
-        report_over(&state, "h1", organization("Kunde GmbH"), supervisor, &[]);
-        let other = crate::fs::FsAgentStore::open(&dir.path().join("configs")).expect("open");
-        let labels = BTreeMap::from([("site".to_string(), "wien".to_string())]);
-        assert!(other.set_labels(&client, &labels).expect("labels"));
-        assert_eq!(
-            other.set_restart_pending(&supervisor, true),
-            Ok(Some(false))
-        );
-        assert!(view(&state, &supervisor).inherited_labels.is_empty());
-
-        state
-            .take_up_agents(&HashSet::from([client, supervisor]))
-            .expect("take up");
-        assert_eq!(view(&state, &client).labels, labels);
-        assert_eq!(view(&state, &supervisor).inherited_labels, labels);
-        assert!(state.fleet.lock().expect("fleet")[&supervisor].restart_pending);
-
-        other.remove(&client).expect("forget");
-        state.catch_up().expect("take up");
-        assert!(!state.fleet.lock().expect("fleet").contains_key(&client));
-        assert!(
-            view(&state, &supervisor).inherited_labels.is_empty(),
-            "a forgotten Client Agent's labels are inherited no more"
-        );
     }
 
     /// A label in the Supervisor's space that the record already holds — stored before the Server

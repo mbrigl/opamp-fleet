@@ -296,7 +296,7 @@ pub(super) fn restartable(uid: &InstanceUid, sequence_num: u64) -> AgentToServer
 /// another instance's write between the read and what is done with it. It counts the reads of
 /// one record and the reads of several, and its re-keys can be made to fail.
 pub(super) struct Hooked {
-    pub(super) inner: Box<dyn AgentStore>,
+    inner: Box<dyn AgentStore>,
     pub(super) failing_gets: Arc<AtomicU64>,
     pub(super) after_get: Arc<Mutex<Option<Act>>>,
     /// What runs once after a batched read of records, before it is answered.
@@ -342,7 +342,7 @@ pub(super) type Act = Box<dyn FnOnce() + Send>;
 pub(super) type Probe = Arc<dyn Fn(&'static str, Option<&InstanceUid>) + Send + Sync>;
 
 /// Runs the probe set in `probe`, if one is, for `call` naming `uid`.
-pub(super) fn probed(probe: &Mutex<Option<Probe>>, call: &'static str, uid: Option<&InstanceUid>) {
+fn probed(probe: &Mutex<Option<Probe>>, call: &'static str, uid: Option<&InstanceUid>) {
     let probe = probe.lock().expect("hook lock").clone();
     if let Some(probe) = probe {
         probe(call, uid);
@@ -804,4 +804,16 @@ impl crate::revocation::LedgerStore for ProbedLedger {
         (self.probe)("save_hosts", None);
         self.inner.save_hosts(hosts)
     }
+}
+
+/// The Deployment the stored assignment of `uid` was released through.
+pub(super) fn released_through(
+    database: &Arc<crate::postgres::Database>,
+    uid: &InstanceUid,
+) -> Option<String> {
+    crate::postgres::agents::PgAgentStore::new(database.clone())
+        .get(uid)
+        .expect("read")
+        .and_then(|stored| stored.assignment)
+        .map(|assignment| assignment.deployment)
 }

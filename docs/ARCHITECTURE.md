@@ -255,13 +255,11 @@ no module.
   The round of an Agent's report — a report processed under the Agent's lock, its record created,
   taken or settled, the reply and the connection settings it is offered, the persist path, a
   goodbye and a forget, and the answers a refused report gets — is the core module
-  `fleet::session`, behind the same `AppState` entry points. A context that calls another's item
-  imports it by name, so the edges between them read from each file's `use` lines. What is left in
-  the module root of `fleet` is what every context calls: the state, its construction and limits,
-  the lease, the reads of the fleet, the audit helpers, the capabilities the Server declares, the
-  staleness rule, the retry wait of a kept put-back (`Backoff`), and the types they share, with the
-  tests of staleness, of placement and of label inheritance. The test helpers the contexts share
-  are the test-only `fleet::fixtures`.
+  `fleet::session`, behind the same `AppState` entry points. The module root of `fleet` keeps the
+  state, its construction and limits, the lease, the reads of the fleet, the audit helpers, the
+  capabilities the Server declares, the staleness rule, and the types the contexts share, with the
+  tests of staleness, of the host a register derives, and of label inheritance. The test helpers
+  the contexts share are the test-only `fleet::fixtures`.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the

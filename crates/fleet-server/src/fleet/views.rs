@@ -1418,4 +1418,68 @@ mod tests {
         assert_eq!(view(&state, &identifying).platform, "darwin-arm64");
         assert_eq!(view(&state, &silent).platform, "");
     }
+
+    /// On PostgreSQL an Agent's view and a rollout to it read the Agent and the Agents bound to its
+    /// Host, not the whole fleet, and the view inherits the labels of its Client Agent, which this
+    /// instance does not hold either.
+    /// Verifies: ADR-0025
+    #[test]
+    fn an_agents_view_and_a_rollout_to_it_read_its_host_and_not_the_fleet() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let a = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+        );
+        let (client, agent, other) = (
+            InstanceUid([0x91; 16]),
+            InstanceUid([0x92; 16]),
+            InstanceUid([0x93; 16]),
+        );
+        let subject = crate::revocation::SubjectValues::default;
+        report_over(
+            &a,
+            "h1",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        report_over(&a, "h1", subject(), agent, &[]);
+        report_over(&a, "h2", subject(), other, &[]);
+        label(&a, &client, &[("ring", "early")]);
+
+        let hooked = Hooked::new(Box::new(
+            crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open"),
+        ));
+        let whole = hooked.whole_queries.clone();
+        let dir = tempfile::tempdir().expect("blobs");
+        let b = delivering_on(&database, Box::new(hooked), dir.path());
+        aim_at_the_early_ring(&b);
+        let view = b.agent_view(&agent).expect("read").expect("known");
+        assert_eq!(
+            view.inherited_labels.get("ring").map(String::as_str),
+            Some("early")
+        );
+        assert_eq!(view.client_agent, client.to_string());
+        assert!(b
+            .agent_view(&InstanceUid([0x94; 16]))
+            .expect("read")
+            .is_none());
+        assert!(
+            b.rollout_to_agent(&agent, None).is_ok(),
+            "the Deployment aimed at the inherited label releases to it"
+        );
+        assert_eq!(
+            released_through(&database, &agent).as_deref(),
+            Some("early")
+        );
+        assert_eq!(
+            whole.load(Ordering::SeqCst),
+            0,
+            "no read of the whole fleet"
+        );
+        assert!(b.snapshot().is_empty());
+    }
 }
