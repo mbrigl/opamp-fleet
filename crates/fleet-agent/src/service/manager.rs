@@ -1843,7 +1843,7 @@ fn remove_socket_dir(socket: &Path) -> Result<(), String> {
         .ok_or_else(|| left(socket, std::io::Error::other("names no file")))?;
     // unlinkat(2) follows no link at the name; only an empty directory is removed.
     gone(fleet_util::nofollow::at::unlink(held.as_raw_fd(), &file)).map_err(|e| left(socket, e))?;
-    gone(fleet_util::nofollow::at::rmdir(parent.as_raw_fd(), &name)).map_err(|e| left(dir, e))
+    gone(crate::storage::handle::rmdir(parent.as_raw_fd(), &name)).map_err(|e| left(dir, e))
 }
 
 /// The installed service, implementing the [`ServiceControl`] seam.

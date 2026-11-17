@@ -343,7 +343,7 @@ fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
         Err(e) => return Err(e),
     };
     let entry = std::ffi::CString::new(name)?;
-    let st = match fleet_util::nofollow::at::lstat_at(at.as_raw_fd(), &entry) {
+    let st = match handle::lstat_at(at.as_raw_fd(), &entry) {
         Ok(st) => st,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Aside::Nothing),
         Err(e) => return Err(e),
@@ -361,7 +361,7 @@ fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
     loop {
         let tomb = tombstone_name(name);
         let tomb_entry = std::ffi::CString::new(tomb.as_str())?;
-        match fleet_util::nofollow::at::lstat_at(at.as_raw_fd(), &tomb_entry) {
+        match handle::lstat_at(at.as_raw_fd(), &tomb_entry) {
             Ok(_) => continue,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
