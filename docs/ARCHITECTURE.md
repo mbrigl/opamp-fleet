@@ -235,6 +235,31 @@ no module.
   instance holds members of; whether the Client Agents of a group another instance carries are read
   under the fleet lock or before it (`Elsewhere`); and the placing again after a notice or a
   catch-up.
+  The views of the fleet — the Agents each Host carries, the view of an Agent and of the whole
+  fleet, and the list of Agents a page at a time
+  ([ADR-0030](adr/0030-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md))
+  — are the core module `fleet::views`, behind the same `AppState` entry points.
+  Packages in the fleet — the Package Sets, their entries and signatures, the upload limit, the
+  offer of a Package to an Agent and of an artifact to a Host, and the Packages a Deployment holds
+  ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)) — are the core module
+  `fleet::delivery`, behind the same `AppState` entry points.
+  Configurations, Deployments and rollouts — the catalogue of Configurations, what a Deployment
+  releases, the rollout acts that assign it, what waits for an Agent's next press, labels, and the
+  restart an operator requests ([ADR-0032](adr/0032-deployments-and-rollouts.md)) — are the core
+  module `fleet::rollout`, behind the same `AppState` entry points.
+  Enrolment and certificates — the approval of an enrolment and its take-back, the answer an
+  enrolling Agent is given, the issuing and renewal of a host certificate with the records of what
+  was issued and signed, and the mark of a host as a Gateway, which places every Agent again
+  ([ADR-0027](adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md))
+  — are the core module `fleet::approval`, behind the same `AppState` entry points.
+  The round of an Agent's report — a report processed under the Agent's lock, its record created,
+  taken or settled, the reply and the connection settings it is offered, the persist path, a
+  goodbye and a forget, and the answers a refused report gets — is the core module
+  `fleet::session`, behind the same `AppState` entry points. The module root of `fleet` keeps the
+  state, its construction and limits, the lease, the reads of the fleet, the audit helpers, the
+  capabilities the Server declares, the staleness rule, and the types the contexts share, with the
+  tests of staleness, of the host a register derives, and of label inheritance. The test helpers
+  the contexts share are the test-only `fleet::fixtures`.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
