@@ -247,6 +247,11 @@ no module.
   releases, the rollout acts that assign it, what waits for an Agent's next press, labels, and the
   restart an operator requests ([ADR-0032](adr/0032-deployments-and-rollouts.md)) — are the core
   module `fleet::rollout`, behind the same `AppState` entry points.
+  Enrolment and certificates — the approval of an enrolment and its take-back, the answer an
+  enrolling Agent is given, and the issuing and renewal of a host certificate with the records of
+  what was issued and signed
+  ([ADR-0027](adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md))
+  — are the core module `fleet::approval`, behind the same `AppState` entry points.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the

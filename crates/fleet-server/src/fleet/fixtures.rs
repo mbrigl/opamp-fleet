@@ -194,3 +194,18 @@ pub(super) fn body(text: &str) -> Revision {
         service_name: "otelcol".to_string(),
     }
 }
+
+/// A fleet whose host register is kept in `dir`, so a reopen restores both.
+pub(super) fn hosted_fleet(dir: &std::path::Path) -> AppState {
+    let revocations = Arc::new(
+        Revocations::open(
+            Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations"),
+    );
+    AppState::new(dir.join("configs"))
+        .expect("state")
+        .with_revocations(Some(revocations))
+}
