@@ -114,7 +114,8 @@ Six crates in one workspace
   kind's tree package keeps, which `opamp-fleetctl` packs and the Client creates (`tree`), though
   no kind on `main` states one yet, the file operations that follow no link (`nofollow`), whose
   Unix `*at` system calls, wrapped once in `nofollow::at`, the Client's work by directory handle
-  calls too, the reader of a password file (`password`), and a bootstrap identity as PEM
+  calls too, while the calls only the Client makes stay in its `storage::handle`, the reader of a
+  password file (`password`), and a bootstrap identity as PEM
   (`identity`), opened from a PKCS#12 file by the adapter `identity::pkcs12`. A test decides from
   who names a module whether it belongs here or in `fleet-core`.
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the

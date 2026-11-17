@@ -511,25 +511,6 @@ pub mod at {
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 
-    /// The entry `name` in `dir` itself, a link as a link.
-    pub fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
-        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: a valid descriptor, a NUL-terminated name and room for one `stat`.
-        let rc = unsafe {
-            libc::fstatat(
-                dir,
-                name.as_ptr(),
-                st.as_mut_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `fstatat` succeeded and filled it.
-        Ok(unsafe { st.assume_init() })
-    }
-
     /// Whether `flags` create a file, so that `openat` reads a mode.
     fn creates(flags: libc::c_int) -> bool {
         #[cfg(target_os = "linux")]
@@ -568,15 +549,6 @@ pub mod at {
         // SAFETY: a valid descriptor and a NUL-terminated name; without `AT_REMOVEDIR` a link is
         // removed as a link.
         if unsafe { libc::unlinkat(dir, name.as_ptr(), 0) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    /// Removes the empty directory `name` in `dir`.
-    pub fn rmdir(dir: RawFd, name: &CStr) -> io::Result<()> {
-        // SAFETY: a valid descriptor and a NUL-terminated name; only an empty directory goes.
-        if unsafe { libc::unlinkat(dir, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())

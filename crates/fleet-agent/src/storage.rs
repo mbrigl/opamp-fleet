@@ -649,7 +649,7 @@ pub(crate) mod handle {
 
     use tracing::warn;
 
-    use fleet_util::nofollow::at::{self, lstat_at, open, DIRECTORY};
+    use fleet_util::nofollow::at::{self, open, DIRECTORY};
 
     use super::ProcessAccountGroup;
 
@@ -687,6 +687,34 @@ pub(crate) mod handle {
         }
         // SAFETY: `fstat` succeeded and filled it.
         Ok(unsafe { st.assume_init() })
+    }
+
+    /// The entry `name` in `dir` itself, a link as a link.
+    pub(crate) fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: a valid descriptor, a NUL-terminated name and room for one `stat`.
+        let rc = unsafe {
+            libc::fstatat(
+                dir,
+                name.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fstatat` succeeded and filled it.
+        Ok(unsafe { st.assume_init() })
+    }
+
+    /// Removes the empty directory `name` in `dir`.
+    pub(crate) fn rmdir(dir: RawFd, name: &CStr) -> io::Result<()> {
+        // SAFETY: a valid descriptor and a NUL-terminated name; only an empty directory goes.
+        if unsafe { libc::unlinkat(dir, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Whether `st` is of the file type `kind` (`S_IFDIR`, `S_IFREG`, `S_IFLNK`).
@@ -959,7 +987,7 @@ pub(crate) mod handle {
             }
         }
         drop(inner);
-        at::rmdir(dir.as_raw_fd(), name).map_err(named)
+        rmdir(dir.as_raw_fd(), name).map_err(named)
     }
 
     /// Gives what `handle` holds to `group` at `mode`: the group first, since a change of group

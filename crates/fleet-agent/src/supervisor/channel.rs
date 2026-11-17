@@ -1160,7 +1160,7 @@ fn remove_own(dir: &std::os::fd::OwnedFd, path: &Path) -> Result<(), String> {
     let mut first = None;
     for name in handle::entries(dir).map_err(|e| format!("{}: {e}", path.display()))? {
         let child = path.join(std::ffi::OsStr::from_bytes(name.as_bytes()));
-        let result = match fleet_util::nofollow::at::lstat_at(dir.as_raw_fd(), &name) {
+        let result = match handle::lstat_at(dir.as_raw_fd(), &name) {
             Ok(st) if st.st_uid == me => match handle::remove_tree_at(dir, &name, &child) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.to_string()),
                 _ => Ok(()),
