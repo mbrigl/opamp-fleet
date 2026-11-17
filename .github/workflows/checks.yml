@@ -11,7 +11,7 @@ name: Checks
 #
 # The sensors report for the reviewer and fail on nothing they count, except the action
 # references once a project runs that sensor with --require; their self-tests fail like any
-# check's. The sensors job checks out the full history because five sensors read it. The review
+# check's. The sensors job checks out the full history because seven sensors read it. The review
 # binding sensor runs in review-binding.yml, the repository settings sensor on a human's
 # instruction (ADR-0002); this workflow runs the self-test of each.
 #
@@ -198,6 +198,17 @@ jobs:
         run: bash scripts/test-sensor-action-refs.sh
       - name: Report the forms of the action references the workflows use
         run: bash scripts/sensor-action-refs.sh
+      - name: Self-test the cited commits sensor
+        run: bash scripts/test-sensor-cited-commits.sh
+      # The checkout above fetches the full history, without which no cited hash is reached.
+      - name: Report the commits the plan and the backlog cite that the head does not reach
+        run: bash scripts/sensor-cited-commits.sh
+      - name: Self-test the Implements sensor
+        run: bash scripts/test-sensor-implements-adrs.sh
+      - name: Report the commits of the change that implement an ADR not in force
+        run: bash scripts/sensor-implements-adrs.sh "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the review binding sensor
         run: bash scripts/test-sensor-review-binding.sh
       # The repository settings sensor itself runs on a human's instruction (ADR-0002).
