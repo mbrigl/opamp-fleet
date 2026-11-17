@@ -1,5 +1,5 @@
 //! The harness every kind's integration tests share ([`wrapped`]), and the stub features they rely
-//! on, held through the core's own `command` kind (ADR-0018): a kind that knows its agent states
+//! on, held through the core's own `command` kind (ADR-0019): a kind that knows its agent states
 //! the arguments itself, so the stub takes the flags a test needs from a file beside it, and a kind
 //! that reloads by signal needs a stub that shows the signal arrived.
 
@@ -8,7 +8,7 @@ mod wrapped;
 /// The harness starts a kind as the core does, the program where the install puts it, and the stub
 /// adds the flags of its `<program>.args` side-file to its own: the marker it writes holds them.
 /// The `command` kind reports the probed version and applies a Configuration by restarting.
-/// Verifies: ADR-0018
+/// Verifies: ADR-0019
 #[tokio::test]
 async fn the_harness_drives_a_kind_and_the_stub_reads_its_side_file() {
     let marker_dir = tempfile::tempdir().expect("tempdir");
@@ -42,7 +42,7 @@ async fn the_harness_drives_a_kind_and_the_stub_reads_its_side_file() {
 
 /// `--record-hup` keeps the stub running through `SIGHUP` and counts each one in a file, so a test
 /// of a kind that reloads by signal sees that the signal reached the process.
-/// Verifies: ADR-0018
+/// Verifies: ADR-0019
 #[cfg(unix)]
 #[tokio::test]
 async fn the_stub_records_each_sighup_and_survives_it() {

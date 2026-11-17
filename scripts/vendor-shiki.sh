@@ -4,7 +4,7 @@
 # Agent's effective configuration with (ADR-0035), and pins its SHA-256 in scripts/vendor-shiki.lock.
 #
 # Dev-only: run it when the version is to change, on a developer's machine. CI and the Dev
-# Container never run it and need no node (ADR-0041 clause 14). The bundle is built from the
+# Container never run it and need no node (ADR-0008 clause 14). The bundle is built from the
 # inputs under scripts/vendor-shiki/: package.json names the exact versions, package-lock.json
 # pins every package with its integrity hash, entry.mjs is the code bundled. To change a version,
 # edit package.json, refresh the lock with `npm install --package-lock-only --ignore-scripts` in

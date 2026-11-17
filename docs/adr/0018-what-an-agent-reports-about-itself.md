@@ -1,4 +1,4 @@
-# ADR-0017: What an Agent reports about itself
+# ADR-0018: What an Agent reports about itself
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-14
@@ -95,7 +95,7 @@ metrics — "CPU or RAM usage" — as what own metrics are for.
 
 **"Own" cannot mean a Managed Process's internals.** Upstream's `opampsupervisor` answers the offer
 by configuring the Collector's internal telemetry. That road is closed here: a Supervisor passes a
-Configuration through without touching it ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)), and
+Configuration through without touching it ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)), and
 the specification's non-goals forbid an abstraction over a Managed Process's configuration
 language. What this Client can honestly report is what it observes from outside: its own process,
 and the processes it spawned and holds the pids of.
@@ -122,7 +122,7 @@ address space — [RFC 1918](https://www.rfc-editor.org/rfc/rfc1918)'s three IPv
 [RFC 4193](https://www.rfc-editor.org/rfc/rfc4193)'s `fc00::/7` — is not routable across the
 public internet, but a stream sent into it crosses every switch, VLAN and tenant between the host
 and the Collector. A name is not an address: `localhost` resolves wherever the host's resolver
-says. [ADR-0008](0008-five-crates-on-tokio-and-axum.md) draws the same line for the OpAMP
+says. [ADR-0008](0008-six-crates-on-tokio-and-axum.md) draws the same line for the OpAMP
 connection, at the literals `127.0.0.1` and `::1`, and builds every rustls configuration for TLS 1.3
 alone.
 
@@ -146,7 +146,7 @@ admits.
 **The `supervisor.` namespace is the Supervisor's own statement.** A Package is matched against
 the version of the Package a Supervisor installed
 ([ADR-0032](0032-deployments-and-rollouts.md) clause 25), and the Client Agent is told apart by
-the kinds it reports ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 18). An operator
+the kinds it reports ([ADR-0019](0019-supervisor-mode-and-its-kinds.md) clause 18). An operator
 who could state a key in that namespace could make every Agent of the host a Client Agent or
 choose the version a Package is held against.
 
@@ -162,14 +162,14 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
    | Source | When |
    |---|---|
-   | The kind's own type | a wrapped kind states it, the type of the one agent it wraps; a block of such a kind carrying `service_name` fails at startup naming the derived value ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)) |
+   | The kind's own type | a wrapped kind states it, the type of the one agent it wraps; a block of such a kind carrying `service_name` fails at startup naming the derived value ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)) |
    | The block key `service_name` | `collector` and `command`; must not be empty, and is not bound by the instance-name grammar, so a reverse FQDN is accepted |
    | The program's file name | the fallback: `otelcol`, `promtail` |
 
    The fallback is read from the configuration, never parsed out of a program's output. What the
    Managed Process reports is never a source of the type (clause 8). The Baseline's reverse-FQDN
    shape is a recommendation and is not enforced. The Client Agent reports the constant
-   `supervisor` ([ADR-0020](0020-the-installed-service-and-its-state.md)), never its configured
+   `supervisor` ([ADR-0021](0021-the-installed-service-and-its-state.md)), never its configured
    name. A Selector or a Configuration's type ([ADR-0031](0031-configurations-and-the-rest-api.md))
    on `service.name` aims at a type.
 
@@ -180,7 +180,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
 3. **The block `name` keeps its local meaning.** It is the Supervisor's directory name and the
    uniqueness key across blocks, bound by the instance-name grammar of
-   [ADR-0020](0020-the-installed-service-and-its-state.md): lowercase, digits, `-`, no dots. A
+   [ADR-0021](0021-the-installed-service-and-its-state.md): lowercase, digits, `-`, no dots. A
    type may be a reverse FQDN; an instance name is a path component on three operating systems.
    That is why the two cannot share a key.
 
@@ -263,11 +263,11 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     several is a Label's job ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)): a
     `[[supervisor]]` block carrying an `attributes` table fails at startup with a message naming
     the Server's Label. The Client Agent also reports the kinds it was compiled with
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)). An `[attributes]` key that starts with
+    ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)). An `[attributes]` key that starts with
     `supervisor.`, whether TOML spells it quoted, dotted, or as a sub-table under
     `[attributes.supervisor]`, fails at startup with a message naming the key. That namespace is
     the Supervisor's own statement: `supervisor.kind.*`
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 18)
+    ([ADR-0019](0019-supervisor-mode-and-its-kinds.md) clause 18)
     and `supervisor.package.version` (clause 5). An operator who could state one could make every
     Agent of the host a Client Agent or choose the version a Package is held against.
 
@@ -316,7 +316,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 16. **Logs are the Client's `tracing` output, bridged.** `opentelemetry-appender-tracing`'s
     `OpenTelemetryTracingBridge` turns events into OTLP log records at the level the log filter
     already selects. Stderr and the service-mode log file
-    ([ADR-0020](0020-the-installed-service-and-its-state.md)) keep everything they print; this adds
+    ([ADR-0021](0021-the-installed-service-and-its-state.md)) keep everything they print; this adds
     a destination. A record written inside an instrumented operation carries that operation's
     `TraceId` and `SpanId`, which is what makes a log-to-trace join answerable at the receiving
     end.
@@ -362,7 +362,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
 21. **A self-update stays one trace across its restart.** The trace id and the span id of the
     `self.update` span go into the update marker
-    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)) as hex, and the process
+    ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)) as hex, and the process
     that comes up after the restart opens `commit` or `roll_back` as a child of that span, its
     parent marked remote. A marker without ids, or with ids that do not parse, makes the
     post-restart span open its own trace; a trace is never a reason to fail an update.
@@ -393,7 +393,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     fleet identity the Server sees. It follows no redirect, so a destination cannot move an export
     to another host or to plaintext. It speaks TLS 1.3 alone, with TLS 1.3 as its minimum and the
     three TLS 1.3 suites of the ring provider, as every rustls configuration of this project does
-    ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)). A destination that speaks only TLS 1.2 or
+    ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)). A destination that speaks only TLS 1.2 or
     older fails the handshake, and that export fails. The client carries a 5 s timeout — half the
     reporting interval — because neither the periodic reader nor a client handed to
     `opentelemetry-otlp` bounds an export, and a destination that stops answering would otherwise
@@ -484,7 +484,7 @@ telemetry — the specification keeps this project out of the telemetry-backend 
 on the Agent that drops the three capability bits. Also out of scope: the Supervisor Endpoint's
 token and which processes are handed it ([ADR-0016](0016-client-modes-and-the-gateway.md)); what a
 Managed Process can read on its host, which includes the Client's `state_dir` and key while both
-run under one account ([ADR-0021](0021-the-accounts-the-service-runs-under.md)); `service.version`,
+run under one account ([ADR-0022](0022-the-accounts-the-service-runs-under.md)); `service.version`,
 which stays the process's word; what a compromised Client reports, since its code builds the whole
 description and no rule on the Client binds it; and the Server's precedence of the effective
 description ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)).
@@ -614,7 +614,7 @@ description ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)).
 - **Admit `localhost` by name.** It is loopback by convention
   ([RFC 6761](https://www.rfc-editor.org/rfc/rfc6761)), but what it resolves to is the host
   resolver's answer, not the URL's, and the OpAMP connection refuses it for the same reason
-  ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+  ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)).
 - **Resolve names and admit those that resolve to the loopback.** The answer would depend on what
   DNS said when the offer arrived, and the name can be re-pointed afterwards without any offer
   changing.

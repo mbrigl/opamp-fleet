@@ -11,7 +11,7 @@
 #
 # A Configuration's name is the file name its entry gets in the Supervisor's config directory,
 # so a block that reads one must read exactly that path. Names carry no extension: they follow the
-# ADR-0020 grammar (lowercase letters, digits and '-'), which admits no dot.
+# ADR-0021 grammar (lowercase letters, digits and '-'), which admits no dot.
 #
 # Two modes:
 #   scripts/seed_test_configs.sh [server-url]

@@ -23,7 +23,7 @@ make the shape worth deciding once:
   technology it runs on, and a decision about the shape has to be one a test can decide
   ([ADR-0002](0002-decisions-verified-by-tests.md)); the shape is what entropy erodes first.
 
-The workspace has its toolchain ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)), so the
+The workspace has its toolchain ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)), so the
 structural test that keeps the shape exists beside the code it reads.
 
 ## Decision

@@ -3,7 +3,7 @@
 //! The attribute a staged rollout wants — `rollout = "canary"` — is one an operator invents, and a
 //! label lets the operator invent it on the Server. Invented in `supervisor.toml` on the machine,
 //! moving a host between channels would be a file edit plus a restart *on that host*: the per-host
-//! wiring ADR-0039 removes, surviving in the one place it matters most.
+//! wiring ADR-0033 removes, surviving in the one place it matters most.
 //!
 //! A label joins the attribute set a Deployment's Selector matches against (ADR-0032), which
 //! releases Configurations and packages alike. It never travels to the Agent: it is an input to
@@ -12,13 +12,13 @@
 //! Client's own Agent hold for that Client's other Agents (ADR-0029 clause 19).
 //!
 //! **A label can never restate a reported attribute.** `os.type` and `host.arch` decide which
-//! artifact an Agent is offered (ADR-0039) and `service.name` decides which packages fit it at all
-//! (ADR-0039), so a label that outranked them would let a typo hand a Windows binary to a Linux
+//! artifact an Agent is offered (ADR-0033) and `service.name` decides which packages fit it at all
+//! (ADR-0033), so a label that outranked them would let a typo hand a Windows binary to a Linux
 //! host. Labels annotate; they do not correct. **And nothing an Agent reports or an operator labels
 //! can speak in the Server's name**: `fleet.*` is the Server's own, filled from the Host's
 //! certificate (ADR-0029 clauses 18 and 20). **Nor can a label speak in a Supervisor's**:
 //! `supervisor.*` is what a Supervisor states about its Client and the Package it installed
-//! (ADR-0017 clause 10), and a label is refused there as in
+//! (ADR-0018 clause 10), and a label is refused there as in
 //! `fleet.*` (ADR-0029 clause 20). A label already stored
 //! with a key in either space is ignored: it enters no effective description and nothing inherits
 //! it, and the fleet row lists it as ignored.
@@ -56,7 +56,7 @@ pub enum LabelError {
     Invalid(String),
     /// A label key the Agent already reports. Refused rather than applied: a label that could
     /// override `os.type`, `host.arch`, or `service.name` would let a slip in the UI offer an
-    /// Agent an artifact built for another machine (ADR-0039).
+    /// Agent an artifact built for another machine (ADR-0033).
     RestatesReported(String),
     /// The Agent's record could not be written.
     Storage(String),
@@ -230,7 +230,7 @@ pub fn ignored_labels(labels: &BTreeMap<String, String>) -> Vec<String> {
         .collect()
 }
 
-/// Whether this is a Client's own Agent: it alone reports `supervisor.kind.*` (ADR-0018
+/// Whether this is a Client's own Agent: it alone reports `supervisor.kind.*` (ADR-0019
 /// clause 18, ADR-0029 clause 19).
 pub fn is_client_agent(description: Option<&AgentDescription>) -> bool {
     description.is_some_and(|description| {

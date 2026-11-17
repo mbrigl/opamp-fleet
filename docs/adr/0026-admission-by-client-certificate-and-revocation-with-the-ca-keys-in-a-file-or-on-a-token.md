@@ -54,7 +54,7 @@ Forces that shape the answer:
   sees belongs to the Gateway. The Gateway's own handshake is what proves a downstream peer.
 - **A Client updates itself.** A Client may start with a `supervisor.toml` written for an
   earlier version, by the self-update of
-  [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md), with nobody at the host.
+  [ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md), with nobody at the host.
 - **The Agent plane serves the package download besides `/v1/opamp`**
   ([ADR-0033](0033-packages-signatures-and-delivery.md)). A handshake that requires a certificate
   requires it there too, so the Client's downloader must present one — to the Server, never to a
@@ -185,7 +185,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)). A `401` is logged as an
    admission failure and retried with the transport's backoff. The communication layer refuses
    `ws://` and `http://` to a host that is not LOOPBACK
-   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+   ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)).
 4. **What the Server offers reaches only admitted members.** A connection-settings offer and a
    `[telemetry_offer]` carrying headers are sent only on a connection whose certificate was issued
    by the client CA. An enrolment connection
@@ -211,7 +211,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    `client-key.pem`. The stored pair outranks the file, the same precedence persisted connection
    settings have; deleting it reverts to what the operator wrote. The private key is written
    `0600` on Unix and inherits the state directory's ACL on Windows
-   ([ADR-0020](0020-the-installed-service-and-its-state.md)).
+   ([ADR-0021](0021-the-installed-service-and-its-state.md)).
 8. **The Server signs CSRs as a local CA while `[client_ca]` is configured.** `[client_ca]` names
    `cert_file`, `validity_days` (default 30, `0` refused; a month bounds what a certificate stolen
    unnoticed is good for, and a host offline for a fortnight still renews on its own) and the CA's
@@ -541,7 +541,7 @@ Client.
   requires it.** Rejected: the Agent plane reads no credential, and the Server is upgraded first,
   so a question kept for older Servers would teach a setting nothing reads.
 - **Remove a leftover `[auth]` section at install, or refuse the file there.** Rejected: `install`
-  never rewrites a file that exists ([ADR-0020](0020-the-installed-service-and-its-state.md)), and
+  never rewrites a file that exists ([ADR-0021](0021-the-installed-service-and-its-state.md)), and
   refusing the section would stop a self-updated Client, whose file still has it, from connecting
   on a host nobody watches.
 - **Refuse a leftover `[auth]` on the Client at startup**, as the Server does. Rejected: a Client

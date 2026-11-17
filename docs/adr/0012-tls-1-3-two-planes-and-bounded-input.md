@@ -67,11 +67,11 @@ connection, send `GET /v1/opamp HTTP/1.1\r\n` and fall silent, costing the Serve
 hyper's read buffer per connection, before any route or credential check runs. hyper 1.x defaults
 `header_read_timeout` to 30 s, but the default is inert unless a `Timer` is installed (its
 `Time::check` warns and resolves to `None`), and configuring the timeout without a timer panics.
-Neither `axum::serve` (0.8) nor `axum_server` (0.7) installs one; `axum::serve` exposes no builder
-at all, while `axum_server::Server::http_builder()` does. A per-request timeout is the wrong
-instrument: the three routes that matter (the WebSocket, the download, and the package upload
-with its body limit off) are meant to take long, and middleware runs only after the headers are
-parsed.
+`axum::serve` (0.8) installs none and exposes no builder at all; `axum_server` (0.9) installs one
+but turns the timeout off, and exposes the builder as `axum_server::Server::http_builder()`. A
+per-request timeout is the wrong instrument: the three routes that matter (the WebSocket, the
+download, and the package upload with its body limit off) are meant to take long, and middleware
+runs only after the headers are parsed.
 
 Two more bounds are needed. Nothing else limits how many connections a peer may hold open at
 once, and `max_agents` bounds the fleet, not the sockets. The TLS listeners offer `h2` by ALPN,
@@ -195,7 +195,7 @@ Agent plane with token buckets.
    startup) in both directions and on both transports, applied after decompression: `413` on plain
    HTTP, a `1009` close on WebSocket, and an oversized reply is discarded rather than sent. The
    shared helpers that implement this live in `crates/opamp`
-   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+   ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)).
 
 4. **Reconnection belongs to the Client's transport layer, and a fleet comes back spread out.**
    - The first reconnect after an established connection is lost — cut, or closed by a Server
@@ -228,7 +228,7 @@ Agent plane with token buckets.
    provider with the three TLS 1.3 suites and nothing else: `TLS13_AES_256_GCM_SHA384`,
    `TLS13_AES_128_GCM_SHA256` and `TLS13_CHACHA20_POLY1305_SHA256`. Every rustls configuration of
    both ends is built from it with the protocol versions pinned to TLS 1.3
-   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)). Each binary installs it process-wide at
+   ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)). Each binary installs it process-wide at
    startup, and every `reqwest` client is built with a minimum of TLS 1.3. This covers every
    connection: OpAMP, the REST API, downloads, mirrors, own telemetry and the Server's connections
    to its stores. `axum-server` (`tls-rustls-no-provider`) terminates TLS on the Server,
@@ -259,7 +259,7 @@ Agent plane with token buckets.
    [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
    and its connection cap)
    live inside it; unknown keys are refused as everywhere
-   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)). The router is split accordingly:
+   ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)). The router is split accordingly:
    `fleet_server::agent_app(state, admission)` and `fleet_server::operator_app(state, auth)`.
 
 8. **The Operator plane is loopback by default.** Its reachability is its first protection; a
@@ -303,7 +303,7 @@ Agent plane with token buckets.
 
 15. **Every plane's server is built in one place, with an HTTP/1 header-read timeout of 30
     seconds.** `listen::plane` serves both planes on `opamp::server::listen`
-    ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)), which serves plain and TLS through
+    ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)), which serves plain and TLS through
     `axum_server`, installs `hyper_util::rt::TokioTimer` on the HTTP/1 builder, and sets
     `header_read_timeout` to `HEADER_READ_TIMEOUT` (30 s, hyper's own default and what axum
     applies once it installs the timer itself). The timeout is a parameter of the serving function
@@ -491,7 +491,7 @@ Agent plane with token buckets.
 - Which bucket a message or a download is counted in
   ([ADR-0016](0016-client-modes-and-the-gateway.md)).
 - The rate of admission attempts.
-- Where the Client's own telemetry goes ([ADR-0017](0017-what-an-agent-reports-about-itself.md)).
+- Where the Client's own telemetry goes ([ADR-0018](0018-what-an-agent-reports-about-itself.md)).
 - Response compression on plain HTTP.
 - A connection cap on the Client's own listeners, the Gateway endpoint and the Supervisor
   Endpoint, which carry the bounds of `opamp`'s listener and no cap.
@@ -577,7 +577,7 @@ Agent plane with token buckets.
   default is a knob nobody turns.
 - **The bound as a shared layer in `crates/opamp`.** It is one framework's builder knob in one
   binary; the Client's outbound transports have no counterpart
-  ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+  ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)).
 - **The weaker posture: TLS 1.2 and 1.3, optional TLS, plaintext on any address, an Agent plane on
   `0.0.0.0:4320` and `ws://` as the Client's default.** A Server that starts with no configuration
   and a fleet that connects without certificates are convenient. Rejected: security comes before
@@ -706,8 +706,9 @@ Agent plane with token buckets.
   about 2.5 kB for an idle one.
 - The HTTP/1 header bound:
   [`hyper::server::conn::http1::Builder::header_read_timeout`](https://docs.rs/hyper/1.11.0/hyper/server/conn/http1/struct.Builder.html#method.header_read_timeout):
-  requires a `Timer`, panics if configured without one; `axum-server` 0.7 `http_builder` and its
-  10-second rustls handshake default, read from the vendored sources.
+  requires a `Timer`, panics if configured without one; `axum-server` 0.9 `http_builder`, its
+  timer with the timeout off, and its 10-second rustls handshake default, read from the vendored
+  0.9.2 sources.
 - Header timeouts elsewhere:
   [Diving into Go's HTTP server timeouts](https://adam-p.ca/blog/2022/01/golang-http-server-timeouts/)
   and nginx's `client_header_timeout` (60 s): the range 30 s sits in.

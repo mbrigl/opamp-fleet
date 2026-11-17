@@ -9,9 +9,9 @@
 
 An operator needs something to install, and a fleet needs something to hand its Server. They are
 different questions. The fleet needs one artifact per platform that the Client itself can open and
-install as a self-update ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). A
+install as a self-update ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)). A
 host needs what its platform expects: native packages, which
-[ADR-0020](0020-the-installed-service-and-its-state.md) decides.
+[ADR-0021](0021-the-installed-service-and-its-state.md) decides.
 `opentelemetry-collector-releases` and Elastic Agent both publish native packages *beside* their
 archives, for exactly that reason. Artifact names are a public contract: operators script against
 them.
@@ -323,7 +323,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
 - reproducible builds;
 - a VEX document;
 - an image of the Client, which stays an operating-system service
-  ([ADR-0020](0020-the-installed-service-and-its-state.md));
+  ([ADR-0021](0021-the-installed-service-and-its-state.md));
 - a Helm chart, Compose file or Kubernetes manifest for production; a health endpoint; a PKCS#11
   module or other library in the image; images for any target but `linux/amd64` and
   `linux/arm64`; a published Server binary outside the image.

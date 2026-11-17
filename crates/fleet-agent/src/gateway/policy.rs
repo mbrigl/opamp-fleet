@@ -576,7 +576,7 @@ mod tests {
     }
 
     /// The first report binds, and a later one from another host leaves the binding where it was.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn the_first_reporting_host_keeps_the_binding() {
         let mut bindings = Bindings::default();

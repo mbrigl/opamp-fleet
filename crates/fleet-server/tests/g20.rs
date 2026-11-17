@@ -1444,7 +1444,7 @@ fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() 
 /// G-20's failover with the instance frozen (`SIGSTOP`) rather than killed: it closes nothing, its
 /// kernel keeps the connections, and its Agents notice it only by the silence of one heartbeat
 /// interval. The same bounds hold as for a killed instance.
-/// Verifies: ADR-0015
+/// Verifies: ADR-0014
 /// Verifies: ADR-0025
 /// Verifies: G-20
 #[test]

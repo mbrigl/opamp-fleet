@@ -8,15 +8,15 @@
 ## Context
 
 The version resolution and its helper do not belong in the publishable `opamp` crate
-([ADR-0008](0008-five-crates-on-tokio-and-axum.md)), which carries the protocol and nothing of this
+([ADR-0008](0008-six-crates-on-tokio-and-axum.md)), which carries the protocol and nothing of this
 project's own.
 
 The version a binary carries is load-bearing in several places at once: the OpAMP
 `service.version` identifying attribute tells the Server which build it is talking to, both CLIs
 print it, the Client's install layout names its version directories after it
-([ADR-0020](0020-the-installed-service-and-its-state.md)), and the self-update compares an offered
+([ADR-0021](0021-the-installed-service-and-its-state.md)), and the self-update compares an offered
 version against what a staged binary reports
-([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)).
+([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)).
 
 Forces:
 
@@ -112,7 +112,7 @@ compared nowhere.
    gate that keeps a version from naming a path outside the install layout. Beside it: `identity`
    (clause 10), `same_release`, and `precedence`, SemVer ordering with build metadata ignored,
    which the self-update's downgrade refusal
-   ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)) and the rollout
+   ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)) and the rollout
    ([ADR-0032](0032-deployments-and-rollouts.md)) order by. It lives in `fleet-core` because the
    Client writes these strings and the Server displays them, and it is this project's grammar, not
    OpAMP's.
@@ -143,7 +143,7 @@ compared nowhere.
 
 **Out of scope:** what a release builds and publishes (targets and artifacts,
 [ADR-0038](0038-releases-attestations-and-the-server-image.md); installers,
-[ADR-0020](0020-the-installed-service-and-its-state.md)); whether a Managed Process's package
+[ADR-0021](0021-the-installed-service-and-its-state.md)); whether a Managed Process's package
 version, free-form and an upstream project's own numbering, is parsed beyond what ordering needs;
 release-candidate tags (`version/1.2.3-rc.1`), refused by the grammar until a release-candidate
 flow is wanted.
@@ -180,7 +180,7 @@ flow is wanted.
 - **A second `build.rs` in `crates/fleet-server`, or an `include!`d shared fragment.** Duplicates
   the tag grammar and the failure modes where they can drift. **A crate holding only build
   support:** a further crate for one function, where a shared crate already sits between the two
-  ends ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)). **The resolution in the `opamp`
+  ends ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)). **The resolution in the `opamp`
   crate:** a crate fetched from a registry is never inside a git checkout, so it would not build
   for anyone else (ADR-0008).
 - **Keep comparing the full string and document `%2B`.** Treats an unusable interface as a
@@ -191,13 +191,13 @@ flow is wanted.
 - **Leave `service_version` holding the full string and add a base field beside it.** Leaves a
   field called `service_version` holding something nobody would call a version.
 - **Name the variables for this project (`OPAMP_FLEET_VERSION`, `OPAMP_BUILD_VERSION`).** A variant
-  build (the `PRODUCT_NAME` clause of [ADR-0020](0020-the-installed-service-and-its-state.md)) would
+  build (the `PRODUCT_NAME` clause of [ADR-0021](0021-the-installed-service-and-its-state.md)) would
   set a variable that names a product it is not, and a *build* version beside a *fleet* version does
   not say which is the input and which the result. `OPAMP_PRODUCT_VERSION` and
   `OPAMP_PRODUCT_RELEASE` read as one pair.
 - **No prefix (`PRODUCT_VERSION`).** Common in other toolchains, so an ambient value would set the
   version. `OPAMP_` is the prefix the build uses for `OPAMP_BASELINE`
-  ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)) and names the protocol, not the product, so
+  ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)) and names the protocol, not the product, so
   it holds in every variant.
 
 ## Sources / Prior art

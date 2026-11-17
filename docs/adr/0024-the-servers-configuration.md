@@ -9,7 +9,7 @@
 
 Both binaries read a TOML file: the Server `server.toml`, the Client `supervisor.toml`, each
 parsed with the `toml` crate into `serde` structs that refuse unknown keys
-([ADR-0008](0008-five-crates-on-tokio-and-axum.md)). A file is what an installer lays down and an
+([ADR-0008](0008-six-crates-on-tokio-and-axum.md)). A file is what an installer lays down and an
 operator diffs, and TOML carries comments and the Client's per-Supervisor structure.
 
 The Server runs in a container. A container is configured by its orchestrator, and the
@@ -133,7 +133,7 @@ since only secrets need one and every secret is already a file.
   that `toml` already does. Rejected.
 - **The `config` crate.** Layered sources and environment overrides, but a larger surface —
   several formats, its own value type, a builder — and it loses `serde`'s field names in some error
-  messages, which the loud validation of [ADR-0008](0008-five-crates-on-tokio-and-axum.md) relies
+  messages, which the loud validation of [ADR-0008](0008-six-crates-on-tokio-and-axum.md) relies
   on. Rejected.
 - **A fixed list of documented variables.** Each needs code and documentation, and a key added
   later is out of reach of a container until someone adds its variable. Rejected.
@@ -143,7 +143,7 @@ since only secrets need one and every secret is already a file.
   for this reason. Rejected.
 - **Ignore unknown `FLEET_SERVER__…` variables.** It tolerates a typo, which then leaves a setting
   silently at its default — the failure that the strict parse of
-  [ADR-0008](0008-five-crates-on-tokio-and-axum.md) exists to prevent. Rejected.
+  [ADR-0008](0008-six-crates-on-tokio-and-axum.md) exists to prevent. Rejected.
 - **A single underscore as separator.** Keys like `data_dir` and `cert_file` contain underscores
   themselves, so `FLEET_SERVER_REST_TLS_CERT_FILE` has no unique reading. Rejected.
 - **Generate the file from the environment in the image's entrypoint.** It needs a shell or a

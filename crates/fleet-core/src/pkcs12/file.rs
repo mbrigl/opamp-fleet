@@ -50,7 +50,7 @@ pub fn seal(
 }
 
 /// What a file holds: the certificate and its key, DER, the key PKCS#8 and wiped when it is dropped
-/// (ADR-0040). Its `Debug` names neither.
+/// (ADR-0015). Its `Debug` names neither.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Identity {
     pub certificate_der: Vec<u8>,
@@ -106,7 +106,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<Identity, OpenError> {
             archive.keys.len()
         )));
     };
-    // `p12-keystore` keeps its own copy, which it does not wipe (ADR-0040 clause 4).
+    // `p12-keystore` keeps its own copy, which it does not wipe (ADR-0015 clause 4).
     let private_key_der = Zeroizing::new(key.key.as_der().to_vec());
     let public = rcgen::KeyPair::try_from(private_key_der.as_slice())
         .map_err(|e| invalid(format!("its private key cannot be read: {e}")))?;
@@ -275,7 +275,7 @@ mod tests {
 
     /// The key a file opens to is held in a buffer wiped when it is dropped: were it a plain
     /// buffer again, this would not compile.
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0015
     #[test]
     fn the_key_a_file_opens_to_is_held_in_a_zeroizing_buffer() {
         fn key_of(identity: Identity) -> Zeroizing<Vec<u8>> {

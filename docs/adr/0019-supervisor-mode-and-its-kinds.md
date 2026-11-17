@@ -1,4 +1,4 @@
-# ADR-0018: Supervisor Mode and its kinds, and a repeated offer of a configuration is applied once
+# ADR-0019: Supervisor Mode and its kinds, and a repeated offer of a configuration is applied once
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-14
@@ -19,7 +19,7 @@ a Plugin translates into OpAMP (G-7).
 The specification asks for a hexagonal core: the supervision domain written against two Ports, the
 Server-facing side speaking OpAMP and the Managed-Process side (lifecycle, configuration, health),
 with Plugins as adapters, so that a new process type is a new Plugin (G-8).
-[ADR-0008](0008-five-crates-on-tokio-and-axum.md) keeps such seams as modules until a need makes
+[ADR-0008](0008-six-crates-on-tokio-and-axum.md) keeps such seams as modules until a need makes
 them crates and requires a typo in the hand-edited TOML to fail loudly at startup. serde cannot
 combine `#[serde(flatten)]` with `deny_unknown_fields` (serde-rs/serde#1547), so a block whose
 kind-specific keys sit beside the common ones cannot be one strict struct.
@@ -30,7 +30,7 @@ The reference `opampsupervisor` runs a local OpAMP server on
 timeout, and watchdog-restarts it with exponential backoff. It configures its agent generically,
 an absolute `agent.executable` plus `args`, because it supervises a binary somebody else
 installed. This Client is in the opposite position: it installs every program it supervises into a
-directory it owns ([ADR-0021](0021-the-accounts-the-service-runs-under.md) lays the directory
+directory it owns ([ADR-0022](0022-the-accounts-the-service-runs-under.md) lays the directory
 out), from an artifact this project packs (clause 23). It is the one end that can know an agent's
 layout, and `opamp-fleetctl package fetch` already carries per-agent knowledge (service name,
 release source, default Configuration names). Writing that knowledge into every host's TOML by
@@ -68,7 +68,7 @@ path written there drifts silently when the Supervisor's directory moves or the 
 renamed: the process starts happily on a file nobody writes to.
 
 What the fleet needs to manage on a Client is which Supervisors it runs. Everything else in
-`supervisor.toml` ([ADR-0020](0020-the-installed-service-and-its-state.md)), the Server endpoint,
+`supervisor.toml` ([ADR-0021](0021-the-installed-service-and-its-state.md)), the Server endpoint,
 the credential, the state directory and the instance name, is host-local trust and wiring; a
 Server that could rewrite it could cut a Client off with one bad push. The specification allows an
 Agent's effective configuration to merge in local configuration, and bounds a remote
@@ -82,7 +82,7 @@ package, prevents that. It is not enough on its own: a block's `env` and `args` 
 program unchecked, with placeholders expanded in both (clause 25). A Server that delivers a shared
 object as a configuration entry and then a block with `LD_PRELOAD` pointing at it has the loader
 run that object as the account the Managed Process runs under
-([ADR-0021](0021-the-accounts-the-service-runs-under.md)), and any signed program that loads a
+([ADR-0022](0022-the-accounts-the-service-runs-under.md)), and any signed program that loads a
 plugin or a script named in its arguments reaches as far. A kind setting that names a file the
 Supervisor reads reaches as far as the host's files: a kind that reads such a file and sends its
 content to a peer the block names sends whatever file a delivered block points it at, to whatever
@@ -126,7 +126,7 @@ declares the constant `AGENT_CAPABILITIES`: `ReportsStatus`, `AcceptsRemoteConfi
 `crates/fleet-agent/src/supervisor/mod.rs` adds `ReportsHeartbeat` when heartbeats are enabled,
 and `AcceptsPackages` with `ReportsPackageStatuses` when `[self_update]` consents and a
 verification key is configured
-([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). Its effective configuration
+([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)). Its effective configuration
 is the redacted text of `supervisor.toml`. Only `AcceptsRemoteConfig` and `ReportsRemoteConfig`
 concern the set. `AgentState` can be restored without both bits, and then ignores an offer that
 arrives anyway and logs it once per hash in a bounded set (`ignored_configs`).
@@ -198,7 +198,7 @@ staged package, whose root is known only once it is staged, so a preflight that 
 program a path into its own tree needs a name for that root.
 
 **The `supervisor.` namespace is the Supervisor's own statement.** `[attributes]` refuses every
-`supervisor.*` key ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clause 10), so the
+`supervisor.*` key ([ADR-0018](0018-what-an-agent-reports-about-itself.md) clause 10), so the
 kinds a Client Agent reports are the kinds it was compiled with (clause 18).
 
 ## Decision
@@ -237,22 +237,22 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
    Client Agent reports (clause 18). A build that leaves a kind out is published under a package
    name of its own (clause 24); a self-update into a build that lacks a kind a block on the host
    names fails its start and is rolled back like any failed attempt
-   ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)).
+   ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)).
 
 3. **A block is parsed in two stages.** The core takes the common keys, `type`, `name`,
-   `service_name` ([ADR-0017](0017-what-an-agent-reports-about-itself.md)), `endpoint_port`,
+   `service_name` ([ADR-0018](0018-what-an-agent-reports-about-itself.md)), `endpoint_port`,
    `program_path` ([ADR-0033](0033-packages-signatures-and-delivery.md)), `stop_timeout_secs`,
    `apply_grace_secs` and `retain_previous_secs`, and the program key the kind names (`binary`
    for `collector`, `command` for `command`), which clause 21 resolves. Everything else is the
    kind's, parsed with `deny_unknown_fields`. `name` follows the instance-name grammar of
-   [ADR-0020](0020-the-installed-service-and-its-state.md), because it is a directory name, and is
+   [ADR-0021](0021-the-installed-service-and-its-state.md), because it is a directory name, and is
    unique across blocks.
 
 4. **Each Supervisor is one Agent; the pool is one connection.** Every Supervisor has its own
    persisted `instance_uid`, `sequence_num` and capability set, and all of them ride the Client's
    single upstream connection, disambiguated by `instance_uid` alone: the n-over-m model of
    [ADR-0016](0016-client-modes-and-the-gateway.md) with m fixed at one. The Client Agent
-   ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)) is always present beside
+   ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)) is always present beside
    them, with or without any `[[supervisor]]` block. The Server needs no Supervisor-specific code.
 
 5. **The Supervisor Endpoint is WebSocket-only on loopback.** It is bound for every Supervisor at
@@ -268,7 +268,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
    SIGTERM, a wait of up to the stop timeout, then a kill on Unix, signalling the process group
    where the kind leads one (clause 53), and `Child::kill` on Windows. On Client shutdown the
    Managed Processes stop first, then each Agent's `agent_disconnect` goes out, within the service
-   managers' stop budgets ([ADR-0020](0020-the-installed-service-and-its-state.md)). The Collector
+   managers' stop budgets ([ADR-0021](0021-the-installed-service-and-its-state.md)). The Collector
    Supervisor passes each written configuration entry as its own `--config` (never a supplementary
    entry, [ADR-0031](0031-configurations-and-the-rest-api.md)), appends its extra `args`, does not
    start before a configuration exists, and manipulates no YAML.
@@ -328,7 +328,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     `[attributes]` describe the host. A configuration a freshly self-updated version refuses is
     that update's failed attempt: a run resolves the update in flight even when the file does not
     load, so the host returns to the version that could read it
-    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)).
+    ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)).
 
 14. **A kind states what it knows, and the spawn applies it.** `Plugin::defaults()` returns
     `KindDefaults`, compile-time constants resolved per platform: the program's file name, its
@@ -382,7 +382,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     Supervisor set at Clients that can run it. One key per kind, because a Selector is equality
     over string values and the question is about one member of the set. An operator cannot state
     one: `[attributes]` refuses every `supervisor.*` key at startup
-    ([ADR-0017](0017-what-an-agent-reports-about-itself.md)
+    ([ADR-0018](0018-what-an-agent-reports-about-itself.md)
     clause 10). `AvailableComponents` is
     not used for this: the message is *Development* in the pinned Baseline
     ([ADR-0011](0011-the-protocol-is-pinned-and-checked-against-opamp-go.md)) and Selectors do not
@@ -430,7 +430,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     fleet-delivered route for every agent it describes.
 
 24. **The Client's own consent stays explicit.** `[self_update]` names the package it takes
-    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)); nothing about it is
+    ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)); nothing about it is
     derived from a path. A package written over the Client takes the host out of reach, which is
     where implicit consent would be wrong.
 
@@ -506,7 +506,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     the file written, so the set the Server asked for is running; a purge error (a file held open
     on Windows, permissions) is a warning naming the path. The purge renamed the directory to a
     tombstone before deleting it, and the next start and the next purge remove the tombstone
-    again ([ADR-0021](0021-the-accounts-the-service-runs-under.md), clause 25).
+    again ([ADR-0022](0022-the-accounts-the-service-runs-under.md), clause 25).
 
 35. **A delivered block brings no environment and no arguments the operator did not allow.** In
     the apply path, a delivered block's `env` entries, `args` and `version_args` must equal those
@@ -544,7 +544,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 38. **The key `server_manages_set`.** `[supervisors] server_manages_set` is a boolean and defaults
     to `true`, the behaviour clauses 26 to 37 describe, with the purge of a removed Supervisor
     ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md)) and the orphaned directories
-    of [ADR-0021](0021-the-accounts-the-service-runs-under.md). It is read when the configuration
+    of [ADR-0022](0022-the-accounts-the-service-runs-under.md). It is read when the configuration
     is loaded, like every key of the file, and is never taken from the Server, since the
     Supervisor-set apply replaces only the `[[supervisor]]` array (clauses 26 and 30). A change
     takes effect at the next start of the Client.
@@ -602,13 +602,13 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     A command a configuration can run (a check or exec entry an agent's configuration names, the
     configuration a `command` kind's program reads) runs as the account its Managed Process runs
     under. Where a process account is registered, that is the process account, which cannot write
-    `supervisor.toml` ([ADR-0021](0021-the-accounts-the-service-runs-under.md)). Where none is,
+    `supervisor.toml` ([ADR-0022](0022-the-accounts-the-service-runs-under.md)). Where none is,
     it is the Client's account, and what the key holds against the Server holds only while every
     Supervisor whose configuration language can run commands is named in
     `remote_config_disabled`. Otherwise the Server can configure such a Supervisor to rewrite
     `supervisor.toml`, and the key flips at the next start. A signed Client build can also still
     replace the Client's own program where `[self_update]` consents
-    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)), and that program reads
+    ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)), and that program reads
     the key.
 
 44. **Switching `server_manages_set` back on hands the set to the Server again.** When the key
@@ -725,7 +725,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     to `SIGKILL` cannot leave the worker behind. Leading a group is opt-in per kind; kinds with one
     process keep signalling the pid. On Windows a program the second service starts runs in a job
     of its own, and a stop ends the job with everything in it
-    ([ADR-0021](0021-the-accounts-the-service-runs-under.md), clauses 19 and 20). A program the
+    ([ADR-0022](0022-the-accounts-the-service-runs-under.md), clauses 19 and 20). A program the
     Client starts itself on Windows has no group, and its stop ends the pid alone.
 
 54. **A package is proved to run before it is installed.** For every kind, after an artifact is
@@ -864,7 +864,7 @@ program the Client starts itself on Windows.
   for a capability the fleet path does not need. Warning and applying anyway is not a control.
 - **A separate `bin_dir`, or a `supervisor_dir` per block.** Two knobs for a separation nobody has
   asked for; one root per Client, laid out by
-  [ADR-0021](0021-the-accounts-the-service-runs-under.md), matches how the Client's own root is
+  [ADR-0022](0022-the-accounts-the-service-runs-under.md), matches how the Client's own root is
   treated.
 - **Keeping a bare name as a `$PATH` lookup and requiring `./` for the owned meaning.** A fourth
   case, noise in TOML, to keep behaviour fragile under a service manager's minimal `PATH`.
@@ -895,7 +895,7 @@ program the Client starts itself on Windows.
   whole.
 - **Reaping orphaned directories at startup.** Startup cannot tell a leftover from a deliberate
   hand edit, and the destructive reading deletes an identity that was not meant to go; the
-  orphaned directories are reported as [ADR-0021](0021-the-accounts-the-service-runs-under.md)
+  orphaned directories are reported as [ADR-0022](0022-the-accounts-the-service-runs-under.md)
   decides.
 - **Default `false` for `server_manages_set`.** Every existing Client would stop following the
   Server's set at upgrade, including hosts that took one, and G-1's loop would no longer close for
@@ -975,11 +975,11 @@ program the Client starts itself on Windows.
 - **Leave a directory the purge cannot delete as an orphan.** The orphan stays beneath the
   Supervisors' root with nothing to remove it. The purge renames the directory to a tombstone first,
   which the next start and the next purge remove again
-  ([ADR-0021](0021-the-accounts-the-service-runs-under.md), clause 25; clause 34).
+  ([ADR-0022](0022-the-accounts-the-service-runs-under.md), clause 25; clause 34).
 - **Run every command a configuration can run as the Client's account.** Where a process account is
   registered, that puts a command a Server can deliver above the Managed Process it belongs to. It
   runs as its Managed Process's account instead
-  ([ADR-0021](0021-the-accounts-the-service-runs-under.md); clause 43).
+  ([ADR-0022](0022-the-accounts-the-service-runs-under.md); clause 43).
 
 ## Sources / Prior art
 
@@ -1227,7 +1227,7 @@ program the Client starts itself on Windows.
 - Directory and program, in `crates/fleet-agent/src/config.rs`:
   `the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable` and
   `a_relative_state_dir_yields_absolute_directories` (the root of
-  [ADR-0021](0021-the-accounts-the-service-runs-under.md) clause 24),
+  [ADR-0022](0022-the-accounts-the-service-runs-under.md) clause 24),
   `a_bare_name_resolves_and_everything_else_is_refused`,
   `an_absolute_program_path_is_refused_and_names_the_way_across`,
   `the_retired_package_keys_are_refused`, `a_program_path_must_stay_inside_the_package`.
@@ -1236,7 +1236,7 @@ program the Client starts itself on Windows.
   `installs_packages_reflects_declared_package_acceptance`,
   `a_tree_supervisor_prepares_its_root_and_leaves_the_tree_to_the_package`,
   `a_program_path_that_is_neither_fails_the_build`, `a_block_without_a_program_fails_the_build`,
-  `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (ADR-0021 clause 25).
+  `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (ADR-0022 clause 25).
 - Placeholders: `the_placeholders_name_this_supervisors_own_directories` and
   `an_unknown_placeholder_is_passed_through_untouched`
   (`crates/fleet-agent/src/supervisor/ports.rs`),

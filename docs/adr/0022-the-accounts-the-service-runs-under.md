@@ -1,18 +1,18 @@
-# ADR-0021: The accounts the service runs under
+# ADR-0022: The accounts the service runs under
 
-- **Status:** ⚪ superseded by [ADR-0042](0042-the-accounts-the-service-runs-under.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
-- **Applies to:** the account a `service install` chooses, accepts, sets and hands the roots to, `--run-as`, `--process-account` and `--no-process-account`, and the second service in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/runtime.rs`, `crates/fleet-agent/src/service/windows.rs`, `crates/fleet-agent/src/service/layout.rs`, `crates/fleet-agent/src/service/windows_config.rs`, `crates/fleet-agent/src/service/windows_rights.rs` and `crates/fleet-agent/src/service/withdrawal.rs`, the systemd units, launchd plists and SCM entries the install registers, `service start`, `service stop` and `service uninstall` on Windows, the install lock, the pipe, the job objects, the security of the second service's process and threads and the handle-based walks in `crates/fleet-agent/src/win32.rs` and `crates/fleet-agent/src/win32/`, the no-follow adapter `crates/fleet-agent/src/nofollow.rs` and the state the Client keeps through it in `crates/fleet-agent/src/storage.rs`, `crates/fleet-agent/src/csr.rs`, `crates/fleet-agent/src/connection.rs` and `crates/fleet-agent/src/tls.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel in `crates/fleet-agent/src/supervisor/channel.rs` and `crates/fleet-agent/src/supervisor/channel/windows.rs`, `supervisor_dir` and the Supervisors' directories with their modes, owners and ACLs, the modes a package archive gives a program, `packaging/linux/postinst` and `packaging/linux/postrm`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `packaging/windows/supervisor.wxs`, the Windows service smoke in `crates/fleet-agent/tests/service_smoke.rs`, the enrolment `service install` and `service config` run in `crates/fleet-agent/src/service/enrol.rs` and what the questionnaire and `--endpoint` hand it in `crates/fleet-agent/src/config_init.rs`, and every document that tells an operator which account the Client or a Managed Process runs as or what the separation by a process account holds against a Managed Process on Windows
+- **Applies to:** the account a `service install` chooses, accepts, sets and hands the roots to, `--run-as`, `--process-account` and `--no-process-account`, and the second service in `crates/fleet-agent/src/main.rs`, `crates/fleet-agent/src/service/run_as.rs`, `crates/fleet-agent/src/service/manager.rs`, `crates/fleet-agent/src/service/runtime.rs`, `crates/fleet-agent/src/service/windows.rs`, `crates/fleet-agent/src/service/layout.rs`, `crates/fleet-agent/src/service/windows_config.rs`, `crates/fleet-agent/src/service/windows_rights.rs` and `crates/fleet-agent/src/service/withdrawal.rs`, the systemd units, launchd plists and SCM entries the install registers, `service start`, `service stop` and `service uninstall` on Windows, the install lock, the pipe, the job objects, the security of the second service's process and threads and the handle-based walks in `crates/fleet-agent/src/win32.rs` and `crates/fleet-agent/src/win32/`, the no-follow adapter `crates/fleet-util/src/nofollow.rs` and the state the Client keeps through it in `crates/fleet-agent/src/storage.rs`, `crates/fleet-agent/src/csr.rs`, `crates/fleet-agent/src/connection.rs` and `crates/fleet-agent/src/tls.rs`, every place a Supervisor starts a program in `crates/fleet-agent/src/supervisor/process.rs`, the channel in `crates/fleet-agent/src/supervisor/channel.rs` and `crates/fleet-agent/src/supervisor/channel/windows.rs`, `supervisor_dir` and the Supervisors' directories with their modes, owners and ACLs, the modes a package archive gives a program, `packaging/linux/postinst` and `packaging/linux/postrm`, the `[package.metadata.deb]` and `[package.metadata.generate-rpm]` tables of `crates/fleet-agent/Cargo.toml`, `packaging/windows/supervisor.wxs`, the Windows service smoke in `crates/fleet-agent/tests/service_smoke.rs`, the enrolment `service install` and `service config` run in `crates/fleet-agent/src/service/enrol.rs` and what the questionnaire and `--endpoint` hand it in `crates/fleet-agent/src/config_init.rs`, and every document that tells an operator which account the Client or a Managed Process runs as or what the separation by a process account holds against a Managed Process on Windows
 
 ## Context
 
 The Client runs as a system service. Every program its Supervisors start runs under the account
 that starts it, and so does every command their configuration language can name: an exec input,
-a check command, a deploy task ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)). The Server sends
+a check command, a deploy task ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)). The Server sends
 those configurations. The account that starts a program is therefore the most a compromised or
 misconfigured Server reaches on a host. A Managed Process is code the Supervisor does not vouch for
-([ADR-0017](0017-what-an-agent-reports-about-itself.md)). Under the Client's own account it can read
+([ADR-0018](0018-what-an-agent-reports-about-itself.md)). Under the Client's own account it can read
 everything the Client can: the whole `state_dir` with the Client's private key `client-key.pem`, the
 `config/` of every other Supervisor, and the Client's environment through `/proc`. It can rewrite
 its own `program/` and so outlast the next package, and with the Client's key it can present itself
@@ -120,7 +120,7 @@ Four runs enrol, and they differ in what the administrator said:
   ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
   clause 17).
 - **`service install --endpoint` over an existing file:** the file is kept as it is
-  ([ADR-0020](0020-the-installed-service-and-its-state.md)), so the service runs with its
+  ([ADR-0021](0021-the-installed-service-and-its-state.md)), so the service runs with its
   endpoint, not the one named. The MSI's custom action runs this way on an upgrade that is given
   an endpoint; the Linux packages' `postinst` only prints the command for the administrator.
 - **`service install` without either, over an existing file:** nothing is answered; an upgrade
@@ -271,7 +271,7 @@ run answered.
     nothing"; rpm has none. **No hook removes the account or its group, on removal or on purge.**
     Files the account owns outside the two roots, such as a Managed Process's output, would pass
     to whichever account is later given the same uid. `service uninstall` itself deletes nothing
-    ([ADR-0020](0020-the-installed-service-and-its-state.md), the lifecycle over
+    ([ADR-0021](0021-the-installed-service-and-its-state.md), the lifecycle over
     `service-manager`); this cleanup is the package's. Re-staging **skips the write when the
     staged binary already holds the running bytes**, because `service install` invoked through the
     symlink runs from the very file it would overwrite, and Linux refuses that (`ETXTBSY`).
@@ -300,7 +300,7 @@ run answered.
    - **Restaging.** Staging a version already present replaces its contents and rewrites its
      manifest. It skips the write when the staged binary already holds the same bytes, because an
      install arriving through the `PATH` symlink runs from that file.
-   - **The state directory** is the one [ADR-0020](0020-the-installed-service-and-its-state.md)
+   - **The state directory** is the one [ADR-0021](0021-the-installed-service-and-its-state.md)
      decides in its order of the state directory.
    - **Absolute paths.** Every path is absolute at install time, and the registered command line
      is `run --service --config <abs> --state-dir <abs>`, followed, where a process account is
@@ -313,13 +313,13 @@ run answered.
    `service-manager` still writes the file (mode `0644`), enables it, which reloads the manager's
    configuration, and uninstalls it. The unit holds:
    - `[Unit]`: `Description=<PRODUCT_NAME>`. The display name stays where
-     [ADR-0020](0020-the-installed-service-and-its-state.md) puts prose. Where a process account
+     [ADR-0021](0021-the-installed-service-and-its-state.md) puts prose. Where a process account
      is registered, also `Wants=<PRODUCT_NAME>-agents.service` and
      `After=<PRODUCT_NAME>-agents.service` (clause 17).
    - `[Service]`: `ExecStart=` with the program and every argument in double quotes. A `\` and a
      `"` are escaped, a `%` is written `%%` and a `$` is written `$$`, so any absolute path reaches
      the program as it was given. Then `Restart=on-failure`, `RestartSec=` set to the restart
-     delay the SCM's recovery actions use ([ADR-0020](0020-the-installed-service-and-its-state.md)),
+     delay the SCM's recovery actions use ([ADR-0021](0021-the-installed-service-and-its-state.md)),
      `User=` set to the account of clause 1, and the directives of clause 8.
    - `[Install]`: `WantedBy=multi-user.target`.
 
@@ -346,7 +346,7 @@ run answered.
    `NT SERVICE\<PRODUCT_NAME>-agents` or the account clause 16 names, set without a password. Its
    command line is `run --agents \\.\pipe\<PRODUCT_NAME>-agents --client-sid <SID>`, the Client
    account's SID, and it starts automatically. As the Client's own entry, it carries the recovery
-   actions of [ADR-0020](0020-the-installed-service-and-its-state.md): one restart after the
+   actions of [ADR-0021](0021-the-installed-service-and-its-state.md): one restart after the
    restart delay, repeated for every failure, and run on a reported failure too. It carries its
    display name and a Description. Its required privileges are `SeChangeNotifyPrivilege` alone
    (SERVICE_REQUIRED_PRIVILEGES_INFO): the SCM removes every other privilege from its token, and
@@ -380,7 +380,7 @@ run answered.
      sensor inputs read `/dev`. `ProtectKernelLogs=`, because of `dmesg` readers. `ProtectClock=`,
      because it implies a device allow-list. `ProtectHostname=`, because a UTS namespace would
      freeze the host name the Client reports
-     ([ADR-0017](0017-what-an-agent-reports-about-itself.md)). `ProtectProc=`, because process
+     ([ADR-0018](0018-what-an-agent-reports-about-itself.md)). `ProtectProc=`, because process
      inputs read other users' `/proc` entries. `RestrictAddressFamilies=` and `SystemCallFilter=`,
      because Managed Processes use netlink, raw and packet sockets and arbitrary system calls.
 
@@ -468,11 +468,11 @@ run answered.
     |---|---|---|
     | `INSTALLFOLDER` | `InstallDirDlg`, via `WIXUI_INSTALLDIR` | where the payload goes; default `C:\Program Files\<PRODUCT_NAME>` |
     | `ENDPOINT` | `EndpointDlg`, an `Edit` control | `service install --endpoint`; empty means none |
-    | `SELFUPDATE` | `EndpointDlg`, a checkbox, default `1` | the self-update consent of [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md) |
+    | `SELFUPDATE` | `EndpointDlg`, a checkbox, default `1` | the self-update consent of [ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md) |
 
     `INSTALLFOLDER` is **one directory the operator configures**, holding only the delivered
     payload. The layout and the state directory go to `%ProgramData%\<PRODUCT_NAME>` and no root
-    reaches the command line ([ADR-0020](0020-the-installed-service-and-its-state.md), where
+    reaches the command line ([ADR-0021](0021-the-installed-service-and-its-state.md), where
     program and data split), so an uninstall empties the folder and the configuration survives
     where Windows expects data to. All names are upper-case and listed `Secure`: Windows Installer
     resets private properties between the UI and execute sequences, and `Secure` lets the same
@@ -530,7 +530,7 @@ run answered.
     directly in a root, the default `<data root>/state`, that path is the root's own, which
     clause 13 settles. For one deeper beneath a root, the components between the root and its
     parent are those the check of what lies beneath a root
-    ([ADR-0020](0020-the-installed-service-and-its-state.md)) inspects before the install writes
+    ([ADR-0021](0021-the-installed-service-and-its-state.md)) inspects before the install writes
     anything.
 
 13. **On Windows, a data root or layout root that is a reparse point is refused, and the data root
@@ -539,7 +539,7 @@ run answered.
     `FILE_SHARE_DELETE` from their first write to their last. On Linux and macOS a root's name
     lies in a directory only root writes, and it is followed. This refusal is a check of its own
     beside the check of what lies beneath a root
-    ([ADR-0020](0020-the-installed-service-and-its-state.md)), which does not inspect the roots.
+    ([ADR-0021](0021-the-installed-service-and-its-state.md)), which does not inspect the roots.
 
 14. **A file with a second hard link is skipped and named.** Another name for it may stand
     anywhere, and re-owning it would re-own that file too. The hand-over and `service config` each
@@ -614,7 +614,7 @@ run answered.
       goes back to a program that ran. A delivered Configuration is written as usual, and its
       acknowledgement is given by the first start of an apply or of the retry that reaches the
       second service and survives the apply grace; a restart command's start acknowledges nothing
-      and swaps nothing in ([ADR-0018](0018-supervisor-mode-and-its-kinds.md), the closed
+      and swaps nothing in ([ADR-0019](0019-supervisor-mode-and-its-kinds.md), the closed
       lifecycle vocabulary), and the retry follows it at once. A Supervisor held after a package
       that failed leaves no Configuration waiting: it is reported `FAILED`. Until then the package
       stays `Installing` and the Configuration `APPLYING`, each naming the second service as the
@@ -786,7 +786,7 @@ run answered.
 
     An install grants and withdraws the process account's rights in the data root, the layout
     root and the state directory alone: a Supervisors' root outside them is the operator's
-    ([ADR-0020](0020-the-installed-service-and-its-state.md)), left as it is and named in a
+    ([ADR-0021](0021-the-installed-service-and-its-state.md)), left as it is and named in a
     warning.
 
 22. **A program inherits nothing of the Client's.** Its environment is the second service's own,
@@ -822,7 +822,8 @@ run answered.
 
     One knob moves state and program together. Staging beside `program/` makes a raw artifact's
     install a rename on one filesystem. The directory is `program/`, not `bin/`, because it holds
-    a whole tree for a multi-file package ([ADR-0033](0033-packages-signatures-and-delivery.md)).
+    a whole tree for a multi-file package
+    ([ADR-0033](0033-packages-signatures-and-delivery.md)).
     Moving `supervisor_dir` on a running host leaves the old tree behind and migrates nothing; each
     Supervisor then registers as a new Agent.
 
@@ -830,7 +831,7 @@ run answered.
     keeps there itself (`instance-uid`, `config`, `packages`, `logs`, `gateway-packages`,
     `supervisors`), and `supervisor_dir` never is, or holds, `state_dir` otherwise: a block that
     would is refused at startup, and an offered set that carries one fails as a whole
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md), the validation of an offered set). This
+    ([ADR-0019](0019-supervisor-mode-and-its-kinds.md), the validation of an offered set). This
     holds on every host, with a process account or without one, because a purge of such a
     Supervisor would delete the Client's own entry and its share would expose it to the process
     account's group. The changelog names the rename this asks of a host that has such a
@@ -938,14 +939,14 @@ run answered.
 - macOS sandboxing, and an account of the macOS Client's own: its first registration stays root,
   since macOS has no virtual account and an account there would have to be created by a package.
 - Account creation by the binary; a `sysusers.d` entry; directives for user-scope units; a
-  confined SELinux policy module ([ADR-0020](0020-the-installed-service-and-its-state.md)).
+  confined SELinux policy module ([ADR-0021](0021-the-installed-service-and-its-state.md)).
 - Moving a host that runs as root or `LocalSystem` to the unprivileged account automatically; an
   operator does that with `--run-as`. The MSI's command lines, which name no account and so take
   the default of clause 1.
 - The trust boundary an administrator crosses when running the account-owned binary through the
   `PATH` symlink (see *Consequences*).
 - Which directory is the state directory, and whether `supervisor.toml` may name it
-  ([ADR-0020](0020-the-installed-service-and-its-state.md)); the `[tls]` files and the CA an
+  ([ADR-0021](0021-the-installed-service-and-its-state.md)); the `[tls]` files and the CA an
   operator names, read where their paths point; `[logging] dir`, which only the service's own run
   uses.
 - An account per Supervisor; making a process account the default where none is named; job
@@ -1020,7 +1021,7 @@ run answered.
   not persist, so the self-update would end. `NoNewPrivileges=` and `RestrictSUIDSGID=` are
   implied and cannot be turned off, which breaks `sudo` and setuid plugins. The persistent
   identity of the installed service rules it out too
-  ([ADR-0020](0020-the-installed-service-and-its-state.md)). Rejected.
+  ([ADR-0021](0021-the-installed-service-and-its-state.md)). Rejected.
 - **Only sandbox, and keep root.** This confines a root service a little. Under root the
   directives that would matter (`ProtectSystem=`, `NoNewPrivileges=`, `CapabilityBoundingSet=`)
   are the ones that break the agents root was kept for. The account is what bounds a
@@ -1442,7 +1443,7 @@ run answered.
 
 ## Enforcement
 
-Tests that carry `Verifies: ADR-0021`:
+Tests that carry `Verifies: ADR-0022`:
 
 - `crates/fleet-agent/src/service/manager.rs` (clauses 7, 8, 17):
   - `the_system_unit_is_the_clients_own_text`: the rendered unit holds `Description=<PRODUCT_NAME>`,
@@ -1678,7 +1679,8 @@ Tests that carry `Verifies: ADR-0021`:
   `the_endpoint_dialog_names_the_identity_and_no_credential`.
 - `crates/fleet-agent/src/supervisor/mod.rs`:
   `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (clause 25). The archive tests of
-  [ADR-0033](0033-packages-signatures-and-delivery.md), `a_tree_keeps_the_modes_the_archive_carried`
+  [ADR-0033](0033-packages-signatures-and-delivery.md),
+  `a_tree_keeps_the_modes_the_archive_carried`
   among them, cover the modes of clause 23.
 - `crates/fleet-agent/src/config_init.rs` and `crates/fleet-agent/src/service/enrol.rs`
   (clause 28):

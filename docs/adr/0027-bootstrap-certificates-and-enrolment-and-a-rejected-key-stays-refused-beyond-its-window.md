@@ -132,7 +132,7 @@ find the bootstrap identity beside its program and enrol with it.
 
 6. **The server CA stays a file of its own.** `server-ca.pem` is the trust anchor written as
    `[tls] ca_file` and kept for every later connection and renewal, while the bootstrap identity
-   serves once and is removed ([ADR-0020](0020-the-installed-service-and-its-state.md)). It comes
+   serves once and is removed ([ADR-0021](0021-the-installed-service-and-its-state.md)). It comes
    from the operator's offline directory, not from the Server it is meant to verify, and the Server
    never puts it into a PKCS#12 file.
 
@@ -280,7 +280,7 @@ find the bootstrap identity beside its program and enrol with it.
     the program is staged, so it is where the operator ran the program from.
     `service install --fleet-files <dir>` names the directory the install looks in instead, for all
     of the fleet's files, with or without `--interactive`; wherever this ADR or
-    [ADR-0020](0020-the-installed-service-and-its-state.md) says "beside the program", that
+    [ADR-0021](0021-the-installed-service-and-its-state.md) says "beside the program", that
     directory is meant when the flag is given. A `<dir>` that is not a readable directory fails the
     install before anything is written, naming the flag. The install never looks in both. A file
     counts only when it is a readable regular file under its exact name. **A bootstrap identity**
@@ -335,10 +335,10 @@ find the bootstrap identity beside its program and enrol with it.
     **The answered CA is copied beside the written file**, as `server-ca.pem`, owner-only on Unix,
     and the file names the copy. A copy left by an earlier answer is replaced. The copy is handed
     over to the service account with the file, as the install hands over the configuration
-    ([ADR-0021](0021-the-accounts-the-service-runs-under.md)). The questionnaire asks nothing about
+    ([ADR-0022](0022-the-accounts-the-service-runs-under.md)). The questionnaire asks nothing about
     the self-update: the file carries `[packages] self_update = true`, and the verification key
     decides whether that takes effect
-    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). Everything else
+    ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)). Everything else
     is written as commented defaults. No question asks for a credential, and no written file
     has an `[auth]` section; a leftover `[auth]` section is kept and ignored. The
     bootstrap password is not a credential of either plane: it opens a file on the host and is
@@ -358,7 +358,7 @@ find the bootstrap identity beside its program and enrol with it.
     startup before anything is written — a `ws://` or `http://` endpoint whose host is not
     `127.0.0.1` or `::1` is refused, naming the setting, and `localhost` is no exception. It
     conflicts with `--interactive` and carries the self-update answer
-    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). For a `wss://` or
+    ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)). For a `wss://` or
     `https://` endpoint, a `server-ca.pem` beside the program — in the directory `--fleet-files`
     names, when given (clause 14) — is copied and written as `[tls] ca_file` as the questionnaire's
     answer would be, and a `package-signing-key.pub` beside it is written as
@@ -386,9 +386,9 @@ find the bootstrap identity beside its program and enrol with it.
 
 19. **A packaged host enrols in a step after the package.** The post-install of the `.deb` and the
     `.rpm` runs `service install` from the payload path as the Linux packages' install states
-    ([ADR-0021](0021-the-accounts-the-service-runs-under.md)): it finds no fleet files and enrols
+    ([ADR-0022](0022-the-accounts-the-service-runs-under.md)): it finds no fleet files and enrols
     nothing, so `apt` and `dnf` never wait for an approval. The host is enrolled by the step the
-    post-install prints ([ADR-0021](0021-the-accounts-the-service-runs-under.md)), interactively,
+    post-install prints ([ADR-0022](0022-the-accounts-the-service-runs-under.md)), interactively,
     or by a script that puts the fleet's files in a directory, names it with `--fleet-files`, and
     runs the non-interactive install of clause 18:
 
@@ -409,7 +409,7 @@ find the bootstrap identity beside its program and enrol with it.
   password; the operator issues a new certificate.
 - A strength rule for the password beyond its length, and a password the Server generates.
 - Removing `bootstrap.p12` or the password file from the host after enrolment, as
-  [ADR-0020](0020-the-installed-service-and-its-state.md) leaves it for the pair.
+  [ADR-0021](0021-the-installed-service-and-its-state.md) leaves it for the pair.
 - Reading a PKCS#12 file made by another tool beyond what clause 15 accepts.
 - A `bootstrap.p12` named in `supervisor.toml`, so that the service enrols with it when it starts.
 - Asking anything in a package's post-install, or preseeding answers through debconf or RPM
@@ -555,8 +555,8 @@ find the bootstrap identity beside its program and enrol with it.
   (admission, the Operator plane,
   revocation), [ADR-0016](0016-client-modes-and-the-gateway.md) (approval through a proved bootstrap
   certificate, renewal, enrolment through a Gateway),
-  [ADR-0020](0020-the-installed-service-and-its-state.md) and
-  [ADR-0021](0021-the-accounts-the-service-runs-under.md) (the installed service and the Linux
+  [ADR-0021](0021-the-installed-service-and-its-state.md) and
+  [ADR-0022](0022-the-accounts-the-service-runs-under.md) (the installed service and the Linux
   packages),
   [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
   (the record of issued bootstrap certificates),

@@ -15,10 +15,10 @@
 //! picks its transport by URL scheme, so serving only one would silently exclude half of them),
 //! [`pool`] holds the upstream connections, [`registry`] routes replies back by `instance_uid`, and
 //! [`cache`] holds the uploaded artifacts the Gateway relays offers of and serves them on the
-//! download route to the hosts they were offered to (ADR-0039), [`floors`] hands those hosts the
+//! download route to the hosts they were offered to (ADR-0033), [`floors`] hands those hosts the
 //! floors it fetched (ADR-0034), and [`rate`] counts what each downstream host sends against a
-//! bucket of its own (ADR-0022).
-//! The endpoint's communication is `opamp::server`'s, the one the Server sits on too (ADR-0041);
+//! bucket of its own (ADR-0017).
+//! The endpoint's communication is `opamp::server`'s, the one the Server sits on too (ADR-0008);
 //! what is the Gateway's is the [`Forwarding`] handler behind it.
 
 pub mod cache;
@@ -79,7 +79,7 @@ struct Forwarding {
     /// The version of the revocation list the bindings were last held against (ADR-0016
     /// clause 17), so an unchanged list is not asked about every host again.
     list_checked: std::sync::atomic::AtomicU64,
-    /// The downstream hosts' buckets, which the download route counts in too (ADR-0022).
+    /// The downstream hosts' buckets, which the download route counts in too (ADR-0017).
     rate: Arc<rate::HostRate>,
 }
 
@@ -231,7 +231,7 @@ pub async fn run_on(
 }
 
 /// [`run_on`] with the header bound tightened — what a test waits out instead of the 30 seconds
-/// every OpAMP listener applies (ADR-0041).
+/// every OpAMP listener applies (ADR-0008).
 ///
 /// # Errors
 /// As [`run_on`].
@@ -438,7 +438,7 @@ fn server_tls(tls: &GatewayTlsConfig) -> Result<(ServerTls, Members), String> {
     Ok((
         ServerTls {
             // `opamp` takes the key as its own buffer; the copy is made here and the one read is
-            // wiped (ADR-0040 clause 3).
+            // wiped (ADR-0015 clause 3).
             identity: Identity {
                 cert_pem: crate::tls::certificates_file(&tls.cert_file)?,
                 key_pem: crate::tls::key_file(&tls.key_file)?.to_vec(),
@@ -486,7 +486,7 @@ struct Downstream {
     /// The certificate chains to the bootstrap CA alone (ADR-0016 clause 11): this peer may relay
     /// one enrolment request and nothing else, and binds nothing.
     enrolling: bool,
-    /// The bucket every message of this connection takes its token from (ADR-0022 clause 1): the
+    /// The bucket every message of this connection takes its token from (ADR-0017 clause 1): the
     /// host it speaks as, or an enrolling peer's address.
     bucket: rate::Key,
 }
@@ -665,7 +665,7 @@ impl Handler for Forwarding {
 
     async fn on_message(&self, downstream: &mut Downstream, report: AgentToServer) -> Reply {
         // Before anything else — before a CSR is read, an `instance_uid` bound, the package cache
-        // touched or anything forwarded — the host's token (ADR-0022 clause 2). Past the limit it
+        // touched or anything forwarded — the host's token (ADR-0017 clause 2). Past the limit it
         // is answered as the Server answers, and a WebSocket stays open (clause 4).
         if !self.rate.admit(&downstream.bucket) {
             return Reply::Send(rate::unavailable(&report.instance_uid));
@@ -690,7 +690,7 @@ impl Handler for Forwarding {
     /// An unreadable report is dropped, never answered: the Gateway invents nothing (ADR-0016). A
     /// plain-HTTP exchange still needs a response, and it says why. It takes the host's token as
     /// the Server counts one (ADR-0012 clause 24); past the limit it is answered as the Server
-    /// answers it, naming no Agent, and not logged one by one (ADR-0022 clause 4).
+    /// answers it, naming no Agent, and not logged one by one (ADR-0017 clause 4).
     fn on_unreadable(&self, downstream: &mut Downstream, error: &Unreadable) -> Reply {
         if !self.rate.admit(&downstream.bucket) {
             return Reply::Send(rate::unavailable(&[]));
@@ -1072,9 +1072,9 @@ mod tests {
 
     /// An upstream connection on which nothing arrives for one heartbeat interval is ended, and
     /// the Agent it carried is placed anew at its next report, on a connection of its own
-    /// (ADR-0015 clauses 1,
+    /// (ADR-0014 clauses 1,
     /// 4).
-    /// Verifies: ADR-0015
+    /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_upstream_connection_on_which_nothing_arrives_is_ended_and_its_agents_placed_anew() {
         use std::sync::atomic::Ordering;
@@ -1116,8 +1116,8 @@ mod tests {
 
     /// An upstream that accepts the TCP connection and never answers the upgrade fails the
     /// forward once one heartbeat interval has passed, rather than holding it
-    /// (ADR-0015 clause 3).
-    /// Verifies: ADR-0015
+    /// (ADR-0014 clause 3).
+    /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_upstream_that_never_answers_the_upgrade_fails_the_forward_within_the_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1158,8 +1158,8 @@ mod tests {
     /// An upstream reader held up by a downstream Agent that reads its replies slowly, for longer
     /// than an interval, keeps a connection to an upstream that answers: the Gateway's own delay
     /// is not the Server's silence
-    /// (ADR-0015 clause 1).
-    /// Verifies: ADR-0015
+    /// (ADR-0014 clause 1).
+    /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_upstream_reader_held_up_by_a_slow_downstream_keeps_a_live_connection() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1243,9 +1243,9 @@ mod tests {
 
     /// An upstream connection ended for its silence is closed towards the Server too: its writer,
     /// which may be blocked on a peer that reads nothing, is aborted rather than left holding the
-    /// socket (ADR-0015
+    /// socket (ADR-0014
     /// clause 4).
-    /// Verifies: ADR-0015
+    /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_ended_upstream_connection_is_closed_towards_the_server() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1297,8 +1297,8 @@ mod tests {
 
     /// An upstream that answers the pool's pings keeps its connection over several bounds,
     /// though it sends nothing else
-    /// (ADR-0015 clause 1).
-    /// Verifies: ADR-0015
+    /// (ADR-0014 clause 1).
+    /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_upstream_that_answers_pings_keeps_its_connection() {
         use std::sync::atomic::Ordering;
@@ -2560,7 +2560,7 @@ mod tests {
     /// `instance_uid`, over a WebSocket and over plain HTTP; its report is not forwarded and binds
     /// nothing, and the WebSocket stays open. Another host behind the same Gateway is forwarded
     /// meanwhile.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0017
     #[tokio::test]
     async fn a_host_past_its_burst_is_answered_unavailable_and_another_is_forwarded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2632,7 +2632,7 @@ mod tests {
 
     /// New `instance_uid`s, new connections and a renewed certificate of one host take from the
     /// one bucket of that host.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0017
     #[tokio::test]
     async fn every_connection_uid_and_renewed_certificate_of_a_host_takes_from_one_bucket() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2673,7 +2673,7 @@ mod tests {
     /// An enrolling peer is counted by its address, an IPv6 one by its /64, whatever its bootstrap
     /// certificate is; its request past the limit is answered `Unavailable` before its CSR is read,
     /// and is not forwarded.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0017
     #[tokio::test]
     async fn an_enrolling_peer_is_counted_by_its_address_before_its_request_is_read() {
         let dir = tempfile::tempdir().expect("tempdir");

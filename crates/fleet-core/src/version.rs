@@ -16,7 +16,7 @@
 //!
 //! This lives in `fleet-core` rather than in either end: the Client writes these strings and the
 //! Server displays them, so one implementation keeps the two from drifting. It is this project's
-//! grammar, not OpAMP's, which is why it is not in the `opamp` crate (ADR-0041).
+//! grammar, not OpAMP's, which is why it is not in the `opamp` crate (ADR-0008).
 //!
 //! [`current`] is the other half of that: the version *this build* reports. `build.rs` computes it
 //! and bakes it in, and every surface on either end reads it here rather than `CARGO_PKG_VERSION`,
@@ -25,7 +25,7 @@
 /// The version this build reports, e.g. `1.2.3+a1b2c3d` or `1.2.3-dev+b4e5f6a`.
 ///
 /// The one place either binary states its version (ADR-0037): the OpAMP `service.version`
-/// attribute, both CLIs' `--version` output, and the install layout of ADR-0042 all call this.
+/// attribute, both CLIs' `--version` output, and the install layout of ADR-0022 all call this.
 ///
 /// It is resolved at compile time by this crate's `build.rs` — the base from `Cargo.toml`
 /// (ADR-0037), the `-dev` marker and the commit short-hash from git — so a binary carries the
@@ -67,7 +67,7 @@ impl<'a> Version<'a> {
 ///
 /// The pre-release and build metadata are held to the SemVer character set — dot-separated,
 /// non-empty identifiers of `[0-9A-Za-z-]`. That is not pedantry: this string becomes a directory
-/// name in the self-update layout (ADR-0042), so a value carrying `/`, `\`, or a bare `..` is both
+/// name in the self-update layout (ADR-0022), so a value carrying `/`, `\`, or a bare `..` is both
 /// not a version *and* a path-traversal waiting to happen. Refusing it here is the single gate the
 /// rest of the project trusts.
 #[must_use]
@@ -377,7 +377,7 @@ mod tests {
         assert!(!same_release("latest", "latest"));
     }
 
-    /// The self-update turns this string into a directory name (ADR-0042), so a pre-release or
+    /// The self-update turns this string into a directory name (ADR-0022), so a pre-release or
     /// build metadata that smuggles a path separator or `..` is not a version. Parsing it away is
     /// the gate that stops a crafted Server offer from escaping `versions/`.
     #[test]

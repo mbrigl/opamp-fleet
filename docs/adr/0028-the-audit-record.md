@@ -428,7 +428,7 @@ token.
     the receiver can walk the chain itself. PostgreSQL may hold an entry to try again (clause 5).
     The Server exports such an entry once it is written. The Server encodes and sends the records
     with the OpenTelemetry crates of the Client's own telemetry
-    ([ADR-0017](0017-what-an-agent-reports-about-itself.md)). A queue of the export's own holds
+    ([ADR-0018](0018-what-an-agent-reports-about-itself.md)). A queue of the export's own holds
     2048 entries, a named constant. The export retries on its own and never blocks a decision. The
     Server counts each entry the export drops while its queue is full. It writes the count as the
     audit entry `audit.export_dropped` with `count`. It writes that entry about every 60 seconds

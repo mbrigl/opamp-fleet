@@ -26,7 +26,7 @@ Client's host then speaks to the Client as its Server. Any local account can ope
 can send Supervisor sets and configurations whose language runs commands, such as an entry that
 runs a program, or whatever the configuration a `command` kind's program reads makes it run, and
 these run with the rights of the account the Client's service runs under
-([ADR-0021](0021-the-accounts-the-service-runs-under.md)). A Server needs to send only one such
+([ADR-0022](0022-the-accounts-the-service-runs-under.md)). A Server needs to send only one such
 offer, whether it is compromised or misconfigured. The real Server cannot undo the move, because
 the Client never connects to it again, and the persisted endpoint outranks `supervisor.toml`.
 Plaintext on the loopback exists for development and tests, where an operator writes the endpoint
@@ -94,7 +94,7 @@ message would be an error.
    message, and includes it whenever an Agent's reported `last_connection_settings_hash` differs.
    The OpAMP half goes only to Agents declaring `AcceptsOpAMPConnectionSettings`; each telemetry
    destination only to an Agent declaring the matching signal
-   ([ADR-0017](0017-what-an-agent-reports-about-itself.md)). With only telemetry to offer, that is
+   ([ADR-0018](0018-what-an-agent-reports-about-itself.md)). With only telemetry to offer, that is
    the whole offer, with no `opamp` block. A certificate issued in answer to a CSR
    ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
    travels as the standing
@@ -133,10 +133,10 @@ message would be an error.
    connection.** Reachability of an OTLP receiver is not this Client's to establish at offer time;
    a receiver that is down is not an offer that is wrong. What is checked before it is put in
    force is what the Client can decide alone (the cleartext rule and the unhonoured fields of
-   [ADR-0017](0017-what-an-agent-reports-about-itself.md)), and a refusal is reported, not
+   [ADR-0018](0018-what-an-agent-reports-about-itself.md)), and a refusal is reported, not
    swallowed. A telemetry-only offer is applied in place; its acknowledgement rides the reports
    already owed, and the transport loop carries on. The headers of a telemetry destination are an
-   OTLP receiver's, not admission: they stay as ADR-0017 has them, still offered only on member
+   OTLP receiver's, not admission: they stay as ADR-0018 has them, still offered only on member
    connections
    ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)),
    and clause 8
@@ -169,7 +169,7 @@ message would be an error.
    the merged settings in force plus the hash that reports them `APPLIED`, written owner-only.
    OpAMP fields fold (an offer that omits a field leaves the one in force), and the file carries
    an `opamp` block only when an offer or the state it folds into had one. How the telemetry
-   destinations fold is [ADR-0017](0017-what-an-agent-reports-about-itself.md)'s. At startup the
+   destinations fold is [ADR-0018](0018-what-an-agent-reports-about-itself.md)'s. At startup the
    persisted settings override `supervisor.toml`'s `endpoint` and heartbeat and poll intervals, and
    the persisted hash restores the status to report. A persisted `ws://` or `http://` endpoint
    that differs from `supervisor.toml`'s is the exception: it is not applied, and
@@ -233,7 +233,7 @@ message would be an error.
 - The audit entries an offer leaves.
 - `AcceptsOtherConnectionSettings`.
 - What own telemetry is, which destinations an offer sets, and how they and their headers fold
-  ([ADR-0017](0017-what-an-agent-reports-about-itself.md)).
+  ([ADR-0018](0018-what-an-agent-reports-about-itself.md)).
 - `connection_settings_status` in the fleet view and the REST API.
 - An audit of the Server's own use of Agent capabilities under the same rule.
 

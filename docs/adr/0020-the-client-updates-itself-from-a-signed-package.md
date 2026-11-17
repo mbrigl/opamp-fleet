@@ -1,4 +1,4 @@
-# ADR-0019: The Client updates itself from a signed package
+# ADR-0020: The Client updates itself from a signed package
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-11
@@ -15,8 +15,8 @@ restart and roll back on failure (G-11).
 
 The machinery around a self-update is decided elsewhere: the versioned side-by-side layout with
 its `current` pointer, per-version `manifest.toml` and restart-on-failure registration
-([ADR-0020](0020-the-installed-service-and-its-state.md),
-[ADR-0021](0021-the-accounts-the-service-runs-under.md)), the verified download and the archive
+([ADR-0021](0021-the-installed-service-and-its-state.md),
+[ADR-0022](0022-the-accounts-the-service-runs-under.md)), the verified download and the archive
 handling of package delivery ([ADR-0033](0033-packages-signatures-and-delivery.md)), and the
 per-Agent offer ([ADR-0032](0032-deployments-and-rollouts.md)). Four problems are specific to
 replacing the program that does the replacing.
@@ -63,7 +63,7 @@ service manager perform the restart.
 1. **The Client always presents a Client Agent.** It exists *alongside* the Supervisor Agents, not
    only when there are none, with its own `instance_uid`, health and `service.version` (the baked
    version, [ADR-0037](0037-the-products-version.md)) and the Agent type `supervisor`
-   ([ADR-0020](0020-the-installed-service-and-its-state.md) clause 4). A Client that supervises
+   ([ADR-0021](0021-the-installed-service-and-its-state.md) clause 4). A Client that supervises
    something is visible in its own fleet, and nobody has to ask which Client version a host runs.
 
 2. **The consent is `[packages] self_update`, it stands by default, and the one package it admits
@@ -81,7 +81,7 @@ service manager perform the restart.
    constant the Client Agent reports as `service.name`. The name a Server offers this Client's
    package under is therefore the name the Client reports, and the same in every variant build,
    whatever its product name: one published Package serves them all
-   ([ADR-0020](0020-the-installed-service-and-its-state.md) clause 3).
+   ([ADR-0021](0021-the-installed-service-and-its-state.md) clause 3).
 
    An absent key is consent, and so is an absent `[packages]`. While the consent stands and
    `verification_key` is set, the Client Agent declares `AcceptsPackages` and
@@ -145,7 +145,7 @@ service manager perform the restart.
 7. **A marker is written before the pointer moves.** `update-marker.json` in the state directory,
    outside `versions/` so that it survives the switch, records the previous version directory, the
    new one, the offered version, the offered package hash, an attempt counter and the install's
-   trace ([ADR-0017](0017-what-an-agent-reports-about-itself.md)). Then `current` is repointed. A
+   trace ([ADR-0018](0018-what-an-agent-reports-about-itself.md)). Then `current` is repointed. A
    crash between the two leaves a marker naming a switch that did not happen, which the next start
    resolves.
 
@@ -164,7 +164,7 @@ service manager perform the restart.
    On Windows all three are required: the `sc.exe` backend of `service-manager` registers no
    recovery actions, the SCM ignores a clean non-zero stop unless the non-crash flag is set, and a
    status of `Win32(0)` is a clean stop whatever happened. The registration that sets them is
-   [ADR-0020](0020-the-installed-service-and-its-state.md)'s (clause 17). **Crashing on purpose is
+   [ADR-0021](0021-the-installed-service-and-its-state.md)'s (clause 17). **Crashing on purpose is
    never the mechanism**: it throws away the graceful shutdown and the `agent_disconnect`, and
    makes every self-update look like a fault.
 
@@ -223,7 +223,7 @@ Windows layout.
   legitimately carry this Client is its Agent type; any other names another program's package or
   none, so the freedom could only misconfigure the narrowing.
 - **The name from the product name.** Every variant build would need a Package of its own, where
-  one serves them all; [ADR-0020](0020-the-installed-service-and-its-state.md) clause 3 keeps the
+  one serves them all; [ADR-0021](0021-the-installed-service-and-its-state.md) clause 3 keeps the
   product name off the Agent type for that reason.
 - **The name from the running file's name.** Renaming or linking the binary would redirect the
   self-update to another package.

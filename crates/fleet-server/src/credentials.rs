@@ -117,7 +117,7 @@ impl Credentials {
     /// one address cannot hold every slot.
     pub async fn check(self: &Arc<Self>, peer: Option<IpAddr>, headers: &HeaderMap) -> Verdict {
         // The header carries the password until it is verified, so it is held in a buffer wiped
-        // when it is dropped (ADR-0040); the copy `hyper` keeps is its own.
+        // when it is dropped (ADR-0015); the copy `hyper` keeps is its own.
         let presented = Zeroizing::new(
             headers
                 .get(header::AUTHORIZATION)
@@ -227,7 +227,7 @@ impl Credentials {
             return true;
         }
         // The decoded credential is held in a buffer wiped when it is dropped, and the user and
-        // the password are borrowed from it (ADR-0040).
+        // the password are borrowed from it (ADR-0015).
         let Ok(decoded) = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map(Zeroizing::new)

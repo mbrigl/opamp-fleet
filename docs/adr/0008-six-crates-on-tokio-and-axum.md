@@ -1,19 +1,31 @@
-# ADR-0008: Five crates in one Cargo workspace on tokio and axum, the whole OpAMP communication layer in the publishable `opamp` crate reading WebSocket frames itself, an internal shared crate by measurement, and a strict parse of the configuration
+# ADR-0008: Six crates in one Cargo workspace on tokio and axum, the whole OpAMP communication layer in the publishable `opamp` crate reading WebSocket frames itself, two internal shared crates chosen by who shares the code, an operator tool that depends on neither end, and a strict parse of the configuration
 
-- **Status:** ⚪ superseded by [ADR-0041](0041-six-crates-on-tokio-and-axum.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
-- **Applies to:** Cargo.toml, `crates/opamp/` (its manifest and `[features]`, `build.rs`, `src/`, `LICENSE`, `NOTICE` and `README.md`), crates/fleet-core/, every OpAMP connection and listener of `crates/fleet-server/` and `crates/fleet-agent/` (the Server's two planes, the Client's upstream connection and its verification probe, the Gateway's downstream endpoint and upstream pool, the Supervisor Endpoint), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, the Client's `Session` in `crates/fleet-agent/src/transport/`, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, the strict parse of server.toml and supervisor.toml, the per-feature lint in `scripts/check-rust.sh` and `README.md`, and every new crate, module placement or dependency, and every `fleet_agent::` path the code of `crates/fleet-tools/src/` names
+- **Applies to:** Cargo.toml, `crates/opamp/` (its manifest and `[features]`, `build.rs`, `src/`, `LICENSE`, `NOTICE` and `README.md`), crates/fleet-core/, crates/fleet-util/, every OpAMP connection and listener of `crates/fleet-server/` and `crates/fleet-agent/` (the Server's two planes, the Client's upstream connection and its verification probe, the Gateway's downstream endpoint and upstream pool, the Supervisor Endpoint), `AgentState` in `crates/fleet-agent/src/supervisor/agent.rs`, the Client's `Session` in `crates/fleet-agent/src/transport/`, crates/fleet-agent/src/lib.rs and main.rs, crates/fleet-tools/, the bundled UI under crates/fleet-server/static/, the strict parse of server.toml and supervisor.toml, the per-feature lint in `scripts/check-rust.sh` and `README.md`, and every new crate, module placement or dependency, the `[dependencies]` of `crates/fleet-tools/Cargo.toml`, and every `pub use` of a `fleet_util::` item
 
 ## Context
 
-The operator tool reuses code of the Client rather than restating it. `opamp-fleetctl pki` opens
-the operator's PKCS#12 file and its password file with two functions of the Client:
-`fleet_agent::nofollow::read_privileged`, which reads a file a privileged step names without
-following a link, and `fleet_agent::config_init::read_password_file`, which reads a password file
-as the Client's own setup does. `fleet_agent::tls::pkcs12_identity`, beside them, is named by
-[ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 5 and 24. Without a test of what
-the tool takes from the Client, that list grows unseen; it did once, by these two functions.
+The operator tool shares four items with the Client rather than restating them: `archive`, the
+unpackers and the 7z Unix-mode convention; `read_privileged` with its `Named`, which reads a file a
+privileged step names without following a link; `read_password_file`, which reads a password file
+as the Client's own setup does; and the PKCS#12 reader, which opens a bootstrap PKCS#12 file as the
+Client's install does
+([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
+clauses 5 and 24).
+
+Taken by depending on the Client, those four items link the whole Client into `opamp-fleetctl`. Of
+the 282 crates the tool linked that way on 2026-11-15, 56 came only through `fleet-agent`: the
+OpenTelemetry stack, `service-manager`, `sysinfo`, `toml_edit`, `tracing-subscriber` and
+`tracing-appender` among them. A count here is of distinct crate names,
+`cargo tree -p fleet-tools -e normal --prefix none | awk '{print $1}' | sort -u | wc -l`;
+the `awk` keeps the name alone, so two versions of one crate count once. Each would be in the tool's
+supply chain (Q-3) and compiled with it, every change to the Client would recompile the tool, and a
+tool that runs on an operator's machine and never on a managed host would be built on one of the two
+ends it serves. `tree`, the links a tree package keeps, is shared the same way in the other
+direction: the Client and the tool use it, the Server never does, and in the crate the Server links
+it would be linked for nothing.
 
 The [specification](../SPECIFICATION.md) fixes the language (both ends in Rust) and the
 deployables: one Server (Linux only, API-first, with a rudimentary bundled UI, G-5) and one Client
@@ -53,12 +65,16 @@ it recompiles both. Two different things are shared. What the Baseline defines (
 framing, the endpoint's body rules, the attribute keys, and the server and client sides of the
 communication) is OpAMP, reusable by anyone, and lives in the publishable `opamp` crate. What both
 ends of *this* project implement identically beyond the protocol (the baked version and its
-grammar, the platform aliases) is this project's own, and lives in an internal crate. **How does
+grammar, the platform aliases) is this project's own, and lives in an internal crate. What only the
+Client and the operator tool share (the unpackers, the reads that follow no link) is this
+project's own too, but the Server never calls it, so it lives in a second internal crate the Server
+does not link. **How does
 a test reach the Client?** Cargo hands a test a helper binary's path
 (`CARGO_BIN_EXE_<name>`) only in an integration test, and an integration test links only a
 package's library. **Where do operator tools live?** `opamp-fleetctl`, the operator tool
-([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)), runs on an operator's machine and uses a
-few Client items: the 7z Unix-mode convention, the unpackers, and the TLS provider helper.
+([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)),
+runs on an operator's machine and shares a few items with the Client: the 7z Unix-mode convention,
+the unpackers, the no-follow reader, the password-file reader and the PKCS#12 reader.
 
 Operators hand-edit both configuration files, often over SSH; a format's failure modes matter more
 than its expressiveness. YAML's indentation and implicit typing (`no` → `false`) are classic sources
@@ -68,14 +84,15 @@ format and are not affected. How each binary finds and layers its configuration 
 
 ## Decision
 
-We will build one Cargo workspace of five crates (`opamp`, `fleet-core`, `fleet-server`,
-`fleet-agent`, `fleet-tools`) on `tokio` and `axum`, make `crates/opamp` the whole OpAMP
-communication layer (the wire layer always, and behind `client` and `server` each side's connection
-end to end, its TLS and its listener included, built from values the application hands it and
-never from a file or a configuration format of its own), keep in `fleet-core` what both ends
-implement identically beyond the Baseline, as measured, make the Client a library under a thin
-binary, keep the operator tool in its own crate depending on the Client, and hold both binaries'
-configuration to a strict parse.
+We will build one Cargo workspace of six crates (`opamp`, `fleet-core`, `fleet-util`,
+`fleet-server`, `fleet-agent`, `fleet-tools`) on `tokio` and `axum`, make `crates/opamp` the whole
+OpAMP communication layer (the wire layer always, and behind `client` and `server` each side's
+connection end to end, its TLS and its listener included, built from values the application hands it
+and never from a file or a configuration format of its own), keep in `fleet-core` what the Server
+shares with the Client or the operator tool and in `fleet-util` what only the Client and the
+operator tool share, as measured, make the Client a library under a thin binary, keep the operator
+tool in its own crate depending on neither end, and hold both binaries' configuration to a strict
+parse.
 
 1. **The wire layer, without features.** `proto` (generated from the vendored Baseline schema with
    protox, [ADR-0011](0011-the-protocol-is-pinned-and-checked-against-opamp-go.md)), `frame`,
@@ -155,7 +172,7 @@ configuration to a strict parse.
    Its `AgentState` keeps the
    Client's decisions over one protocol state machine. Its flows after a reply run in one order:
    connection settings, certificate, packages, the self-update restart, the Supervisor set
-   ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). Connection settings come
+   ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)). Connection settings come
    before the certificate because an offer may carry the certificate a request asked for, and a
    request queued before it is taken in would ride the next connection and be signed again.
 
@@ -172,12 +189,12 @@ configuration to a strict parse.
     - TLS 1.2 is neither offered nor accepted by either end, and plaintext off the loopback is
       refused rather than warned about (clauses 4, 6 and 8).
 
-11. **One workspace, five crates, one lockfile, one toolchain.** `crates/opamp` (the publishable
-    communication layer), `crates/fleet-core` (the internal shared crate), `crates/fleet-server`,
-    `crates/fleet-agent` and `crates/fleet-tools`. Versions are pinned once in
-    `[workspace.dependencies]`; `rust-toolchain.toml` pins the compiler. Every crate but `opamp` is
-    `publish = false`. A further crate needs a concrete need a module cannot meet (compile time,
-    reuse, a dependency boundary); hexagonal seams live as modules first.
+11. **One workspace, six crates, one lockfile, one toolchain.** `crates/opamp` (the publishable
+    communication layer), `crates/fleet-core` and `crates/fleet-util` (the two internal shared
+    crates), `crates/fleet-server`, `crates/fleet-agent` and `crates/fleet-tools`. Versions are
+    pinned once in `[workspace.dependencies]`; `rust-toolchain.toml` pins the compiler. Every crate
+    but `opamp` is `publish = false`. A further crate needs a concrete need a module cannot meet
+    (compile time, reuse, a dependency boundary); hexagonal seams live as modules first.
 
 12. **`tokio` and `tracing`.** The multi-threaded `tokio` runtime on both ends; `tracing` with
     `tracing-subscriber` for structured logging; `serde` for the REST API's JSON and for
@@ -199,13 +216,24 @@ configuration to a strict parse.
     checked and tested on Windows and macOS, and release-built on all three; the Server is built on
     Linux only.
 
-16. **The internal shared crate holds what both ends implement identically, established by
-    measurement.** Code enters `fleet-core` when both ends implement it identically, or would have
-    to, and the Baseline does not define it; an end and the operator tool count as two ends here,
-    because the tool makes what an end must accept. What the Baseline defines goes to `opamp`
-    (clause 17). Adding it is ordinary work under this clause. Nothing enters to make the crate
-    look less small. Each addition is judged by what it costs the two ends; a build dependency is
-    the cheaper case, since it links into no artifact.
+16. **Two internal shared crates hold what is implemented identically, as measured, and who
+    shares an item chooses its crate.** Code enters one when two of the Server, the Client and the
+    operator tool implement it identically, or would have to, and the Baseline does not define it.
+    The operator tool counts here, because it makes what an end must accept. What the Baseline
+    defines goes to `opamp` (clause 17).
+    - `fleet-core` holds what the Server shares with the Client, with the operator tool, or with
+      both.
+    - `fleet-util` holds what the Client and the operator tool share and the Server does not use.
+    - The Server must not depend on `fleet-util`. `fleet-util` must not depend on a workspace crate
+      but `fleet-core`.
+    - An item of `fleet-util` that the Server comes to use moves to `fleet-core`. An item of
+      `fleet-core` that the Server stops using moves to `fleet-util` when the Client and the tool
+      still share it.
+    - Every crate names an item of `fleet-util` by its `fleet_util::` path. No crate re-exports one.
+
+    Adding code is ordinary work under this clause. Nothing enters to make a crate look less small.
+    Each addition is judged by what it costs the crates that link it; a build dependency is the
+    cheaper case, since it links into no artifact.
 
 17. **What goes where.**
     - `opamp`, always: `proto` and `frame`, the generated types and the WebSocket framing
@@ -222,13 +250,15 @@ configuration to a strict parse.
       `private_key`. Their path-based wrappers and error wording stay in each end, where what the
       file means is known.
     - `fleet-core`: `version`, the version helper ([ADR-0037](0037-the-products-version.md));
-      `platform`, the platform alias table ([ADR-0033](0033-packages-signatures-and-delivery.md));
+      `platform`, the platform alias table
+      ([ADR-0033](0033-packages-signatures-and-delivery.md));
       `package`, the statements a package signature and a floor signature cover, which the operator
       tool signs and the Client verifies
       ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md)); `ending`, the rule that says
       when a certificate is ending, as plain date arithmetic without a dependency, and `naming`,
       what a certificate is called, which the Server and the operator tool apply alike
-      ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)); `pkcs12`, the bootstrap
+      ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md));
+      `pkcs12`, the bootstrap
       certificate's file
       ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md));
       `host`, `x509`, `csr`, `renewal` and `bootstrap_proof`, what a client certificate is known by
@@ -236,7 +266,24 @@ configuration to a strict parse.
       Gateway read alike ([ADR-0016](0016-client-modes-and-the-gateway.md)); and `rate`, the token
       buckets a sender is counted in on the Server and on a Gateway
       ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md),
-      [ADR-0022](0022-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
+      [ADR-0017](0017-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
+    - `fleet-util`: `archive`, the unpackers of a package's artifact and the 7z Unix-mode
+      convention, which the operator tool packs by and the Client installs by
+      ([ADR-0033](0033-packages-signatures-and-delivery.md));
+      `tree`, the links a kind's tree package keeps, which the operator tool packs and the Client
+      creates
+      ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md));
+      `nofollow`, the file operations that follow no link
+      ([ADR-0022](0022-the-accounts-the-service-runs-under.md));
+      `password`, with `read_password_file`, which reads the first line of a password file; and
+      `identity`, with `BootstrapIdentity`, a certificate and its key as PEM, and `pem_block`,
+      which writes one PEM block in a buffer wiped on drop
+      ([ADR-0015](0015-secrets-in-memory-are-wiped-on-drop.md));
+      and `identity::pkcs12`, whose `open` opens a `BootstrapIdentity` from a bootstrap PKCS#12
+      file
+      ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+      The value and its reader are two modules, so a core module of the Client may name the value
+      ([ADR-0009](0009-ports-and-adapters.md)).
 
 18. **What the measurement leaves where it is.** The Server's router and admission, the Server's
     CA, the Client's CSR flow, the persistence of its connection settings, the choice of which TLS
@@ -248,10 +295,10 @@ configuration to a strict parse.
     declares the module tree; `src/main.rs` keeps only what starting a process needs: parsing the
     command line, handing off to the daemon or the `service` verbs, and the exit code.
 
-20. **Visibility is widened by need.** An item becomes `pub` when a test or another workspace
-    target has to reach it. `pub` in the Client means "another target here reaches it", not a
-    published interface. Where widening would expose an invariant only the module can hold, the
-    item stays private and the test moves to where it can see it.
+20. **Visibility is widened by need.** An item becomes `pub` when a test or another workspace target
+    has to reach it. `pub` in the Client and in `fleet-util` means "another target here reaches it",
+    not a published interface. Where widening would expose an invariant only the module can hold,
+    the item stays private and the test moves to where it can see it.
 
 21. **Tests reach what they test through the library.** Integration tests import constants rather
     than restating them, and tests that spawn a real program spawn the Client's own cross-platform
@@ -260,19 +307,20 @@ configuration to a strict parse.
     fact, such as a file mode. The stubs stay in `fleet-agent`, because `CARGO_BIN_EXE_*` resolves
     only inside the crate that declares them.
 
-22. **The operator tool is its own crate, depending on the Client.** `crates/fleet-tools`
-    produces `opamp-fleetctl` (ADR-0036) and has no library. The arrow points one way:
-    `fleet-tools` uses `fleet_agent::archive`, `opamp::tls` and the items of `fleet-core` clause 17
-    names rather than restating them. Of the Client, the tool's own code under
-    `crates/fleet-tools/src/` uses only `fleet_agent::archive`, `fleet_agent::tls::pkcs12_identity`,
-    and `fleet_agent::nofollow::read_privileged` with its `Named`, and
-    `fleet_agent::config_init::read_password_file`, which read the operator's PKCS#12 file and its
-    password file as the Client reads its own; a test fails on any other `fleet_agent::` path and
-    names it. Its integration tests may run the Client itself, and its tests open what the tool
-    produces with the Client's own unpacker. Nothing in `fleet-agent`, `fleet-server` or `opamp`
-    depends on `fleet-tools`. Tool-only dependencies (the 7z writer, release listing) are declared
-    there, so `cargo build -p fleet-agent` does not build them. The code that makes the fleet's
-    certificate authorities lives there too; no end runs it.
+22. **The operator tool is its own crate, depending on neither end.** `crates/fleet-tools`
+    produces `opamp-fleetctl` (ADR-0036) and has no library.
+    - Its `[dependencies]` must not name `fleet-agent` or `fleet-server`, in any target table.
+    - It uses `opamp::tls`, the items of `fleet-core` and the items of `fleet-util` clause 17 names
+      rather than restating them. It reads the operator's PKCS#12 file and its password file with
+      the readers the Client uses for its own.
+    - Its `[dev-dependencies]` may name `fleet-agent` and `fleet-server`. Its integration tests may
+      run the real Server and the real Client on what the tool wrote.
+    - Nothing in `fleet-agent`, `fleet-server`, `fleet-util`, `fleet-core` or `opamp` depends on
+      `fleet-tools`.
+
+    Tool-only dependencies (the 7z writer, release listing) are declared there, so
+    `cargo build -p fleet-agent` does not build them. The code that makes the fleet's certificate
+    authorities lives there too; no end runs it.
 
 23. **A configuration that does not parse fails startup, loudly.** Every setting has a documented
     default; unknown keys are rejected (`deny_unknown_fields`, or the equivalent strict parse for a
@@ -284,20 +332,34 @@ configuration to a strict parse.
 finer features, such as one per transport; a release routine for the crate; where the PEM material
 comes from on disk; how each binary finds its configuration file and whether its environment adds
 to it ([ADR-0024](0024-the-servers-configuration.md)); where an installed service looks for its
-configuration file on each OS ([ADR-0020](0020-the-installed-service-and-its-state.md)); the
+configuration file on each OS ([ADR-0021](0021-the-installed-service-and-its-state.md)); the
 listener layout ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)); whether a release ships
 the operator tools.
 
 ## Alternatives considered
 
-- **The operator tool stops using the two functions.** It would read the PKCS#12 file and the
-  password file with code of its own. Rejected: two readers of one secret file that must agree on
-  links, modes and size bounds drift apart, and the Client's are the ones its tests hold.
-- **Name the functions without a test.** Rejected: a list no test checks grows unseen.
-- **Name only `fleet_agent::archive` of the Client in clause 22, beside `opamp::tls` and the items
-  of `fleet-core`, with no test.** The clause as it stood until 2026-11-15. Rejected: the tool's
-  code already used the two readers above, so the clause no longer said what the tool takes from
-  the Client.
+- **The operator tool depends on the Client, and a test holds it to a list of Client paths.**
+  Clause 22 as it stood until 2026-11-15. Rejected: the tool linked 56 crates only the Client
+  needs, recompiled with every change to the Client, and was built on one of the two ends it serves.
+- **The shared items in `fleet-core`.** Clause 16 as it stood until 2026-11-15 allowed it, since
+  the tool counted as an end. Rejected: the Server links `fleet-core`, and would link the tar, zip
+  and 7z readers and the no-follow file layer it never calls.
+- **Choose the crate by dependency rather than by who shares.** `fleet-util` would take only shared
+  code whose dependencies the Server must not link, and `tree` would stay in `fleet-core`. Rejected:
+  that is a judgement made in review, while who names a module is decided by a test.
+- **Keep thin modules in the Client that re-export `fleet-util`.** The paths other ADRs name would
+  stay true while the code moved. Rejected: an item would have two paths in use, and an ADR's
+  *Applies to* would name a shim instead of the code it governs.
+- **Hold `[dev-dependencies]` to the same rule.** Rejected: the end-to-end tests of
+  ADR-0036 run the real Server and the real Client in-process.
+  `CARGO_BIN_EXE_opamp-fleetctl` resolves only inside the crate that declares the binary
+  (clause 21), so those tests cannot move to another crate.
+- **A name that says what the crate holds, such as `fleet-files`.** Not chosen: the human chose
+  `fleet-util`. A crate of that name invites code that belongs nowhere else; clause 16 and its test
+  admit only what the Client and the operator tool share.
+- **The operator tool reads the PKCS#12 file and the password file with code of its own.**
+  Rejected: two readers of one secret file that must agree on links, modes and size bounds drift
+  apart, and the Client's are the ones its tests hold.
 - **axum's WebSocket, judged by the bytes the connection reads.** A Ping between two fragments of
   a message looks like progress, so a message stays open for ever; treating control frames as no
   progress closes a peer that only pings. TLS records and the bytes read with the upgrade request
@@ -342,8 +404,9 @@ the operator tools.
 - **Moving the supervision core into its own crate for testability.** A library target meets the
   need without turning every internal seam into a crate API.
 - **Operator tools inside `fleet-agent`, or `archive` moved into `opamp`.** The first keeps
-  tooling in the crate that runs on every managed host; the second widens the shared crate with
-  something only the Client implements, since the Server never opens an artifact.
+  tooling in the crate that runs on every managed host; the second puts something only this
+  project's Client and tool implement into the published crate, since the Server never opens an
+  artifact.
 - **A separate repository for the tools, or duplicated items.** The tools' correctness is defined
   by what the Client can install, and `unix_mode_attributes` must have one definition.
 - **YAML.** The OpenTelemetry ecosystem's format, but with indentation and implicit-typing failure
@@ -363,7 +426,7 @@ the operator tools.
 - [`reqwest::ClientBuilder`](https://docs.rs/reqwest/0.13/reqwest/struct.ClientBuilder.html):
   `tls_certs_only`, `identity` and `tls_backend_preconfigured`, with the stability warning on the
   last. Read 2026-10-03 in the vendored 0.13.5 source.
-- [`axum-server`](https://docs.rs/axum-server/0.7) `RustlsAcceptor::handshake_timeout` and
+- [`axum-server`](https://docs.rs/axum-server/0.9) `RustlsAcceptor::handshake_timeout` and
   [`hyper-util`](https://docs.rs/hyper-util/0.1) `TokioTimer`, as ADR-0012 cites them.
 - [`rustls-pki-types`](https://docs.rs/rustls-pki-types) `PemObject`, the PEM reader rustls
   itself uses.
@@ -382,6 +445,11 @@ the operator tools.
   [workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html) and
   [RFC 2906](https://rust-lang.github.io/rfcs/2906-cargo-workspace-deduplicate.html): one
   lockfile, one resolved version per dependency.
+- [The Cargo Book, development
+  dependencies](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#development-dependencies):
+  they are used to compile tests, examples and benchmarks, and are not propagated to packages that
+  depend on this one. `cargo tree -p fleet-tools -e normal`, run on 2026-11-15 before and after
+  the move, for the count in the Context.
 - [`ripgrep`](https://github.com/BurntSushi/ripgrep): a library with a thin `main.rs`; `kubectl`
   beside `kubelet`: an operator tool built with the system it drives but not run on a node.
 - [TOML v1.0](https://toml.io/), the [`toml` crate](https://crates.io/crates/toml), and the
@@ -401,9 +469,14 @@ the operator tools.
 - Positive: the Server is one binary embedding its UI. The operations that write to a host (binary
   swap, health gate, rollback, tree install) are tested on all three platforms.
 - Positive: `crates/fleet-agent` is what runs on a managed host, and its manifest says so.
+- Positive: `opamp-fleetctl` links 56 crates fewer, 226 instead of 282 distinct crate names (see
+  Context), and a change to the Client
+  no longer recompiles it. The Server no longer links `tree`.
+- Positive: which internal crate an item belongs in is decided by a test, not argued in review.
 - Negative / trade-offs: the published API includes `Connection`, the listener and the TLS types.
-  `axum-server`'s `Handle` and `tokio-tungstenite`'s socket are part of it, so a breaking bump of
-  either waits for the next Baseline.
+  `tokio-tungstenite`'s socket and its `Connector` are part of it (`client::ws`), so a breaking
+  bump of it waits for the next Baseline. `axum-server` is not: the listener's `Handle` holds
+  `axum_server::Handle` in a private field, and no public item names an `axum_server` type.
 - Negative / trade-offs: the `server` feature pulls `axum-server` and `hyper-util`, and `client`
   pulls `webpki-roots`. A user who brings their own listener pays for one anyway.
 - Negative / trade-offs: the listener attaches the per-connection extensions with
@@ -418,6 +491,16 @@ the operator tools.
   not warn about a `pub` item nothing uses.
 - Negative / trade-offs: operators coming from OpenTelemetry meet a second format for the fleet
   tooling itself.
+- Negative / trade-offs: a sixth crate, and a crate boundary inside code the Client calls from
+  about fifteen modules. Every change to `fleet-util` recompiles the Client and the tool.
+- Negative / trade-offs: the move restates four ADRs that name the moved files by path
+  ([ADR-0015](0015-secrets-in-memory-are-wiped-on-drop.md),
+  [ADR-0022](0022-the-accounts-the-service-runs-under.md),
+  [ADR-0033](0033-packages-signatures-and-delivery.md),
+  [ADR-0036](0036-the-operator-program-opamp-fleetctl.md)).
+  The backlog entries that name those paths move with them.
+- Negative / trade-offs: a crate named `fleet-util` reads as a place for anything. Clause 16 and its
+  test hold it to what the Client and the tool share.
 - Follow-ups: the CSR flow in `opamp` if a second user wants it; finer features if a user asks for
   one transport alone; a shared test-support target if two suites want the same helpers.
 
@@ -447,12 +530,20 @@ the operator tools.
 - [`.github/workflows/checks.yml`](../../.github/workflows/checks.yml): `rust` (clause 15),
   and `client-windows` and `client-macos` on Windows and macOS;
   [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml): `release-build` (clauses 15, 21).
-  The workspace manifest lists the five members, and Cargo refuses a dependency cycle, so
+  The workspace manifest lists the six members, and Cargo refuses a dependency cycle, so
   `fleet-agent` cannot come to depend on `fleet-tools` (clause 22).
-- `crates/fleet-tools/tests/client_items.rs`
-  `the_operator_tool_uses_only_the_client_items_its_adr_names` reads the code under
-  `crates/fleet-tools/src/` and fails on a `fleet_agent::` path outside clause 22's list, naming
-  the path and its file (clause 22).
+- `crates/fleet-tools/tests/depends_on_neither_end.rs`
+  `the_operator_tool_depends_on_neither_end` reads `crates/fleet-tools/Cargo.toml` and fails when
+  `[dependencies]` or a target-specific dependency table names `fleet-agent` or `fleet-server`
+  (clause 22).
+- `crates/fleet-util/tests/who_shares.rs` `each_shared_module_sits_in_the_crate_its_users_choose`
+  reads the sources of `fleet-server`, `fleet-agent` and `fleet-tools`, and fails naming the module
+  in each of these cases (clause 16):
+  - a module of `fleet-util` that the Client or the tool does not name;
+  - a module of `fleet-util` that the Server names;
+  - a module of `fleet-core` that no Server code names;
+  - a `pub use` of a `fleet_util::` item;
+  - a manifest of `fleet-server` that names `fleet-util`.
 - The test
   [`crates/fleet-agent/tests/supervisor_process.rs`](../../crates/fleet-agent/tests/supervisor_process.rs)
   spawns `stub_agent` through `CARGO_BIN_EXE_stub_agent`, and
@@ -466,5 +557,7 @@ the operator tools.
 - `crates/fleet-server/src/config.rs` `rejects_unknown_keys` and `crates/fleet-agent/src/config.rs`
   `rejects_an_unknown_scheme_and_unknown_keys` (clause 23).
 
-**Not mechanically decidable:** whether a piece of code is implemented identically by both ends
-(clauses 16, 18), and whether a widened item is needed (clause 20), are judgements made in review.
+**Not mechanically decidable:** two judgements are made in review. One is whether two of the
+Server, the Client and the operator tool implement a piece of code identically (clauses 16, 18).
+The other is whether a widened item is needed (clause 20). The test above decides which internal
+crate holds a shared item.

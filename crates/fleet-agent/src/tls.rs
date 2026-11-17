@@ -1,5 +1,5 @@
 //! Which TLS material the Client uses (ADR-0012, ADR-0026), read from disk and handed to `opamp` as
-//! [`ClientTls`] (ADR-0041).
+//! [`ClientTls`] (ADR-0008).
 //!
 //! The decisions are the Client's: an optional CA file that *replaces* the built-in roots, and the
 //! identity in force — the one the Server issued, else the one the operator configured. Building a
@@ -67,7 +67,7 @@ pub fn client_tls_for(
                 ));
             }
             // `opamp` takes the key as its own buffer; the copy is made here and the one read
-            // is wiped (ADR-0040 clause 3).
+            // is wiped (ADR-0015 clause 3).
             Some(Identity {
                 cert_pem: cert.to_vec(),
                 key_pem: key_in(&key, state_file(&key)?)?.to_vec(),
@@ -131,7 +131,7 @@ pub(crate) fn certificates_in(path: &Path, pem: Vec<u8>) -> Result<Vec<u8>, Stri
 }
 
 /// A PEM file holding a private key, parsed here so that a bad one is named by its path. The key
-/// is held, and parsed, in buffers wiped when they are dropped (ADR-0040).
+/// is held, and parsed, in buffers wiped when they are dropped (ADR-0015).
 pub(crate) fn key_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
     key_in(path, read(path)?)
 }
@@ -146,7 +146,7 @@ pub(crate) fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, St
 
 /// A file `[tls]` names, read by its path: the run-time Client's own files, which its operator
 /// may reach through a link. A privileged enrolment reads them through
-/// [`fleet_util::nofollow::read_privileged`] instead, and never by this path (ADR-0042 clause 11).
+/// [`fleet_util::nofollow::read_privileged`] instead, and never by this path (ADR-0022 clause 11).
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     read_bounded(path)
         .map(|mut bytes| std::mem::take(&mut *bytes))
@@ -158,7 +158,7 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 pub(crate) const MAX_PEM_BYTES: u64 = 1 << 20;
 
 /// The bytes of the regular file at `path`, of at most [`MAX_PEM_BYTES`], in a buffer wiped when
-/// it is dropped (ADR-0040). The error says why, and leaves naming the file to the caller.
+/// it is dropped (ADR-0015). The error says why, and leaves naming the file to the caller.
 ///
 /// Anything but a regular file is refused before it is opened, and again by what was opened, so
 /// a FIFO or a device at the name — `/dev/zero` — is never read. On Unix the open does not block,
@@ -190,7 +190,7 @@ fn not_regular() -> String {
 }
 
 /// A file of the state directory, never read through a link: an install reads it as root, and the
-/// directory belongs to the service's account (ADR-0042).
+/// directory belongs to the service's account (ADR-0022).
 fn state_file(path: &Path) -> Result<Vec<u8>, String> {
     fleet_util::nofollow::read(path, MAX_PEM_BYTES)
         .map(|mut bytes| std::mem::take(&mut *bytes))
@@ -300,7 +300,7 @@ mod tests {
     /// bootstrap identity, a key file, a bootstrap password, the Supervisor Endpoint token and
     /// `[packages] archive_key`.
     /// Were any of them a plain buffer again, this would not compile.
-    /// Verifies: ADR-0040
+    /// Verifies: ADR-0015
     #[test]
     fn the_clients_secrets_are_held_in_zeroizing_buffers() {
         use fleet_util::identity::BootstrapIdentity;

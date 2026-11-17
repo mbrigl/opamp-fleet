@@ -60,7 +60,7 @@ pub fn revision_hash(revision: &Revision) -> String {
 #[serde(deny_unknown_fields)]
 pub struct Configuration {
     /// The name: a config-map key on the wire and a file name on both ends, so it follows the
-    /// ADR-0020 name grammar.
+    /// ADR-0021 name grammar.
     pub name: String,
     /// What editing operates on, and what a rollout act releases as one snapshot.
     pub saved: Revision,
@@ -90,7 +90,7 @@ pub struct ConfigEntry {
 #[derive(Clone)]
 pub struct DesiredConfig {
     /// The entries, sorted by name — deterministic like the entry order the Managed Process sees
-    /// (the Collector receives them as one `--config` per entry, ADR-0018).
+    /// (the Collector receives them as one `--config` per entry, ADR-0019).
     pub entries: Vec<ConfigEntry>,
     /// SHA-256 over the length-prefixed `(name, body, role)` triples in name order.
     pub hash: Vec<u8>,
@@ -188,7 +188,7 @@ pub struct Pinned {
 /// ([`FsConfigBackend`](crate::fs::FsConfigBackend)) is what the composition root wires.
 pub trait ConfigBackend: Send + Sync {
     /// Every persisted Configuration, once, when the store opens. One that cannot be read fails
-    /// loudly and names where it is — never silently ignored (ADR-0041's principle).
+    /// loudly and names where it is — never silently ignored (ADR-0008's principle).
     fn load(&self) -> Result<Vec<Configuration>, String>;
 
     /// Creates a Configuration or replaces its saved revision, in one step. No retained revision
@@ -455,7 +455,7 @@ impl ConfigStore {
     }
 }
 
-/// The ADR-0020 name grammar, applied to Configuration names: they become file names here, wire
+/// The ADR-0021 name grammar, applied to Configuration names: they become file names here, wire
 /// config-map keys, and entry files on every Client — including Windows ones, hence the reserved
 /// device names. Kept in sync with the Client's instance-name parser by the shared test corpus.
 pub fn validate_name(name: &str) -> Result<(), String> {

@@ -1,4 +1,4 @@
-//! The operator tool depends on neither end (ADR-0041 clause 22).
+//! The operator tool depends on neither end (ADR-0008 clause 22).
 //!
 //! What it shares with the Client is in `fleet-util`, so its `[dependencies]`, in every target
 //! table, name neither `fleet-agent` nor `fleet-server`. Its `[dev-dependencies]` may: the
@@ -43,7 +43,7 @@ fn ends_named(manifest: &str) -> Vec<String> {
 }
 
 /// The tool's manifest names neither end outside its development dependencies.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0008
 #[test]
 fn the_operator_tool_depends_on_neither_end() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -119,8 +119,8 @@ fn linked(metadata: &serde_json::Value, root: &str) -> Vec<(String, Vec<String>)
 
 /// What the tool links, through any chain of normal dependencies on the host's platform, includes
 /// neither end: a workspace crate the tool depends on cannot bring one in either
-/// (ADR-0041 clause 22). The manifest test above covers the tool's tables for every platform.
-/// Verifies: ADR-0041
+/// (ADR-0008 clause 22). The manifest test above covers the tool's tables for every platform.
+/// Verifies: ADR-0008
 #[test]
 fn the_operator_tool_links_neither_end() {
     let rustc = std::process::Command::new(std::env::var("RUSTC").unwrap_or("rustc".into()))

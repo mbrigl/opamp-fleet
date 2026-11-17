@@ -649,7 +649,7 @@ mod tests {
         );
     }
 
-    /// A file that does not parse fails startup loudly rather than being skipped (ADR-0041's
+    /// A file that does not parse fails startup loudly rather than being skipped (ADR-0008's
     /// principle, as every store here applies it).
     #[test]
     fn a_corrupt_record_fails_the_load_by_name() {
