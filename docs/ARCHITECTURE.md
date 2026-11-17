@@ -235,6 +235,10 @@ no module.
   instance holds members of; whether the Client Agents of a group another instance carries are read
   under the fleet lock or before it (`Elsewhere`); and the placing again after a notice or a
   catch-up.
+  The views of the fleet — the Agents each Host carries, the view of an Agent and of the whole
+  fleet, and the list of Agents a page at a time
+  ([ADR-0030](adr/0030-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md))
+  — are the core module `fleet::views`, behind the same `AppState` entry points.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the

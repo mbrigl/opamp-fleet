@@ -10,7 +10,10 @@ deleting a Configuration, the Deployment's Configurations, `release`, `rollout_t
 ## Acceptance criteria
 
 - [ ] Given the branch, when its diff against `main` is listed, then it touches only
-      `crates/fleet-server/src/fleet.rs`, `crates/fleet-server/src/fleet/`, this ticket's file.
+      `crates/fleet-server/src/fleet.rs`, `crates/fleet-server/src/fleet/`, this ticket's file, and
+      the sentence of `docs/ARCHITECTURE.md` that names its module, which ADR-0001 updates with
+      the structure, and the role of its module in the structural test of ADR-0009,
+      `crates/fleet-core/tests/dependency_direction.rs`.
 - [ ] Given the unit tests of `fleet` on `main` and on the branch, when they are counted and
       listed by name, then the count and every name are the same.
 - [ ] Given every public item of `fleet` on `main`, when the branch is built, then each is
