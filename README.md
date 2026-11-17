@@ -99,8 +99,8 @@ The checks beyond these, each for what the plain build cannot show:
 
 | Check | Command | When, and what it needs |
 |---|---|---|
-| `opamp` per feature | `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features --features "$f" -- -D warnings; done` | each feature stands alone (ADR-0041); run by `check-rust.sh` |
-| fewer Supervisor kinds | `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings`, the same with `--features <kind>` for each feature of its `[features]` table but `default`, and `cargo test -p fleet-agent --no-default-features` | each wrapped kind is a feature, all on by default, so only these show that a build leaving one out compiles and refuses its `type` (ADR-0018); run by `check-rust.sh` |
+| `opamp` per feature | `for f in "" client server; do cargo clippy -p opamp --all-targets --no-default-features --features "$f" -- -D warnings; done` | each feature stands alone (ADR-0008); run by `check-rust.sh` |
+| fewer Supervisor kinds | `cargo clippy -p fleet-agent --all-targets --no-default-features -- -D warnings`, the same with `--features <kind>` for each feature of its `[features]` table but `default`, and `cargo test -p fleet-agent --no-default-features` | each wrapped kind is a feature, all on by default, so only these show that a build leaving one out compiles and refuses its `type` (ADR-0019); run by `check-rust.sh` |
 | Windows build | `cargo xwin clippy -p fleet-agent --all-targets --target x86_64-pc-windows-msvc -- -D warnings` | on a change to platform-gated code; needs `cargo install cargo-xwin` and `rustup target add x86_64-pc-windows-msvc`; `scripts/check-client-platform.sh`, and so `scripts/check-all.sh`, runs it on Linux where both are installed; CI builds the Client on Windows |
 | supply chain | `cargo deny check` | as [`deny.toml`](deny.toml) sets it; needs `cargo install cargo-deny`; the `Security audit` workflow runs it weekly and on lockfile changes |
 | fuzz targets build | `cargo check --manifest-path fuzz/Cargo.toml` | `fuzz/` is a workspace of its own, which `--workspace` never compiles; stable suffices; run by `check-rust.sh` |
@@ -135,9 +135,9 @@ What still needs a human, per platform:
 - starting at **boot**, the service's [log](docs/manual/client.md#where-the-services-logs-are), and
   the Agent in the fleet UI;
 - an **SELinux-enforcing host**: the `.rpm` install must start, and a service dying with
-  `status=203/EXEC` and an AVC denial is the failure ADR-0020 clause 12 prevents;
+  `status=203/EXEC` and an AVC denial is the failure ADR-0021 clause 12 prevents;
 - each wrapped kind under the packaged account `opamp-fleet` and under `--run-as root`: it starts,
-  reports, and its `sudo` or setuid helpers still work (ADR-0042).
+  reports, and its `sudo` or setuid helpers still work (ADR-0022).
 
 ## Usage
 

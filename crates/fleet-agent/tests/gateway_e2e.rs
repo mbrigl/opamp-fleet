@@ -397,7 +397,7 @@ async fn a_downstream_peer_without_the_protobuf_content_type_is_refused() {
 /// nowhere — the Server's endpoint had it, this one handed the compressed bytes straight to the
 /// protobuf decoder — so a Client that compressed reached the Server directly and was refused the
 /// moment a Gateway was put in front of it. One reading of the rule now serves both endpoints
-/// (ADR-0041).
+/// (ADR-0008).
 /// Verifies: ADR-0016
 #[tokio::test]
 async fn a_downstream_peer_may_gzip_its_report() {

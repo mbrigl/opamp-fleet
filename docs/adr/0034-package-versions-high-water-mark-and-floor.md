@@ -24,7 +24,7 @@ The forces:
 
 - **The Server manages the Supervisor set.** A Supervisor removed from the set is purged, its
   directory deleted, installed-package record included
-  ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)). A floor kept in the Supervisor's directory
+  ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)). A floor kept in the Supervisor's directory
   is one a compromised Server can reset by sending a set without the Supervisor and then one that
   adds it back, under the same name or another.
 - **A version that does not compare cannot be refused by order.** `precedence` in
@@ -33,7 +33,7 @@ The forces:
   use, an ordering test that lets an incomparable version through lets the Server offer that build
   over any installed version, however new.
 - **The Client's own update has a floor no Server act lowers:** the binary that is running
-  ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)).
+  ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)).
 - **An honest Server does not move an Agent backwards.** A rollout reaches an Agent only when it
   moves the Agent forward, rollback is not a rollout, and a deliberate Server-driven downgrade is
   left undecided ([ADR-0032](0032-deployments-and-rollouts.md)). That rule binds an honest Server;
@@ -134,7 +134,7 @@ highest floor the operator signed for that type.
    Supervisor under another one. Every Supervisor of one type on this Client shares the type's
    mark. The file sits outside `supervisor_dir`, and its name contains a `.`, which no Supervisor
    name can contain (the instance-name grammar of
-   [ADR-0020](0020-the-installed-service-and-its-state.md)), so no purge can delete it, even where
+   [ADR-0021](0021-the-installed-service-and-its-state.md)), so no purge can delete it, even where
    an operator places `supervisor_dir` at `state_dir` itself. The mark rises when a Supervisor
    reports a package `Installed`, that is, once its program has survived the apply grace
    ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 58). It never falls. It does not
@@ -246,11 +246,11 @@ highest floor the operator signed for that type.
 
 21. **The Client's own floor is the higher of its running build and the floor of its Agent type.**
     It refuses an offered version that is not SemVer (clause 2), one that orders below the running
-    build ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)), and one that
+    build ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)), and one that
     orders below the floor kept for its Agent type. It keeps no high-water mark: the Client's
     Agent type is not a key in `package-high-water.json`. The crash-loop pointer move back to the
     previous version is local, takes no offer, and stays as
-    [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md) decides it.
+    [ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md) decides it.
 
 ### The floor in the operator program and the data directory
 
@@ -432,7 +432,7 @@ decides the rest ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 19
   - **Two Supervisors of one type share a floor.** On one Client, a new Supervisor of a type cannot
     be started on an older version than another Supervisor of that type has had.
   - **The mark and the floors outlive a reinstall.** `service uninstall` keeps `state_dir`
-    ([ADR-0020](0020-the-installed-service-and-its-state.md)), so reinstalling the Client keeps
+    ([ADR-0021](0021-the-installed-service-and-its-state.md)), so reinstalling the Client keeps
     them. Removing `state_dir` removes them, together with the Client's identity.
   - **A floor can be withheld.** It takes effect on a host only once a Server or Gateway that
     serves it has been reached, and behind a Gateway only after the Gateway's next fetch.

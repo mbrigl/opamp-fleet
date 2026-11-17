@@ -103,7 +103,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
    it is in.
 
 2. **Every Supervisor exposes a Supervisor Endpoint, unconditionally.** It binds `127.0.0.1` on
-   the block's `endpoint_port` ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)) before the
+   the block's `endpoint_port` ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)) before the
    Managed Process starts, so a taken port fails startup. It is WebSocket-only, declares
    `AcceptsStatus` and `AcceptsEffectiveConfig`, and folds what the process reports into the
    owning Agent, whose `instance_uid` stays the Supervisor's. For a Managed Process that speaks no
@@ -131,7 +131,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
    the scheme of its endpoint ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)), so the
    Gateway serves a WebSocket upgrade and a plain-HTTP POST on `/v1/opamp`, with the Baseline's
    message size limit, protobuf media type and gzip rules enforced per hop through the shared
-   `opamp::endpoint` helpers ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+   `opamp::endpoint` helpers ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)).
 
 6. **axum serves it, as an ordinary dependency of the Client crate behind no Cargo feature.** The
    mode lives in `crates/fleet-agent/src/gateway/` (`mod.rs` the endpoint, `pool.rs` the upstream
@@ -327,7 +327,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       and rewrites it whole from what it holds when it starts and when it has grown to twice as
       many lines as it holds live bindings and hosts, as a new file synced and renamed over the
       old. A store is at most 512 MiB. It is written as the Client writes into its state
-      directory, without following a link ([ADR-0021](0021-the-accounts-the-service-runs-under.md)),
+      directory, without following a link ([ADR-0022](0022-the-accounts-the-service-runs-under.md)),
       readable and writable by the Client's account alone: `0600` on Unix, under the restricted ACL
       the install gives the state directory on Windows.
     - **An unreadable store refuses every downstream Agent.** At start the Gateway reads the store
@@ -538,7 +538,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
   `all_packages_hash` stands ([ADR-0033](0033-packages-signatures-and-delivery.md));
 - bindings shared between Gateways, so a host that reports through two keeps an end at each;
 - the rate a Gateway holds each downstream host to
-  ([ADR-0022](0022-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md));
+  ([ADR-0017](0017-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md));
 - a bootstrap certificate issued below an intermediate CA, which cannot enrol through a Gateway
   (the proof carries no chain); a member certificate issued below an intermediate of the client
   CA, which a Gateway with `bootstrap_ca_file` takes for an enrolling peer, as the Server takes

@@ -129,9 +129,9 @@ pub async fn serve_guarded(
     (addr, rest_addr)
 }
 
-/// The Agent type every scaffolded Agent reports as `service.name` (ADR-0017). It is a constant
+/// The Agent type every scaffolded Agent reports as `service.name` (ADR-0018). It is a constant
 /// because a type describes a *kind* of Agent: the test fleet is one kind of thing on many hosts,
-/// which is also what makes one package able to reach several of them (ADR-0039).
+/// which is also what makes one package able to reach several of them (ADR-0033).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub const AGENT_TYPE: &str = "io.opentelemetry.collector";
 
@@ -155,7 +155,7 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
                 }),
             }],
             non_identifying_attributes: vec![
-                // The operator's name for this Agent (ADR-0017) — what distinguishes it from its
+                // The operator's name for this Agent (ADR-0018) — what distinguishes it from its
                 // neighbours, since `service.name` says only what kind of thing it is.
                 KeyValue {
                     key: "service.instance.name".to_string(),
@@ -169,7 +169,7 @@ pub fn full_report(uid: &InstanceUid, name: &str, sequence_num: u64) -> AgentToS
                         value: Some(any_value::Value::StringValue("linux".to_string())),
                     }),
                 },
-                // The other half of the Platform a package is fitted against (ADR-0039). An Agent
+                // The other half of the Platform a package is fitted against (ADR-0033). An Agent
                 // reporting no `host.arch` fits no artifact at all, which is its own test.
                 KeyValue {
                     key: "host.arch".to_string(),
@@ -336,7 +336,7 @@ pub async fn spawn_with_agent_rate(
     )
 }
 
-/// The same real router with own-telemetry destinations to offer (ADR-0017).
+/// The same real router with own-telemetry destinations to offer (ADR-0018).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_telemetry(offer: fleet_server::fleet::TelemetryOffer) -> TestServer {
     opamp::tls::install_ring_provider();

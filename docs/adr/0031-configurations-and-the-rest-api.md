@@ -38,7 +38,7 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
 `utoipa`, the Server's contract.
 
 1. **The name follows the instance-name grammar** of
-   [ADR-0020](0020-the-installed-service-and-its-state.md) — 1–32 characters of lowercase
+   [ADR-0021](0021-the-installed-service-and-its-state.md) — 1–32 characters of lowercase
    letters, digits, and `-`, not starting or ending with `-`, not a Windows device name — because
    it becomes a file name on the Server, a config-map key on the wire, and an entry file on every
    Client.
@@ -85,7 +85,7 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
    plane ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)), behind its authentication
    ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)),
    beside the rendered docs
-   page ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+   page ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)).
 
 **Out of scope:** what a Configuration holds, how it is aimed and released, its routes, and what
 deleting one does ([ADR-0032](0032-deployments-and-rollouts.md)); where Configurations are stored

@@ -1,4 +1,4 @@
-# ADR-0022: A Gateway rate-limits each downstream host as the Server limits a host
+# ADR-0017: A Gateway rate-limits each downstream host as the Server limits a host
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-27
@@ -114,7 +114,7 @@ Server's aggregate.
 
 ## Enforcement
 
-These tests carry `Verifies: ADR-0022`:
+These tests carry `Verifies: ADR-0017`:
 
 - [`crates/fleet-agent/src/gateway/mod.rs`](../../crates/fleet-agent/src/gateway/mod.rs):
   `a_host_past_its_burst_is_answered_unavailable_and_another_is_forwarded`: a host past its burst

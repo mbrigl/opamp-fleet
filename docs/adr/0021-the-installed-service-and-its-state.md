@@ -1,4 +1,4 @@
-# ADR-0020: The installed service and its state
+# ADR-0021: The installed service and its state
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-23
@@ -10,7 +10,7 @@
 The specification commits the Client to install as a native operating-system service that updates
 itself in place, on Linux, macOS and Windows (Mission, Strategy, G-11). A fleet client must run
 without a logged-in user, start at boot, survive the service restart a self-update causes
-([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)), and explain itself when it
+([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)), and explain itself when it
 fails on a host nobody watches. It puts security before convenience (Strategy "Security before
 convenience", Q-1 "Secure by default"): the first configuration an installer writes must
 authenticate and must not send plaintext beyond the loopback. Plaintext is accepted on the loopback
@@ -30,7 +30,7 @@ Forces:
 - **What the service points at decides how an update works.** Registering the binary's own path
   would force a re-registration on every update, and Windows locks a running `.exe`. A stable
   pointer into side-by-side version directories makes an update a pointer switch; the layout itself
-  is [ADR-0021](0021-the-accounts-the-service-runs-under.md)'s.
+  is [ADR-0022](0022-the-accounts-the-service-runs-under.md)'s.
 - **The layout is rewritten at runtime by the daemon itself**, so it must stand where the platform
   lets the service execute it *and* where the service's own account may write it. On Fedora, RHEL
   and openSUSE Leap 16 / SLES 16 the SELinux targeted policy is enforcing by default, and systemd
@@ -43,7 +43,7 @@ Forces:
   service without that file. It must at once be a systemd unit name, a launchd label, an SCM
   service name and a directory name on every platform.
 - **Nothing ships the configuration.** A release artifact is the bare binary, and the Client loads
-  defaults when its file is absent ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)), so a
+  defaults when its file is absent ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)), so a
   service installed without one starts, dials the development default, and manages nothing,
   silently. `install` is also the command an Ansible play, an MDM profile or an MSI invokes: a
   prompt there does not fail, it hangs. And a first configuration names a client identity, files
@@ -58,7 +58,7 @@ Forces:
   Client, could name any tree (another service's data, a user's profile, a system directory), and
   the next upgrade would hand that tree to it: a privilege escalation from the service's account to
   arbitrary file access on every platform. A Server cannot write those keys, since it delivers
-  `[[supervisor]]` blocks only ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)); a compromised
+  `[[supervisor]]` blocks only ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)); a compromised
   service account can. The registration (`/etc/systemd/system/<PRODUCT_NAME>.service`,
   `/Library/LaunchDaemons/<PRODUCT_NAME>.plist`, or the SCM's entry) is what the Client wrote as
   root, and only an administrator can change it.
@@ -76,7 +76,7 @@ modified and the next `apt upgrade` silently reverts. The releases that carry th
 
 And one force on the name. The Baseline reserves `service.name` for the Agent *type* and recommends
 a reverse FQDN, a recommendation this project does not enforce
-([ADR-0017](0017-what-an-agent-reports-about-itself.md)), and which opamp-spec issue 131 records as
+([ADR-0018](0018-what-an-agent-reports-about-itself.md)), and which opamp-spec issue 131 records as
 an overload of that key. Among Collectors, Foreign Agents and the process that supervises them, the
 useful type for the last is the role it plays. What the fleet offers the thing is named after what
 the thing is, and so is the thing itself.
@@ -97,7 +97,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    and the default when no subcommand is given) and `service install | config | uninstall | start
    | stop | status`. The global flags are `--config` (default `supervisor.toml`) and `--state-dir`;
    every service verb takes `--user`. There is no environment-variable configuration: the Client is
-   file-configured ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)) and a registered service
+   file-configured ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)) and a registered service
    carries the configuration's *path*, never its content. clap's `version` is wired to
    `opamp::version::current()` ([ADR-0037](0037-the-products-version.md)). The daemon code lives
    in `crates/fleet-agent/src/service/` (`runtime`, `layout`, `manager`, `run_as`, `enrol`, and
@@ -116,7 +116,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    would read correctly for the next variant, and appears only where prose belongs: the Add/Remove
    Programs entry, the SCM's display column and the installer dialog's title. It is not the Agent
    type, so the fleet view never prints one word in both columns
-   ([ADR-0017](0017-what-an-agent-reports-about-itself.md)).
+   ([ADR-0018](0018-what-an-agent-reports-about-itself.md)).
 
 3. **Three names sit side by side, and none is derived from another.**
 
@@ -137,12 +137,12 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 5. **The package that carries the Client is `supervisor` too.** The self-update takes only the
    package named after the Agent type
-   ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md) clause 2), and a Server
+   ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md) clause 2), and a Server
    offers a package under the Agent type it is built for
    ([ADR-0033](0033-packages-signatures-and-delivery.md)), so the release a fleet uploads for its
    Clients is a Package for Agent type `supervisor`, and no per-host setting is needed. A
    Configuration carrying the Client's `[[supervisor]]` blocks
-   ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)) is typed `supervisor` as well.
+   ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)) is typed `supervisor` as well.
 
 6. **The program is `supervisor`.** `supervisor.exe` on Windows: the binary Cargo builds
    (`[[bin]] name = "supervisor"` in the package `fleet-agent`), the file in every version
@@ -151,7 +151,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    CLI's own name. The configuration file is **`supervisor.toml`**, and the `--config` default with
    it. What names an *installation* (the install path, the service, the dpkg/rpm package, the
    `PATH` symlink) is the product's name, not the program's (clauses 2 and 3, and the service name
-   of [ADR-0021](0021-the-accounts-the-service-runs-under.md)). The program's name is not derived
+   of [ADR-0022](0022-the-accounts-the-service-runs-under.md)). The program's name is not derived
    from the product's, so one published Package serves every variant build: the member a
    self-update extracts is the same in all of them. Two names deliberately stay where they are: the
    Cargo package `fleet-agent`, a build-time identifier that never leaves the repository, and the
@@ -160,7 +160,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 7. **The instance name is a separate attribute, and its default is `Supervisor Agent`.** The
    top-level `name` is the operator's name for *this* Client, reported as `service.instance.name`
-   ([ADR-0017](0017-what-an-agent-reports-about-itself.md)). Its default is a display name (spaces
+   ([ADR-0018](0018-what-an-agent-reports-about-itself.md)). Its default is a display name (spaces
    and capitals) and deliberately not `supervisor`: a default equal to the type would print the
    same word in both columns of the fleet view. Nothing resolves a path or a service from this key.
 
@@ -180,7 +180,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    separate Server, client identity, lifecycle and rollback. Scaling the number of *managed* Agents
    is the multiplexing inside one installation ([ADR-0016](0016-client-modes-and-the-gateway.md));
    two variants on one host are told apart by `service.instance.name`
-   ([ADR-0017](0017-what-an-agent-reports-about-itself.md)).
+   ([ADR-0018](0018-what-an-agent-reports-about-itself.md)).
 
 10. **There is no instance flag.** `--instance` is not a flag at all (not hidden, not accepted and
     ignored), so a command line carrying it fails to parse, and no registered service carries it.
@@ -218,11 +218,11 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
       and then runs the same `service install` the command line would, which builds the layout and
       the data under `%ProgramData%\<PRODUCT_NAME>`. The layout is not put in `Program Files`: the
       service's own account must be able to write it
-      ([ADR-0021](0021-the-accounts-the-service-runs-under.md)), and granting a low-privileged
+      ([ADR-0022](0022-the-accounts-the-service-runs-under.md)), and granting a low-privileged
       account modify rights on a `TrustedInstaller`-owned tree it executes from is a
       privilege-escalation surface. The line is the one the Linux packages draw between the
       package-owned `/usr/libexec/<PRODUCT_NAME>/` payload and the program-owned `/opt` layout
-      ([ADR-0021](0021-the-accounts-the-service-runs-under.md)). The MSI passes no root flag, so no
+      ([ADR-0022](0022-the-accounts-the-service-runs-under.md)). The MSI passes no root flag, so no
       directory property reaches a command line, and an MSI host and an archive host put the same
       things in the same places.
     - **Two flags.** `--root` names the layout root; given **alone** it collapses layout and data
@@ -240,8 +240,8 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
       registration has it (clause 14).
     - A re-registration rewrites the program path (`ExecStart`) and the rest of the unit or plist
       from the version that runs it, the systemd unit's directives included
-      ([ADR-0021](0021-the-accounts-the-service-runs-under.md)). The account stays the one the
-      registration names ([ADR-0021](0021-the-accounts-the-service-runs-under.md)).
+      ([ADR-0022](0022-the-accounts-the-service-runs-under.md)). The account stays the one the
+      registration names ([ADR-0022](0022-the-accounts-the-service-runs-under.md)).
     - The instance's configuration, identity and state never move.
     - A change that would move the data root or the state directory of an installed host must bring
       its own migration and carries the full weight of this rule. An administrator who names
@@ -258,7 +258,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
        - Under the SCM it is the service's binary path name, read with `QueryServiceConfig`.
        - The install reads what the Client wrote, never a drop-in and never the manager's loaded
          state, as the account a registration names is read
-         ([ADR-0021](0021-the-accounts-the-service-runs-under.md)).
+         ([ADR-0022](0022-the-accounts-the-service-runs-under.md)).
        - A registration that names no `--state-dir`, and every user-scope one, offers none. A user
          scope has no administrator between the file and the service.
     3. **The file's**: the absolute `state_dir` that `supervisor.toml` names, and only beneath the
@@ -284,7 +284,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 16. **A Supervisors' root outside the roots is the operator's.** A `supervisor_dir` outside the
     data root, the layout root and the state directory stays as relocatable as the Supervisors'
-    directories are made ([ADR-0021](0021-the-accounts-the-service-runs-under.md)). A system-scope
+    directories are made ([ADR-0022](0022-the-accounts-the-service-runs-under.md)). A system-scope
     install on Windows never creates, restricts or hands over such a root. It leaves it as it is
     and names it in a warning. On Linux and macOS an install never touches a Supervisors' root.
 
@@ -436,13 +436,13 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 **Out of scope:** the versioned layout and its `current` pointer, the service's name, the account
 it runs under, what the Linux packages deliver and remove, and the MSI's dialogs and actions
-([ADR-0021](0021-the-accounts-the-service-runs-under.md)); staging, verifying, rolling back and
+([ADR-0022](0022-the-accounts-the-service-runs-under.md)); staging, verifying, rolling back and
 pruning versions, and the self-update consent
-([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)); the questions of the first
+([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)); the questions of the first
 configuration, `service install --endpoint` and what lies beside the program
 ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md));
 that no installer starts the service it registers
-([ADR-0021](0021-the-accounts-the-service-runs-under.md)); whether variant builds are ever
+([ADR-0022](0022-the-accounts-the-service-runs-under.md)); whether variant builds are ever
 published, and where their `UpgradeCode`s are recorded; how an operator discovers what is installed
 on a host; a confined SELinux policy module; configuration reload on `SIGHUP`; `Type=notify`
 integration; the startup rules themselves and the Server's enrolment window and approval, which the
@@ -451,7 +451,7 @@ installer only applies and names
 hosting apt and yum
 repositories; preseeding the endpoint on Linux; a macOS `.pkg`, which needs a Developer ID and
 notarization; the files an enrolment writes as root into the state directory, which no privileged
-step writes through a link ([ADR-0021](0021-the-accounts-the-service-runs-under.md) clause 11); the
+step writes through a link ([ADR-0022](0022-the-accounts-the-service-runs-under.md) clause 11); the
 `[tls]` files an enrolment reads as root; `[logging] dir`, which only the service's own run uses;
 the releases and the Server's image
 ([ADR-0038](0038-releases-attestations-and-the-server-image.md)).
@@ -526,7 +526,7 @@ the releases and the Server's image
 - **The Windows Event Log**: an event source registered at install time, a message resource, and a
   code path only one platform exercises. **A file only on Windows**: makes "where are the logs"
   platform-dependent and leaves containers without one. **Rely on the OTLP own-logs bridge**
-  ([ADR-0017](0017-what-an-agent-reports-about-itself.md)): needs a reachable Server, so it cannot
+  ([ADR-0018](0018-what-an-agent-reports-about-itself.md)): needs a reachable Server, so it cannot
   explain the failures that prevent one. **Size-based rotation**: `tracing-appender` does not
   offer it. **`keep = 0` as unlimited**: the setting that fills a disk. **Remotely configurable
   logging**: the Client's own configuration stays on the machine. **The log in the version
@@ -782,11 +782,11 @@ the releases and the Server's image
   `restaging_replaces_a_staged_binary_with_different_bytes`,
   `a_torn_pointer_is_healed_a_correct_one_left_alone`,
   `the_layout_is_found_from_the_pointer_the_service_was_registered_against` (clause 6, and the
-  layout of [ADR-0021](0021-the-accounts-the-service-runs-under.md)).
+  layout of [ADR-0022](0022-the-accounts-the-service-runs-under.md)).
 - `crates/fleet-agent/src/service/run_as.rs`: `windows_forms_are_the_passwordless_ones`,
   `a_missing_account_is_refused_with_the_way_out`,
   `the_handover_walks_the_tree_and_skips_what_is_missing` (the account of
-  [ADR-0021](0021-the-accounts-the-service-runs-under.md)).
+  [ADR-0022](0022-the-accounts-the-service-runs-under.md)).
 - `crates/fleet-agent/src/config_init.rs`: `an_existing_file_is_never_overwritten`,
   `an_endpoint_given_never_overwrites_an_existing_file`,
   `an_edit_changes_the_asked_keys_and_keeps_the_rest`, `the_defaults_are_what_the_file_holds`,
@@ -805,7 +805,7 @@ the releases and the Server's image
 - The tests of the first configuration's questions, `--endpoint`, the post-install's printed steps
   and the MSI's dialogs and actions, which hold what
   [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-  and [ADR-0021](0021-the-accounts-the-service-runs-under.md) carry:
+  and [ADR-0022](0022-the-accounts-the-service-runs-under.md) carry:
   `the_bootstrap_pair_is_asked_only_before_enrolment`,
   `the_server_ca_is_asked_for_where_tls_applies`, `the_suggested_endpoint_is_tls_on_the_loopback`,
   `a_plaintext_endpoint_is_accepted_only_on_a_loopback_literal`,

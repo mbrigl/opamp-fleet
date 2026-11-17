@@ -1,4 +1,4 @@
-//! Who shares an item chooses its crate (ADR-0041 clause 16).
+//! Who shares an item chooses its crate (ADR-0008 clause 16).
 //!
 //! `fleet-util` holds what the Client and the operator tool share and the Server does not use;
 //! `fleet-core` holds what the Server shares with either. This test reads the code under `src/` of
@@ -406,7 +406,7 @@ fn workspace_packages() -> BTreeSet<String> {
 /// Every module of `fleet-util` is named by the Client and by the tool and not by the Server;
 /// every module of `fleet-core` is named by the Server; no crate re-exports a `fleet_util::`
 /// item; the Server's manifest does not name `fleet-util`.
-/// Verifies: ADR-0041
+/// Verifies: ADR-0008
 #[test]
 fn each_shared_module_sits_in_the_crate_its_users_choose() {
     let mut wrong = Vec::new();

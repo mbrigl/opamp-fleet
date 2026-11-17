@@ -91,7 +91,7 @@ once its tag exists.
   **What to do:** nothing.
 
 - **Breaking: the Client refuses an `[attributes]` key in the `supervisor.` namespace**
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)
   clause 10). The namespace is
   the Supervisor's own statement. A `supervisor.kind.*` entry made every Agent of the host look
   like a Client's own Agent to the Server. A `supervisor.package.version` entry chose the version
@@ -212,7 +212,7 @@ once its tag exists.
   without a host is not re-keyed by its own reconnect.
   **What to do:** nothing.
 - **A configuration offered twice restarts its Managed Process once**
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)
   clause 56). A heartbeat that left the Client before the Server's push of a rollout arrived still
   named the old hash, the Server answered it with the offer again, and the Client applied both:
   the Managed Process restarted once more after reporting `APPLIED`, and the Client's own Agent
@@ -350,7 +350,7 @@ once its tag exists.
 
 - **Several Server instances serve the fleet on when one of them is lost**
   ([ADR-0025](docs/adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md),
-  [ADR-0015](docs/adr/0015-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md),
+  [ADR-0014](docs/adr/0014-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md),
   G-20 in [the specification](docs/SPECIFICATION.md)). Two or more instances on one PostgreSQL
   database and one bucket, with no CA key in a file, serve a fleet of up to about 100 000 Agents:
   - **An instance lost.** Every Agent it carried is connected to another instance within
@@ -615,7 +615,7 @@ once its tag exists.
   `max_connections` for `pool_size` connections of each instance.
 
 - **An Agent leaves a Server that stopped answering within one heartbeat interval**
-  ([ADR-0015](docs/adr/0015-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).
+  ([ADR-0014](docs/adr/0014-a-websocket-on-which-nothing-arrives-for-one-heartbeat-interval-is-ended.md)).
   A Server that was frozen, lost its power or was cut off closed nothing, and its Agents stayed on
   it until TCP gave up, about fifteen minutes. The Client, a Gateway's upstream connections and the
   `opamp` crate's WebSocket driver now send a WebSocket ping once nothing has arrived for half a
@@ -1139,7 +1139,7 @@ once its tag exists.
 ### Security
 
 - **`service config` and `service install --interactive` copy only certificates beside the
-  configuration** ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md) clause 11).
+  configuration** ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md) clause 11).
   The copy `server-ca.pem` is handed to the service's account, which owns the data root and could
   put a link where the file names its CA: a root-only file behind it was read and handed over. The
   copy now holds the CA file's certificates, encoded again, and a file that holds none is refused
@@ -1149,7 +1149,7 @@ once its tag exists.
   `server-ca.pem` that is no PEM certificate file fails the next `service config` with its name.
 
 - **On Windows a first install runs the Client under its own virtual account, not `LocalSystem`**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)).
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)).
   `service install`, the MSI's included, registers `NT SERVICE\<product>` where no service is
   registered yet, so a Managed Process the Client starts itself no longer holds `LocalSystem`. A
   re-registration — every MSI upgrade — keeps the account the SCM holds, `LocalSystem` included.
@@ -1160,7 +1160,7 @@ once its tag exists.
   "NT SERVICE\<product>"` moves one off `LocalSystem`.
 
 - **A Gateway rate-limits each host behind it as the Server limits a host**
-  ([ADR-0022](docs/adr/0022-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
+  ([ADR-0017](docs/adr/0017-a-gateway-rate-limits-each-downstream-host-as-the-server-limits-a-host.md)).
   The Server counts what a Gateway forwards in one aggregate for all the hosts behind it, so a
   single host speaking for many `instance_uid`s, or looping downloads or enrolment requests, could
   drain it and leave every other host behind that Gateway answered `Unavailable`. A Gateway now
@@ -1176,7 +1176,7 @@ once its tag exists.
   reports through.
 
 - **On Windows a Managed Process can no longer reach into the second service**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)).
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)).
   The second service's process kept the default security its account gives it, so a Managed
   Process under the same process account could open it to read its memory — what the Client sends
   it, the Supervisor Endpoint's token among it — run code in it, or duplicate its pipe handle and
@@ -1203,7 +1203,7 @@ once its tag exists.
 ### Added
 
 - **Managed Processes can run under a process account of their own**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)).
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)).
   `service install --process-account <account>` registers a second service,
   `<PRODUCT_NAME>-agents`, that runs under that account and starts every Managed Process, its
   version probe and a package's preflight on the Client's request, over a Unix socket on Linux and
@@ -1222,7 +1222,7 @@ once its tag exists.
 ### Changed
 
 - **An Agent's type is always its Supervisor's**
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)):
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)):
   the kind's type, the block's `service_name`, or the program's file name. A `service.name` a
   Managed Process reports — a Collector's `dist.name` among them — no longer decides which
   Configurations and Deployments reach its Agent; the Client names a differing one in a warning.
@@ -1233,7 +1233,7 @@ once its tag exists.
   its `service.version` reaches the fleet view.
 
 - **A Supervisor is never named after an entry the Client keeps in its state directory**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)
   clause 24). Where `supervisor_dir` is `state_dir`, a Supervisor named `instance-uid`, `config`,
   `packages`, `logs`, `gateway-packages` or `supervisors` took the Client's own entry of that name
   as its directory: removing the Supervisor deleted it, and a process account's group could read
@@ -1249,7 +1249,7 @@ once its tag exists.
   `<state_dir>/supervisors`, is not affected.
 
 - **On Windows every `service install` stops both services first, and starts again what ran**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)
   clause 9), with a process account or without one, every MSI upgrade among them: the Client and
   its Managed Processes are stopped for as long as the install runs. What ran is recorded under
   `HKLM\SOFTWARE\<PRODUCT_NAME>\WithdrawalPending` before the stop, so an install that fails or an
@@ -1258,13 +1258,13 @@ once its tag exists.
   **What to do:** schedule MSI upgrades as the short outage they are.
 
 - **A package's `.tar.gz` members never land writable by group or others**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)
   clause 23), on every host: a member written `0777` or `0666` lands `0755` or `0644`.
   **What to do:** nothing, unless an agent relies on a group-writable file from its package; it
   then creates that file at run time.
 
 - **On Linux and macOS a `service install` that changes an account stops both services first**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)
   clause 26): another `--run-as`, or a process account changed or dropped. It waits up to 60
   seconds for each, starts again what ran once it has succeeded, and leaves the services stopped
   if it fails, naming them. An install that changes no account stops nothing beyond what it did.
@@ -1273,7 +1273,7 @@ once its tag exists.
 ### Fixed
 
 - **An MSI upgrade no longer unregisters the services halfway**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)
   clause 10). The MSI stops and unregisters only on a real removal, never while a major upgrade
   removes the product it replaces.
 
@@ -1285,7 +1285,7 @@ once its tag exists.
 ### Security
 
 - **The Client speaks only to the process its service manager runs as the second service**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md) clause 19).
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md) clause 19).
   Where a process account is registered, any Managed Process under it could replace the second
   service's socket, or on Windows create an instance of its pipe, and be told every program, its
   environment and the Supervisor Endpoint's token at the Client's next connection. Before it writes
@@ -1327,7 +1327,7 @@ once its tag exists.
   longer packed as a second copy, and the names it reports are quoted.
 
 - **Secrets are wiped from memory when they are dropped**
-  ([ADR-0014](docs/adr/0014-secrets-in-memory-are-wiped-on-drop.md)): private keys,
+  ([ADR-0015](docs/adr/0015-secrets-in-memory-are-wiped-on-drop.md)): private keys,
   passwords, the bytes of a `bootstrap.p12` while it is read, the Supervisor Endpoint token,
   `[packages] archive_key` and the text of `supervisor.toml` where the Client rewrites it, on the
   Client, the Server and in `opamp-fleetctl`, and the Server's PostgreSQL password and S3 secret
@@ -1358,7 +1358,7 @@ once its tag exists.
 ### Security
 
 - **An install acts only on a state directory an administrator named**
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)).
   `service install` and `service config` run as root or an Administrator, on every package
   upgrade too, and took the state directory from `supervisor.toml`, a file the service's account
   may rewrite. A compromised Client could name any directory and have the next install hand it
@@ -1374,7 +1374,7 @@ once its tag exists.
   On Windows, create a `supervisor_dir` outside the roots yourself.
 
 - **No privileged install step follows a link the service's account placed**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)).
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)).
   `service install` and `service config`, which run as root or an Administrator, wrote, truncated,
   changed the mode of and re-owned files in the state directory and the layout root through a
   symbolic link, junction or hard link the service's account placed there — for example after the
@@ -1584,7 +1584,7 @@ once its tag exists.
   longer serial.
 
 - **A Managed Process states only its own `service.*` attributes**
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)).
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)).
   What a Managed Process reported about itself was laid over the Supervisor's description for
   every key but its identity and name. A process running a command from its configuration could
   report another host's `host.name` or `host.id` and draw that host's Configurations, report
@@ -1598,7 +1598,7 @@ once its tag exists.
   Collector reported, move that tag to a Server label, or to `[attributes]` for the whole host.
 
 - **The Linux packages run the Client under its own account, and an upgrade keeps the account it
-  finds** ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)).
+  finds** ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)).
   Every packaged Linux host ran the Client, and every command a Server-delivered configuration
   names, as root. A host installed with `--run-as` went back to root at its next package upgrade,
   without a word, because the post-install re-registered without the flag. The `.deb` and the
@@ -1686,7 +1686,7 @@ once its tag exists.
   until an exchange fails.
 
 - **A plain `service install` no longer returns a host to root**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)).
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)).
   Without `--run-as` a re-registration keeps the account the registration names. Root is chosen
   with `--run-as root`, which the unit records as `User=root`. The install prints the account and
   where it came from, and on every system registration under Linux and macOS, root included, hands
@@ -1696,7 +1696,7 @@ once its tag exists.
   Windows is unchanged: the SCM keeps the logon account it holds.
 
 - **The Client writes its systemd unit itself**
-  ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)).
+  ([ADR-0022](docs/adr/0022-the-accounts-the-service-runs-under.md)).
   `ExecStart=` now quotes every word, so a root holding a space, a `%` or a `$` names the right
   program. Every system unit carries `ProtectControlGroups=yes`; a unit running as root also
   carries `ProtectKernelTunables=yes`, `LockPersonality=yes` and `RestrictRealtime=yes`. Nothing
@@ -2119,7 +2119,7 @@ once its tag exists.
 - **A Gateway frees what it kept for an Agent once that Agent is gone**: a departed socket's pool
   places and routes, and the route of an exchange that ends without its reply. A plain-HTTP
   Agent's pool place still lasts until its upstream connection drops. **What to do:** nothing.
-- **A delivered Supervisor block is held to more of ADR-0018 clause 35's rule.** The clause
+- **A delivered Supervisor block is held to more of ADR-0019 clause 35's rule.** The clause
   refuses, whatever `[supervisors] delivered_env` allows, a variable that steers which code a
   program loads and a value pointing where the Server delivers files no one signed. Beyond the names
   and placeholders the clause lists, the Client now applies that rule to `PATHEXT`, `COMSPEC`,
@@ -2170,7 +2170,7 @@ once its tag exists.
 ### Changed
 
 - **The Client's install takes the fleet's files it finds beside its program**
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)).
   `service install` looks in its program's directory for `server-ca.pem`, `bootstrap.pem`,
   `bootstrap-key.pem` and `package-signing-key.pub`. `--interactive` offers them as the answers;
   `--endpoint` copies the CA and writes the verification key, and an install without
@@ -2223,7 +2223,7 @@ once its tag exists.
   differs; the free-text signature fields are gone.
 - **Breaking: the build's product variables are named for the product**
   ([ADR-0037](docs/adr/0037-the-products-version.md) clauses 1 and 4,
-  [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md) clause 2).
+  [ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md) clause 2).
   `OPAMP_FLEET_PRODUCT_NAME` is now `OPAMP_PRODUCT_NAME`, `OPAMP_FLEET_PRODUCT_DISPLAY_NAME` is
   `OPAMP_PRODUCT_TITLE` and `OPAMP_FLEET_VERSION` is `OPAMP_PRODUCT_VERSION`; the version the build
   resolves is emitted as `OPAMP_PRODUCT_RELEASE`. The old names are no longer read: a build that
@@ -2261,7 +2261,7 @@ once its tag exists.
   `heartbeat_interval_secs` is short raises `messages_per_sec`; the Server warns at startup when
   one host cannot report for 256 Agents at that interval.
 - **Remote configuration can be switched off per Supervisor**
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)).
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)).
   `[supervisors] remote_config_disabled` in `supervisor.toml` lists Supervisor names whose Agents
   declare neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig` and run only on the files placed
   in `<supervisor_dir>/<name>/config/`. A delivered block brings a listed Supervisor no `args`,
@@ -2273,7 +2273,7 @@ once its tag exists.
   move anything there you want to keep, since the first delivered configuration replaces every
   file in it.
 - **A host can keep its Supervisor set from the Server**
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)).
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)).
   `[supervisors] server_manages_set = false` in `supervisor.toml` builds the Client's own Agent
   without `AcceptsRemoteConfig` and `ReportsRemoteConfig`, so the Server offers it no Supervisor
   set; one that arrives anyway is ignored and logged once per hash. Every other capability stays,
@@ -2361,7 +2361,7 @@ once its tag exists.
   naming the entry.
 
 - **A Server-delivered `[[supervisor]]` block brings nothing that reaches past the package
-  signature** ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)).
+  signature** ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)).
   It may set `env`, `args` and `version_args` only as the running block of the same name already
   has them, or as the new `[supervisors] delivered_env` and `delivered_args` allow; never `PATH`,
   `LD_*` or `DYLD_*`.
@@ -2385,7 +2385,7 @@ once its tag exists.
   Client** — each question offers what `supervisor.toml` holds, only the asked keys change, and a
   host that holds no certificate yet is enrolled with the Server on the spot; nothing is
   registered. It takes the `--user`, `--root` and `--data-root` the Client was installed with
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)).
   **What to do:** nothing; restart the service after it to apply the change.
 
 ### Changed
@@ -2412,7 +2412,7 @@ once its tag exists.
   gone**
   ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
   [ADR-0013](docs/adr/0013-connection-settings-that-never-lead-to-plaintext.md),
-  [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md),
+  [ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md),
   [ADR-0028](docs/adr/0028-the-audit-record.md),
   [ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md)).
   The Server reads no `Authorization` header on `/v1/opamp` or the download route; one an older
@@ -2469,7 +2469,7 @@ once its tag exists.
   referenced package `url`
   ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md))
   and an own-telemetry destination
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)). A
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)). A
   peer that speaks only TLS 1.2 can no longer connect. **What to do:** move every such URL to
   `wss://` or `https://`, and put TLS 1.3 in front of any Collector or mirror that lacks it.
 - **The Server requires `[tls]` and listens on the loopback by default.** Without `[tls]` it does
@@ -2478,12 +2478,12 @@ once its tag exists.
   (`scripts/dev-pki.sh` makes a development set), set `listen = "0.0.0.0:4320"` to serve the
   fleet, and point clients of the REST API at `https://`.
 - **The Client's default endpoint is `wss://127.0.0.1:4320/v1/opamp`**, and so is the MSI's
-  prefill ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
+  prefill ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)).
   **What to do:** a Client that relied on the old `ws://` default needs `[tls] ca_file` for the
   Server's certificate.
 - **Nothing is installed without a signature**
   ([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md),
-  [ADR-0019](docs/adr/0019-the-client-updates-itself-from-a-signed-package.md)). A Client without
+  [ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md)). A Client without
   `[packages] verification_key` takes no packages and no self-update. The Server offers no entry
   its Deployment has not signed, and refuses (`409`) to roll out a Deployment with an unsigned
   entry. A download goes only to the Server's own origin or to an https prefix in `[packages]
@@ -2493,7 +2493,7 @@ once its tag exists.
 - **Every Agent is admitted by a client certificate, and a new host is approved by an operator**
   ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
   [ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md),
-  [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
+  [ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)).
   The Server requires `[tls] client_ca_file`, and asks for the client certificate in
   the TLS handshake — the package download included. A fresh host enrols with a bootstrap
   certificate from `[enrolment] bootstrap_ca_file`, only while an operator holds the enrolment
@@ -2521,7 +2521,7 @@ once its tag exists.
 - **The Gateway's downstream endpoint and the Supervisor Endpoint bound connection setup** as the
   Server's two planes do: a peer has 30 seconds to send its request headers, and on a TLS Gateway
   10 seconds to complete the handshake
-  ([ADR-0008](docs/adr/0008-five-crates-on-tokio-and-axum.md)). A
+  ([ADR-0008](docs/adr/0008-six-crates-on-tokio-and-axum.md)). A
   plaintext Gateway now drains for at most 35 seconds on shutdown, as a TLS one already did.
   **What to do:** nothing.
 
@@ -2544,7 +2544,7 @@ once its tag exists.
   is `true` by default and `false` withdraws it. The package it takes is always the Client's own
   Agent type, `supervisor`; `[self_update] package` and `service install --self-update-package`
   are gone, and `--interactive` no longer asks about the self-update
-  ([ADR-0019](docs/adr/0019-the-client-updates-itself-from-a-signed-package.md)).
+  ([ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md)).
   **What to do:** on every host, before this release reaches it, replace the
   `[self_update]` section of `supervisor.toml`: `enabled = false` becomes `self_update = false`
   under `[packages]`, and anything else is deleted. A host whose file still has the section does not
@@ -2561,7 +2561,7 @@ once its tag exists.
   the file, and are used at once: the install sends the enrolment request, logs its key
   fingerprint and waits for an operator's approval before it registers the service. On a
   configured host every question offers what the file holds, and only the asked keys change
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)).
   **What to do:** open the enrolment window before running `--interactive` on a new host, and
   approve the request it waits for. A file that names a bootstrap pair keeps it, and a service
   started on it enrols as before.
@@ -2570,14 +2570,14 @@ once its tag exists.
 
 - **A Client offered its first own-telemetry destination over a running connection reports
   metrics at once**
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)).
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)).
   The sampler decided once per connection whether a destination was in force, so a Client that
   learned of one over the connection already open — a Server given `[telemetry_offer]` and
   restarted after the Client was up — sent logs and traces but no metrics until it next
   reconnected. It now checks at every sample. **What to do:** nothing; a Client restarted after the
   offer was not affected.
 - **A new own-telemetry destination no longer holds up the Client's connection**
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)).
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)).
   Applying an offer shut the exporters it replaced down in place, and their flush to a destination
   that had gone silent held the OpAMP connection for up to the export timeout per signal. The
   replaced exporters are now detached at once and flushed on a thread of their own; only stopping
@@ -2642,7 +2642,7 @@ once its tag exists.
   `supervisor.toml`, the private key and the stored connection settings were readable by any
   account on the host. `service install` now removes the inherited rights
   from the data root and leaves it to LocalSystem, the Administrators and the service account
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)
   clause 25). **What to do:** re-run `service install` on every Windows host, or apply the same
   with `icacls "%ProgramData%\<product>" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F /grant:r
   *S-1-5-32-544:(OI)(CI)F` followed by a grant to the service account. Revoke the certificate of
@@ -2655,7 +2655,7 @@ once its tag exists.
   already did.
 - **`service install` keeps the state directory under the data root** — a configuration that
   names no absolute `state_dir` now gets `<data root>/state`, as
-  [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)
+  [ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)
   states; before, the install took `client-state` in the working directory of the shell it ran
   from, typically the operator's home directory. **What to do:** on a host installed that way,
   uninstall, delete that `client-state` directory and install again; the host enrols anew.
@@ -2766,7 +2766,7 @@ once its tag exists.
 
 - **A Client that updates itself into a configuration it cannot read now rolls back.** The
   self-update's probation
-  ([ADR-0019](docs/adr/0019-the-client-updates-itself-from-a-signed-package.md)) counts a failed
+  ([ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md)) counts a failed
   start
   and returns the host to the previous version after three attempts — but it never saw this one: a
   run resolved its configuration *before* it resolved the update in flight, so a new version that
@@ -2784,7 +2784,7 @@ once its tag exists.
 - **An Agent reports its own traces.** The `own_traces` destination has been offered, persisted and
   exported to since 0.4.x, with nothing to export: no code created a span, and the bridge in force
   converts `tracing` events rather than spans. Five fleet operations are now traces
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)) — installing a
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)) — installing a
   package, applying a configuration (a Managed Process's, and the Supervisor set), applying offered
   connection settings, and the Client's own self-update — each with its phases as child spans and
   the outcome the Server is told as the span's status. A failed rollout is one trace naming the
@@ -2805,7 +2805,7 @@ once its tag exists.
 - **An Agent's own metrics now say what the Agent is and where it runs.** Every sample already
   carried the Agent's `service.instance.id` and the operator's name for it; it now also carries
   `service.name` — the Agent *type*
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)), which
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)), which
   differs per Agent within one Client and therefore belongs on the sample rather than on the
   Resource — while the OTLP Resource carries `os.type`, `host.arch` and `os.description` beside
   what identifies the Client. A series can be read as "this Agent, of this type, on this platform"
@@ -2816,8 +2816,8 @@ once its tag exists.
 - **The Client says what it is at startup, and what its TLS will use.** Two lines before any work:
   the running version, the configuration file, the state directory, the endpoint and the number of
   Supervisors — the version appeared in no log line until now, so a file a self-update left behind
-  ([ADR-0019](docs/adr/0019-the-client-updates-itself-from-a-signed-package.md),
-  [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)) could not be attributed to
+  ([ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md),
+  [ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)) could not be attributed to
   the version that wrote it — and then the trust and the client certificate actually in force,
   which is a Server-issued one no `supervisor.toml` mentions when there is one
   ([ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
@@ -2832,7 +2832,7 @@ once its tag exists.
   the Collector
   Supervisor states which config-map entries it hands the Collector on every (re)start; and the
   `command` Supervisor states the fully expanded invocation of its Foreign Agent
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)) — its
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)) — its
   environment by variable name only, never by value. **What to do:** nothing, unless you are
   chasing one of those, in which case `RUST_LOG=debug` now answers it.
 
@@ -2854,7 +2854,7 @@ once its tag exists.
 ### Changed
 
 - **A `[telemetry_offer]` now says what an Agent reports — and can take a destination away**
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)). Own telemetry
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)). Own telemetry
   could be switched on and moved from the Server, and never switched off: a destination once in
   force survived reconnects and restarts, and every message that would have ended it was read as
   "unchanged". An offer that names any of the three signals is now the whole truth about own
@@ -2875,7 +2875,7 @@ once its tag exists.
 
 - **Own telemetry now carries the operator's name for the Agent it came from.**
   `service.instance.name`
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)) is
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)) is
   non-identifying, so it was filtered out of the OTLP Resource and every series arrived labelled
   with
   a `service.instance.id` uuid and nothing an operator could place against the fleet view they had
@@ -2911,7 +2911,7 @@ once its tag exists.
   to it. `http://` is now accepted to loopback and to `10.0.0.0/8`, `172.16.0.0/12`,
   `192.168.0.0/16` and `fc00::/7`, and refused everywhere else — reported back with the reason, as
   before, never warned about and never downgraded
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)). The
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)). The
   judgement is made on the **address**, so a cleartext *host name* is still refused whatever it
   resolves to: an admission test a later DNS change can flip is not one an offer can be trusted
   against. Link-local and carrier-grade NAT are private but not the operator's, and stay refused.
@@ -2925,7 +2925,7 @@ once its tag exists.
 
 - **A fresh Client calls itself `Supervisor Agent`.** The top-level `name` — your name for *this*
   Client, reported as `service.instance.name` — defaulted to the program's own name, which since
-  [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md) reads exactly
+  [ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md) reads exactly
   like the Agent *type* it sits beside in the fleet view. It is now a display name instead: spaces
   and capitals, because nothing resolves a path or a service from this key.
   **What to do:** nothing. A host whose configuration names this Client keeps that name; only a
@@ -2939,15 +2939,15 @@ once its tag exists.
   same name. `.tar.gz` is what every other agent's package already ships as — the only container
   that carries the executable bit, unpacked the same way on every platform — and `supervisor` is the
   name of the Set these files become since
-  [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md). The documented upload
+  [ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md). The documented upload
   procedure was building its Set at `.../packages/opamp-fleet-client/opamp-fleet-client/...`, whose
-  second field is the Agent type: since ADR-0020 no Client reports that type, so the Set fitted
+  second field is the Agent type: since ADR-0021 no Client reports that type, so the Set fitted
   nobody and the release was publishing a package the fleet could not install.
   **What to do:** three things, and the second is the one that bites.
   1. Scripts that fetch release assets by name need the new name and extension. There is no
      transition window — the old name published a package that no longer installs.
   2. **A Client already in the field will refuse the renamed package** until its `client.toml`
-     agrees. The self-update gate is the package name, so a host configured before ADR-0020 reports
+     agrees. The self-update gate is the package name, so a host configured before ADR-0021 reports
      *"this Agent installs only the package "opamp-fleet-client"; the Server offered "supervisor""*
      and stays on its version — loud, harmless, and stuck. Fix it on the host before rolling out:
      set `package = "supervisor"` under `[self_update]`, or delete the section and take the default,
@@ -2978,8 +2978,8 @@ once its tag exists.
   (`supervisor-prod` for a named instance) on systemd, launchd and the SCM, the version directories
   are `supervisor-<version>-<hash>`, the `PATH` symlink is `/usr/bin/supervisor`, the log file is
   `supervisor.<date>.log`, and `client.toml` is **`supervisor.toml`**
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md) on the two names). It completes
-  what ADR-0020 began: one word from the
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md) on the two names). It completes
+  what ADR-0021 began: one word from the
   Agent type in the fleet view down to the unit you restart. The top-level `name` default follows
   it; a host that set one of its own keeps it.
 
@@ -2987,7 +2987,7 @@ once its tag exists.
   own program from an artifact *by name*, so a host on any earlier release asks for
   `opamp-fleet-client`, does not find it, and stays exactly where it is — loud, and harmless. There
   is no compatibility
-  name: carrying both would re-create the two-names-for-one-file problem ADR-0020 removed.
+  name: carrying both would re-create the two-names-for-one-file problem ADR-0021 removed.
 
   **What to do on every host**, in this order:
 
@@ -3014,8 +3014,8 @@ once its tag exists.
 
 - **The Client's own Agent now reports the type `supervisor`, and takes its own updates under that
   name** — it used to report and consent to `opamp-fleet-client`
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md), changing one value of
-  [ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)). Two strings
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md), changing one value of
+  [ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)). Two strings
   change, and they are the same string: the `service.name` every Client reports, and the default
   `[self_update] package` it consents to. The program, its service and its configuration file take
   the same name in this release — see *The program, the service and the configuration file are now
@@ -3042,8 +3042,8 @@ once its tag exists.
 
 - **The Client now consents to its own updates unless you say otherwise** — a behaviour change on
   hosts that are already installed
-  ([ADR-0019](docs/adr/0019-the-client-updates-itself-from-a-signed-package.md), superseding
-  [ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md) point 4). Until
+  ([ADR-0020](docs/adr/0020-the-client-updates-itself-from-a-signed-package.md), superseding
+  [ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md) point 4). Until
   now an absent `[self_update]` section meant *no consent*, so a Client installed the documented way
   declared no package capability at all and the Server could never replace its binary — which made
   the Client the one program in the fleet left to patch by hand on every host. That is now the wrong
@@ -3132,7 +3132,7 @@ once its tag exists.
   every host anyone ever installed. It now installs under `<base>/<product>` alone:
   `/opt/opamp-fleet` and `/var/lib/opamp-fleet` on Linux, `%ProgramData%\opamp-fleet` on Windows,
   `/Library/Application Support/opamp-fleet` on macOS
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)). The product's name is
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)). The product's name is
   fixed at build time (`OPAMP_FLEET_PRODUCT_NAME`, default `opamp-fleet`), and a second
   installation on one host is a **second build** rather than a runtime flag — the flag was
   reachable from no delivery path we ship, was read by nothing at runtime, and could not be
@@ -3166,7 +3166,7 @@ once its tag exists.
 - **A `[[supervisor]]` block can no longer name a program on the machine.** `binary` and `command`
   take a bare file name and nothing else; an absolute path — and the Windows drive-relative form
   with it — is refused at startup with a message naming the way across
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)). A Managed Process is
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)). A Managed Process is
   always one this Client installed, so every Supervisor now declares `AcceptsPackages` and the
   capability is a constant of the Client rather than something derived from a path.
   **What to do:** an agent the machine carries
@@ -3256,7 +3256,7 @@ once its tag exists.
   The refusal now reaches the Server as a `FAILED` status naming what was dropped, including one
   found at startup when persisted settings are put back in force. An offered client `certificate` is
   now honoured rather than ignored
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)):
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)):
   the exporter presents it, paired with the key this Client generated for its signing request. A
   `private_key` *in the offer* is refused by name — this Client's private key never leaves its host
   and is never accepted from the Server.
@@ -3354,7 +3354,7 @@ once its tag exists.
 - **The REST API and the UI moved to their own port, on loopback**
   ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md),
   superseding the single-listener decision of
-  [ADR-0008](docs/adr/0008-five-crates-on-tokio-and-axum.md)). The Server now serves two planes,
+  [ADR-0008](docs/adr/0008-six-crates-on-tokio-and-axum.md)). The Server now serves two planes,
   split by audience. The **Agent plane** keeps `listen` (`0.0.0.0:4320`): the OpAMP endpoint and the
   package download an offer's `download_url` points at. The **Operator plane** is new — `[rest]
   listen`, `127.0.0.1:4321` by default — and carries the REST API, the API docs, and the bundled UI.
@@ -3422,7 +3422,7 @@ once its tag exists.
   place; such an artifact is now unpacked instead. Nothing else changes: `.tar.gz` stays the
   right container for a tree on Unix, being the one that carries file modes.
 - **The operator tools moved to their own crate**
-  ([ADR-0008](docs/adr/0008-five-crates-on-tokio-and-axum.md)).
+  ([ADR-0008](docs/adr/0008-six-crates-on-tokio-and-axum.md)).
   `opamp-package-sign` and the new `opamp-package-fetch` are `crates/package-tools`, not binaries
   of the Client: the crate that runs on every managed host no longer carries tooling that never
   runs there. The binaries keep their names and their behaviour.
@@ -3442,7 +3442,7 @@ once its tag exists.
   **What to do:** nothing; it is a new tool beside `opamp-package-sign`, which still builds an
   artifact out of any program you have.
 - **A `command` Supervisor can reload instead of restart**
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)). A `[[supervisor]]` block of
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)). A `[[supervisor]]` block of
   `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also accepted,
   with or without a `SIG` prefix): a configuration change is then applied by sending that signal,
   and the process keeps running with its in-flight state. If the signal cannot be delivered or
@@ -3454,7 +3454,7 @@ once its tag exists.
 ### Changed
 
 - **Removing a Supervisor now deletes its directory**
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)). When an applied Supervisor set
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)). When an applied Supervisor set
   removes a Supervisor, the Client stops it as before and then deletes
   `<supervisor_dir>/<name>/` whole — the Client-owned program, staged packages, written
   configuration entries, and the `instance-uid`. Re-adding the same name later starts a genuinely
@@ -3479,7 +3479,7 @@ once its tag exists.
 ### Fixed
 
 - **The Client stops its Managed Processes cleanly when it updates itself.** The self-update
-  restart path exited without running the graceful shutdown ADR-0019 specifies, so the Managed
+  restart path exited without running the graceful shutdown ADR-0020 specifies, so the Managed
   Processes were left to the service manager. On systemd the unit's cgroup reaped them; on a manager
   that does not (launchd, the Windows SCM, a foreground or non-cgroup container run) they were
   orphaned, and the restarted Client spawned duplicates that fought over their ports. The
@@ -3522,8 +3522,8 @@ once its tag exists.
 ### Security
 
 - **A Server-delivered `[[supervisor]]` block may name only a program the Client owns**
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)).
-  A Configuration typed `opamp-fleet-client` that pushes a Supervisor set (ADR-0018) is now refused
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)).
+  A Configuration typed `opamp-fleet-client` that pushes a Supervisor set (ADR-0019) is now refused
   (`FAILED`, nothing stopped or written) if any block names its program by an **absolute path** —
   that would let the Server spawn a machine binary that never passed through package signing. A
   bare file name — the Client-owned, package-updatable case — is unaffected, as is an absolute-path
@@ -3540,7 +3540,7 @@ once its tag exists.
   is off.
 
 - **The Server warns at startup when a credential-bearing offer runs without `[auth]`.** A
-  `[connection_offer]` credential (ADR-0013) or `[telemetry_offer]` headers (ADR-0017) are handed
+  `[connection_offer]` credential (ADR-0013) or `[telemetry_offer]` headers (ADR-0018) are handed
   to any Agent that connects; with the OpAMP endpoint open (no `[auth]`), that means any anonymous
   peer. The offer still works — this is a loud log line, not a refusal, so zero-config operation is
   unchanged.
@@ -3571,7 +3571,7 @@ once its tag exists.
   one extra publication call.
 
 - **A configuration offered to the Client's own Agent now means something — its Supervisor set**
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)). A
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)). A
   Configuration typed `opamp-fleet-client` carries `[[supervisor]]` blocks; a matching Client
   stops what left the set, writes the blocks into its own `client.toml` (preserving the
   operator's comments and everything outside them), and starts what arrived — unchanged
@@ -3616,7 +3616,7 @@ once its tag exists.
   instead of under `/var/lib`, where SELinux-enforcing hosts (Fedora, RHEL, SUSE 16) never let
   systemd start it (`status=203/EXEC`); `client.toml` and `state/` stay at
   `/var/lib/opamp-fleet/client/<instance>`, and `--root` still puts everything under the one
-  directory it names ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
+  directory it names ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)).
   **What to do:** nothing on a packaged (`.deb`/`.rpm`) host — the upgrade re-registers the unit
   against `/opt`, restarts the service if it was running, moves no data, and cleans the orphaned
   binaries out of `/var/lib`. A *manual* Linux system install (`.7z`, no `--root`) should re-run
@@ -3680,7 +3680,7 @@ once its tag exists.
   `host.cpu.model.name` and, where the platform stamps one, `os.build_id`. The fleet table gains a
   **Network** column — the first address of each kind at a glance, the full lists in the tooltip
   and the attribute chips — and everything stays searchable like any other reported attribute
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)). Addresses are re-read on
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)). Addresses are re-read on
   each description, so a DHCP move shows up. No operator action required; note that host addresses
   are now visible to anyone who can read the fleet API.
 
@@ -3689,7 +3689,7 @@ once its tag exists.
 - **The Linux packages put a symlink on `PATH`, and removing them uninstalls every staged
   version.** The `.deb` and `.rpm` now deliver the binary to `/usr/libexec/opamp-fleet-client`;
   `/usr/bin/opamp-fleet-client` becomes a symlink through the install layout's `current` pointer
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)), so
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)), so
   `opamp-fleet-client --version` — and every other CLI call — answers for the binary the service
   actually runs, even after a fleet self-update or a hand-reinstalled older package. A real removal
   (`apt remove`, `dnf remove`) now also deletes the staged `versions/` and the `current` pointer,
@@ -3701,7 +3701,7 @@ once its tag exists.
 
 - **The MSI's endpoint page comes prefilled with the development default**
   (`http://localhost:4320/v1/opamp`) instead of empty, so a local evaluation install is a
-  click-through (ADR-0020). Interactive installs only: clearing the field still means "configure
+  click-through (ADR-0021). Interactive installs only: clearing the field still means "configure
   later", a value passed as `ENDPOINT=` on the `msiexec` command line still wins, and a silent
   install (`/qn`) without one still writes no configuration — unattended deployments are
   unaffected.
@@ -3763,7 +3763,7 @@ once its tag exists.
   warning saying so.
 
 - **A Server-offered self-update version can no longer escape the install layout.** The offered
-  version string becomes a directory name under `versions/` (ADR-0020); a crafted value carrying
+  version string becomes a directory name under `versions/` (ADR-0021); a crafted value carrying
   `..` or a path separator (e.g. `1.0.0+../../../…`) could place the staged binary outside the
   layout
   and repoint `current` at it — an escape the package hash and signature never covered, because they
@@ -3857,7 +3857,7 @@ once its tag exists.
 ### Added
 
 - **A release now ships native installers: `.deb`, `.rpm` and `.msi`**
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)). They sit *beside* the five
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)). They sit *beside* the five
   `.7z`
   archives, which are unchanged and are still the artifact a Server offers for a Client self-update
   —
@@ -3887,7 +3887,7 @@ once its tag exists.
   shows an unknown publisher and `rpm` reports no signature. macOS keeps the archive only.
 
 - **`service install --endpoint <url>`** writes the first configuration file without asking
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)).
   It is what the installers above use, and what a provisioning run that has an endpoint but no
   terminal needs — `--interactive` is an error without one, on purpose. It writes the same file, is
   mutually exclusive with `--interactive`, and keeps an existing configuration rather than
@@ -3919,7 +3919,7 @@ once its tag exists.
   running to completion first.
 
   Both endpoints now read one implementation of the rule
-  ([ADR-0008](docs/adr/0008-five-crates-on-tokio-and-axum.md)). Nothing to change on any host — an
+  ([ADR-0008](docs/adr/0008-six-crates-on-tokio-and-axum.md)). Nothing to change on any host — an
   affected Agent works through a Gateway as soon as it runs this version.
 
 - **`server --version` now names the build it is, not the release it is heading for.** It printed
@@ -3938,7 +3938,7 @@ once its tag exists.
   what it always was, and no Agent, configuration or stored file is touched.
 
 - **The fleet view shows an Agent's Instance UID again.** It had been the line under the agent name
-  until [ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md) gave a
+  until [ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md) gave a
   row both the operator's name for an Agent and the type it reports, and the UID moved into the name
   link's tooltip — where nothing on a printed, screenshotted or scrolled-past row carried it. It is
   a
@@ -4065,8 +4065,8 @@ once its tag exists.
   type no Agent has reported yet can still be typed in.
 
   The **name** now stands alone on the first line, and is filled in rather than asked for: from the
-  chosen artifact's file name, which states the package it belongs to (ADR-0020), else a
-  source url's last segment, else the Agent type folded into the ADR-0020 name grammar. It is
+  chosen artifact's file name, which states the package it belongs to (ADR-0021), else a
+  source url's last segment, else the Agent type folded into the ADR-0021 name grammar. It is
   derived again when a request is actually sent, so an artifact chosen and uploaded in one motion is
   named after itself. A name typed by hand outranks all three, and one that names a package that
   exists is not renamed by a correction to that package's type.
@@ -4106,7 +4106,7 @@ once its tag exists.
 ### Added
 
 - **A Client running as a service now writes its own log to disk**
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)), at
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)), at
   `<state_dir>/logs/`, one file per day with seven days kept.
 
   **On Windows this closes a hole**: the SCM discards a service's stderr, so a Client installed
@@ -4117,7 +4117,7 @@ once its tag exists.
 
   Running the Client in the foreground writes no file; stderr is already in front of you.
 
-  It is not a replacement for `ReportsOwnLogs` (ADR-0017): that ships to a destination the Server
+  It is not a replacement for `ReportsOwnLogs` (ADR-0018): that ships to a destination the Server
   offers, over a connection that must already work, and the failures most worth reading are the ones
   where it does not.
 
@@ -4137,7 +4137,7 @@ once its tag exists.
 - **A package says how many Agents it reaches.** `GET /api/v1/packages` gains `targeted_agents`,
   and the package list in the UI shows `⚠ reaches no agent` when it is zero.
 
-  This closes a silent failure the follow-ups of ADR-0033 and ADR-0017 both named: a
+  This closes a silent failure the follow-ups of ADR-0033 and ADR-0018 both named: a
   package can target nobody — through an Agent type that is unset or misspelled, artifacts for
   platforms nobody runs, or a Selector that matches no one — and none of those is an upload error.
   The package stored fine and reached no one, and nothing said so until somebody noticed the version
@@ -4224,7 +4224,7 @@ once its tag exists.
   interval where one is configured.
 
 - **Every Agent can now report its own telemetry** — metrics, logs, and traces — to a destination
-  the **Server** names ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)).
+  the **Server** names ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)).
 
   Add a `[telemetry_offer]` section to `server.toml` with any of `metrics_endpoint`,
   `traces_endpoint`, `logs_endpoint` — full OTLP/HTTP URLs **with path**, e.g.
@@ -4242,7 +4242,7 @@ once its tag exists.
   the Agent's identifying attributes, so one host's several Agents stay apart at the receiving end.
 
   **What it does not send:** a Collector's *internal* telemetry. This Client must not touch a
-  Managed Process's configuration (ADR-0018), so what it reports is what it observes from the
+  Managed Process's configuration (ADR-0019), so what it reports is what it observes from the
   outside. Configure the Collector for its own internals as you would without OpAMP.
 
   **A cleartext destination is refused, not warned about.** `http://` beyond the loopback interface
@@ -4302,7 +4302,7 @@ once its tag exists.
   a fresh host cannot guess (endpoint, Agent name, credential, a private CA when the endpoint is
   `wss://`/`https://`, and last, defaulting to *no*, consent for the Server to update this Client's
   own binary), writes the file, and validates it before registering the service
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)).
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)).
 
   Nothing about existing invocations changes: the flag is opt-in, an existing file is kept rather
   than overwritten, and `--interactive` without a terminal on stdin fails instead of blocking a
@@ -4337,7 +4337,7 @@ once its tag exists.
   nothing migrates automatically.
 
 - **`${supervisor_dir}` and `${config_dir}` in a `command` Supervisor's `args`, `working_dir`, and
-  `env` values** ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)),
+  `env` values** ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)),
   so a Foreign Agent's command line is derived from the same place the Client derives it from:
 
   ```toml
@@ -4406,7 +4406,7 @@ once its tag exists.
 
 - **The connection-settings hash now covers the whole offer**, not just its OpAMP part — it has to,
   now that one offer can also carry telemetry destinations
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)).
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)).
 
   One consequence on upgrade: every Agent's stored hash stops matching, so the Server sends its
   standing offer once more and each Agent verifies and re-applies it. That is one extra exchange per
@@ -4470,7 +4470,7 @@ once its tag exists.
   unit**,
   inside the install root, instead of `client.toml` resolved against whatever the working directory
   happened to be
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)). A service
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)). A service
   manager's working directory is `/` or `System32`, so the old default pointed at a file the
   service could not have been relying on unless the install was run from exactly the right
   directory. **If you installed by running `install` from the directory holding your
@@ -4519,7 +4519,7 @@ once its tag exists.
 
 - **On macOS, a Client installed as a service could never update itself** — every offer was refused
   with "this Client does not run from a versioned install layout", and a torn `current` pointer was
-  never repaired either. The service is registered against `<root>/current/client` (ADR-0020), and
+  never repaired either. The service is registered against `<root>/current/client` (ADR-0021), and
   asking the operating system what is running answers with that path on macOS and with the version
   directory behind it on Linux; only the second shape says where in the layout the binary sits. The
   path is now resolved before the layout is looked for, so both platforms answer the same. Nothing
@@ -4539,7 +4539,7 @@ once its tag exists.
 - **The fleet view now shows why an Agent refused a package offer**, in the new `package_error`
   field of `GET /api/v1/agents`. An offer refused outright has no package status to carry the
   reason — which is exactly what happens when the Client's own Agent is offered a package
-  `[self_update]` did not name (ADR-0019) — so the reason was reported by the Client, stored by the
+  `[self_update]` did not name (ADR-0020) — so the reason was reported by the Client, stored by the
   Server, and shown nowhere. It is now also logged.
 
 ### Changed — breaking
@@ -4573,7 +4573,7 @@ once its tag exists.
   **New route** `PUT /api/v1/packages/{name}/type`; `PackageView` gains `service_name`.
 
 - **`service.name` now reports the Agent *type*, not the Agent's name**
-  ([ADR-0017](docs/adr/0017-what-an-agent-reports-about-itself.md)). The name an
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)). The name an
   operator gives an Agent moved to a new attribute, `service.instance.name`. Before, a
   `[[supervisor]]` block's `name` was reported as `service.name` — the slot the protocol reserves
   for "a reverse FQDN that uniquely identifies the Agent type" — and a Collector carrying the
@@ -4672,7 +4672,7 @@ once its tag exists.
   the name and version it has to strip first.
 
 - **The service is registered as `opamp-fleet-client` on every platform**
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)). It used to be
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)). It used to be
   `opamp-fleet-client.default.service` on systemd and `io.opamp-fleet.client.default` on launchd and
   the Windows SCM — two names nobody chose, both falling out of how a reverse-DNS label happens to
   be split. Now: `systemctl status opamp-fleet-client`, `launchctl list opamp-fleet-client`,
@@ -4683,7 +4683,7 @@ once its tag exists.
   `service uninstall` with the *old* binary, then `service install` with the new one. The install
   layout and the state directory are untouched by either.
 
-  On Windows the services list now shows **OpAMP Fleet Client** — the readable name ADR-0020
+  On Windows the services list now shows **OpAMP Fleet Client** — the readable name ADR-0021
   promised and never actually set.
 
 - **A version is compared and shown without its build metadata**
@@ -4709,7 +4709,7 @@ once its tag exists.
   `opamp-fleet-client-<version>-<os>-<arch>.7z`, the file it installs is `opamp-fleet-client`
   (`.exe` on Windows), and the version directory beside it is
   `versions/opamp-fleet-client-<version>-<commit>/`
-  ([ADR-0020](docs/adr/0020-the-installed-service-and-its-state.md)). One name from the download
+  ([ADR-0021](docs/adr/0021-the-installed-service-and-its-state.md)). One name from the download
   to the process in `ps` to the Agent in the fleet view.
 
   **Nothing in a fleet has to be migrated, because nothing has been released yet** — this is the one
@@ -4725,7 +4725,7 @@ once its tag exists.
 - **`accepts_packages` is no longer a `[[supervisor]]` key** and a configuration still carrying it
   **fails at startup**. Whether a Managed Process takes Server-offered package updates is now
   decided by how its program is named
-  ([ADR-0018](docs/adr/0018-supervisor-mode-and-its-kinds.md)):
+  ([ADR-0019](docs/adr/0019-supervisor-mode-and-its-kinds.md)):
 
   | `binary` / `command` | Meaning |
   |---|---|

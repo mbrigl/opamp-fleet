@@ -1,4 +1,4 @@
-//! How often a downstream host may be heard through this Gateway (ADR-0022).
+//! How often a downstream host may be heard through this Gateway (ADR-0017).
 //!
 //! Every downstream report, enrolment request and package download takes one token from the bucket
 //! of the host that sent it before the Gateway does anything else with it. A bucket holds `burst`
@@ -7,7 +7,7 @@
 //! the one it names, else the one derived from its issuer and serial (ADR-0016 clause 15) — or, for
 //! an enrolling peer, its address, an IPv6 one by its /64. The buckets live in memory, in one table
 //! bounded at the Gateway's total of bindings, and a full one forgets the bucket used least
-//! recently, which can only grant tokens (ADR-0022 clause 5).
+//! recently, which can only grant tokens (ADR-0017 clause 5).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -20,7 +20,7 @@ use tracing::warn;
 
 use crate::config::GatewayRateLimitConfig;
 
-/// The most buckets held at once: the Gateway's total of bindings (ADR-0022 clause 5).
+/// The most buckets held at once: the Gateway's total of bindings (ADR-0017 clause 5).
 pub const MAX_BUCKETS: usize = super::cache::MAX_BINDINGS;
 
 /// What a report or an enrolment request past the limit is told, as the Server tells it
@@ -38,7 +38,7 @@ const LOG_EVERY_MS: u64 = 60_000;
 /// The most hosts whose refusals are counted at once; past it the count starts over.
 const LOGGED_HOSTS: usize = 4096;
 
-/// Whose bucket a downstream message or download takes its token from (ADR-0022 clause 1).
+/// Whose bucket a downstream message or download takes its token from (ADR-0017 clause 1).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     /// The host a member's certificate speaks as.
@@ -159,7 +159,7 @@ impl HostRate {
     }
 
     /// Takes one token from `key`'s bucket, and says whether there was one. A refusal is logged
-    /// once per host per minute, with the host and how many were refused (ADR-0022 clause 4).
+    /// once per host per minute, with the host and how many were refused (ADR-0017 clause 4).
     pub fn admit(&self, key: &Key) -> bool {
         #[cfg(test)]
         if let Some(now) = self.frozen {
@@ -232,7 +232,7 @@ mod tests {
 
     /// A host's bucket starts full at its burst and refills at its rate; another host's bucket is
     /// its own.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0017
     #[test]
     fn a_hosts_bucket_holds_its_burst_and_refills_at_its_rate() {
         let rate = HostRate::with_capacity(LIMITS, 16);
@@ -249,7 +249,7 @@ mod tests {
 
     /// A member is keyed by the host its certificate speaks as; an enrolling peer by its address,
     /// an IPv6 one by its /64, whatever host its bootstrap certificate names.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0017
     #[test]
     fn an_enrolling_peer_is_keyed_by_its_address_an_ipv6_one_by_its_64() {
         let at = |ip: &str| Some(SocketAddr::new(ip.parse().expect("ip"), 4000));
@@ -281,7 +281,7 @@ mod tests {
     }
 
     /// The table holds at most its capacity, and a new key evicts the bucket used least recently.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0017
     #[test]
     fn a_full_table_evicts_the_bucket_used_least_recently() {
         let rate = HostRate::with_capacity(LIMITS, 2);
@@ -306,7 +306,7 @@ mod tests {
 
     /// What a host has refused is logged once a minute, with how many were refused since the last
     /// line.
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0017
     #[test]
     fn refusals_are_logged_once_per_host_per_minute_with_their_count() {
         let mut state = State {
@@ -322,7 +322,7 @@ mod tests {
         assert_eq!(state.refused(&host("a"), 60_001), None);
     }
 
-    /// Verifies: ADR-0022
+    /// Verifies: ADR-0017
     #[test]
     fn a_refusal_names_its_own_agent_says_unavailable_and_when_to_retry() {
         let reply = unavailable(&[7; 16]);

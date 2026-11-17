@@ -1,9 +1,9 @@
 # ADR-0033: Packages, signatures, and delivery
 
-- **Status:** ⚪ superseded by [ADR-0039](0039-packages-signatures-and-delivery.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/fs/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, signature, Deployment-package and download routes of `crates/fleet-server/src/api.rs` with the handler `download_package`, the package limits and the `[packages]` section of `server.toml` in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, the `download.refused` audit entry, the platform table in `crates/fleet-core/src/platform.rs` and `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI in `crates/fleet-server/static/index.html`, the signing file `opamp-fleet-signing-v1`, the `package sign` command of `opamp-fleetctl` in `crates/fleet-tools/src/package.rs` and `crates/fleet-tools/src/signing.rs`, the Gateway's package cache in `crates/fleet-agent/src/gateway/` and its directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs`, `crates/fleet-agent/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the `member` a kind states in `KindDefaults` in `crates/fleet-agent/src/supervisor/ports.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, the kept-link rule in `crates/fleet-core/src/tree.rs`, and every document that tells an operator how to add, sign or deliver an artifact
+- **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/fs/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, signature, Deployment-package and download routes of `crates/fleet-server/src/api.rs` with the handler `download_package`, the package limits and the `[packages]` section of `server.toml` in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, the `download.refused` audit entry, the platform table in `crates/fleet-core/src/platform.rs` and `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI in `crates/fleet-server/static/index.html`, the signing file `opamp-fleet-signing-v1`, the `package sign` command of `opamp-fleetctl` in `crates/fleet-tools/src/package.rs` and `crates/fleet-tools/src/signing.rs`, the Gateway's package cache in `crates/fleet-agent/src/gateway/` and its directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs`, `crates/fleet-util/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the `member` a kind states in `KindDefaults` in `crates/fleet-agent/src/supervisor/ports.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, the kept-link rule in `crates/fleet-util/src/tree.rs`, and every document that tells an operator how to add, sign or deliver an artifact
 
 ## Context
 
@@ -54,7 +54,7 @@ The store, and which held artifact can be meant for an Agent:
   `.tar.gz`, `.deb`, `.rpm` and `.msi`, never a bare binary, with a `checksums.txt` of SHA-256
   values. Some agents publish their portable Windows build as a `.zip`.
 - **The Agent type is a fact the Server can read.** Every Agent this Client presents reports its
-  type as `service.name` ([ADR-0017](0017-what-an-agent-reports-about-itself.md)), which the
+  type as `service.name` ([ADR-0018](0018-what-an-agent-reports-about-itself.md)), which the
   Baseline defines as "a reverse FQDN that uniquely identifies the Agent type".
 
 What identifies a Package and how it is released:
@@ -115,9 +115,9 @@ On the Agent:
   the signature covers the Agent type and the version as well.
 - **A running process cannot reliably replace its own binary,** so the work crosses a process
   boundary. For a Managed Process that boundary exists: the Supervisor owns its process's stop,
-  spawn and apply-grace health gate ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)). The
+  spawn and apply-grace health gate ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)). The
   Client's own binary is the other case
-  ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)).
+  ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)).
 - **Verification protects the host; the origin bounds what is exposed.** What stands between the
   bytes and an executed program is the content hash and an Ed25519 signature made with a key the
   operator holds (the Baseline's *Code Signing* leaves the method to the Agent). The `ring`
@@ -218,7 +218,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 9. **Two names are derived, and they answer different questions.** The **wire name** is the Agent
    type alone: the `PackagesAvailable` map key, the key an Agent reports its `PackageStatuses`
    under, and the value the Client's `[self_update] package` is compared against
-   ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). It must be stable across
+   ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)). It must be stable across
    versions. The **display name** is `<agent_type> <version>`, used in the UI and the log. Using
    one name in both places would break the Client's self-update guard on every release or make the
    fleet view unreadable.
@@ -289,7 +289,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     saying the Server decides. Type fit is also the second, independent guard on the Client's own
     binary: the Server does not offer a Package of another type to the Client's Agent, whatever it
     is called, and the Client still refuses an offer outside its `[self_update]` consent
-    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)). One side refuses to
+    ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)). One side refuses to
     send, the other to install.
 
 17. **The version test reads the claim under the Agent type**, because that is the key an Agent
@@ -603,9 +603,9 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 48. **The Supervisor is the updater, and only a Client holding a verification key takes
     packages.** With `[packages] verification_key` set, every Supervisor-backed Agent declares
     `AcceptsPackages` and `ReportsPackageStatuses` (every Managed Process is one this Client
-    installed, [ADR-0018](0018-supervisor-mode-and-its-kinds.md)). Without it, no Agent of this
+    installed, [ADR-0019](0019-supervisor-mode-and-its-kinds.md)). Without it, no Agent of this
     Client declares `AcceptsPackages`, neither a Supervisor nor the Client's own Agent
-    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)), and the Client says so
+    ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)), and the Client says so
     at startup, once, naming `[packages] verification_key` as what to set. A package offered to
     such an Agent regardless is ignored: nothing is downloaded, and an Agent that declared no
     package capability reports no package status. A verified artifact travels to the Supervisor as
@@ -681,7 +681,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     signature still covers the artifact exactly as published, archive and all, and holds for that
     type and version alone. Where the signature is kept is clause 18. The same download and
     verification serve the Client's own update
-    ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)).
+    ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)).
 
 53. **The Agent opens the artifact; nothing between its author and the host repacks it.** The hash
     an Agent verifies is therefore the SHA-256 the artifact was published with: integrity runs in
@@ -717,7 +717,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     relative path *inside* the package, e.g. `bin/fluent-bit`; absent, the package is one file. It
     is validated at startup (non-empty, relative, no `.` or `..`), and it says *where inside*,
     never *whether*: the program's bare file name stays the consent
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)). Being written in the configuration, the
+    ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)). Being written in the configuration, the
     spawn path `program/tree/<program_path>` is known before any package exists.
     - `program_path` matches a member by its **trailing path components**, so `bin/fluent-bit`
       finds `fluent-bit-3.1.0/bin/fluent-bit` and stays right at the next release. No match fails
@@ -742,7 +742,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
       no link at all, since the repacks that need one are `.tar.gz`
       ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
       clause 27). The program is never a kept link. Both ends hold a link against the kind's list
-      by one rule, `fleet_core::tree::is_kept`.
+      by one rule, `fleet_util::tree::is_kept`.
 
 58. **The swap is a rename, and the apply grace gates it.** On disk, per Supervisor:
 
@@ -753,11 +753,11 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
     The artifact is unpacked to the staged name first, beside what runs; a raw artifact is moved
     there rather than copied when it can be. A kind that declares a preflight proves the staged
-    program runs before anything is stopped ([ADR-0018](0018-supervisor-mode-and-its-kinds.md),
+    program runs before anything is stopped ([ADR-0019](0019-supervisor-mode-and-its-kinds.md),
     the preflight). Then the Managed Process is stopped, the live name renamed to the predecessor,
     the staged name renamed to the live one, so the live name is always the old package or the new
     one, never a mixture, and the process is spawned and must survive `apply_grace_secs`
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)). Surviving is `Installed`, after which the
+    ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)). Surviving is `Installed`, after which the
     program is asked for its version again. A spawn failing with `ETXTBSY` right after the swap is
     retried briefly rather than rolled back. When there is nothing to run yet (no Configuration),
     the package is installed and reported `Installed`; the configuration that arrives starts it.
@@ -775,7 +775,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     Configuration, a new package or a restart command is a fresh chance and resets the count; a
     run that outlasted the floor resets it too. This holds for a failed package, a rolled-back
     predecessor that will not start either, and a Configuration alike. Three is the self-update's
-    give-up ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)), so the two
+    give-up ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)), so the two
     update paths behave alike.
 
 61. **The superseded version is kept for a window, then deleted.** After a successful apply the
@@ -883,7 +883,9 @@ reproducible tree mode for `opamp-fleetctl package pack`.
   what the Server happened to receive, from where it stands: trust on first use with no anchor.
 - **A base URL per Package from which entries and hashes are loaded.** A URL yields neither asset
   names nor hashes, which differ for every upstream. That knowledge per agent lives in
-  `opamp-fleetctl package fetch` ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)), which
+  `opamp-fleetctl package fetch`
+  ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)),
+  which
   uploads.
 - **An `advertised_url` for a mirror or another host in front of the download.** With the Client
   downloading only from its own Server's origin, an `advertised_url` naming another host reaches
@@ -1203,7 +1205,7 @@ reproducible tree mode for `opamp-fleetctl package pack`.
   `download_client` in `crates/fleet-agent/src/packages.rs`; `HOST_URI_PREFIX` and `facts` in
   `crates/fleet-server/src/ca.rs`.
 - `crates/fleet-core/src/package.rs`, `statement`: the signed bytes name type, version and hash,
-  not a Deployment. `crates/fleet-agent/src/archive.rs`: the Client detects raw, `.tar.gz`, `.7z`
+  not a Deployment. `crates/fleet-util/src/archive.rs`: the Client detects raw, `.tar.gz`, `.7z`
   and `.zip` by their leading bytes; the Server never inspects an artifact, so no format field is
   needed.
 - [RFC 8032](https://www.rfc-editor.org/rfc/rfc8032), section 5.1.6: Ed25519 signing is
@@ -1550,7 +1552,7 @@ marker citing this decision ([ADR-0002](0002-decisions-verified-by-tests.md)).
   [`supervisor/mod.rs`](../../crates/fleet-agent/src/supervisor/mod.rs);
   `a_slow_download_is_reported_as_downloading_with_progress` in
   [`transport/mod.rs`](../../crates/fleet-agent/src/transport/mod.rs).
-- Containers, single file and tree: in [`archive.rs`](../../crates/fleet-agent/src/archive.rs) the
+- Containers, single file and tree: in [`archive.rs`](../../crates/fleet-util/src/archive.rs) the
   detection tests (`detects_gzip_by_its_leading_bytes_and_anything_else_as_raw`,
   `detects_a_7z_by_its_signature`, `detects_a_zip_by_its_signature_and_an_empty_one_too`),
   `an_encrypted_7z_opens_with_the_key_and_not_without_it`,
@@ -1563,7 +1565,7 @@ marker citing this decision ([ADR-0002](0002-decisions-verified-by-tests.md)).
   `a_hard_link_member_refuses_the_archive`,
   `a_link_the_kind_keeps_is_created_as_that_link`,
   `a_link_the_kind_does_not_keep_refuses_the_archive` (clause 57, with
-  `only_the_named_path_with_the_named_target_is_kept` in `crates/fleet-core/src/tree.rs`),
+  `only_the_named_path_with_the_named_target_is_kept` in `crates/fleet-util/src/tree.rs`),
   `a_7z_member_that_is_a_link_or_an_anti_item_refuses_the_archive`,
   `an_archive_of_too_many_members_is_refused`, `a_tree_that_outgrows_the_total_budget_is_refused`,
   `no_match_and_an_ambiguous_match_are_both_refused_by_name`,

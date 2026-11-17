@@ -1,4 +1,4 @@
-//! The package channel (ADR-0039, ADR-0019): an offer checked and taken or refused, the
+//! The package channel (ADR-0033, ADR-0020): an offer checked and taken or refused, the
 //! download and install in flight, and the `PackageStatuses` this Agent reports about them.
 
 use opamp::proto::{
@@ -11,7 +11,7 @@ use super::{AgentState, Handled, Local};
 use crate::supervisor::ports::{HighWaterMarks, InstalledPackage, PackageFloors};
 
 impl AgentState {
-    /// Opts this Agent into package delivery (ADR-0039): declares `AcceptsPackages` and
+    /// Opts this Agent into package delivery (ADR-0033): declares `AcceptsPackages` and
     /// `ReportsPackageStatuses`, and restores what it last installed so a restarted Client reports
     /// the version it runs and is not re-offered it.
     ///
@@ -76,7 +76,7 @@ impl AgentState {
         }
     }
 
-    /// Opts this Agent into package delivery for **one named package only** (ADR-0019) — what the
+    /// Opts this Agent into package delivery for **one named package only** (ADR-0020) — what the
     /// Client's own Agent does. A Supervisor takes whichever top-level package the Server offers
     /// it, because the worst case there is a Managed Process that will not start and is rolled
     /// back. The Client has no such safety net: a package written over this binary takes the host
@@ -84,7 +84,7 @@ impl AgentState {
     ///
     /// The restored record is held against the version this binary *is*, and dropped when the two
     /// are not the same release. `service uninstall` deliberately keeps the install layout and the
-    /// state (ADR-0020), so an operator who reinstalls an older Client comes up on top of the
+    /// state (ADR-0021), so an operator who reinstalls an older Client comes up on top of the
     /// record its successor wrote — and reporting that record would tell the Server this host runs
     /// a version it does not have. Worse than the wrong line in the fleet view: the offer is gated
     /// on the hash inside it, so the Server would never offer this host the package again. A
@@ -111,15 +111,15 @@ impl AgentState {
         self.local.expected_package = Some(name);
     }
 
-    /// Whether this Agent takes Server-offered packages (ADR-0039) — the self-Agent unless
-    /// `[packages] self_update = false` withdraws the consent (ADR-0019), and every Supervisor, since every Managed
-    /// Process is one this Client installs (ADR-0018). Read without side effects, so a startup
+    /// Whether this Agent takes Server-offered packages (ADR-0033) — the self-Agent unless
+    /// `[packages] self_update = false` withdraws the consent (ADR-0020), and every Supervisor, since every Managed
+    /// Process is one this Client installs (ADR-0019). Read without side effects, so a startup
     /// check can ask it before anything is polled.
     pub fn accepts_packages(&self) -> bool {
         self.protocol.declares(AgentCapabilities::AcceptsPackages)
     }
 
-    /// Records how far the artifact download has got (ADR-0039), so the next report carries
+    /// Records how far the artifact download has got (ADR-0033), so the next report carries
     /// `Downloading` with the details. The Baseline only *permits* these interim reports; without
     /// them a multi-hundred-megabyte download is indistinguishable from a stuck install.
     pub fn package_downloading(&mut self, details: PackageDownloadDetails) {
@@ -136,7 +136,7 @@ impl AgentState {
     }
 
     /// A package `Installing` names `reason` as what it waits for, the second service, or nothing
-    /// once `reason` is empty (ADR-0042 clause 17); the outcome replaces it. A package still
+    /// once `reason` is empty (ADR-0022 clause 17); the outcome replaces it. A package still
     /// downloading, and a status other than `Installing`, stay as they are.
     pub(super) fn package_waits(&mut self, reason: &str) {
         let local = &mut self.local;
@@ -148,7 +148,7 @@ impl AgentState {
         self.protocol.package_status_changed();
     }
 
-    /// Closes a package's lifecycle the Supervisor applied (ADR-0039): `Ok(version)` records it
+    /// Closes a package's lifecycle the Supervisor applied (ADR-0033): `Ok(version)` records it
     /// Installed and persists it; `Err` reports InstallFailed (the binary was rolled back). Either
     /// way the offered aggregate is echoed, so the Server stops re-offering the same bytes — a
     /// refusal is a report, not a loop.
@@ -199,7 +199,7 @@ impl AgentState {
 impl Local {
     /// The package this Agent is processing or has: the one being installed, else the installed
     /// one, else the one last offered — and for the Client's own Agent, else the one it consents
-    /// to, which it knows from its own configuration before any offer arrives (ADR-0019).
+    /// to, which it knows from its own configuration before any offer arrives (ADR-0020).
     ///
     /// That last fallback is what lets this Client state a version for its own package from the
     /// first report on. A Supervisor has no such name: which package it gets is the Server's
@@ -297,7 +297,7 @@ impl Local {
     }
 
     /// Reacts to a `PackagesAvailable` offer: the Server selected what this Agent may have
-    /// (ADR-0039), so this side takes the one **top-level** package out of the offer — the binary
+    /// (ADR-0033), so this side takes the one **top-level** package out of the offer — the binary
     /// of its Managed Process — and ignores addons, which a Supervisor has no way to apply.
     pub(super) fn handle_package_offer(
         &mut self,
@@ -352,7 +352,7 @@ impl Local {
             return;
         }
         let name = name.clone();
-        // The Client's own Agent takes one named package and nothing else (ADR-0019). A
+        // The Client's own Agent takes one named package and nothing else (ADR-0020). A
         // fleet-wide package with an empty Selector reaches every consenting Agent, so without
         // this an artifact meant for a Collector would be written over this binary and the host
         // would be gone. Refused and reported, never silently ignored.
@@ -487,7 +487,7 @@ impl Local {
             content_hash: file.content_hash.clone(),
             signature: file.signature.clone(),
             // The Baseline asks the Agent to send these on the GET. This Server sends none; any a
-            // Server does send go to its own origin alone (ADR-0039).
+            // Server does send go to its own origin alone (ADR-0033).
             headers: file
                 .headers
                 .as_ref()
@@ -594,7 +594,7 @@ impl Local {
     /// Whether this offer is what the Agent already has, so the offer ends with an echo rather
     /// than a download.
     ///
-    /// For the package that carries the Client itself (ADR-0019, ADR-0020) that question is
+    /// For the package that carries the Client itself (ADR-0020, ADR-0021) that question is
     /// answered by the version *this process runs*: what a program reports about itself outranks
     /// what a record says was once installed here (ADR-0032). The record's hash would otherwise end
     /// an offer of the very bytes this host is not running: a state directory that outlived its
@@ -634,7 +634,7 @@ pub struct PackageDownload {
     /// The Ed25519 signature over the artifact; empty means unsigned.
     pub signature: Vec<u8>,
     /// The headers the offer says this download needs, sent only to this Client's own Server
-    /// origin (ADR-0039). The Baseline: *"The Agent SHOULD include the HTTP headers provided in the
+    /// origin (ADR-0033). The Baseline: *"The Agent SHOULD include the HTTP headers provided in the
     /// headers field for the GET request."*
     ///
     /// Raw pairs rather than the wire type, like every other field here: what the download needs is
@@ -645,7 +645,7 @@ pub struct PackageDownload {
 /// Written by hand rather than derived, because a header value is a credential.
 ///
 /// This struct travels inside `Handled`, which derives `Debug`; a single `debug!(?handled)` added
-/// later would otherwise put a download credential in the log file that ADR-0020 writes to disk in
+/// later would otherwise put a download credential in the log file that ADR-0021 writes to disk in
 /// service mode. Keys are printed — they are what a diagnosis needs — and values never are.
 impl std::fmt::Debug for PackageDownload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -76,9 +76,9 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
         ));
     }
     // Whole or not at all, through a temporary name and a rename in the held directory, so a link
-    // the service's account put at either name is replaced rather than written through (ADR-0042).
+    // the service's account put at either name is replaced rather than written through (ADR-0022).
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0042 clause 21).
+    // may pass through (ADR-0022 clause 21).
     held(state_dir)?
         .write(PENDING_CERT_FILE, cert_pem, 0o600)
         .map_err(|e| format!("cannot store the issued certificate: {e}"))?;
@@ -86,7 +86,7 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
 }
 
 /// The state directory, held without following a link at its name: an install enrols as root in a
-/// directory that belongs to the service's account (ADR-0042).
+/// directory that belongs to the service's account (ADR-0022).
 fn held(state_dir: &Path) -> Result<HeldDir, String> {
     HeldDir::open(state_dir).map_err(|e| format!("cannot open {}: {e}", state_dir.display()))
 }
@@ -259,7 +259,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
 
     // Held without following a link at its name, and each file written whole over a link at its
     // own: an install enrols as root in a directory that belongs to the service's account
-    // (ADR-0042). Passed through by the process group where one is registered (ADR-0042 clause 21).
+    // (ADR-0022). Passed through by the process group where one is registered (ADR-0022 clause 21).
     crate::storage::create_shared_dir(
         &config.state_dir,
         &config.state_dir,
@@ -272,7 +272,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     // The key is written no wider than its owner, the mode set in the open call so it is never on
     // disk at the umask default even briefly; it replaces a key file a prior enrolment left at a
     // wider mode. On Windows the state directory's ACL under `%ProgramData%` protects it
-    // (ADR-0020).
+    // (ADR-0021).
     dir.write(
         PENDING_KEY_FILE,
         Zeroizing::new(key.serialize_pem()).as_bytes(),
@@ -280,7 +280,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     )
     .map_err(|e| format!("cannot store the private key: {e}"))?;
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0042 clause 21).
+    // may pass through (ADR-0022 clause 21).
     dir.write(PENDING_CSR_FILE, csr.as_bytes(), 0o600)
         .map_err(|e| format!("cannot store the certificate request: {e}"))?;
     // What the operator matches in the enrolment queue (ADR-0027 clause 10): the same SHA-256 the
@@ -333,7 +333,7 @@ fn bootstrap_proof(config: &ClientConfig, new_key: &KeyPair) -> Option<String> {
         return None;
     }
     let identity = crate::tls::client_tls(config).ok()?.identity?;
-    // Read here only to sign: the key moves into a buffer wiped on drop (ADR-0040).
+    // Read here only to sign: the key moves into a buffer wiped on drop (ADR-0015).
     let key_pem = Zeroizing::new(identity.key_pem);
     let certificate = opamp::tls::certificates(&identity.cert_pem).ok()?;
     let leaf = certificate.first()?;
@@ -423,7 +423,7 @@ mod tests {
 
     /// Where a process account is registered, its group passes through the state directory, and
     /// the request and the certificate are the Client's alone: `0600`, beside the key.
-    /// Verifies: ADR-0042
+    /// Verifies: ADR-0022
     #[cfg(unix)]
     #[test]
     fn with_a_process_account_the_request_and_the_certificate_are_owner_only() {

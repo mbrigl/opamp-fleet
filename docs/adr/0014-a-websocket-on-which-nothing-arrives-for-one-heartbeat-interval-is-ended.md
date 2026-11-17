@@ -1,4 +1,4 @@
-# ADR-0015: A WebSocket on which nothing arrives for one heartbeat interval is ended by the end that opened it
+# ADR-0014: A WebSocket on which nothing arrives for one heartbeat interval is ended by the end that opened it
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-07
@@ -35,7 +35,7 @@ The heartbeat interval is the operator's measure of how often an Agent is heard 
 stated in it. A bound that follows it keeps the failover inside G-20 whatever the operator sets,
 and costs one ping per connection per interval at most, since anything that arrives counts.
 
-The `opamp` crate is versioned by the Baseline ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)
+The `opamp` crate is versioned by the Baseline ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)
 clause 2): a new field on its public settings would break its interface and wait for the next
 Baseline. The heartbeat is already a field of the driver's settings.
 

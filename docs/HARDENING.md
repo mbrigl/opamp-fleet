@@ -16,7 +16,7 @@ The link this document is about is **Client ↔ Server**. In this project's voca
 lives *inside* the Client
 ([`crates/fleet-agent/src/supervisor/`](../crates/fleet-agent/src/supervisor/)) and
 does not speak to the Server itself — the Client carries every Supervisor's Agent over its one
-connection (ADR-0016, ADR-0018). Where other OpAMP material says "Supervisor ↔ Server", this is the
+connection (ADR-0016, ADR-0019). Where other OpAMP material says "Supervisor ↔ Server", this is the
 link it means.
 
 One adjacent surface is in scope because it terminates on the same host and carries the same
@@ -28,7 +28,7 @@ admits only the process its Supervisor started (ADR-0016).
 Out of scope, and deliberately so: **authorization and multi-tenancy**, which the specification
 names as non-goals, with one bound on the Agent plane: a host receives from the Server only the
 configurations and packages released to an Agent it speaks for
-(ADR-0039),
+(ADR-0033),
 on the Server and from
 a Gateway's package cache alike. The boundary is worth
 stating precisely because the host binding (ADR-0027 clause 11) runs close to it — *which Agent is
@@ -61,7 +61,7 @@ has:
 - Message size limits enforced in both directions on both transports, and at the Supervisor
   Endpoint.
 - **TLS 1.3 alone, on every connection of both ends**
-  (ADR-0041,
+  (ADR-0008,
   ADR-0012): the process-wide
   provider carries the three TLS 1.3 suites and no other, every configuration pins TLS 1.3, and a
   peer offering only TLS 1.2 fails the handshake. Plaintext is accepted on `127.0.0.1` and `::1`
@@ -75,7 +75,7 @@ has:
   planes. On the Agent plane the TLS handshake and its client-certificate verification come
   before that, and a failed handshake is not counted as an admission failure.
 - **Nothing installed unsigned, and downloads only from the Client's own Server**
-  (ADR-0039):
+  (ADR-0033):
   a
   Client without the verification key takes no package, the Server offers no entry
   that carries no signature, and every download hop is held to `https://` and the Client's own
@@ -115,10 +115,10 @@ has:
   reporter is re-keyed — and a host holds at most three valid certificates. A renewal proves the
   certificate it renews with that certificate's key, so it keeps its host and chain through a
   Gateway too. An operator marks a Gateway, whose certificate then speaks for any Agent.
-- **Key material and configuration readable by their owner alone** (ADR-0026 clause 7, ADR-0020
+- **Key material and configuration readable by their owner alone** (ADR-0026 clause 7, ADR-0021
   clause 25): on Unix the private key, the stored connection settings and `supervisor.toml` are
   written `0600` in `0700` directories, a state directory `0710` that the process account's group
-  only passes through where one is registered (ADR-0042). On Windows a system-scope install gives
+  only passes through where one is registered (ADR-0022). On Windows a system-scope install gives
   the default data
   root under `%ProgramData%` to the Administrators, whoever created it, drops every right in it
   that the install does not grant, cuts it off from the read right every local user inherits
@@ -130,14 +130,14 @@ has:
   warning, and protecting it is the operator's. A local user acting while the install runs is not
   covered.
 - **On Windows the Client runs under its own virtual account unless an operator names
-  `LocalSystem`** (ADR-0042): a first registration, the MSI's included, registers
+  `LocalSystem`** (ADR-0022): a first registration, the MSI's included, registers
   `NT SERVICE\<PRODUCT_NAME>`, to which the install grants its roots and no group or privilege.
   Without a process account that account is the bound of what a Server-delivered configuration
   reaches on the host. A re-registration keeps the account the SCM holds; `--run-as LocalSystem`
   names `LocalSystem`, and every install under it warns that each Managed Process the Client
   starts itself runs as `LocalSystem`. Residual: a host registered as `LocalSystem` stays so until
   an operator moves it, and macOS runs the Client as root unless `--run-as` names an account.
-- **A Managed Process can be kept from the Client's key and program** (ADR-0042): where the
+- **A Managed Process can be kept from the Client's key and program** (ADR-0022): where the
   operator registers a process account, every program a Supervisor starts — the Managed Process,
   its version probe, a package's preflight — runs under it, started by a second service over a Unix
   socket or named pipe that admits the Client's account alone. It reads its own `program/` and
@@ -149,7 +149,7 @@ has:
   without a process account runs every Managed Process as the Client; all Managed Processes share
   the one account, so they read one another's `config/`.
 - **A Managed Process cannot take the second service's place by its socket or pipe, nor, on
-  Linux and Windows, reach into it once it has closed itself** (ADR-0042 clause 19):
+  Linux and Windows, reach into it once it has closed itself** (ADR-0022 clause 19):
   before the Client writes anything
   on a new connection it reads the process at the other end — `SO_PEERPIDFD` on Linux,
   `LOCAL_PEERPID` on macOS, `GetNamedPipeServerProcessId` on Windows — and accepts it only where
@@ -180,22 +180,22 @@ has:
   a Managed Process can remove or replace the socket, and the Client then finds the second service
   away; where the service manager cannot be asked — no system bus, a `launchctl print` that fails —
   no Managed Process starts until it answers again.
-- **An install acts only on directories an administrator named or its roots hold** (ADR-0020,
-  ADR-0042 clause 1): `supervisor.toml` belongs to the service's account, and `service install`
+- **An install acts only on directories an administrator named or its roots hold** (ADR-0021,
+  ADR-0022 clause 1): `supervisor.toml` belongs to the service's account, and `service install`
   and `service config` run as root or an Administrator. The state directory comes from
   `--state-dir`, else from the registration an earlier install wrote, and only then from the file,
   and from that only beneath the data root or the layout root. Beneath a root it is reached with no
   `..` and through no link or junction; anything else is refused before anything is written. A
   Supervisors' root the file places outside them is never created, restricted or handed over. The
   hand-over and the cut act on a link or junction itself on every platform.
-- **A delivered Supervisor block reaches no further than the package signature** (ADR-0018): no
+- **A delivered Supervisor block reaches no further than the package signature** (ADR-0019): no
   environment or arguments beyond what the running block has or the operator allowed, and no file
-  outside its own `config/` directory. Under ADR-0018 clause 35's rule — no variable that steers
+  outside its own `config/` directory. Under ADR-0019 clause 35's rule — no variable that steers
   which code a program loads, no value pointing where the Server delivers unsigned files — the
   Client refuses the names and placeholders the clause lists, and further loader variables
   (`PATHEXT`, `COMSPEC`, `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB`, `RUBYLIB`) and new values
   that start with a path under the Supervisors' root.
-- **A privileged install follows no link the service's account placed** (ADR-0042):
+- **A privileged install follows no link the service's account placed** (ADR-0022):
   `service install` and `service config` run as root or an Administrator and write into the state
   directory and the layout root, which belong to the account. Each file there is read without
   following a link and written whole to a new name, then renamed over its own, so a link at the
@@ -221,7 +221,7 @@ has:
   A test holds the modules these steps run in to no path-based read, write, removal, rename or mode
   change outside a justified list (`privileged_steps_follow_no_link.rs`).
 - **A privileged enrolment connects where its own run answered**
-  ([ADR-0042](adr/0042-the-accounts-the-service-runs-under.md) clause 28):
+  ([ADR-0022](adr/0022-the-accounts-the-service-runs-under.md) clause 28):
   a run that answered the questionnaire or `--endpoint` enrols with the endpoint and the CA
   certificates it answered, held in memory, and does not read them back from `supervisor.toml`,
   which the service's account can rewrite meanwhile. An answer without a CA leaves the built-in
@@ -249,7 +249,7 @@ has:
 - **The Supervisor Endpoint admits only the process its Supervisor started** (ADR-0016): a token
   made at every start, handed to the process in its environment, asked of every connection.
 - **A package signature covers the Agent type, the version and the hash**
-  (ADR-0039):
+  (ADR-0033):
   a signed
   artifact installs as its own type's program at its own version and nowhere else. **A Package
   version is SemVer** (ADR-0034): the Server creates no other, `package sign` signs no other, and a
@@ -302,13 +302,13 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
     `max_package_size_bytes` and the whole store, uploads still arriving included, to
     `max_total_package_bytes` · ✅ capped, HTTP/2-bounded and throttled as above
 - **Client → Server**, outbound (`opamp::client::connection`,
-  ADR-0041).
+  ADR-0008).
   - ✅ request timeout 30 s on the polling transport · ✅ redirects refused outright ·
     ✅ reconnect backoff · ✅ message size in both directions
 - **Gateway endpoint** — the Client serving OpAMP downstream (ADR-0016).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1), from the listener every OpAMP endpoint
     is served on
-    (ADR-0041)
+    (ADR-0008)
     · ✅ message size, gzip after decompression, per-hop exchange timeout,
     `max_carried_agents` · ✅ no downstream `Authorization` forwarded; every upstream connection
     carries the Gateway's own certificate alone (ADR-0016)
@@ -317,7 +317,7 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
   - ✅ every downstream report, enrolment request and package download rate-limited per host
     before anything else is done with it, an enrolling peer per address and an IPv6 one per /64,
     `[gateway.rate_limit]`, in at most 1 000 000 buckets, so one host cannot drain the aggregate
-    the Server gives the Gateway (ADR-0022)
+    the Server gives the Gateway (ADR-0017)
   - ✅ an enrolling peer — a bootstrap certificate, with `bootstrap_ca_file` — is refused a
     WebSocket and anything but one enrolment request `403`, binds nothing, and its place upstream
     goes with its exchange (ADR-0016)
@@ -377,13 +377,13 @@ signature grows; where the Client's second verification key lives; and what has 
 the certificates move — ML-DSA in TLS 1.3 as a standard, issuance through rcgen, verification in
 the other OpAMP implementations, and a browser on the Operator plane. It would supersede
 ADR-0012 (the TLS provider),
-[ADR-0039](adr/0039-packages-signatures-and-delivery.md)
+[ADR-0033](adr/0033-packages-signatures-and-delivery.md)
 (the package
 signature), [ADR-0034](adr/0034-package-versions-high-water-mark-and-floor.md) (the floor's
 signature) and
 [ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
 (its stores' TLS without
-aws-lc-rs), and touch [ADR-0019](adr/0019-the-client-updates-itself-from-a-signed-package.md),
+aws-lc-rs), and touch [ADR-0020](adr/0020-the-client-updates-itself-from-a-signed-package.md),
 whose self-update rests on the package signature.
 
 ## The channels that put code on the host
@@ -395,28 +395,28 @@ Agent's host. They deserve at least as much attention as the transport, and argu
 through seven channels. It **can** write any files into a Supervisor's own `config/` directory and
 restart its process, except for a Supervisor the host lists in `[supervisors]
 remote_config_disabled`, whose Agent takes no remote configuration and whose delivered block must
-repeat the one it runs (ADR-0018); add, change, purge and restart Supervisors of the compiled-in
+repeat the one it runs (ADR-0019); add, change, purge and restart Supervisors of the compiled-in
 kinds, each running a program from its own `program/` directory, except on a host that sets
-`[supervisors] server_manages_set = false`, whose own Agent takes no Supervisor set (ADR-0018);
+`[supervisors] server_manages_set = false`, whose own Agent takes no Supervisor set (ADR-0019);
 install any package signed with the operator's key into a Supervisor, and a newer signed Client
 build into the Client itself; move the
 fleet to another TLS endpoint its trust accepts, install a certificate for
 the key the Client generated, and set its telemetry destinations; restart a Managed Process; and
 re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a command it
 names, a receiver bound to any port — it allows as the process's account; that is the product.
-The switch of ADR-0018 binds a name: while the Server manages the set, it can remove a listed
+The switch of ADR-0019 binds a name: while the Server manages the set, it can remove a listed
 Supervisor and deliver the same agent under a name that is not listed, whose configuration is then
 the Server's again. A host that also sets `server_manages_set = false` closes that: the Server
-can neither remove the listed Supervisor nor add another (ADR-0018). Both keys hold against the
+can neither remove the listed Supervisor nor add another (ADR-0019). Both keys hold against the
 Server only while every Supervisor whose configuration language can run commands as the Client's
 account — a command an agent's configuration names, the configuration a `command`
 kind's program reads — is in `remote_config_disabled`; otherwise the Server can configure such a
 Supervisor to rewrite `supervisor.toml`, and the keys change at the next start. Where a process
 account
-is registered (ADR-0042), such a command runs under it, and it cannot write `supervisor.toml`. A
+is registered (ADR-0022), such a command runs under it, and it cannot write `supervisor.toml`. A
 signed Client
 build can still replace the program that reads them where `[packages] self_update` consents
-(ADR-0019).
+(ADR-0020).
 
 It **cannot**: write outside a Supervisor's `config/` (entry names are sanitized), or store there an
 entry Windows cannot hold or two entries in one file (such an offer is refused); name a program

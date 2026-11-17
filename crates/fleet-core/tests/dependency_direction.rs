@@ -207,7 +207,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("gateway::floors", Adapter),
             ("gateway::policy", Core),
             ("gateway::pool", Adapter),
-            // The downstream hosts' buckets, read against the Gateway's clock (ADR-0022).
+            // The downstream hosts' buckets, read against the Gateway's clock (ADR-0017).
             ("gateway::rate", Adapter),
             ("gateway::registry", Adapter),
             ("gateway::revocations", Adapter),
@@ -246,7 +246,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     (
         "fleet-tools",
         &[
-            // One command-line program and no library (ADR-0043): nothing here is core, and a
+            // One command-line program and no library (ADR-0036): nothing here is core, and a
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),
@@ -260,17 +260,17 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
 ];
 
 /// The external crates the core may name: data formats, codecs, the logging facade, and the buffer
-/// a secret is wiped from on drop (ADR-0040) — none of them reaches a file, a socket, a process, or
+/// a secret is wiped from on drop (ADR-0015) — none of them reaches a file, a socket, a process, or
 /// a clock.
 const CORE_CRATES: &[&str] = &[
     "prost", "serde", "sha2", "hex", "base64", "uuid", "flate2", "tracing", "zeroize",
 ];
 
 /// What the core may name of a technology, by path prefix. `tokio::sync` is channels, which need
-/// no runtime and do no I/O — and ADR-0018 makes a Port a message pair over them; `tokio::select`
+/// no runtime and do no I/O — and ADR-0019 makes a Port a message pair over them; `tokio::select`
 /// and `tokio::pin` are how the core waits on several of them, control flow over futures that
 /// starts no task and touches nothing outside the process. `toml::Table` and
-/// `toml::Value` are the configuration's values (ADR-0024 clause 1), which ADR-0018 hands a
+/// `toml::Value` are the configuration's values (ADR-0024 clause 1), which ADR-0019 hands a
 /// Plugin as its block; reading and parsing the file stays at the edge. An address is a value, and
 /// `env::consts` is fixed at compile time.
 const CORE_PREFIXES: &[&[&str]] = &[

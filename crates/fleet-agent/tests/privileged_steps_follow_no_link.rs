@@ -1,4 +1,4 @@
-//! No privileged step goes through a link the account could have placed (ADR-0042 clause 11).
+//! No privileged step goes through a link the account could have placed (ADR-0022 clause 11).
 //!
 //! `service install`, `service config` and `service uninstall` run as root or as an
 //! Administrator, and they write into the data root, the state directory and the layout root,
@@ -79,7 +79,7 @@ const BANNED: &[&str] = &[
     "\"mklink\"",
     "set_readonly(",
     // A read by path follows a link at the name too, and a privileged step that reads what the
-    // account put there acts on the account's word (ADR-0042 clause 11).
+    // account put there acts on the account's word (ADR-0022 clause 11).
     "fs::read(",
     "fs::read_to_string(",
     "File::open(",
@@ -93,7 +93,7 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "load",
         "fs::read_to_string(",
         "the run-time Client's read of its own file, in a directory its own account owns, which \
-         ADR-0042 clause 11 does not cover; every privileged step reads through `load_held`",
+         ADR-0022 clause 11 does not cover; every privileged step reads through `load_held`",
     ),
     (
         "src/config_init.rs",
@@ -132,7 +132,7 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "src/service/runtime.rs",
         "recovery_state_dir",
         "fs::read_to_string(",
-        "the run-time Client, in its own account's directories, which ADR-0042 clause 11 does \
+        "the run-time Client, in its own account's directories, which ADR-0022 clause 11 does \
          not cover",
     ),
     (
@@ -149,7 +149,7 @@ const ALLOWED: &[(&str, &str, &str, &str)] = &[
         "install",
         "fs::create_dir_all(",
         "the data root itself: its name is the administrator's, in a directory only root writes \
-         on Unix, and on Windows the hold right after it refuses a reparse point (ADR-0042 \
+         on Unix, and on Windows the hold right after it refuses a reparse point (ADR-0022 \
          clause 13)",
     ),
     (
@@ -344,14 +344,14 @@ const CALLED_FROM: &[(&str, &str, &str, usize, &str)] = &[
         "unreadable_config",
         "recovery_state_dir",
         1,
-        "the run-time Client's own start, which ADR-0042 clause 11 does not cover",
+        "the run-time Client's own start, which ADR-0022 clause 11 does not cover",
     ),
     (
         "src/service/runtime.rs",
         "load_effective_config",
         "load",
         1,
-        "the run-time Client's own configuration, which ADR-0042 clause 11 does not cover",
+        "the run-time Client's own configuration, which ADR-0022 clause 11 does not cover",
     ),
     (
         "src/tls.rs",
@@ -501,7 +501,7 @@ fn privileged_sources() -> Vec<(String, String)> {
     found
 }
 
-/// Verifies: ADR-0042
+/// Verifies: ADR-0022
 #[test]
 fn privileged_modules_change_the_account_s_directories_through_held_directories_only() {
     let mut violations = Vec::new();
@@ -574,7 +574,7 @@ fn the_scanner_finds_path_based_calls_by_function() {
 /// call of it in a privileged module is named here too, by the file and the function it is made
 /// in, with why the path it hands on is one no link the account placed can carry. A new caller
 /// is a finding until it is listed, and an entry that no longer matches fails, as in `ALLOWED`.
-/// Verifies: ADR-0042
+/// Verifies: ADR-0022
 #[test]
 fn each_call_of_an_allowed_function_is_named_with_its_reason() {
     let allowed: BTreeSet<&str> = ALLOWED

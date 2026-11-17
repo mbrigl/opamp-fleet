@@ -267,7 +267,7 @@ pub fn derive(source: &Source<'_>) -> Derived {
         description if !description.is_empty() => description,
         _ => lookup(&non_identifying, attributes::OS_TYPE),
     };
-    // The Platform the offer reads (ADR-0039 clause 14): what an upload is keyed by.
+    // The Platform the offer reads (ADR-0033 clause 14): what an upload is keyed by.
     let platform = crate::packages::Platform::reported(source.description)
         .map(|platform| platform.tag())
         .unwrap_or_default();
@@ -537,7 +537,7 @@ mod tests {
 
     /// The search text carries the platform the offer reads: folded through the core's table, and
     /// read from the identifying attributes where the non-identifying ones do not carry it.
-    /// Verifies: ADR-0030, ADR-0039
+    /// Verifies: ADR-0030, ADR-0033
     #[test]
     fn the_search_finds_an_agent_under_its_canonical_platform() {
         let search = |identifying: &[(&str, &str)], non_identifying: &[(&str, &str)]| {

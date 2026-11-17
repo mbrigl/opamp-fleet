@@ -1,6 +1,6 @@
 [package]
 name = "fleet-core"
-description = "What the Server and the Client of OpAMP Fleet implement identically, beyond the protocol (ADR-0041)"
+description = "What the Server and the Client of OpAMP Fleet implement identically, beyond the protocol (ADR-0008)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -34,10 +34,10 @@ hex.workspace = true
 # in — all three already linked by both ends.
 ring.workspace = true
 time.workspace = true
-# The key a `bootstrap.p12` opens to is held in a buffer wiped on drop (ADR-0040). No TLS or
+# The key a `bootstrap.p12` opens to is held in a buffer wiped on drop (ADR-0015). No TLS or
 # crypto backend comes with zeroize itself (ADR-0012).
 zeroize.workspace = true
-# What the Server and the operator program do alike on a PKCS#11 token (ADR-0026, ADR-0043 clause
+# What the Server and the operator program do alike on a PKCS#11 token (ADR-0026, ADR-0036 clause
 # 5), behind the `pkcs11` feature: only those two turn it on, so the Client does not build it.
 cryptoki = { workspace = true, optional = true }
 

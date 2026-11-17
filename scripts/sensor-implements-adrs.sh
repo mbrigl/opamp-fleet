@@ -56,7 +56,7 @@ state() {
   file="$(git ls-tree --name-only "$head" docs/adr/ 2>/dev/null \
     | grep -m 1 -E "^docs/adr/${id#ADR-}-[^/]*\.md$")"
   [[ -n "$file" ]] || { echo "no ADR of that number${through:-}"; return; }
-  # The status without its emoji and with a link's text alone: 'superseded by ADR-0039'.
+  # The status without its emoji and with a link's text alone: 'superseded by ADR-NNNN'.
   status="$(git show "$head:$file" | sed -n 's/^- \*\*Status:\*\* *//p' | head -n 1 \
     | sed -E 's/\[([^]]*)\]\([^)]*\)/\1/g; s/^[^A-Za-z]*//')"
   case "$status" in

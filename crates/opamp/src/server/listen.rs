@@ -1,4 +1,4 @@
-//! The listener an OpAMP endpoint is served on (ADR-0041): TLS from the material the application
+//! The listener an OpAMP endpoint is served on (ADR-0008): TLS from the material the application
 //! hands it, the bounds on connection setup of ADR-0012, and what the handshake learned carried
 //! into every request.
 //!
@@ -64,7 +64,7 @@ pub const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shuts listeners down. One handle may drain several; how long a drain may take is the caller's
-/// to state (ADR-0041 clause 6).
+/// to state (ADR-0008 clause 6).
 ///
 /// It is `axum_server`'s handle plus what that one cannot reach: the WebSocket sessions, which
 /// outlive the HTTP connection they were upgraded from and so are not counted by its drain. A

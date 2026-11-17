@@ -240,7 +240,7 @@ Configuration, Package or Deployment that an assignment pins.
     reported.
 
 18. **The Client applies the same rule to an offer it receives.** For the Package that carries the
-    Client itself ([ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md)), *already
+    Client itself ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md)), *already
     installed* means the version this process runs is the offered one — not that a recorded
     package hash matches. A record whose hash equals the offer does not end the offer on a host
     that is not running it.
@@ -260,7 +260,7 @@ Configuration, Package or Deployment that an assignment pins.
 21. **Rollback is not a rollout.** No act moves an Agent to an older version than it runs. An
     operator who wants an Agent back on its predecessor has the Agent's retention window
     ([ADR-0033](0033-packages-signatures-and-delivery.md)) and, for the Client itself, the
-    pointer move of [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md); a bad
+    pointer move of [ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md); a bad
     version is otherwise taken back by publishing the old content as a new, greater version. A
     deliberate Server-driven downgrade is left undecided: it is a separate act with its own
     authorisation question, and it must never be the same press as a rollout.
@@ -301,7 +301,7 @@ Configuration, Package or Deployment that an assignment pins.
 
 25. **A Supervisor reports the version of the Package it installed.**
     - A Supervisor-backed Agent reports the non-identifying attribute `supervisor.package.version`
-      ([ADR-0017](0017-what-an-agent-reports-about-itself.md)
+      ([ADR-0018](0018-what-an-agent-reports-about-itself.md)
       clause 5): the version of the Package whose program its Supervisor installed and starts,
       from the record of the last install that survived its apply grace
       ([ADR-0033](0033-packages-signatures-and-delivery.md)), restored when the Client starts.
@@ -309,9 +309,9 @@ Configuration, Package or Deployment that an assignment pins.
       ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 10). A failed
       install and a rollback leave the record of the predecessor, which is what then runs.
     - The Supervisor alone states it. The fold of a Managed Process's description drops every
-      `supervisor.*` key ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clause 8),
+      `supervisor.*` key ([ADR-0018](0018-what-an-agent-reports-about-itself.md) clause 8),
       `[attributes]` refuses one at startup
-      ([ADR-0017](0017-what-an-agent-reports-about-itself.md)
+      ([ADR-0018](0018-what-an-agent-reports-about-itself.md)
       clause 10), and the Server refuses a label in that namespace and ignores one already stored
       ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)
       clause 20), so neither a program nor the host's operator nor the Server's can state it.
@@ -401,7 +401,7 @@ to re-install a version the test holds back; a Server-driven downgrade.
   would carry the operator tool's numbering rule, and a program that numbers itself `1.19` would
   still give it nothing to compare.
 - **Report the Package's version as `service.version`.** That is the program's own statement
-  ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clause 4) and the version the fleet view
+  ([ADR-0018](0018-what-an-agent-reports-about-itself.md) clause 4) and the version the fleet view
   shows; overwriting it hides what the program says it is.
 - **Compare against `agent_has_version` alone.** Cannot reach a Client that reports no package
   version, and believes a claim the Agent's own program contradicts.

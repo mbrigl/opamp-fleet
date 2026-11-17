@@ -16,7 +16,7 @@ Forces:
 
 - The bundled UI is static assets embedded in the Server binary, plain HTML, CSS and JS, with
   **no frontend toolchain**, neither in the Dev Container nor in CI
-  ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)). Redoc is vendored as one pre-built file
+  ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)). Redoc is vendored as one pre-built file
   and named in `NOTICE`; that is the precedent.
 - The Operator plane's CSP is `script-src 'self'` plus the hashes of the inline scripts, and no
   `'wasm-unsafe-eval'`. TextMate grammars are written for the Oniguruma regex engine, which
@@ -46,7 +46,7 @@ checked by a test, and whose colours come from each look's stylesheet.
      their versions and the script that built it.
    - `scripts/vendor-shiki.sh` rebuilds it. It runs only when the version is to change, on a
      developer's machine. CI and the Dev Container do not need node; the bundled UI keeps no
-     frontend toolchain ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+     frontend toolchain ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)).
    - The Server embeds the file and serves it from its own origin as `/shiki.js`, like the
      stylesheets. The CSP does not change: `script-src 'self'` covers it, and nothing needs
      WebAssembly or `eval`.
@@ -100,7 +100,7 @@ the browser.
 - **Loading Shiki from a CDN.** It needs no vendoring. It breaks the UI on a host without
   internet, hands the page to a third party, and would need the CSP opened to that origin.
 - **A node toolchain in CI that builds the file on every build.** It keeps the file reproducible
-  at all times. [ADR-0008](0008-five-crates-on-tokio-and-axum.md) rejects this cost for a
+  at all times. [ADR-0008](0008-six-crates-on-tokio-and-axum.md) rejects this cost for a
   rudimentary UI, and the pinned hash (clause 2) catches an unreviewed change.
 - **Colouring on the Server.** Shiki could run there through a JavaScript runtime or a Rust port
   of TextMate (`syntect`). It adds a dependency to the Server binary for a display concern, and
@@ -112,7 +112,7 @@ the browser.
   `@shikijs/engine-javascript` and `@shikijs/langs`; the CSS-variables theme comes from Shiki's
   core, so `@shikijs/themes` is not bundled.
 - Shiki documentation: the JavaScript regex engine and the CSS-variables theme.
-- [ADR-0008](0008-five-crates-on-tokio-and-axum.md) on the bundled UI without a frontend
+- [ADR-0008](0008-six-crates-on-tokio-and-axum.md) on the bundled UI without a frontend
   toolchain, and its alternative "A frontend framework and bundler for the UI"; `NOTICE` (Redoc
   vendored as a pre-built file); the Operator plane's CSP in `crates/fleet-server/src/api.rs`.
 

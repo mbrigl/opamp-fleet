@@ -1,9 +1,9 @@
-# ADR-0014: The secrets the application crates hold in memory are wiped when they are dropped, with `zeroize`
+# ADR-0015: The secrets the application crates hold in memory are wiped when they are dropped, with `zeroize`
 
-- **Status:** ⚪ superseded by [ADR-0040](0040-secrets-in-memory-are-wiped-on-drop.md)
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
-- **Applies to:** the `zeroize` crate in `Cargo.toml` and in the manifests of `crates/fleet-core/`, `crates/fleet-agent/`, `crates/fleet-server/` and `crates/fleet-tools/`, every value of those crates that holds a private key, a password, the S3 secret access key, a `bootstrap.p12` being read or the Supervisor Endpoint token (among them `BootstrapIdentity` in `crates/fleet-agent/src/config.rs`, `crates/fleet-agent/src/tls.rs`, `crates/fleet-agent/src/csr.rs`, `read_password_file` and the questionnaire in `crates/fleet-agent/src/config_init.rs`, the token in `crates/fleet-agent/src/supervisor/`, `crates/fleet-core/src/pkcs12/file.rs`, `crates/fleet-server/src/ca.rs`, `Password` in `crates/fleet-server/src/bootstrap.rs`, the Basic password in `crates/fleet-server/src/credentials.rs`, the Server's own TLS key, `read_secret_file` in `crates/fleet-server/src/config.rs`, the contents of `[database.postgres] password_file` in `crates/fleet-server/src/postgres/mod.rs` and of `[blobs.s3] secret_access_key_file` in `crates/fleet-server/src/s3.rs`, `[packages] archive_key` in `crates/fleet-agent/src/config.rs` and `crates/fleet-agent/src/config_file.rs`, the text of `supervisor.toml` where `crates/fleet-agent/src/reconfigure.rs` and `crates/fleet-agent/src/config_init.rs` rewrite it, the Gateway's listener key, and the password and key handling of `crates/fleet-tools/src/pki.rs` and `crates/fleet-tools/src/package.rs` with `package pack --archive-key`)
+- **Applies to:** the `zeroize` crate in `Cargo.toml` and in the manifests of `crates/fleet-core/`, `crates/fleet-util/`, `crates/fleet-agent/`, `crates/fleet-server/` and `crates/fleet-tools/`, every value of those crates that holds a private key, a password, the S3 secret access key, a `bootstrap.p12` being read or the Supervisor Endpoint token (among them `BootstrapIdentity` and `pem_block` in `crates/fleet-util/src/identity.rs`, `open` in `crates/fleet-util/src/identity/pkcs12.rs`, `crates/fleet-agent/src/tls.rs`, `crates/fleet-agent/src/csr.rs`, `read_password_file` in `crates/fleet-util/src/password.rs`, the questionnaire in `crates/fleet-agent/src/config_init.rs`, the token in `crates/fleet-agent/src/supervisor/`, `crates/fleet-core/src/pkcs12/file.rs`, `crates/fleet-server/src/ca.rs`, `Password` in `crates/fleet-server/src/bootstrap.rs`, the Basic password in `crates/fleet-server/src/credentials.rs`, the Server's own TLS key, `read_secret_file` in `crates/fleet-server/src/config.rs`, the contents of `[database.postgres] password_file` in `crates/fleet-server/src/postgres/mod.rs` and of `[blobs.s3] secret_access_key_file` in `crates/fleet-server/src/s3.rs`, `[packages] archive_key` in `crates/fleet-agent/src/config.rs` and `crates/fleet-agent/src/config_file.rs`, the text of `supervisor.toml` where `crates/fleet-agent/src/reconfigure.rs` and `crates/fleet-agent/src/config_init.rs` rewrite it, the Gateway's listener key, and the password and key handling of `crates/fleet-tools/src/pki.rs` and `crates/fleet-tools/src/package.rs` with `package pack --archive-key`)
 
 ## Context
 
@@ -51,7 +51,8 @@ What the crates around the secrets do, read in the locked sources:
   as a `String`. Neither names `zeroize`.
 
 `opamp::tls::Identity` carries the key as PEM into every connection
-([ADR-0008](0008-five-crates-on-tokio-and-axum.md) clause 4). ADR-0008 clause 3 lists the
+([ADR-0008](0008-six-crates-on-tokio-and-axum.md)
+clause 4). ADR-0008 clause 3 lists the
 dependencies each feature of `opamp` adds, and `zeroize` is not among them.
 
 ## Decision
@@ -62,9 +63,10 @@ a `bootstrap.p12` while the Client reads it, and the Supervisor Endpoint token) 
 buffer from the moment it is read or made until it is dropped.
 
 1. **One dependency, default features.** `zeroize` is pinned once in `[workspace.dependencies]`
-   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md) clause 11) with its default `alloc` feature
-   and no derive, and named by `fleet-core`, `fleet-agent`, `fleet-server` and `fleet-tools` where
-   they hold a secret. It pulls no TLS or crypto backend, so the rule of
+   ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)
+   clause 11) with its default `alloc` feature
+   and no derive, and named by `fleet-core`, `fleet-util`, `fleet-agent`, `fleet-server` and
+   `fleet-tools` where they hold a secret. It pulls no TLS or crypto backend, so the rule of
    [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) on the TLS and crypto backend holds.
 2. **`Zeroizing` is the whole mechanism.** A secret is a `Zeroizing<Vec<u8>>` or a
    `Zeroizing<String>`, or a struct field of that type; no type of this project's own wraps it. A

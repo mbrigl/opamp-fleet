@@ -1,5 +1,5 @@
 //! The listeners' TLS material (ADR-0012, ADR-0026), read from the files `[tls]`,
-//! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (ADR-0041).
+//! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (ADR-0008).
 //!
 //! What is the Server's here is which material and why. The Agent plane requires a client
 //! certificate in the handshake, verified against the client CA and, while `[enrolment]` is set,
@@ -225,7 +225,7 @@ fn identity(cert_file: &Path, key_file: &Path) -> Result<Identity, String> {
     let cert_pem = read(cert_file)?;
     opamp::tls::certificates(&cert_pem).map_err(|e| in_file(cert_file, &e))?;
     // Read, and parsed, in buffers wiped when they are dropped; `opamp` takes the key as its own
-    // buffer, so the copy is made here (ADR-0040 clause 3).
+    // buffer, so the copy is made here (ADR-0015 clause 3).
     let key_pem = zeroize::Zeroizing::new(read(key_file)?);
     opamp::tls::private_key(&key_pem)
         .map(zeroize::Zeroizing::new)

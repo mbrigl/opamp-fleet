@@ -1,6 +1,6 @@
 //! The links a kind's tree package keeps as links
-//! (ADR-0043 clause 27,
-//! ADR-0039 clause 57).
+//! (ADR-0036 clause 27,
+//! ADR-0033 clause 57).
 //!
 //! A tree package carries no link, with one exception a kind decides: an absolute link it names
 //! by its exact path in the tree and its exact target, such as a program loader an upstream tree
@@ -56,7 +56,7 @@ mod tests {
 
     /// Only the named path with the named target is kept: another path, another target, a
     /// relative target and a kind's malformed entry keep nothing.
-    /// Verifies: ADR-0039
+    /// Verifies: ADR-0033
     #[test]
     fn only_the_named_path_with_the_named_target_is_kept() {
         let target = Path::new("/lib64/ld-linux-x86-64.so.2");

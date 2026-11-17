@@ -1,6 +1,6 @@
 # Development observability stack
 
-OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry (ADR-0017), stored
+OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry (ADR-0018), stored
 in one place — twice: in ClickHouse and, side by side, in Apache Doris. It is a Compose project of
 its own ([`compose.yaml`](compose.yaml)) that runs on the
 host, apart from the Dev Container: start it when you want to look, leave it off when you do not.
@@ -92,7 +92,7 @@ The Dev Container has no Docker socket ([ADR-0004](../docs/adr/0004-dev-containe
 needs none for this: it reaches the Collector **through the host**, over the ports published above.
 
 The Client sends own telemetry in plaintext to a loopback IP literal and nowhere else
-([ADR-0017](../docs/adr/0017-what-an-agent-reports-about-itself.md)), so
+([ADR-0018](../docs/adr/0018-what-an-agent-reports-about-itself.md)), so
 `http://host.docker.internal:4318` is refused inside the container just like any other address.
 That is why the container forwards the host's Collector onto its own loopback:
 [`.devcontainer/forward-otlp.sh`](../.devcontainer/forward-otlp.sh), run by `postStartCommand` on
@@ -200,7 +200,7 @@ Two things this stack is shaped around:
   receiver routes on that path. An endpoint without it disappears into a 404.
 - **`http://` only to `127.0.0.1` or `[::1]`.** The Client refuses every other cleartext
   destination — a private address, a host name, even `localhost` — and reports the refusal rather
-  than warning about it ([ADR-0017](../docs/adr/0017-what-an-agent-reports-about-itself.md)).
+  than warning about it ([ADR-0018](../docs/adr/0018-what-an-agent-reports-about-itself.md)).
   An Agent on the host, or in the Dev Container through its forwarder, reaches
   `http://127.0.0.1:4318` and is satisfied. An Agent on another machine is not: terminate TLS in
   front of the Collector and offer the `https://` URL.
@@ -234,7 +234,7 @@ latter. Metric names are stored unmodified — `process.memory.usage`, `process.
 
 **The platform is on the Resource too.** `ResourceAttributes['os.type']` and `['host.arch']` — the
 two halves
-ADR-0039
+ADR-0033
 selects a package variant by — plus `['os.description']` for the readable form.
 They describe the *host*, not one Agent: this Client samples its own process and the Managed
 Processes it holds the pids of, so everything in one export runs on the machine the Resource names.
@@ -270,7 +270,7 @@ Three dashboards are provisioned from `grafana/dashboards/` into the **OpAMP** f
 | **Fleet Agents — Traces** | Operation rate, error rate, p50/p95/p99 duration, which phase fails most, and a trace detail view. |
 
 **What fills the traces dashboard.** Five fleet operations, and nothing else
-([ADR-0017](../docs/adr/0017-what-an-agent-reports-about-itself.md)): `package.install`,
+([ADR-0018](../docs/adr/0018-what-an-agent-reports-about-itself.md)): `package.install`,
 `config.apply` (twice over — a Managed Process's configuration, and the Supervisor set),
 `connection.settings.apply`, and `self.update`. Each is a root span whose children are its phases,
 and whose status is the outcome the Server is told — so *"which phase fails most"* has real rows in
@@ -307,7 +307,7 @@ reporting.
 The buckets alternate because each Client's `PeriodicReader` runs in its own phase (the samples of
 *one* Client share a timestamp, so its Managed Processes stay aligned), and because
 `$__timeInterval` resolves from the panel's width — around 5 s over an hour, well below the 10 s
-sampling interval ADR-0017 sets.
+sampling interval ADR-0018 sets.
 
 Hence:
 

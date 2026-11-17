@@ -298,7 +298,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 19. **An Agent inherits the labels of its Client Agent.**
     - The Client Agent is the Agent a Client presents for itself, recognised by the
       `supervisor.kind.*` attributes it alone reports
-      ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)).
+      ([ADR-0019](0019-supervisor-mode-and-its-kinds.md)).
     - Its labels hold for the other Agents of the same Client:
       - on a direct connection, the Agents bound to the same Host;
       - behind a Gateway, the Agents arriving over the same Gateway Host that report the same
@@ -315,7 +315,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
     - A label whose key starts with `supervisor.` is refused (`400`), naming the key, the same way.
       That space is a Supervisor's own statement: the kinds its Client carries and the version of
       the Package it installed
-      ([ADR-0017](0017-what-an-agent-reports-about-itself.md)
+      ([ADR-0018](0018-what-an-agent-reports-about-itself.md)
       clauses 5 and 10). A label there would let a Selector match an Agent as if it stated one.
     - A label the record already holds in either space is ignored: it enters no effective
       description (clause 18), so no Selector and no package match reads it, no Agent inherits it
@@ -459,7 +459,7 @@ which approvals and provisioned certificates already limit.
   `supervisor.` space would then be set like any other and matched where the Agent reports no such
   key. That space is a Supervisor's own statement: the kinds its Client carries and the version of
   the Package it installed
-  ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clauses 5 and 10). A label there would
+  ([ADR-0018](0018-what-an-agent-reports-about-itself.md) clauses 5 and 10). A label there would
   let a Selector or a package match take an Agent for one that states a kind or a version it never
   stated. Rejected; clause 20 refuses such a label as it refuses one in `fleet.`, and ignores one
   the record already holds in either space rather than match it.
@@ -506,8 +506,8 @@ which approvals and provisioned certificates already limit.
   memory and offers no persistence design to follow.
 - On the host a certificate names, renewal, and that a Gateway hides its downstream certificates:
   [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md);
-  [ADR-0018](0018-supervisor-mode-and-its-kinds.md) on `supervisor.kind.*`;
-  [ADR-0017](0017-what-an-agent-reports-about-itself.md): `host.name`, `host.id`, `host.ip` and
+  [ADR-0019](0019-supervisor-mode-and-its-kinds.md) on `supervisor.kind.*`;
+  [ADR-0018](0018-what-an-agent-reports-about-itself.md): `host.name`, `host.id`, `host.ip` and
   `host.mac` are reported attributes.
 - The code: `check_report` and `prune` in `crates/fleet-server/src/revocation.rs`, the host minted
   at approval and `forget_agent` in `crates/fleet-server/src/fleet.rs`. Read in the source.

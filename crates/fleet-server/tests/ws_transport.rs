@@ -75,8 +75,8 @@ async fn a_framed_report_is_answered() {
 
 /// The Server answers a WebSocket ping with a pong carrying its payload, on a session that has
 /// sent nothing yet and after a report: the sign of life an Agent waits for
-/// (ADR-0015 clause 1).
-/// Verifies: ADR-0015
+/// (ADR-0014 clause 1).
+/// Verifies: ADR-0014
 #[tokio::test]
 async fn the_server_answers_a_ping_with_a_pong() {
     async fn pong(socket: &mut Socket, payload: &'static [u8]) {

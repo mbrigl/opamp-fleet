@@ -76,7 +76,7 @@ async fn an_enrolment_needs_no_heartbeat() {
 /// The questionnaire's enrolment (ADR-0027 clause 16) carries a host to its first certificate with
 /// the bootstrap pair where it lies: it returns once an operator approved the request, the issued
 /// certificate is in the state directory, and nothing was copied beside the configuration.
-/// Verifies: ADR-0020, ADR-0027
+/// Verifies: ADR-0021, ADR-0027
 #[tokio::test]
 async fn the_questionnaires_enrolment_stores_the_issued_certificate_and_copies_nothing() {
     let served = Served::start(600).await;
