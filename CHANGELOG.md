@@ -16,6 +16,14 @@ once its tag exists.
 
 ## [0.8.4]
 
+### Fixed
+
+- **`libz-sys` 1.1.33 (RUSTSEC-2026-0544).** The heap buffer overflow lies in a crate only the
+  build script of `fleet-core` links, through `git2`, to stamp the version with git's provenance;
+  no shipped binary contains it. `chrono` and `humantime`, flagged as unmaintained on the same day
+  (RUSTSEC-2026-0543, RUSTSEC-2026-0542), come only through `object_store`, which has no release
+  without them, and are recorded as reviewed in `deny.toml`. **What to do:** nothing.
+
 ## [0.8.3] - 2026-11-15
 
 ### Added
