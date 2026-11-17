@@ -39,10 +39,11 @@ repo() {
   echo "$dir"
 }
 
-# commit <dir> <message> — an empty commit, printed as its abbreviated hash.
+# commit <dir> <message> — an empty commit, printed as its full hash: an abbreviation of nine
+# digits is all decimal in about one run in seventy, and the sensor reads such a word as no hash.
 commit() {
   git_in "$1" commit -q --allow-empty -m "$2"
-  git_in "$1" rev-parse --short=9 HEAD
+  git_in "$1" rev-parse HEAD
 }
 
 # cite <dir> <path> <text> — write the text into the file under the fixture.
