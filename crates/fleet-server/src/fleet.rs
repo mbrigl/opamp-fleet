@@ -45,11 +45,9 @@ pub use delivery::{PackageOffering, StoreFull, UploadReservation};
 use held::{Carried, Kept, PendingRekey, Settled, Taking, Took, UnsureRekey, AGENT_LOCKS};
 use placement::{Elsewhere, Groups};
 pub use placement::{Group, Placement};
-use rollout::{offer, restart_command, waiting, Waiting};
 pub use session::{
     bad_request, unavailable, Processed, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER,
 };
-use session::{compose_settings_offer, Ending};
 pub(crate) use views::{attr_map, capability_names, display_version};
 pub use views::{
     AgentListing, AgentQuery, AgentView, DeploymentReach, HostAgentView, HostAgents,
@@ -892,24 +890,6 @@ impl AppState {
         self
     }
 
-    /// Marks `host` as a Gateway, or not (ADR-0027 clause 11); answers whether this Server knows
-    /// the host. The mark decides whether the Agents arriving over it carry its values and how
-    /// they group (ADR-0029 clauses 18 and 19), so every Agent is placed again.
-    ///
-    /// # Errors
-    /// Returns an error when there is no host register or the change cannot be written.
-    pub fn set_gateway(&self, host: &str, gateway: bool) -> Result<bool, String> {
-        let revocations = self
-            .revocations
-            .as_ref()
-            .ok_or_else(|| "revocation is not configured".to_string())?;
-        let known = revocations.set_gateway(host, gateway)?;
-        if known {
-            self.place_all();
-        }
-        Ok(known)
-    }
-
     /// The fleet as the Operator plane reads it
     /// (ADR-0023 clause 3): on a shared store every record as
     /// stored, connected as its stored presence says, placed among the others, and nothing of what
@@ -1255,8 +1235,8 @@ mod tests {
         assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60]);
     }
 
-    use super::fixtures::*;
     use super::*;
+    use crate::fleet::fixtures::*;
 
     // ---- Hosts, the effective description and label inheritance (ADR-0029) ----
 
@@ -1269,52 +1249,6 @@ mod tests {
         let fleet = state.fleet.lock().expect("fleet lock");
         let record = fleet.get(uid).expect("known");
         deployments::matches(&selector, record.effective_description().as_deref())
-    }
-
-    /// The view names the platform an Agent is offered packages for as the offer reads it: folded
-    /// to the canonical tokens, an identifying copy standing in, empty when it reports neither. The
-    /// Agents tab shows it and the fleet search finds the Agent by it (ADR-0030, ADR-0031).
-    /// Verifies: ADR-0030, ADR-0031
-    #[test]
-    fn the_view_names_the_platform_the_offer_reads() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let state = hosted_fleet(dir.path());
-        let none = crate::revocation::SubjectValues::default;
-        let (raw, identifying, silent) = (
-            InstanceUid([0xc1; 16]),
-            InstanceUid([0xc2; 16]),
-            InstanceUid([0xc3; 16]),
-        );
-        let service = [("service.name", "otelcol")];
-        let in_identifying = [
-            ("service.name", "otelcol"),
-            ("os.type", "macos"),
-            ("host.arch", "aarch64"),
-        ];
-        report_listed(
-            &state,
-            "h1",
-            none(),
-            raw,
-            1,
-            0,
-            &service,
-            &[("os.type", "linux"), ("host.arch", "x86_64")],
-        );
-        report_listed(
-            &state,
-            "h2",
-            none(),
-            identifying,
-            1,
-            0,
-            &in_identifying,
-            &[],
-        );
-        report_listed(&state, "h3", none(), silent, 1, 0, &service, &[]);
-        assert_eq!(view(&state, &raw).platform, "linux-amd64");
-        assert_eq!(view(&state, &identifying).platform, "darwin-arm64");
-        assert_eq!(view(&state, &silent).platform, "");
     }
 
     /// An Agent on a direct connection carries its Host's subject values as `fleet.host.*`; an
@@ -1639,41 +1573,5 @@ mod tests {
 
         label(&state, &rekeyed, &[("site", "linz")]);
         assert!(selects(&state, &supervisor, &[("site", "linz")]));
-    }
-
-    /// Labels are part of the Agent's record: a re-keyed Agent keeps them, on disk too, and
-    /// forgetting it removes them — it comes back unlabelled.
-    /// Verifies: ADR-0029
-    #[test]
-    fn forgetting_an_agent_removes_its_labels_and_a_rekey_keeps_them() {
-        let dir = tempfile::tempdir().expect("tempdir").keep();
-        let state = AppState::new(dir.clone())
-            .expect("state")
-            .with_stale_after(Duration::from_secs(90));
-        let uid = InstanceUid::default();
-        state.process(report(&uid, 1), Transport::WebSocket, Some(1));
-        label(&state, &uid, &[("rollout", "canary")]);
-
-        let mut rekey = report(&uid, 2);
-        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
-        let new_uid = state
-            .process(rekey, Transport::WebSocket, Some(1))
-            .uid
-            .expect("the new identity");
-        assert_eq!(view(&state, &new_uid).labels["rollout"], "canary");
-        let stored = std::fs::read_to_string(dir.join("agents").join(format!("{new_uid}.json")))
-            .expect("stored");
-        assert!(stored.contains("canary"), "{stored}");
-
-        let mut goodbye = report(&new_uid, 3);
-        goodbye.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
-        state.process(goodbye, Transport::WebSocket, Some(1));
-        assert!(state.forget_agent(&new_uid).is_ok());
-        state.process(report(&new_uid, 4), Transport::WebSocket, Some(2));
-        assert!(
-            view(&state, &new_uid).labels.is_empty(),
-            "it comes back unlabelled"
-        );
-        assert!(!dir.join("labels").exists(), "no label store is written");
     }
 }

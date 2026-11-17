@@ -248,17 +248,20 @@ no module.
   restart an operator requests ([ADR-0032](adr/0032-deployments-and-rollouts.md)) — are the core
   module `fleet::rollout`, behind the same `AppState` entry points.
   Enrolment and certificates — the approval of an enrolment and its take-back, the answer an
-  enrolling Agent is given, and the issuing and renewal of a host certificate with the records of
-  what was issued and signed
+  enrolling Agent is given, the issuing and renewal of a host certificate with the records of what
+  was issued and signed, and the mark of a host as a Gateway, which places every Agent again
   ([ADR-0027](adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md))
   — are the core module `fleet::approval`, behind the same `AppState` entry points.
   The round of an Agent's report — a report processed under the Agent's lock, its record created,
   taken or settled, the reply and the connection settings it is offered, the persist path, a
   goodbye and a forget, and the answers a refused report gets — is the core module
-  `fleet::session`, behind the same `AppState` entry points. What is left in the module root of
-  `fleet` is the state, its construction and limits, the lease, the reads of the fleet and the
-  audit helpers every context calls, and the types they share; the test helpers they share are
-  the test-only `fleet::fixtures`.
+  `fleet::session`, behind the same `AppState` entry points. A context that calls another's item
+  imports it by name, so the edges between them read from each file's `use` lines. What is left in
+  the module root of `fleet` is what every context calls: the state, its construction and limits,
+  the lease, the reads of the fleet, the audit helpers, the capabilities the Server declares, the
+  staleness rule, the retry wait of a kept put-back (`Backoff`), and the types they share, with the
+  tests of staleness, of placement and of label inheritance. The test helpers the contexts share
+  are the test-only `fleet::fixtures`.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the

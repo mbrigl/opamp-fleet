@@ -886,4 +886,114 @@ mod tests {
         go.send(()).expect("go on");
         assert_eq!(deleting.join().expect("the entry deletion"), Ok(true));
     }
+
+    /// On PostgreSQL the check of a Gateway's package download, and the view of an Agent behind
+    /// it, read the Agents that arrived over the Gateway's Host through the port's `query_page`,
+    /// not the whole fleet, and still find the Client Agent behind the Gateway whose labels the
+    /// Agent inherits.
+    /// Verifies: ADR-0030, ADR-0033
+    #[test]
+    fn a_gateways_download_and_an_agent_behind_it_read_the_gateways_agents_and_not_the_fleet() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("blobs");
+        let a = delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+            dir.path(),
+        );
+        let (client, agent, other) = (
+            InstanceUid([0xb1; 16]),
+            InstanceUid([0xb2; 16]),
+            InstanceUid([0xb3; 16]),
+        );
+        let none = crate::revocation::SubjectValues::default;
+        let takes = opamp::proto::AgentCapabilities::ReportsStatus as u64
+            | opamp::proto::AgentCapabilities::AcceptsPackages as u64
+            | opamp::proto::AgentCapabilities::ReportsPackageStatuses as u64;
+        report_listed(
+            &a,
+            "gw",
+            none(),
+            client,
+            1,
+            takes,
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true"), ("host.name", "m1")],
+        );
+        assert_eq!(a.set_gateway("gw", true), Ok(true));
+        report_listed(
+            &a,
+            "gw",
+            none(),
+            agent,
+            1,
+            takes,
+            &[("service.name", "otelcol")],
+            &[
+                ("os.type", "linux"),
+                ("host.arch", "amd64"),
+                ("host.name", "m1"),
+            ],
+        );
+        report_listed(
+            &a,
+            "h2",
+            none(),
+            other,
+            1,
+            takes,
+            &[("service.name", "otelcol")],
+            &[("os.type", "linux"), ("host.arch", "amd64")],
+        );
+        label(&a, &client, &[("ring", "early")]);
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        a.create_package_set(&id).expect("set");
+        a.put_package_entry(&id, &linux, &mut &b"v1"[..])
+            .expect("entry");
+        a.put_package_entry_signature(&id, &linux, vec![1; 64])
+            .expect("signature");
+        a.deployment_store()
+            .expect("deployments")
+            .put(
+                "early",
+                BTreeMap::from([("ring".to_string(), "early".to_string())]),
+            )
+            .expect("deployment");
+        a.put_deployment_package("early", &id, true)
+            .expect("hold it");
+        assert_eq!(
+            a.rollout_deployment("early").expect("rollout"),
+            1,
+            "the inheriting Agent"
+        );
+
+        let hooked = Hooked::new(Box::new(
+            crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open"),
+        ));
+        let whole = hooked.whole_queries.clone();
+        let b = delivering_on(&database, Box::new(hooked), dir.path());
+        assert!(
+            b.offers_artifact("gw", &id, &linux),
+            "the Gateway fetches what its Agent was released"
+        );
+        assert!(
+            !b.offers_artifact("h2", &id, &linux),
+            "nothing was released over h2"
+        );
+        let view = b.agent_view(&agent).expect("read").expect("known");
+        assert_eq!(
+            view.inherited_labels.get("ring").map(String::as_str),
+            Some("early")
+        );
+        assert_eq!(view.client_agent, client.to_string());
+        assert_eq!(
+            whole.load(Ordering::SeqCst),
+            0,
+            "no read of the whole fleet"
+        );
+    }
 }

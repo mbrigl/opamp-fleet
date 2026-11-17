@@ -1,9 +1,10 @@
 //! Enrolment and certificates (ADR-0023 clause 9, ADR-0026, ADR-0027): the approval of an
 //! enrolment and its take-back, the answer an enrolling Agent is given, the issuing and renewal of
-//! a host certificate on the connection the request arrived over, and the records of what was
-//! issued and signed, each written with its decision. Behind the same `AppState` entry points as
-//! before.
+//! a host certificate on the connection the request arrived over, the records of what was issued
+//! and signed, each written with its decision, and the mark of a host as a Gateway (ADR-0027
+//! clause 11). Behind the same `AppState` entry points as before.
 
+use super::session::{compose_settings_offer, Ending};
 use super::*;
 
 impl AppState {
@@ -322,6 +323,24 @@ impl AppState {
             uid: Some(uid),
             disconnected: false,
         }))
+    }
+
+    /// Marks `host` as a Gateway, or not (ADR-0027 clause 11); answers whether this Server knows
+    /// the host. The mark decides whether the Agents arriving over it carry its values and how
+    /// they group (ADR-0029 clauses 18 and 19), so every Agent is placed again.
+    ///
+    /// # Errors
+    /// Returns an error when there is no host register or the change cannot be written.
+    pub fn set_gateway(&self, host: &str, gateway: bool) -> Result<bool, String> {
+        let revocations = self
+            .revocations
+            .as_ref()
+            .ok_or_else(|| "revocation is not configured".to_string())?;
+        let known = revocations.set_gateway(host, gateway)?;
+        if known {
+            self.place_all();
+        }
+        Ok(known)
     }
 }
 

@@ -3,6 +3,7 @@
 //! the version a reader of the fleet table is shown (ADR-0037). Behind the same `AppState` entry
 //! points as before.
 
+use super::rollout::{waiting, Waiting};
 use super::*;
 
 impl AppState {
@@ -1370,5 +1371,51 @@ mod tests {
             before,
             "no row but the Client Agent's was written"
         );
+    }
+
+    /// The view names the platform an Agent is offered packages for as the offer reads it: folded
+    /// to the canonical tokens, an identifying copy standing in, empty when it reports neither. The
+    /// Agents tab shows it and the fleet search finds the Agent by it (ADR-0030, ADR-0031).
+    /// Verifies: ADR-0030, ADR-0031
+    #[test]
+    fn the_view_names_the_platform_the_offer_reads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let none = crate::revocation::SubjectValues::default;
+        let (raw, identifying, silent) = (
+            InstanceUid([0xc1; 16]),
+            InstanceUid([0xc2; 16]),
+            InstanceUid([0xc3; 16]),
+        );
+        let service = [("service.name", "otelcol")];
+        let in_identifying = [
+            ("service.name", "otelcol"),
+            ("os.type", "macos"),
+            ("host.arch", "aarch64"),
+        ];
+        report_listed(
+            &state,
+            "h1",
+            none(),
+            raw,
+            1,
+            0,
+            &service,
+            &[("os.type", "linux"), ("host.arch", "x86_64")],
+        );
+        report_listed(
+            &state,
+            "h2",
+            none(),
+            identifying,
+            1,
+            0,
+            &in_identifying,
+            &[],
+        );
+        report_listed(&state, "h3", none(), silent, 1, 0, &service, &[]);
+        assert_eq!(view(&state, &raw).platform, "linux-amd64");
+        assert_eq!(view(&state, &identifying).platform, "darwin-arm64");
+        assert_eq!(view(&state, &silent).platform, "");
     }
 }
