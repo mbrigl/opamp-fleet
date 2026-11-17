@@ -239,6 +239,10 @@ no module.
   fleet, and the list of Agents a page at a time
   ([ADR-0030](adr/0030-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md))
   — are the core module `fleet::views`, behind the same `AppState` entry points.
+  Packages in the fleet — the Package Sets, their entries and signatures, the upload limit, the
+  offer of a Package to an Agent and of an artifact to a Host, and the Packages a Deployment holds
+  ([ADR-0033](adr/0033-packages-signatures-and-delivery.md)) — are the core module
+  `fleet::delivery`, behind the same `AppState` entry points.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the

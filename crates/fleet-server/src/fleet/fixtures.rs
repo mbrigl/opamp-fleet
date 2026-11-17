@@ -136,3 +136,52 @@ pub(super) fn listed(
     );
     seen
 }
+
+/// A fleet delivering `otelcol@1.0.0`, uploaded and signed for linux/amd64 and held by the
+/// `stable` channel that claims every `otelcol`, with a host register.
+pub(super) fn delivering_fleet(dir: &std::path::Path) -> (AppState, Arc<Revocations>, PackageId) {
+    let store = PackageStore::open(dir.join("packages")).expect("store");
+    let id = PackageId::new("otelcol", "1.0.0").expect("id");
+    store.create(&id).expect("create");
+    store
+        .put_entry(&id, &linux(), b"v1".to_vec())
+        .expect("entry");
+    let revocations = Arc::new(
+        Revocations::open(
+            Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations"),
+    );
+    let state = AppState::new(dir.join("configs"))
+        .expect("state")
+        .with_packages(Some(
+            PackageOffering::new(&dir.join("packages"), store).expect("offering"),
+        ))
+        .with_revocations(Some(revocations.clone()));
+    state
+        .deployment_store()
+        .expect("deployments")
+        .put(
+            "stable",
+            BTreeMap::from([("service.name".to_string(), "otelcol".to_string())]),
+        )
+        .expect("deployment");
+    put_signed(&state, &id);
+    (state, revocations, id)
+}
+
+pub(super) fn linux() -> Platform {
+    Platform::new("linux", "amd64").expect("platform")
+}
+
+/// Signs `id` for linux/amd64 and puts it into the `stable` channel — saved, released to nobody.
+pub(super) fn put_signed(state: &AppState, id: &PackageId) {
+    state
+        .put_package_entry_signature(id, &linux(), vec![1; 64])
+        .expect("signature");
+    state
+        .put_deployment_package("stable", id, true)
+        .expect("package");
+}

@@ -114,7 +114,10 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("deployments", Core),
             ("enrolment", Core),
             ("fleet", Core),
-            ("fleet::fixtures", Core),
+            ("fleet::delivery", Core),
+            // Test-only: it wires the filesystem adapters the tests of the core run on, as
+            // `test_support` does.
+            ("fleet::fixtures", Adapter),
             ("fleet::held", Core),
             ("fleet::placement", Core),
             ("fleet::views", Core),
