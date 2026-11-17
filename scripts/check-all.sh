@@ -236,6 +236,10 @@ run "Backlog sensor self-test" scripts/test-sensor-backlog.sh
 run "Backlog sensor" scripts/sensor-backlog.sh
 run "Action references sensor self-test" scripts/test-sensor-action-refs.sh
 run "Action references sensor" scripts/sensor-action-refs.sh
+run "Cited commits sensor self-test" scripts/test-sensor-cited-commits.sh
+run "Cited commits sensor" scripts/sensor-cited-commits.sh
+run "Implements sensor self-test" scripts/test-sensor-implements-adrs.sh
+run "Implements sensor" scripts/sensor-implements-adrs.sh
 run "Review binding sensor self-test" scripts/test-sensor-review-binding.sh
 run "Review binding sensor" scripts/sensor-review-binding.sh
 run "Action reference self-test" scripts/test-check-action-refs.sh
