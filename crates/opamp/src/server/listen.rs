@@ -41,8 +41,9 @@ use super::pace::{self, Pace, MIN_PACE_BYTES, PACE_WINDOW};
 use crate::endpoint::is_loopback_literal;
 use crate::tls::{certificates, private_key, provider, root_store, server_builder, Identity};
 
-/// How long a connection may take to send its request line and headers: hyper's own default,
-/// with the timer that makes it take effect. It bounds the request line and the headers only.
+/// How long a connection may take to its first request, and an HTTP/1 request to its request line
+/// and headers: hyper's own default, with the timer that makes it take effect. It bounds nothing
+/// after a request is dispatched: not a WebSocket session, not a download.
 pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The connections a listener holds at once unless the application states another cap
@@ -286,8 +287,9 @@ impl Listener {
         self
     }
 
-    /// Replaces [`HEADER_READ_TIMEOUT`] — the seam a test drives, since nothing else makes a
-    /// 30-second bound observable in a suite.
+    /// Replaces [`HEADER_READ_TIMEOUT`], which also bounds the time to a connection's first
+    /// request — the seam a test drives, since nothing else makes a 30-second bound observable in
+    /// a suite.
     #[must_use]
     pub fn with_header_read_timeout(mut self, timeout: Duration) -> Self {
         self.header_read_timeout = timeout;
@@ -403,11 +405,15 @@ impl Listener {
 
 /// The header-read bound, with the timer it needs first: without the timer hyper discards the
 /// default, and with the timeout set but no timer it panics. HTTP/2 has no header phase to time,
-/// so it is bounded by its streams and its pings instead (ADR-0012).
+/// so it is bounded by its streams and its pings instead (ADR-0012). Before either, hyper reads the
+/// first bytes to tell the two apart with no timer of its own, so a peer that falls silent before
+/// its first request, after the TCP connection or the TLS handshake, would hold its slot of the
+/// cap for good; the same bound covers the time to the first request.
 fn bounded<A>(
-    mut server: Server<SocketAddr, A>,
+    server: Server<SocketAddr, A>,
     header_read_timeout: Duration,
 ) -> Server<SocketAddr, A> {
+    let mut server = server.first_request_timeout(header_read_timeout);
     let builder = server.http_builder();
     builder
         .http1()

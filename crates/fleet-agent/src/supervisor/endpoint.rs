@@ -74,8 +74,8 @@ impl Endpoint {
         self
     }
 
-    /// Tightens the header bound — what a test waits out instead of the 30 seconds every OpAMP
-    /// listener applies (ADR-0041).
+    /// Tightens the header bound, which also bounds the time to a connection's first request —
+    /// what a test waits out instead of the 30 seconds every OpAMP listener applies (ADR-0041).
     #[must_use]
     pub fn with_header_read_timeout(mut self, timeout: Duration) -> Self {
         self.header_read_timeout = timeout;
