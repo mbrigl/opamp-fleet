@@ -1,6 +1,8 @@
 //! The test helpers the contexts of `fleet` share: an Agent put into the fleet, a report, the
 //! view of one Agent, labels, the list read a page at a time, and a clock the test moves.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use super::*;
 
 pub(super) fn insert(state: &AppState, record: AgentRecord) -> InstanceUid {
@@ -208,4 +210,77 @@ pub(super) fn hosted_fleet(dir: &std::path::Path) -> AppState {
     AppState::new(dir.join("configs"))
         .expect("state")
         .with_revocations(Some(revocations))
+}
+
+pub(super) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub(super) fn record_with(capabilities: u64) -> AgentRecord {
+    AgentRecord {
+        sequence_num: 1,
+        capabilities,
+        description: None,
+        health: None,
+        effective_config: None,
+        remote_config_status: None,
+        transport: Transport::WebSocket,
+        connected: false,
+        last_seen_ms: now_ms(),
+        restart_pending: false,
+        available_components: None,
+        components_demanded: None,
+        connection_settings_status: None,
+        package_statuses: None,
+        owner: None,
+        carried_ms: 0,
+        heard: false,
+        labels: BTreeMap::new(),
+        host: None,
+        placement: Placement::default(),
+        holder: None,
+        assignment: None,
+    }
+}
+
+/// Whether the record `stored` holds of `uid` has a restart queued; `None` without a record.
+pub(super) fn queued(stored: &dyn AgentStore, uid: &InstanceUid) -> Option<bool> {
+    stored
+        .get(uid)
+        .expect("get")
+        .map(|record| record.restart_pending)
+}
+
+/// A full report from `uid` describing itself with `pairs`, over a certificate naming `host`
+/// whose subject carries `subject`.
+pub(super) fn report_over(
+    state: &AppState,
+    host: &str,
+    subject: crate::revocation::SubjectValues,
+    uid: InstanceUid,
+    pairs: &[(&str, &str)],
+) -> Processed {
+    let mut message = report(&uid, 1);
+    message
+        .agent_description
+        .as_mut()
+        .expect("described")
+        .non_identifying_attributes = pairs
+        .iter()
+        .map(|(key, value)| opamp::attributes::string_attr(key, value))
+        .collect();
+    state.process_presented(
+        message,
+        Transport::Http,
+        None,
+        Some(&Presented {
+            id: CertId::new(b"CA", host),
+            host: Some(host.to_string()),
+            subject_values: subject,
+            not_after_ms: u64::MAX,
+        }),
+    )
 }

@@ -72,7 +72,7 @@ impl AppState {
     /// provisioned from a bootstrap certificate, and proves whichever it holds. A certificate that
     /// names no host — one an operator provisioned — gets a host derived from its issuer and
     /// serial, the same on every retry.
-    pub(super) fn renews(
+    fn renews(
         &self,
         ca: &dyn CertificateSigner,
         csr: &str,

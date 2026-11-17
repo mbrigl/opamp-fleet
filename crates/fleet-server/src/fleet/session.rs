@@ -1,0 +1,7585 @@
+//! The round of an Agent's report (ADR-0025, ADR-0029): a report processed under the Agent's
+//! lock, its record created, taken or settled, the reply it is answered with, the connection
+//! settings it is offered, the persist path that writes what changed, a goodbye and a forget, and
+//! the answers every refused report gets. Behind the same `AppState` entry points as before.
+
+use super::*;
+
+impl AppState {
+    /// A fresh identity for one WebSocket connection.
+    pub fn connection_id(&self) -> ConnId {
+        self.next_conn.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// A receiver that fires whenever any Configuration changes; WebSocket loops use it to push
+    /// offers without waiting for the Agent to speak.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.push.subscribe()
+    }
+
+    /// Forgets everything this Server knows about one Agent (ADR-0029): the record is dropped and
+    /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
+    /// certificate revoked, since a certificate here proves fleet membership and its host, never
+    /// which Agent is speaking (ADR-0027 clause 11). A Client still running therefore reappears on its next
+    /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
+    /// The `instance_uid` is released from the Host it was bound to, so that report binds it to
+    /// the host whose certificate carries it (ADR-0029 clause 10).
+    ///
+    /// Refused while the Agent is still reporting: the record holds the hashes that gate
+    /// re-offering, so forgetting a live Agent has it offered its configuration again — and the
+    /// Collector plugin restarts its Managed Process when a configuration arrives. An operator who
+    /// wants a restart asks for one through [`request_restart`](Self::request_restart).
+    ///
+    /// `connected` alone would not do. Behind a Gateway the open connection is the *Gateway's*, so
+    /// a Gatewayed Agent that died still reads as connected; and plain-HTTP polling has no socket
+    /// to close, so an Agent that stops polling without saying goodbye stays connected forever.
+    /// Silence is the second half of the test — and it is [`is_silent`], not [`is_stale`]: an
+    /// Agent that declared no heartbeat is never called stale, and gating on staleness would leave
+    /// its row on a decommissioned host permanently unremovable.
+    pub fn forget_agent(&self, uid: &InstanceUid) -> Result<(), ForgetError> {
+        let _agent = self.agent_lock(uid);
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        let (budget, now_ms) = (self.stale_after(), self.clock.now_ms());
+        if let Some(record) = fleet.get(uid) {
+            if record.connected && !is_silent(record, budget, now_ms) {
+                return Err(ForgetError::StillReporting);
+            }
+        }
+        // Forgetting that left a stored record behind would be the "remembering under another
+        // name" ADR-0029 rejected: the record leaves the store with the row, its labels with it
+        // (ADR-0029 clause 21). On a shared store the instance that carries the Agent may be
+        // another, so what decides is the presence stored, read and removed in one step
+        // (ADR-0029 clause 11).
+        // On a shared store the record's removal answers what its stored assignment named, read
+        // under the row's lock in the same step, so the revisions only it pinned are collected
+        // whatever another instance released meanwhile.
+        let mut stored_configurations = Vec::new();
+        if self.agent_store.is_shared() {
+            let silent_before = now_ms.saturating_sub(budget.as_millis() as u64);
+            match self
+                .agent_store
+                .remove_if_silent(uid, silent_before)
+                .map_err(ForgetError::Storage)?
+            {
+                Some(crate::agent_store::Silenced::Forgotten(configurations)) => {
+                    stored_configurations = configurations;
+                }
+                Some(crate::agent_store::Silenced::Reporting) => {
+                    return Err(ForgetError::StillReporting)
+                }
+                // Held but not stored: forgotten or re-keyed through another instance, and not yet
+                // heard of here. What is held is forgotten.
+                None if fleet.contains_key(uid) => {}
+                None => return Err(ForgetError::UnknownAgent),
+            }
+        } else {
+            if !fleet.contains_key(uid) {
+                return Err(ForgetError::UnknownAgent);
+            }
+            self.unpersist(uid);
+        }
+        let removed = fleet.remove(uid);
+        self.kept.forget(uid);
+        // Its `instance_uid` leaves the Host it was bound to: whichever host reports it next binds
+        // it (ADR-0029 clause 10).
+        if let Some(revocations) = &self.revocations {
+            if let Err(e) = revocations.release(uid.as_bytes()) {
+                warn!(agent = %uid, error = %e, "cannot write the released host binding");
+            }
+        }
+        if let Some(record) = removed {
+            // A session that still carries it ends (ADR-0029 clause 10).
+            self.end_session(uid, &record);
+            // A Client Agent forgotten takes its labels from the Agents that inherited them.
+            self.unplace(
+                &mut fleet,
+                uid,
+                record.placement.group.clone(),
+                &mut Elsewhere::Now,
+            );
+            // A pinned revision only this Agent referenced is unreferenced now (ADR-0032): what
+            // it held, and what the store named, which a release through another instance may
+            // have changed before its notification arrived here.
+            let mut configurations: BTreeSet<String> =
+                record.assigned_configurations().keys().cloned().collect();
+            configurations.extend(stored_configurations);
+            self.collect_revisions(configurations);
+        } else {
+            self.collect_revisions(stored_configurations);
+        }
+        drop(fleet);
+        self.push.send_modify(|rev| *rev += 1);
+        info!(agent = %uid, "agent forgotten");
+        Ok(())
+    }
+
+    /// Persists one record when — and only when — its durable content changed since it was last
+    /// written (ADR-0029). `last_seen_ms` and `sequence_num` are outside the comparison and ride
+    /// along on whatever write happens, so the common heartbeat reaches no storage backend at
+    /// all; [`flush_agents`](Self::flush_agents) is what makes them current on a graceful stop.
+    /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
+    /// one that refuses reports. Answers whether the record is still stored: on a shared store
+    /// one forgotten through another instance is not, and is not written again.
+    pub(super) fn persist_if_dirty(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> bool {
+        match self.persist(uid, persisted) {
+            Ok(stored) => stored,
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "cannot persist the agent record");
+                true
+            }
+        }
+    }
+
+    /// Writes one record when its durable content changed since it was last written, and says
+    /// whether the write failed — for an operator's act that must not be answered unwritten — or
+    /// found no record to write, as of an Agent forgotten through another instance. The record was
+    /// created or read before (ADR-0029 clause 14), so only what a report decides is written of
+    /// it, and nothing creates it again.
+    ///
+    /// `persisted` is what the record held when the report let the fleet lock go, and it is
+    /// written after: no other report waits for the write. Two writes of one record do not race,
+    /// so an older state never lands after a newer one, since the Agent's own lock, which every
+    /// report of it holds from its start to its answer, is held across the write; and a report is
+    /// answered only once its record is written (ADR-0029 clause 4). What a store's write may take
+    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0023 clause 24).
+    ///
+    /// On a shared store, an Agent this instance was answered no count of takes for, its take not
+    /// written or its answer lost, has its record written at every report and no digest kept: a
+    /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
+    /// again, may have written over it, and the next report writes it again. Once a count is
+    /// answered, a report that changes nothing durable writes nothing again
+    /// (ADR-0025
+    /// clause 8).
+    fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
+        let digest = persisted.durable_digest();
+        let counted = !self.agent_store.is_shared()
+            || self
+                .kept
+                .presence_written
+                .lock()
+                .expect("presence lock")
+                .counted(uid);
+        if counted && self.kept.written.lock().expect("written lock").get(uid) == Some(&digest) {
+            return Ok(true);
+        }
+        if !self.agent_store.write_report(uid, persisted)? {
+            return Ok(false);
+        }
+        if !counted {
+            self.kept.written.lock().expect("written lock").remove(uid);
+            return Ok(true);
+        }
+        self.kept
+            .written
+            .lock()
+            .expect("written lock")
+            .insert(*uid, digest);
+        Ok(true)
+    }
+
+    /// Drops one record from the store and the dirty-check ledger — the storage half of
+    /// forgetting (ADR-0029) and of an identity reassignment.
+    fn unpersist(&self, uid: &InstanceUid) {
+        if let Err(e) = self.agent_store.remove(uid) {
+            warn!(agent = %uid, error = %e, "cannot remove the agent record from the store");
+        }
+        self.kept.written.lock().expect("written lock").remove(uid);
+    }
+
+    /// Notes that `record`, just forgotten as `uid`, was carried by a live WebSocket, whose loop
+    /// then ends its session.
+    pub(super) fn end_session(&self, uid: &InstanceUid, record: &AgentRecord) {
+        if let (true, Some(conn)) = (record.connected, record.owner) {
+            self.forgotten
+                .lock()
+                .expect("forgotten lock")
+                .entry(conn)
+                .or_default()
+                .push(*uid);
+        }
+    }
+
+    /// Writes every record's current state, timestamps and sequence numbers included — the
+    /// graceful-shutdown flush (ADR-0029) that lets the ordinary restart restore a fleet whose
+    /// `last_seen` is current and whose next compressed report is accepted without a gap. On a
+    /// shared store only the records of the Agents this instance heard from are written: of the
+    /// others it holds what it loaded, and another instance carries them
+    /// (ADR-0029 clause 2). Of those, only the ones no other
+    /// instance holds the connection of: an Agent heard here that moved to another instance keeps
+    /// what that instance wrote of it. Whether one moved is told by the count of takes this
+    /// instance was last answered, never by comparing its clock with another's.
+    pub fn flush_agents(&self) {
+        let fleet = self.fleet.lock().expect("fleet lock");
+        let shared = self.agent_store.is_shared();
+        let holder = self.lease.get().and_then(|lease| lease.borrow().clone());
+        // The counts outlive the lease they were answered under: a count still stored says no
+        // instance took the Agent since, whatever lease this instance serves under now.
+        // An Agent whose take lost its answer is flushed under the count answered before it, which
+        // a take counted since, also its own lost one, no longer matches.
+        let takes = self
+            .kept
+            .presence_written
+            .lock()
+            .expect("presence lock")
+            .flushed_takes();
+        let mut written = self.kept.written.lock().expect("written lock");
+        for (uid, record) in fleet.iter().filter(|(_, record)| record.heard || !shared) {
+            let persisted = record.to_persisted();
+            match self.agent_store.write_report_unless_held_elsewhere(
+                uid,
+                &persisted,
+                holder.as_deref(),
+                takes.get(uid).copied(),
+            ) {
+                Ok(true) => {
+                    written.insert(*uid, persisted.durable_digest());
+                }
+                // Forgotten through another instance, or held by another: not written.
+                Ok(false) => {}
+                Err(e) => warn!(agent = %uid, error = %e, "cannot flush the agent record"),
+            }
+        }
+    }
+
+    /// The control loop for one report, shared by both transports (ADR-0012): update what we know,
+    /// then answer with what the Agent still lacks — the config offer gated by the hash comparison.
+    /// `conn` identifies the WebSocket connection that carried the report; `None` for plain HTTP.
+    ///
+    /// The reported `instance_uid` is taken at face value: admission proved fleet membership, not
+    /// which Agent is speaking, so within an admitted fleet a report's identity is self-asserted and
+    /// not authorized against any other Agent (ADR-0026). The plain-HTTP path in particular offers
+    /// nothing to tell two pollers apart; the WebSocket duplicate-`instance_uid` rekey below is
+    /// collision handling, not authorization.
+    pub fn process(
+        &self,
+        msg: AgentToServer,
+        transport: Transport,
+        conn: Option<ConnId>,
+    ) -> Processed {
+        self.process_presented(msg, transport, conn, None)
+    }
+
+    /// [`process`](Self::process) for a connection that presented a certificate: the host it was
+    /// issued to binds the Agents it reports for, and a CSR without a renewal proof renews it
+    /// unless its host is a Gateway's (ADR-0027 clause 11, ADR-0016).
+    pub fn process_presented(
+        &self,
+        msg: AgentToServer,
+        transport: Transport,
+        conn: Option<ConnId>,
+        presented: Option<&Presented>,
+    ) -> Processed {
+        let Some(reported) = InstanceUid::from_wire(&msg.instance_uid) else {
+            warn!(
+                len = msg.instance_uid.len(),
+                "report with a malformed instance_uid"
+            );
+            return Processed {
+                reply: bad_request("instance_uid must be 16 bytes (UUID v7 recommended)"),
+                uid: None,
+                disconnected: false,
+            };
+        };
+        // The Agent's own lock, held across everything this report reads and writes in the
+        // store: two reports of one Agent are taken up and written in order, a take is not
+        // overtaken by the reading of the holder again, and a restart's clear by a request, a try
+        // or a forget. The fleet lock is taken only to take into memory what was read and
+        // written, so no other Agent's report waits for a call to the store.
+        let _agent = self.agent_lock(&reported);
+        let mut msg = msg;
+        for _ in 0..REPORT_ROUNDS {
+            match self.report_round(msg, transport, conn, presented, reported) {
+                Ok(processed) => return processed,
+                Err(again) => msg = *again,
+            }
+        }
+        warn!(
+            agent = %reported,
+            "the agent left memory while each round of its report read the store"
+        );
+        Processed {
+            reply: unavailable(
+                &msg.instance_uid,
+                "the Server cannot take this report up now; retry later",
+            ),
+            uid: None,
+            disconnected: false,
+        }
+    }
+
+    /// One round of [`process_presented`](Self::process_presented): what the report needs of the
+    /// store is read and written first, then taken into memory under the fleet lock. A round
+    /// whose Agent left memory meanwhile — forgotten, or moved through another instance — hands
+    /// the report back, and the next round goes on from what the store holds then.
+    fn report_round(
+        &self,
+        msg: AgentToServer,
+        transport: Transport,
+        conn: Option<ConnId>,
+        presented: Option<&Presented>,
+        reported: InstanceUid,
+    ) -> Result<Processed, Box<AgentToServer>> {
+        let mut sender = msg.instance_uid.clone();
+        // The reply is addressed to the identity the Agent reported, even when it is re-keyed
+        // below: the Baseline makes a reply's instance_uid match the message's, and the Agent
+        // routes by it — a reply addressed to the new identity reaches no one, and the Agent goes
+        // on reporting under the old one. The new identity travels in agent_identification alone.
+        let mut uid = reported;
+        // One moment for the round's two looks at a stale carrier, so the take-up judges it as the
+        // first look did.
+        let now_ms = self.clock.now_ms();
+        let mut loaded = self.hold_from_store(&uid);
+        let mut reply_flags = 0u64;
+        let mut identification = None;
+
+        // An instance_uid belongs to the host whose certificate first reported it (ADR-0027
+        // clause 11): a certificate of another host does not speak for it, nor re-keys it. Such a
+        // reporter is re-keyed — it gets an identity of its own, never the one it claimed. The
+        // binding is made only once the report is admitted below.
+        let mut binding = None;
+        if let (Some(host), Some(revocations)) =
+            (presented.and_then(|p| p.host.as_deref()), &self.revocations)
+        {
+            if revocations.may_report(host, uid.as_bytes()).is_err() {
+                let new_uid = InstanceUid::default();
+                warn!(
+                    claimed = %uid, new = %new_uid, host,
+                    "an Agent of another host was claimed; rekeying the reporter"
+                );
+                self.audit_refusal(
+                    Entry::new("identity.claimed", "rekeyed")
+                        .with("claimed", uid.to_string())
+                        .with("host", host.to_string()),
+                );
+                identification = Some(AgentIdentification {
+                    new_instance_uid: new_uid.as_bytes().to_vec(),
+                });
+                uid = new_uid;
+                // A CSR in the same message must not name the claimed identity either.
+                sender = uid.as_bytes().to_vec();
+                if let Err(e) = revocations.may_report(host, uid.as_bytes()) {
+                    return Ok(Processed {
+                        reply: bad_request(&e),
+                        uid: None,
+                        disconnected: false,
+                    });
+                }
+            }
+            binding = Some((host, uid));
+        }
+
+        // The Agent asked the Server to assign its identity (AgentToServerFlags_RequestInstanceUid):
+        // mint a UUID v7 and re-key the record; the reply tells the Agent to adopt it. A re-key
+        // whose answer was lost and could not be read back is read back first, whether the Agent
+        // asks again or not: moved, the identity it moved to is assigned now.
+        let mut rekeyed = None;
+        let unsure = if identification.is_none() {
+            self.read_back_unsure_rekey(&uid)
+        } else {
+            UnsureRekey::None
+        };
+        let asked = identification.is_none()
+            && msg.flags & AgentToServerFlags::RequestInstanceUid as u64 != 0;
+        let moves = matches!(unsure, UnsureRekey::Moved(_))
+            || (asked && matches!(unsure, UnsureRekey::None));
+        let (held, to_move) = {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            let to_move = (moves && unsure == UnsureRekey::None)
+                .then(|| fleet.get(&uid).map(AgentRecord::to_persisted))
+                .flatten();
+            (fleet.contains_key(&uid), to_move)
+        };
+        // While it is not known, a report under the old identity of which nothing is held creates
+        // no record: the row may have moved.
+        if unsure == UnsureRekey::Unknown && !held {
+            return Ok(Processed {
+                reply: unavailable(
+                    &msg.instance_uid,
+                    "the Server cannot tell yet whether this Agent's identity moved; retry later",
+                ),
+                uid: None,
+                disconnected: false,
+            });
+        }
+        if moves {
+            // The stored record follows the identity in one step (ADR-0029 clause 14), before what
+            // is held does; what this report changes is written by the dirty check at this
+            // exchange's end. A move that fails leaves the Agent under the identity it has, and
+            // the reply assigns none, so the Agent asks again with its next report. Until what is
+            // held follows, the move is kept as pending, so a read again that finds the old row
+            // gone meanwhile reads it back rather than drop the Agent.
+            let (new_uid, moved) = match unsure {
+                UnsureRekey::Moved(new_uid) => (new_uid, Ok(())),
+                _ => {
+                    let new_uid = InstanceUid::default();
+                    let moved = match &to_move {
+                        None => Ok(()),
+                        Some(record) => {
+                            self.kept.unsure_rekeys.lock().expect("rekeys lock").insert(
+                                uid,
+                                PendingRekey {
+                                    new: new_uid,
+                                    moved: false,
+                                },
+                            );
+                            self.rekey_reading_back(&uid, &new_uid, record)
+                                .map_err(|(e, kept)| {
+                                    if !kept {
+                                        self.kept
+                                            .unsure_rekeys
+                                            .lock()
+                                            .expect("rekeys lock")
+                                            .remove(&uid);
+                                    }
+                                    e
+                                })
+                        }
+                    };
+                    (new_uid, moved)
+                }
+            };
+            match moved {
+                Ok(()) => {
+                    // The new identity is placed below.
+                    info!(old = %uid, new = %new_uid, "assigned a server-generated instance_uid");
+                    identification = Some(AgentIdentification {
+                        new_instance_uid: new_uid.as_bytes().to_vec(),
+                    });
+                    rekeyed = Some((uid, new_uid));
+                    uid = new_uid;
+                }
+                Err(e) => {
+                    warn!(
+                        agent = %uid, error = %e,
+                        "cannot move the agent record; it keeps its identity"
+                    );
+                }
+            }
+        }
+
+        // What memory holds of the Agent, read once, the record a re-key moves standing for the
+        // one under its new identity.
+        //
+        // Duplicate instance_uid detection (a Baseline SHOULD): the same identity alive on a
+        // WebSocket connection of *another peer* — bad UID generators, cloned VMs — is rekeyed
+        // exactly as the Baseline prescribes: mint a fresh uid and answer with
+        // AgentIdentification, which the Client adopts. The newcomer starts a record of its own;
+        // the incumbent and its connection stay untouched. (Stateless plain-HTTP polling offers
+        // nothing to distinguish two pollers by, so detection is WebSocket-only.) An Agent that
+        // comes back on a new connection of the host whose certificate its old connection
+        // presented is not a duplicate of itself: the newest connection takes it, and the older
+        // one's reports no longer take it back
+        // (ADR-0025
+        // clause 8).
+        let arrived_over = self
+            .revocations
+            .as_ref()
+            .and(presented.and_then(|p| p.host.clone()));
+        let described = msg.agent_description.is_some();
+        let mut superseded = false;
+        let mut seen = {
+            let fleet = self.fleet.lock().expect("fleet lock");
+            let mut record = fleet
+                .get(&uid)
+                .or_else(|| rekeyed.and_then(|(old, _)| fleet.get(&old)));
+            if let Some(this_conn) = conn {
+                match record.map_or(Carried::Not, |existing| {
+                    Carried::of(
+                        existing,
+                        this_conn,
+                        arrived_over.as_deref(),
+                        now_ms,
+                        self.heartbeat_interval(),
+                    )
+                }) {
+                    Carried::Not => {}
+                    Carried::ByOlder => {
+                        info!(
+                            agent = %uid,
+                            "the agent came back on a new connection of its host, which carries it now"
+                        );
+                    }
+                    Carried::ByStale => {
+                        info!(
+                            agent = %uid,
+                            "the connection of its host that carried the agent carried none of its \
+                             reports for a heartbeat interval; this one carries it now"
+                        );
+                    }
+                    Carried::ByNewer => superseded = true,
+                    Carried::ByAnotherPeer => {
+                        let new_uid = InstanceUid::default();
+                        warn!(duplicate = %uid, new = %new_uid, "duplicate instance_uid; rekeying the newcomer");
+                        identification = Some(AgentIdentification {
+                            new_instance_uid: new_uid.as_bytes().to_vec(),
+                        });
+                        uid = new_uid;
+                        record = None;
+                    }
+                }
+            }
+            Seen::of(record, |record| {
+                (!described)
+                    .then(|| self.group_of(arrived_over.as_deref(), record.description.as_ref()))
+                    .flatten()
+            })
+        };
+
+        // Admitting a genuinely new Agent past the ceiling would let a peer cycling self-asserted
+        // UIDs (ADR-0026) grow the in-memory map and its per-Agent disk mirror without bound. Known
+        // Agents keep reporting; only a *new* UID at capacity is refused, `Unavailable` so a Client
+        // that legitimately raced in retries rather than gives up. The real gate is admission
+        // (ADR-0026); this bounds the damage while the endpoint is open. On a shared store the
+        // ceiling bounds the records stored, counted by the store as it creates this one, so it
+        // holds for the fleet and not for one instance. A record stored already passes none: it
+        // is another instance's, which the read before the lock missed, and this report goes on
+        // from it as from one read then. On a store this Server alone writes, the new Agent is
+        // counted against what memory holds and what other reports counted and have not yet
+        // taken into it.
+        let mut created = false;
+        let mut reserved = Reservation::none(&self.reserved_new);
+        if !seen.known {
+            let at_ceiling = if self.agent_store.is_shared() {
+                let persisted = self
+                    .new_record(msg.sequence_num, transport, conn)
+                    .to_persisted();
+                match self
+                    .agent_store
+                    .create_within(&uid, &persisted, self.max_agents)
+                {
+                    Ok(Creation::Created) => {
+                        info!(agent = %uid, transport = transport.as_str(), "new agent");
+                        created = true;
+                        // Held from its commit on, not yet carried, as a record found is: what
+                        // another instance commits to it from now on and announces is taken up
+                        // into it, and the report goes on from it.
+                        let digest = persisted.durable_digest();
+                        let mut fleet = self.fleet.lock().expect("fleet lock");
+                        if let std::collections::hash_map::Entry::Vacant(held) = fleet.entry(uid) {
+                            self.kept
+                                .written
+                                .lock()
+                                .expect("written lock")
+                                .insert(uid, digest);
+                            held.insert(AgentRecord::from_persisted(persisted));
+                        }
+                        false
+                    }
+                    Ok(Creation::Found(stored)) => {
+                        let digest = stored.durable_digest();
+                        let found = AgentRecord::from_persisted(*stored);
+                        let mut fleet = self.fleet.lock().expect("fleet lock");
+                        let joined = |record: &AgentRecord| {
+                            (!described)
+                                .then(|| {
+                                    self.group_of(
+                                        arrived_over.as_deref(),
+                                        record.description.as_ref(),
+                                    )
+                                })
+                                .flatten()
+                        };
+                        if let Some(record) = fleet.get(&uid) {
+                            seen = Seen::of(Some(record), joined);
+                        } else {
+                            self.kept
+                                .written
+                                .lock()
+                                .expect("written lock")
+                                .insert(uid, digest);
+                            seen = Seen::of(Some(&found), joined);
+                            fleet.insert(uid, found);
+                        }
+                        loaded = true;
+                        false
+                    }
+                    Ok(Creation::Full) => true,
+                    Err(e) => {
+                        warn!(agent = %uid, error = %e, "cannot store a new agent's record");
+                        return Ok(Processed {
+                            reply: unavailable(
+                                &msg.instance_uid,
+                                "the Server cannot store this Agent's record now; retry later",
+                            ),
+                            uid: None,
+                            disconnected: false,
+                        });
+                    }
+                }
+            } else {
+                let fleet = self.fleet.lock().expect("fleet lock");
+                reserved = Reservation::of(&self.reserved_new, fleet.len(), self.max_agents);
+                !reserved.held()
+            };
+            if at_ceiling {
+                warn!(
+                    agent = %uid,
+                    max_agents = self.max_agents,
+                    "refusing a new agent: the fleet is at its record ceiling"
+                );
+                return Ok(Processed {
+                    reply: unavailable(
+                        &msg.instance_uid,
+                        "the Server is at its Agent-record ceiling; retry later",
+                    ),
+                    uid: None,
+                    disconnected: false,
+                });
+            }
+        }
+        if let Some(revocations) = &self.revocations {
+            if let Some((host, bound)) = binding {
+                let subject = presented
+                    .map(|p| p.subject_values.clone())
+                    .unwrap_or_default();
+                // The binding exists only for a presented certificate that names a host.
+                let not_after_ms = presented.map_or(0, |p| p.not_after_ms);
+                if let Err(e) =
+                    revocations.check_report(host, &subject, not_after_ms, bound.as_bytes())
+                {
+                    // A record this report created goes with it, from the store and from what
+                    // is held; one another instance created stays. A re-key made stands, and what
+                    // is held follows it.
+                    if created {
+                        self.unpersist(&uid);
+                        self.fleet.lock().expect("fleet lock").remove(&uid);
+                    }
+                    self.follow_move(rekeyed, seen.group.clone());
+                    return Ok(Processed {
+                        reply: bad_request(&e),
+                        uid: None,
+                        disconnected: false,
+                    });
+                }
+            }
+            // A re-key an Agent asks for keeps its host (ADR-0027 clause 11).
+            if let Some((old, new)) = rekeyed {
+                if let Err(e) = revocations.rebind(old.as_bytes(), new.as_bytes()) {
+                    warn!(error = %e, "cannot move the host binding to the new instance_uid");
+                }
+            }
+        }
+
+        // The take of an Agent this connection begins to carry, written now: its answer is taken
+        // up with the record below.
+        // A report of an older connection of the host whose newer one carries the Agent takes it
+        // no more.
+        let connects = !superseded && (created || !seen.connected || seen.owner != conn);
+        let _taking = connects.then(|| Taking::of(&self.taking, uid));
+        let took = if connects {
+            self.take_row(&uid, self.clock.now_ms())
+        } else {
+            Took::Nothing
+        };
+
+        // What places it in its Client and under its Host may have changed (ADR-0029): a new
+        // record, a new Host, a new description, or a new identity — a re-key took the old one
+        // out of its group, and a compressed message carries no description to place it by. The
+        // Client Agents of the groups it leaves and joins that another instance carries are read
+        // now.
+        let moved = seen.host != arrived_over;
+        let places = !seen.known || moved || described || rekeyed.is_some() || loaded;
+        let joined = if described || !seen.known {
+            self.group_of(arrived_over.as_deref(), msg.agent_description.as_ref())
+        } else {
+            seen.joined.clone()
+        };
+        let groups: Vec<Group> = if places || rekeyed.is_some() {
+            [seen.group.clone(), joined].into_iter().flatten().collect()
+        } else {
+            Vec::new()
+        };
+        let mut elsewhere = self.elsewhere_of(&groups);
+
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        if let Some((old, new)) = rekeyed {
+            if fleet.contains_key(&old) {
+                self.rekey_held(&mut fleet, &old, new, &mut elsewhere);
+            }
+            let mut pending = self.kept.unsure_rekeys.lock().expect("rekeys lock");
+            if pending.get(&old).is_some_and(|pending| pending.new == new) {
+                pending.remove(&old);
+            }
+        }
+        // Whether a newer connection of the host took the Agent while this round read and wrote
+        // the store, or still carries it: this connection then leaves it to that one.
+        let superseded = conn.is_some_and(|this_conn| {
+            fleet.get(&uid).is_some_and(|record| {
+                Carried::of(
+                    record,
+                    this_conn,
+                    arrived_over.as_deref(),
+                    now_ms,
+                    self.heartbeat_interval(),
+                ) == Carried::ByNewer
+            })
+        });
+        let now_connects = created
+            || fleet
+                .get(&uid)
+                .is_none_or(|record| !record.connected || record.owner != conn);
+        let left = (seen.known || created) && rekeyed.is_none() && !fleet.contains_key(&uid);
+        // A round that re-keyed the Agent goes on under the identity it assigned: a next round
+        // would start from the message under the old one and assign a second. It finds the Agent
+        // no longer carried, its connection closed meanwhile, and leaves it so: it wrote no take,
+        // and nothing would mark the Agent disconnected again.
+        let uncarried = now_connects && !connects && !superseded;
+        if left || (uncarried && rekeyed.is_none()) {
+            // Forgotten or moved through another instance, or no longer carried, while this
+            // round read and wrote the store: the next round goes on from what it holds now.
+            drop(fleet);
+            self.place_again(elsewhere);
+            return Err(Box::new(msg));
+        }
+        let known = seen.known;
+        let record = fleet.entry(uid).or_insert_with(|| {
+            info!(agent = %uid, transport = transport.as_str(), "new agent");
+            self.new_record(msg.sequence_num, transport, conn)
+        });
+        reserved.release();
+
+        // A compressed report (unchanged fields omitted) is only usable if our state is current.
+        // A gap in sequence_num — or an Agent we have never seen describing itself with nothing —
+        // means state was lost somewhere; the Baseline's recovery is to demand a full report.
+        let compressed = msg.agent_description.is_none();
+        let gap = known && msg.sequence_num != record.sequence_num.wrapping_add(1);
+        // Counting from the start again is an Agent that restarted. A gap alone is not: an Agent
+        // that never counts shows one on every message.
+        let restarted = known && msg.sequence_num < record.sequence_num;
+        if compressed && (!known || gap) {
+            reply_flags |= ServerToAgentFlags::ReportFullState as u64;
+        }
+
+        // The Host it arrived over (ADR-0029 clause 16) — none without a host register.
+        let moved = record.host != arrived_over;
+        record.host = arrived_over;
+
+        record.sequence_num = msg.sequence_num;
+        record.transport = transport;
+        // A demand for the component map may have been lost with the previous connection, or with
+        // an Agent that restarted, which plain HTTP shows instead of a connection, so either may be
+        // asked again.
+        if !uncarried && !superseded {
+            if !record.connected || record.owner != conn || restarted {
+                record.components_demanded = None;
+            }
+            record.connected = true;
+            record.owner = conn;
+            // When the take-up commits, not when the round began: a round that waited on the store
+            // leaves its carrier as fresh as its report.
+            record.carried_ms = self.clock.now_ms();
+        }
+        record.heard = true;
+        record.last_seen_ms = self.clock.now_ms();
+        if connects {
+            self.took(&uid, took, record.presence(), created);
+        }
+        if msg.capabilities != 0 {
+            record.capabilities = msg.capabilities;
+        }
+        if let Some(description) = msg.agent_description {
+            record.description = Some(description);
+        }
+        if let Some(health) = msg.health {
+            record.health = Some(health);
+        }
+        if let Some(effective) = msg.effective_config {
+            record.effective_config = Some(config_map_text(effective.config_map.as_ref()));
+        }
+        if let Some(status) = msg.remote_config_status {
+            record.remote_config_status = Some(status);
+        }
+        if let Some(status) = msg.connection_settings_status {
+            if status.status == opamp::proto::ConnectionSettingsStatuses::Failed as i32 {
+                warn!(agent = %uid, error = %status.error_message, "connection settings rejected");
+            }
+            record.connection_settings_status = Some(status);
+        }
+        if let Some(statuses) = msg.package_statuses {
+            self.take_up_package_statuses(&uid, record, statuses);
+        }
+        if let Some(incoming) = msg.available_components {
+            // A routine hash-only update must not degrade an already-fetched full map of the
+            // same hash; anything else (first sight, or a changed hash) replaces the stored value.
+            let keep_stored_full = record.available_components.as_ref().is_some_and(|stored| {
+                incoming.components.is_empty()
+                    && !stored.components.is_empty()
+                    && stored.hash == incoming.hash
+            });
+            if !keep_stored_full {
+                record.available_components = Some(incoming);
+            }
+        }
+
+        if !known || moved || described || rekeyed.is_some() || loaded {
+            self.place(&mut fleet, &uid, &mut elsewhere);
+        }
+        let record = fleet.get_mut(&uid).expect("the record was just written");
+
+        // The Agent asked to be issued a client certificate (ADR-0026); it is signed once the
+        // fleet lock is let go.
+        let request = msg
+            .connection_settings_request
+            .as_ref()
+            .and_then(|request| request.opamp.as_ref())
+            .and_then(|opamp| opamp.certificate_request.as_ref())
+            .map(|request| request.csr.clone());
+        let mut ending = Ending {
+            uid,
+            reported,
+            disconnected: msg.agent_disconnect.is_some(),
+            superseded,
+            identification,
+            reply_flags,
+        };
+        let pending = match request {
+            None => Pending::Settled(self.settle(record, &mut ending, None)),
+            Some(csr) => Pending::Issue(Box::new(record.to_persisted()), csr),
+        };
+        drop(fleet);
+        self.place_again(elsewhere);
+        Ok(self.finish(pending, &sender, presented, ending))
+    }
+
+    /// Takes a report's package statuses into `record`: an outcome that moved is audited, and a
+    /// failed installation and an offer the Agent refused are logged.
+    fn take_up_package_statuses(
+        &self,
+        uid: &InstanceUid,
+        record: &mut AgentRecord,
+        statuses: PackageStatuses,
+    ) {
+        use opamp::proto::PackageStatusEnum as P;
+        for (name, status) in &statuses.packages {
+            let before = record
+                .package_statuses
+                .as_ref()
+                .and_then(|previous| previous.packages.get(name))
+                .map(|previous| (previous.status, previous.agent_has_version.clone()));
+            let outcome = if status.status == P::Installed as i32 {
+                Some("installed")
+            } else if status.status == P::InstallFailed as i32 {
+                Some("failed")
+            } else {
+                None
+            };
+            if let (Some(outcome), true) = (
+                outcome,
+                before != Some((status.status, status.agent_has_version.clone())),
+            ) {
+                self.audit_refusal(
+                    Entry::new("package.outcome", outcome)
+                        .with("instance_uid", uid.to_string())
+                        .with("package", name.clone())
+                        .with("version", status.agent_has_version.clone())
+                        .with("offered_version", status.server_offered_version.clone())
+                        .with(
+                            "error",
+                            (!status.error_message.is_empty())
+                                .then(|| status.error_message.clone()),
+                        ),
+                );
+            }
+        }
+        for status in statuses.packages.values() {
+            if status.status == P::InstallFailed as i32 {
+                warn!(agent = %uid, package = %status.name, error = %status.error_message, "package installation failed");
+            }
+        }
+        // An Agent that refuses the offer itself has no package to hang the reason on, so the
+        // report carries it. Logged and surfaced, or a Client refusing every offer it is sent
+        // would look like one that is simply not installing anything.
+        if !statuses.error_message.is_empty() {
+            warn!(agent = %uid, error = %statuses.error_message, "the agent refused the package offer");
+        }
+        record.package_statuses = Some(statuses);
+    }
+
+    /// Moves what this instance holds to the identity a re-key moved the stored record to, where
+    /// a report that made the move is refused before it takes it into memory.
+    fn follow_move(&self, rekeyed: Option<(InstanceUid, InstanceUid)>, left: Option<Group>) {
+        let Some((old, new)) = rekeyed else {
+            return;
+        };
+        let mut elsewhere = self.elsewhere_of(left.as_slice());
+        {
+            let mut fleet = self.fleet.lock().expect("fleet lock");
+            if fleet.contains_key(&old) {
+                self.rekey_held(&mut fleet, &old, new, &mut elsewhere);
+            }
+            let mut pending = self.kept.unsure_rekeys.lock().expect("rekeys lock");
+            if pending.get(&old).is_some_and(|pending| pending.new == new) {
+                pending.remove(&old);
+            }
+        }
+        self.place_again(elsewhere);
+    }
+
+    /// Under the fleet lock, what a report's end makes of `record` once a certificate it asked
+    /// for is `issued` or refused: its goodbye, the demand for its component map, and the reply,
+    /// or a queued restart that goes out instead, whose clear is written once the lock is let go.
+    fn settle(
+        &self,
+        record: &mut AgentRecord,
+        ending: &mut Ending,
+        issued: Option<TlsCertificate>,
+    ) -> Settled {
+        if ending.disconnected && !ending.superseded {
+            info!(agent = %ending.uid, "agent disconnected");
+            record.connected = false;
+            record.owner = None;
+        }
+
+        // A hash without the map is an offer to fetch: demand the full component list from an
+        // Agent that declared it can report one (the flag is meaningless toward any other), once
+        // per hash on a connection.
+        if !ending.disconnected
+            && !ending.superseded
+            && record.capabilities
+                & opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64
+                != 0
+        {
+            if let Some(stored) = record
+                .available_components
+                .as_ref()
+                .filter(|ac| ac.components.is_empty())
+            {
+                if record.components_demanded.as_ref() != Some(&stored.hash) {
+                    record.components_demanded = Some(stored.hash.clone());
+                    ending.reply_flags |= ServerToAgentFlags::ReportAvailableComponents as u64;
+                }
+            }
+        }
+
+        // A queued restart goes out as the Baseline's command-only message: nothing but
+        // identity, capabilities, and the command. Anything else the reply would carry —
+        // an identity reassignment, a demanded full report — defers the command to the next
+        // exchange instead of being combined with it.
+        if record.restart_pending
+            && !ending.disconnected
+            && !ending.superseded
+            && ending.identification.is_none()
+            && ending.reply_flags == 0
+            && record.capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64
+                != 0
+        {
+            return Settled::Restart(issued);
+        }
+        Settled::Done(Box::new((
+            self.reply_of(record, ending, issued),
+            record.to_persisted(),
+        )))
+    }
+
+    /// The reply to a report, with the offers `record` is due.
+    fn reply_of(
+        &self,
+        record: &AgentRecord,
+        ending: &Ending,
+        issued: Option<TlsCertificate>,
+    ) -> Processed {
+        // The config offer — composed from this Agent's assignments (ADR-0032), gated by the
+        // hash comparison, and only toward an Agent that both said goodbye ≠ true and declared
+        // AcceptsRemoteConfig (capability negotiation is binding). Matching proposes; only an
+        // operator's rollout act made anything an assignment.
+        let remote_config = if ending.disconnected {
+            None
+        } else {
+            let desired = self.configs.compose(record.assigned_configurations());
+            offer(record, desired.as_ref())
+        };
+
+        // The connection-settings offer (ADR-0013), gated the same way: by capability and by
+        // the hash the Agent last reported — the Baseline's own "compare and include" MUST.
+        let connection_settings = if ending.disconnected {
+            None
+        } else {
+            self.settings_offer(record, issued)
+        };
+
+        // The package offer (ADR-0033), gated by capability and the reported
+        // server_provided_all_packages_hash — the Baseline's "compare and include" for packages.
+        let packages_available = if ending.disconnected {
+            None
+        } else {
+            self.packages_offer(record)
+        };
+
+        Processed {
+            reply: ServerToAgent {
+                instance_uid: ending.reported.as_bytes().to_vec(),
+                capabilities: self.capabilities(),
+                flags: ending.reply_flags,
+                remote_config,
+                connection_settings,
+                packages_available,
+                agent_identification: ending.identification.clone(),
+                ..Default::default()
+            },
+            uid: Some(ending.uid),
+            disconnected: ending.disconnected,
+        }
+    }
+
+    /// The end of a report once its record is taken into memory, with the fleet lock let go: a
+    /// certificate it asked for is signed and recorded, a queued restart cleared, and everything
+    /// the report changed is persisted if it moved the durable state (ADR-0029) — a heartbeat did
+    /// not, and writes nothing — before the Agent is answered.
+    fn finish(
+        &self,
+        pending: Pending,
+        sender: &[u8],
+        presented: Option<&Presented>,
+        mut ending: Ending,
+    ) -> Processed {
+        let settled = match pending {
+            Pending::Issue(persisted, csr) => {
+                match self.issue(csr, sender, presented, &ending, &persisted) {
+                    Ok(issued) => {
+                        let mut fleet = self.fleet.lock().expect("fleet lock");
+                        let Some(record) = fleet.get_mut(&ending.uid) else {
+                            drop(fleet);
+                            return self.forgotten_elsewhere(&ending.uid, &ending.reported);
+                        };
+                        self.settle(record, &mut ending, Some(issued))
+                    }
+                    Err(answered) => return *answered,
+                }
+            }
+            Pending::Settled(settled) => settled,
+        };
+        let (processed, persisted) = match settled {
+            Settled::Done(done) => *done,
+            Settled::Restart(issued) => {
+                let cleared = self.clear_restart(&ending.uid);
+                let mut fleet = self.fleet.lock().expect("fleet lock");
+                let Some(record) = fleet.get_mut(&ending.uid) else {
+                    drop(fleet);
+                    return self.forgotten_elsewhere(&ending.uid, &ending.reported);
+                };
+                if self.take_restart(&ending.uid, record, cleared) {
+                    let processed = Processed {
+                        reply: restart_command(&ending.uid, self.capabilities()),
+                        uid: Some(ending.uid),
+                        disconnected: false,
+                    };
+                    (processed, record.to_persisted())
+                } else {
+                    (
+                        self.reply_of(record, &ending, issued),
+                        record.to_persisted(),
+                    )
+                }
+            }
+        };
+        if !self.persist_if_dirty(&ending.uid, &persisted) {
+            return self.forgotten_elsewhere(&ending.uid, &ending.reported);
+        }
+        processed
+    }
+
+    /// The record of an Agent first heard of now.
+    fn new_record(
+        &self,
+        sequence_num: u64,
+        transport: Transport,
+        conn: Option<ConnId>,
+    ) -> AgentRecord {
+        AgentRecord {
+            labels: BTreeMap::new(),
+            host: None,
+            placement: Placement::default(),
+            holder: None,
+            sequence_num,
+            capabilities: 0,
+            description: None,
+            health: None,
+            effective_config: None,
+            remote_config_status: None,
+            transport,
+            connected: true,
+            last_seen_ms: self.clock.now_ms(),
+            restart_pending: false,
+            available_components: None,
+            components_demanded: None,
+            connection_settings_status: None,
+            package_statuses: None,
+            owner: conn,
+            carried_ms: self.clock.now_ms(),
+            heard: true,
+            // A new Agent waits (ADR-0032 clause 10): it is assigned nothing until an operator's
+            // rollout act says so, and the fleet view shows what it could get.
+            assignment: None,
+        }
+    }
+
+    /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
+    /// at an Agent's first report here: another instance may have written it, and its labels, its
+    /// assignment and its queued restart are what this report goes on from
+    /// (ADR-0025
+    /// clause 8). Read before the fleet lock is taken, so no other report waits for it. Answers
+    /// whether it loaded one; one that cannot be read is logged, and the report goes on as an
+    /// Agent's first.
+    fn hold_from_store(&self, uid: &InstanceUid) -> bool {
+        if !self.agent_store.is_shared() || self.fleet.lock().expect("fleet lock").contains_key(uid)
+        {
+            return false;
+        }
+        let stored = match self.agent_store.get(uid) {
+            Ok(Some(stored)) => stored,
+            Ok(None) => return false,
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "cannot read the agent's stored record");
+                return false;
+            }
+        };
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        if fleet.contains_key(uid) {
+            return false;
+        }
+        self.kept
+            .written
+            .lock()
+            .expect("written lock")
+            .insert(*uid, stored.durable_digest());
+        fleet.insert(*uid, AgentRecord::from_persisted(stored));
+        true
+    }
+
+    /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
+    /// reported hash says it already runs (or refused) exactly this offer.
+    ///
+    /// `issued` is a certificate just signed for this Agent (ADR-0026). It overrides the hash gate
+    /// — the Agent asked for it in this very exchange — and rides whatever else the standing offer
+    /// carries, so one message can hand over a certificate and the endpoint or heartbeat that go
+    /// with it, exactly as the Baseline describes.
+    fn settings_offer(
+        &self,
+        record: &AgentRecord,
+        issued: Option<TlsCertificate>,
+    ) -> Option<ConnectionSettingsOffers> {
+        // The own-telemetry destinations (ADR-0018), offered only for the signals this Agent says
+        // it can report — the protocol's negotiation rule, and an offer for a capability the peer
+        // lacks is one nobody will ever act on.
+        let telemetry = TelemetryOffer {
+            own_metrics: self.telemetry_offer.own_metrics.clone().filter(|_| {
+                record.capabilities & opamp::proto::AgentCapabilities::ReportsOwnMetrics as u64 != 0
+            }),
+            own_traces: self.telemetry_offer.own_traces.clone().filter(|_| {
+                record.capabilities & opamp::proto::AgentCapabilities::ReportsOwnTraces as u64 != 0
+            }),
+            own_logs: self.telemetry_offer.own_logs.clone().filter(|_| {
+                record.capabilities & opamp::proto::AgentCapabilities::ReportsOwnLogs as u64 != 0
+            }),
+        };
+
+        if let Some(certificate) = issued {
+            let mut settings = self
+                .connection_offer
+                .as_ref()
+                .map(|offer| offer.settings.clone())
+                .unwrap_or_default();
+            settings.certificate = Some(certificate);
+            // Not gated, and hashed over the settings as sent: the standing offer's hash would
+            // tell the Agent nothing changed, and it would never adopt the certificate.
+            return Some(compose_settings_offer(Some(settings), telemetry));
+        }
+
+        // An Agent that accepts no OpAMP settings may still report telemetry, so the two are
+        // gated separately: with only a telemetry destination to offer, that is the whole offer.
+        let settings = self
+            .connection_offer
+            .as_ref()
+            .filter(|_| {
+                record.capabilities
+                    & opamp::proto::AgentCapabilities::AcceptsOpAmpConnectionSettings as u64
+                    != 0
+            })
+            .map(|offer| offer.settings.clone());
+        if settings.is_none() && telemetry.is_empty() {
+            return None;
+        }
+        gate(record, compose_settings_offer(settings, telemetry))
+    }
+
+    /// Marks the Agents a closing WebSocket connection carried as no longer connected — but only
+    /// those the connection still *owns*: after a rekey (or a transport switch) another live
+    /// connection may legitimately carry an identity this one once saw, and a closing socket
+    /// must not take it down. State stays: the fleet remembers what each Agent last reported.
+    pub fn mark_disconnected(&self, uids: &[InstanceUid], conn: ConnId) {
+        let mut fleet = self.fleet.lock().expect("fleet lock");
+        for uid in uids {
+            // An Agent whose re-key a notification found moved goes by its new identity here
+            // before the connection is told it.
+            let uid = &if fleet.contains_key(uid) {
+                *uid
+            } else {
+                self.kept
+                    .unsure_rekeys
+                    .lock()
+                    .expect("rekeys lock")
+                    .get(uid)
+                    .filter(|pending| pending.moved)
+                    .map_or(*uid, |pending| pending.new)
+            };
+            if let Some(record) = fleet.get_mut(uid) {
+                if record.owner == Some(conn) {
+                    record.connected = false;
+                    record.owner = None;
+                }
+            }
+        }
+        self.forgotten.lock().expect("forgotten lock").remove(&conn);
+    }
+}
+
+/// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
+/// what the transport layer needs to know for its own bookkeeping.
+pub struct Processed {
+    pub reply: ServerToAgent,
+    /// The identity the Agent goes by *after* this message (it may have been reassigned).
+    pub uid: Option<InstanceUid>,
+    /// The Agent said goodbye; a WebSocket loop drops it from its connection-local set.
+    pub disconnected: bool,
+}
+
+/// How often a report starts again where an Agent it went on from left memory while it read and
+/// wrote the store, before it is answered `Unavailable`.
+const REPORT_ROUNDS: usize = 3;
+
+/// What memory held of an Agent as its report began: what the report decides its calls to the
+/// store from, before it takes the fleet lock to take them up.
+struct Seen {
+    /// Memory held a record of it.
+    known: bool,
+    connected: bool,
+    owner: Option<ConnId>,
+    /// The Host it last arrived over.
+    host: Option<String>,
+    /// The group it is placed in.
+    group: Option<Group>,
+    /// The group the report places it in where the report carries no description.
+    joined: Option<Group>,
+}
+
+impl Seen {
+    /// What `record` holds, `joined` the group it joins without a description.
+    fn of(
+        record: Option<&AgentRecord>,
+        joined: impl FnOnce(&AgentRecord) -> Option<Group>,
+    ) -> Self {
+        match record {
+            None => Seen {
+                known: false,
+                connected: false,
+                owner: None,
+                host: None,
+                group: None,
+                joined: None,
+            },
+            Some(record) => Seen {
+                known: true,
+                connected: record.connected,
+                owner: record.owner,
+                host: record.host.clone(),
+                group: record.placement.group.clone(),
+                joined: joined(record),
+            },
+        }
+    }
+}
+
+/// A new Agent counted against `max_agents` on a store the Server alone writes, until the report
+/// takes it into memory or ends.
+struct Reservation<'a> {
+    count: &'a AtomicUsize,
+    held: bool,
+}
+
+impl<'a> Reservation<'a> {
+    /// None held.
+    fn none(count: &'a AtomicUsize) -> Self {
+        Reservation { count, held: false }
+    }
+
+    /// One counted beside the `held` records memory holds and those `count` counts, unless that
+    /// reaches `max`. Made under the fleet lock, so two reports do not count past it together.
+    fn of(count: &'a AtomicUsize, held: usize, max: usize) -> Self {
+        if held.saturating_add(count.load(Ordering::SeqCst)) >= max {
+            return Reservation::none(count);
+        }
+        count.fetch_add(1, Ordering::SeqCst);
+        Reservation { count, held: true }
+    }
+
+    fn held(&self) -> bool {
+        self.held
+    }
+
+    /// No longer counted: taken into memory, where it counts, or let go.
+    fn release(&mut self) {
+        if std::mem::take(&mut self.held) {
+            self.count.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// What a report's end answers with, once its record is taken into memory.
+pub(super) struct Ending {
+    /// The identity the Agent goes by after the report.
+    pub(super) uid: InstanceUid,
+    /// The identity it reported, which the reply is addressed to.
+    pub(super) reported: InstanceUid,
+    /// It said goodbye.
+    disconnected: bool,
+    /// It came on an older connection of the host whose newer one carries the Agent, which its
+    /// goodbye does not end and a queued restart is not sent on
+    /// (ADR-0025
+    /// clause 8).
+    superseded: bool,
+    identification: Option<AgentIdentification>,
+    reply_flags: u64,
+}
+
+/// Where a report's end stands once its record is taken into memory.
+enum Pending {
+    /// Its reply, or a restart to clear first.
+    Settled(Settled),
+    /// A certificate it asked for to sign first, with what its record held.
+    Issue(Box<PersistedAgent>, Vec<u8>),
+}
+
+/// One `ConnectionSettingsOffers` message, with one hash over everything it carries: the Agent
+/// acknowledges the message, not its parts.
+pub(super) fn compose_settings_offer(
+    opamp: Option<OpAmpConnectionSettings>,
+    telemetry: TelemetryOffer,
+) -> ConnectionSettingsOffers {
+    let mut offer = ConnectionSettingsOffers {
+        opamp,
+        own_metrics: telemetry.own_metrics,
+        own_traces: telemetry.own_traces,
+        own_logs: telemetry.own_logs,
+        ..Default::default()
+    };
+    offer.hash = Sha256::digest(offer.encode_to_vec()).to_vec();
+    offer
+}
+
+/// The Baseline's gate: send the offer when the Agent's reported hash differs. An APPLYING echo of
+/// the same hash keeps it coming — a verification whose outcome was lost (a dropped connection
+/// mid-switch) must heal by retry, not hang.
+fn gate(record: &AgentRecord, offer: ConnectionSettingsOffers) -> Option<ConnectionSettingsOffers> {
+    if let Some(status) = &record.connection_settings_status {
+        if status.last_connection_settings_hash == offer.hash
+            && status.status != opamp::proto::ConnectionSettingsStatuses::Applying as i32
+        {
+            return None;
+        }
+    }
+    Some(offer)
+}
+
+/// The `ServerToAgent` for a report the Server cannot make sense of.
+pub fn bad_request(message: &str) -> ServerToAgent {
+    ServerToAgent {
+        capabilities: SERVER_CAPABILITIES,
+        error_response: Some(ServerErrorResponse {
+            r#type: ServerErrorResponseType::BadRequest as i32,
+            error_message: message.to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// What a CSR with a bootstrap proof over a member's certificate is answered (ADR-0016 clause 25).
+pub const MEMBER_DOES_NOT_ENROL: &str =
+    "a certificate signing request with a bootstrap proof is an enrolment, and a member does not \
+     enrol";
+
+/// What a CSR with neither proof over a Gateway's certificate is answered (ADR-0016 clause 18).
+pub const NEEDS_A_PROOF: &str =
+    "a certificate requested through a Gateway needs a renewal proof or a bootstrap proof";
+
+/// How long an Agent told `Unavailable` waits before it asks again.
+pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
+/// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
+/// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
+/// field a Client and a Gateway route a reply by (ADR-0012 clause 27).
+pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
+    ServerToAgent {
+        instance_uid: instance_uid.to_vec(),
+        capabilities: SERVER_CAPABILITIES,
+        error_response: Some(ServerErrorResponse {
+            r#type: ServerErrorResponseType::Unavailable as i32,
+            error_message: message.to_string(),
+            details: Some(opamp::proto::server_error_response::Details::RetryInfo(
+                opamp::proto::RetryInfo {
+                    retry_after_nanoseconds: RETRY_AFTER.as_nanos() as u64,
+                },
+            )),
+        }),
+        ..Default::default()
+    }
+}
+
+/// Renders a reported config map for the operator: single unnamed entry as-is, named entries with
+/// a `# <name>` heading.
+fn config_map_text(map: Option<&AgentConfigMap>) -> String {
+    let Some(map) = map else {
+        return String::new();
+    };
+    let mut entries: Vec<_> = map.config_map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+        .into_iter()
+        .map(|(name, file)| {
+            let body = String::from_utf8_lossy(&file.body);
+            if name.is_empty() {
+                body.into_owned()
+            } else {
+                format!("# {name}\n{body}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::fleet::fixtures::*;
+
+    /// ADR-0029. The tidy-up case: a host that was decommissioned, its Agent gone with it.
+    #[test]
+    fn a_disconnected_agent_is_forgotten() {
+        let state = forgettable_state();
+        let uid = insert(&state, record_with(0));
+        assert!(state.forget_agent(&uid).is_ok());
+        assert!(state.snapshot().is_empty(), "the row is gone");
+    }
+
+    /// The gate: forgetting a live Agent would drop the hashes that stop the Server re-offering,
+    /// so its next exchange re-applies its configuration — and a managed process restarts with it.
+    #[test]
+    fn an_agent_that_is_still_reporting_is_refused() {
+        let state = forgettable_state();
+        let mut record = record_with(0);
+        record.connected = true;
+        record.last_seen_ms = now_ms();
+        let uid = insert(&state, record);
+        assert!(matches!(
+            state.forget_agent(&uid),
+            Err(ForgetError::StillReporting)
+        ));
+        assert_eq!(state.snapshot().len(), 1, "the row stays");
+    }
+
+    /// The gatewayed case: the connection is up because it is the *Gateway's*, and the Agent behind
+    /// it stopped talking long ago. `connected` alone would refuse this forever.
+    #[test]
+    fn a_connected_agent_that_went_quiet_is_forgotten() {
+        let state = forgettable_state();
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsHeartbeat as u64);
+        record.connected = true;
+        record.last_seen_ms = now_ms() - 120_000;
+        let uid = insert(&state, record);
+        assert!(state.forget_agent(&uid).is_ok());
+    }
+
+    /// The case that made the rule test silence rather than staleness (ADR-0029): an Agent that
+    /// promised no heartbeat is never *stale*, and plain-HTTP polling never clears `connected` —
+    /// so gating on the flag would have left this row on a dead host permanently unremovable.
+    #[test]
+    fn a_silent_agent_is_forgotten_although_it_can_never_be_stale() {
+        let state = forgettable_state();
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsStatus as u64);
+        record.connected = true;
+        record.transport = Transport::Http;
+        record.last_seen_ms = now_ms() - 86_400_000;
+        let uid = insert(&state, record);
+        assert!(
+            !is_stale(
+                &record_at(now_ms() - 86_400_000),
+                Duration::from_secs(90),
+                now_ms()
+            ),
+            "it declares no heartbeat, so it is never stale"
+        );
+        assert!(state.forget_agent(&uid).is_ok(), "but it is forgettable");
+    }
+
+    #[test]
+    fn forgetting_an_agent_that_was_never_known_says_so() {
+        let state = forgettable_state();
+        assert!(matches!(
+            state.forget_agent(&InstanceUid::default()),
+            Err(ForgetError::UnknownAgent)
+        ));
+    }
+
+    fn forgettable_state() -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The directory outlives the state only for the length of a test; the Configuration store
+        // is not what these exercise.
+        AppState::new(dir.keep().join("configs"))
+            .expect("state")
+            .with_stale_after(Duration::from_secs(90))
+    }
+
+    fn record_at(last_seen_ms: u64) -> AgentRecord {
+        let mut record = record_with(opamp::proto::AgentCapabilities::ReportsStatus as u64);
+        record.last_seen_ms = last_seen_ms;
+        record
+    }
+
+    /// ADR-0029: the fleet survives a restart — the record is restored with everything the Agent
+    /// reported, shown honestly as disconnected until live evidence says otherwise.
+    // Verifies: ADR-0029
+    #[test]
+    fn the_fleet_is_restored_disconnected_after_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        {
+            let state = AppState::new(dir.clone()).expect("state");
+            state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+        }
+        let state = AppState::new(dir).expect("reopened state");
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot.len(), 1, "the row survived the restart");
+        assert_eq!(snapshot[0].service_name, "otelcol");
+        assert!(
+            !snapshot[0].connected,
+            "connectedness is runtime-only and never restored"
+        );
+    }
+
+    /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
+    /// be written — tells the Agent when to ask again, so it retries instead of giving up or
+    /// hammering (ADR-0027 clause 9, ADR-0028 clause 5).
+    /// Verifies: ADR-0026, ADR-0028, ADR-0012
+    #[test]
+    fn unavailable_tells_the_agent_when_to_retry() {
+        let reply = unavailable(&[7; 16], "busy");
+        assert_eq!(reply.instance_uid, [7; 16], "it names the Agent it answers");
+        let error = reply.error_response.expect("an error");
+        assert_eq!(error.r#type, ServerErrorResponseType::Unavailable as i32);
+        match error.details {
+            Some(opamp::proto::server_error_response::Details::RetryInfo(info)) => {
+                assert_eq!(info.retry_after_nanoseconds, RETRY_AFTER.as_nanos() as u64);
+            }
+            other => panic!("no retry_info: {other:?}"),
+        }
+    }
+
+    /// A new `instance_uid` past the record ceiling is refused `Unavailable` and leaves no record,
+    /// so a peer minting fresh self-asserted UIDs (ADR-0026) cannot grow the fleet — and its
+    /// in-memory map and per-Agent disk mirror — without bound. Agents already known keep reporting.
+    #[test]
+    fn a_new_agent_past_the_ceiling_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let state = AppState::new(dir).expect("state").with_max_agents(2);
+
+        let a = InstanceUid::default();
+        let b = InstanceUid::default();
+        state.process(report(&a, 1), Transport::Http, None);
+        state.process(report(&b, 1), Transport::Http, None);
+        assert_eq!(state.snapshot().len(), 2, "the fleet filled to its ceiling");
+
+        // A third, genuinely new UID: refused, and told to retry rather than give up.
+        let c = InstanceUid::default();
+        let processed = state.process(report(&c, 1), Transport::Http, None);
+        let error = processed.reply.error_response.expect("an error response");
+        assert_eq!(
+            error.r#type,
+            ServerErrorResponseType::Unavailable as i32,
+            "a full fleet answers Unavailable, not BadRequest"
+        );
+        assert!(
+            processed.uid.is_none(),
+            "the refused report has no identity to route a config to"
+        );
+        assert_eq!(
+            state.snapshot().len(),
+            2,
+            "no record was created for the refused UID"
+        );
+
+        // An Agent already in the fleet keeps reporting even at the ceiling.
+        let processed = state.process(report(&a, 2), Transport::Http, None);
+        assert!(
+            processed.reply.error_response.is_none(),
+            "a known Agent is never refused by the ceiling"
+        );
+        assert_eq!(state.snapshot().len(), 2);
+    }
+
+    /// ADR-0029: a restored sequence number means the next compressed heartbeat is accepted in
+    /// place of a fleet-wide ReportFullState stampede.
+    #[test]
+    fn a_restored_agent_is_not_demanded_a_full_report() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        {
+            let state = AppState::new(dir.clone()).expect("state");
+            state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+            state.flush_agents();
+        }
+        let state = AppState::new(dir).expect("reopened state");
+        let heartbeat = AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num: 2,
+            ..Default::default()
+        };
+        let processed = state.process(heartbeat, Transport::WebSocket, Some(1));
+        assert_eq!(
+            processed.reply.flags & ServerToAgentFlags::ReportFullState as u64,
+            0,
+            "no gap: the restored record carries the sequence"
+        );
+    }
+
+    /// ADR-0029: a heartbeat exists to change nothing, and it reaches no storage backend — the
+    /// stored record still carries the durable state's write, not the heartbeat's.
+    // Verifies: ADR-0029
+    #[test]
+    fn a_heartbeat_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        let state = AppState::new(dir.clone()).expect("state");
+        state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+        let path = dir.join("agents").join(format!("{uid}.json"));
+        let written = std::fs::read_to_string(&path).expect("the report was persisted");
+        let heartbeat = AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            sequence_num: 2,
+            ..Default::default()
+        };
+        state.process(heartbeat, Transport::WebSocket, Some(1));
+        let after = std::fs::read_to_string(&path).expect("still persisted");
+        assert_eq!(written, after, "the heartbeat performed no write");
+    }
+
+    /// ADR-0029: forgetting removes the stored record with the row — nothing
+    /// remembers under another name.
+    #[test]
+    fn forgetting_an_agent_removes_its_stored_record() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        let state = AppState::new(dir.clone())
+            .expect("state")
+            .with_stale_after(Duration::from_secs(90));
+        let mut goodbye = report(&uid, 1);
+        goodbye.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        state.process(goodbye, Transport::WebSocket, Some(1));
+        let path = dir.join("agents").join(format!("{uid}.json"));
+        assert!(path.exists(), "the record was persisted");
+        assert!(
+            state.forget_agent(&uid).is_ok(),
+            "forgettable: disconnected"
+        );
+        assert!(!path.exists(), "forgetting frees the store too");
+    }
+
+    /// ADR-0029: the persisted record follows a reassigned identity — one record, one file.
+    #[test]
+    fn a_rekeyed_agent_moves_its_stored_record() {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let uid = InstanceUid::default();
+        let state = AppState::new(dir.clone()).expect("state");
+        state.process(report(&uid, 1), Transport::WebSocket, Some(1));
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let processed = state.process(rekey, Transport::WebSocket, Some(1));
+        let new_uid = processed.uid.expect("the new identity");
+        assert_eq!(
+            processed.reply.instance_uid,
+            uid.as_bytes().to_vec(),
+            "the reply is addressed to the identity the Agent asked under"
+        );
+        assert!(!dir.join("agents").join(format!("{uid}.json")).exists());
+        assert!(dir.join("agents").join(format!("{new_uid}.json")).exists());
+    }
+
+    /// A restart whose command was not sent is queued again, on a lease that lapsed meanwhile
+    /// too, and the Agent's next connection is sent it, once; a message that carries no restart
+    /// leaves nothing queued. Run on each store.
+    fn a_restart_whose_send_failed_is_queued_again(state: &AppState, stored: &dyn AgentStore) {
+        let uid = InstanceUid([0x30; 16]);
+        let restartable = |sequence_num| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+            msg
+        };
+        state.process(restartable(1), Transport::WebSocket, Some(1));
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+        let command = state.restart_command_for(&uid, 1).expect("sent");
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending
+        );
+
+        state.unsent(&ServerToAgent {
+            instance_uid: uid.as_bytes().to_vec(),
+            ..Default::default()
+        });
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "a message without the command queues nothing"
+        );
+
+        let mut pushes = state.subscribe();
+        pushes.mark_unchanged();
+        state.answer_while(|| false);
+        state.unsent(&command);
+        state.answer_while(|| true);
+        assert!(
+            pushes.has_changed().expect("pushes"),
+            "a session that carries the Agent now is told"
+        );
+        state.mark_disconnected(&[uid], 1);
+        assert!(
+            stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "queued again"
+        );
+
+        let reply = state
+            .process(restartable(2), Transport::WebSocket, Some(2))
+            .reply;
+        assert_eq!(
+            reply.command.map(|c| c.r#type),
+            Some(opamp::proto::CommandType::Restart as i32),
+            "the next connection is sent it"
+        );
+        let reply = state
+            .process(restartable(3), Transport::WebSocket, Some(2))
+            .reply;
+        assert!(reply.command.is_none(), "once");
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending
+        );
+    }
+
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_restart_whose_send_failed_is_queued_again_on_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(dir.path().to_path_buf()).expect("state");
+        let stored = crate::fs::FsAgentStore::open(dir.path()).expect("open");
+        a_restart_whose_send_failed_is_queued_again(&state, &stored);
+    }
+
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_restart_whose_send_failed_is_queued_again_on_postgres() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let state = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+        );
+        let stored = crate::postgres::agents::PgAgentStore::new(database.clone());
+        a_restart_whose_send_failed_is_queued_again(&state, &stored);
+    }
+
+    /// An instance whose put-backs of restarts fail until `failing` is cleared, on files, with the
+    /// store it writes and a second handle on that store, as another instance writes it.
+    fn with_failing_restarts() -> (
+        AppState,
+        Arc<std::sync::atomic::AtomicBool>,
+        crate::fs::FsAgentStore,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooked = Hooked::new(Box::new(
+            crate::fs::FsAgentStore::open(dir.path()).expect("open"),
+        ));
+        let failing = hooked.failing_restarts.clone();
+        let state = AppState::with_stores(
+            Box::new(hooked),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(crate::clock::SystemClock),
+        )
+        .expect("state");
+        let stored = crate::fs::FsAgentStore::open(dir.path()).expect("open");
+        (state, failing, stored, dir)
+    }
+
+    fn restartable(uid: &InstanceUid, sequence_num: u64) -> AgentToServer {
+        let mut msg = report(uid, sequence_num);
+        msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+        msg
+    }
+
+    /// A restart taken whose send failed and whose put-back the store refused: kept for retry.
+    fn kept_put_back(state: &AppState, failing: &std::sync::atomic::AtomicBool, uid: &InstanceUid) {
+        state.process(restartable(uid, 1), Transport::WebSocket, Some(1));
+        assert!(state.request_restart(uid).is_ok(), "queued");
+        let command = state.restart_command_for(uid, 1).expect("sent");
+        failing.store(true, Ordering::SeqCst);
+        state.unsent(&command);
+        failing.store(false, Ordering::SeqCst);
+    }
+
+    /// A kept put-back is one restart with a request made meanwhile, and with a delivery of a
+    /// restart another instance queued meanwhile: once that one is delivered, retrying queues no
+    /// second.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_kept_put_back_is_dropped_by_a_request_or_a_delivery_meanwhile() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x33; 16]);
+        kept_put_back(&state, &failing, &uid);
+        assert!(state.request_restart(&uid).is_ok(), "requested again");
+        assert!(state.restart_command_for(&uid, 1).is_some(), "delivered");
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        assert!(
+            state.restart_command_for(&uid, 1).is_none(),
+            "no second restart"
+        );
+
+        kept_put_back(&state, &failing, &uid);
+        assert_eq!(
+            stored.set_restart_pending(&uid, true),
+            Ok(Some(false)),
+            "requested through another instance"
+        );
+        state.catch_up().expect("taken up");
+        assert!(state.restart_command_for(&uid, 1).is_some(), "delivered");
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        assert!(
+            state.restart_command_for(&uid, 1).is_none(),
+            "no second restart"
+        );
+
+        // Requested here and delivered through another instance.
+        kept_put_back(&state, &failing, &uid);
+        assert!(state.request_restart(&uid).is_ok(), "requested again");
+        assert_eq!(
+            stored.set_restart_pending(&uid, false),
+            Ok(Some(true)),
+            "delivered through another instance"
+        );
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "no second restart"
+        );
+    }
+
+    /// A kept put-back goes with its Agent's forget, through this instance or one heard of from
+    /// another: an Agent that comes back under the same identity is not restarted for it.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_kept_put_back_goes_with_its_agents_forget() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let (here, elsewhere) = (InstanceUid([0x34; 16]), InstanceUid([0x35; 16]));
+        kept_put_back(&state, &failing, &here);
+        kept_put_back(&state, &failing, &elsewhere);
+        state.mark_disconnected(&[here, elsewhere], 1);
+        assert!(state.forget_agent(&here).is_ok(), "forgotten here");
+        stored.remove(&elsewhere).expect("forgotten elsewhere");
+        state.catch_up().expect("taken up");
+        for (uid, conn) in [(here, 2), (elsewhere, 3)] {
+            state.process(restartable(&uid, 1), Transport::WebSocket, Some(conn));
+        }
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        for uid in [here, elsewhere] {
+            assert!(
+                !stored
+                    .get(&uid)
+                    .expect("get")
+                    .expect("stored")
+                    .restart_pending,
+                "the Agent that came back is not restarted"
+            );
+        }
+    }
+
+    /// A request announced by name in one read with a missed notification drops its kept
+    /// put-back though the record no longer queues it, delivered through the other instance
+    /// meanwhile: the catch-up keeps such a put-back, and the named request still drops it, so
+    /// the Agent is not restarted twice.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_request_announced_with_a_missed_notification_drops_a_put_back_its_delivery_left() {
+        use crate::changed::Changed;
+        use crate::postgres::notify::{Heard, Notice};
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x3a; 16]);
+        kept_put_back(&state, &failing, &uid);
+        assert_eq!(stored.set_restart_pending(&uid, true), Ok(Some(false)));
+        assert_eq!(
+            stored.set_restart_pending(&uid, false),
+            Ok(Some(true)),
+            "requested and delivered through another instance"
+        );
+
+        // A take that names no Agent has every holder read again: a catch-up.
+        crate::instance::take_up_held_for(
+            &state,
+            &[
+                Heard::Notified(Notice::new(Changed::Taken, "")),
+                Heard::Notified(Notice::new(Changed::Restart, &uid.to_string())),
+            ],
+        )
+        .expect("taken up");
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+        assert_eq!(
+            queued(&stored, &uid),
+            Some(false),
+            "no second restart is queued"
+        );
+    }
+
+    /// A try found due is not made once a request and its delivery dropped the put-back before
+    /// the try took the fleet lock, so the Agent is not restarted a second time.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_try_found_due_is_not_made_once_a_request_and_its_delivery_dropped_it() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x36; 16]);
+        kept_put_back(&state, &failing, &uid);
+        let due = state.due_restarts();
+        assert_eq!(due, [uid], "due at the next call");
+        // Between finding it due and trying it: requested and delivered.
+        assert!(state.request_restart(&uid).is_ok(), "requested again");
+        assert!(state.restart_command_for(&uid, 1).is_some(), "delivered");
+        for uid in &due {
+            state.put_back(uid, true);
+        }
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "no second restart"
+        );
+        assert_eq!(state.retry_restarts(), 0, "nothing is kept");
+    }
+
+    /// A request through another instance, taken up from its announcement, drops a put-back kept
+    /// here, so its delivery there is the one restart; after a missed notification one whose
+    /// record shows a restart queued is dropped, and one whose record shows none is kept.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_request_announced_by_another_instance_drops_a_kept_put_back() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let (announced, queued, other) = (
+            InstanceUid([0x37; 16]),
+            InstanceUid([0x38; 16]),
+            InstanceUid([0x39; 16]),
+        );
+        for uid in [&announced, &queued, &other] {
+            kept_put_back(&state, &failing, uid);
+        }
+        assert_eq!(
+            stored.set_restart_pending(&announced, true),
+            Ok(Some(false))
+        );
+        state
+            .take_up_restarts(&HashSet::from([announced]))
+            .expect("taken up");
+        assert_eq!(
+            stored.set_restart_pending(&announced, false),
+            Ok(Some(true)),
+            "delivered there"
+        );
+
+        assert_eq!(stored.set_restart_pending(&queued, true), Ok(Some(false)));
+        state.catch_up().expect("taken up");
+        assert_eq!(
+            stored.set_restart_pending(&queued, false),
+            Ok(Some(true)),
+            "delivered there"
+        );
+
+        let mut kept = usize::MAX;
+        for _ in 0..4 {
+            kept = state.retry_restarts();
+        }
+        assert_eq!(kept, 0, "every put-back held or was dropped");
+        for uid in [announced, queued] {
+            assert!(
+                !stored
+                    .get(&uid)
+                    .expect("get")
+                    .expect("stored")
+                    .restart_pending,
+                "no second restart"
+            );
+        }
+        assert!(
+            stored
+                .get(&other)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "the put-back nothing announced is queued again"
+        );
+    }
+
+    /// On PostgreSQL the announcement of a request through another instance is what drops a
+    /// put-back kept here: once it is taken up, the request's delivery there leaves nothing for a
+    /// retry here to restart again.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_request_announced_by_another_instance_drops_a_kept_put_back_on_postgres() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.shared();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_restarts.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let following = {
+            let _entered = runtime.enter();
+            crate::instance::follow(&database, a.clone(), None)
+        };
+        until("the first read once listening", || following.reads() > 0);
+        let uid = InstanceUid([0x3a; 16]);
+        kept_put_back(&a, &failing, &uid);
+        let kept = || a.kept.unput_restarts.lock().expect("restarts lock").len();
+        assert_eq!(kept(), 1, "kept for retry");
+
+        let other = crate::postgres::agents::PgAgentStore::new(test.shared());
+        assert_eq!(
+            other.set_restart_pending(&uid, true),
+            Ok(Some(false)),
+            "requested through another instance"
+        );
+        until("the request taken up", || kept() == 0);
+        assert_eq!(
+            other.set_restart_pending(&uid, false),
+            Ok(Some(true)),
+            "delivered there"
+        );
+        assert_eq!(a.retry_restarts(), 0, "nothing is kept");
+        assert_eq!(
+            other.get(&uid).map(|r| r.map(|r| r.restart_pending)),
+            Ok(Some(false)),
+            "no second restart"
+        );
+    }
+
+    /// A put-back the store does not take is kept and tried again, at intervals that double, until
+    /// it holds; the Agent's next connection is then sent the restart. One whose Agent is
+    /// forgotten meanwhile is dropped.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_put_back_the_store_refuses_is_tried_again_until_it_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooked = Hooked::new(Box::new(
+            crate::fs::FsAgentStore::open(dir.path()).expect("open"),
+        ));
+        let (failing, set) = (hooked.failing_restarts.clone(), hooked.restarts_set.clone());
+        let state = AppState::with_stores(
+            Box::new(hooked),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(crate::clock::SystemClock),
+        )
+        .expect("state");
+        let stored = crate::fs::FsAgentStore::open(dir.path()).expect("open");
+        let (uid, gone) = (InstanceUid([0x31; 16]), InstanceUid([0x32; 16]));
+        let restartable = |uid: &InstanceUid, sequence_num| {
+            let mut msg = report(uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+            msg
+        };
+        for uid in [&uid, &gone] {
+            state.process(restartable(uid, 1), Transport::WebSocket, Some(1));
+            assert!(state.request_restart(uid).is_ok(), "queued");
+        }
+        let command = state.restart_command_for(&uid, 1).expect("sent");
+        let other = state.restart_command_for(&gone, 1).expect("sent");
+        let tries = || set.load(Ordering::SeqCst);
+        let base = tries();
+
+        failing.store(true, Ordering::SeqCst);
+        state.unsent(&command);
+        state.unsent(&other);
+        assert_eq!(tries(), base + 2, "each put back once");
+        assert!(
+            !stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending
+        );
+        // Tried at the next call, then after two calls, then after four.
+        let mut seen = Vec::new();
+        for _ in 0..7 {
+            state.retry_restarts();
+            seen.push(tries() - base);
+        }
+        assert_eq!(seen, [4, 4, 6, 6, 6, 6, 8], "the intervals double");
+
+        state.mark_disconnected(&[uid, gone], 1);
+        assert!(state.forget_agent(&gone).is_ok(), "forgotten");
+        failing.store(false, Ordering::SeqCst);
+        let mut kept = usize::MAX;
+        for _ in 0..8 {
+            kept = state.retry_restarts();
+            if kept == 0 {
+                break;
+            }
+        }
+        assert_eq!(kept, 0, "it held, and the forgotten Agent's was dropped");
+        assert!(
+            stored
+                .get(&uid)
+                .expect("get")
+                .expect("stored")
+                .restart_pending,
+            "queued again"
+        );
+        let reply = state
+            .process(restartable(&uid, 2), Transport::WebSocket, Some(2))
+            .reply;
+        assert_eq!(
+            reply.command.map(|c| c.r#type),
+            Some(opamp::proto::CommandType::Restart as i32),
+            "the next connection is sent it"
+        );
+    }
+
+    /// What an instance keeps of an Agent moves whole with a re-key on the same instance: a
+    /// restart kept for retry and what was written of its presence go to the new identity, and
+    /// nothing of them stays with the old. The digest goes with neither, so the record is written
+    /// whole under the new identity, and a pending re-key of the old one is left to the caller,
+    /// which knows whether this re-key is the one it names.
+    /// Verifies: ADR-0025
+    #[test]
+    fn what_is_kept_of_an_agent_moves_whole_with_a_rekey() {
+        let (old, new, pending) = (
+            InstanceUid([0x51; 16]),
+            InstanceUid([0x52; 16]),
+            InstanceUid([0x53; 16]),
+        );
+        let kept = Kept::with_written(HashMap::from([(old, [7; 32])]));
+        let presence = Presence {
+            connected: true,
+            last_seen_ms: 5,
+        };
+        kept.presence_written
+            .lock()
+            .expect("presence lock")
+            .taken(old, presence, 3);
+        kept.unput_restarts
+            .lock()
+            .expect("restarts lock")
+            .insert(old, Backoff::first());
+        kept.unsure_rekeys.lock().expect("rekeys lock").insert(
+            old,
+            PendingRekey {
+                new: pending,
+                moved: false,
+            },
+        );
+
+        kept.rekey(&old, new);
+
+        let restarts = kept.unput_restarts.lock().expect("restarts lock");
+        assert!(restarts.contains_key(&new), "the kept restart moved");
+        assert!(!restarts.contains_key(&old));
+        drop(restarts);
+        let written = kept.presence_written.lock().expect("presence lock");
+        assert_eq!(
+            written.agents.get(&new),
+            Some(&presence),
+            "the presence moved"
+        );
+        assert_eq!(
+            written.takes.get(&new),
+            Some(&3),
+            "the count of takes moved"
+        );
+        assert!(!written.agents.contains_key(&old) && !written.takes.contains_key(&old));
+        drop(written);
+        let digests = kept.written.lock().expect("written lock");
+        assert!(digests.is_empty(), "written whole under the new identity");
+        drop(digests);
+        assert_eq!(
+            kept.unsure_rekeys
+                .lock()
+                .expect("rekeys lock")
+                .get(&old)
+                .map(|pending| pending.new),
+            Some(pending),
+            "the caller's to resolve"
+        );
+    }
+
+    /// A re-key an Agent asks for on the instance that holds it leaves nothing of it under the old
+    /// identity, on a shared store what was written of its presence included. The restart kept for
+    /// retry, tried again, is queued on the new identity.
+    fn a_rekey_on_the_same_instance_leaves_nothing_under_the_old_identity(
+        state: &AppState,
+        failing: &std::sync::atomic::AtomicBool,
+        stored: &dyn AgentStore,
+    ) {
+        let old = InstanceUid([0x55; 16]);
+        kept_put_back(state, failing, &old);
+        let mut rekey = restartable(&old, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let new = state
+            .process(rekey, Transport::WebSocket, Some(1))
+            .uid
+            .expect("carried");
+        assert_ne!(new, old, "re-keyed");
+        assert!(
+            !state.holds_anything_of(&old),
+            "nothing is left under the old identity"
+        );
+        assert_eq!(
+            state.retry_restarts(),
+            0,
+            "the kept restart was tried and held"
+        );
+        assert_eq!(queued(stored, &new), Some(true), "on the new identity");
+    }
+
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_rekey_on_the_same_instance_leaves_nothing_under_the_old_identity_on_files() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        a_rekey_on_the_same_instance_leaves_nothing_under_the_old_identity(
+            &state, &failing, &stored,
+        );
+    }
+
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_rekey_on_the_same_instance_leaves_nothing_under_the_old_identity_on_postgres() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_restarts.clone();
+        let state = on_postgres(&database, Box::new(hooked));
+        state.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let stored = crate::postgres::agents::PgAgentStore::new(database.clone());
+        a_rekey_on_the_same_instance_leaves_nothing_under_the_old_identity(
+            &state, &failing, &stored,
+        );
+    }
+
+    /// A forgotten Agent leaves nothing of it in what the instance holds, whatever was kept of it.
+    /// Before the forget it has a restart kept for retry, a re-key that failed and whose read back
+    /// failed too, so not known to have moved, the digest of its record, which a report written
+    /// since left, and on a shared store its presence written. Each part kept of it is shown to
+    /// keep something, so a part the setup misses fails here. `hooks` are the put-backs that fail,
+    /// the re-keys that fail and the read backs that fail of the [`Hooked`] store under `state`.
+    fn a_forgotten_agent_leaves_nothing_behind(
+        state: &AppState,
+        hooks: [&std::sync::atomic::AtomicBool; 3],
+        shared: bool,
+    ) {
+        let [failing, refused, unreadable] = hooks;
+        let uid = InstanceUid([0x54; 16]);
+        kept_put_back(state, failing, &uid);
+        refused.store(true, Ordering::SeqCst);
+        unreadable.store(true, Ordering::SeqCst);
+        let mut rekey = restartable(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = state.process(rekey, Transport::WebSocket, Some(1));
+        refused.store(false, Ordering::SeqCst);
+        assert_eq!(answered.uid, Some(uid), "not known: it keeps its identity");
+        state.process(restartable(&uid, 3), Transport::WebSocket, Some(1));
+        unreadable.store(false, Ordering::SeqCst);
+        state.mark_disconnected(&[uid], 1);
+        let mut parts = vec!["written", "unsure_rekeys", "unput_restarts"];
+        if shared {
+            parts.insert(1, "presence_written");
+        }
+        assert_eq!(state.kept.keeping(&uid), parts, "each part keeps something");
+        assert!(state.forget_agent(&uid).is_ok(), "forgotten");
+        assert!(
+            !state.holds_anything_of(&uid),
+            "nothing of the Agent is left"
+        );
+    }
+
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_forgotten_agent_leaves_nothing_behind_on_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooked = Hooked::new(Box::new(
+            crate::fs::FsAgentStore::open(dir.path()).expect("open"),
+        ));
+        let hooks = (
+            hooked.failing_restarts.clone(),
+            hooked.failing_rekeys.clone(),
+            hooked.failing_moved.clone(),
+        );
+        let state = AppState::with_stores(
+            Box::new(hooked),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(crate::clock::SystemClock),
+        )
+        .expect("state");
+        a_forgotten_agent_leaves_nothing_behind(&state, [&hooks.0, &hooks.1, &hooks.2], false);
+    }
+
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_forgotten_agent_leaves_nothing_behind_on_postgres() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let hooks = (
+            hooked.failing_restarts.clone(),
+            hooked.failing_rekeys.clone(),
+            hooked.failing_moved.clone(),
+        );
+        let state = on_postgres(&database, Box::new(hooked));
+        state.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        a_forgotten_agent_leaves_nothing_behind(&state, [&hooks.0, &hooks.1, &hooks.2], true);
+    }
+
+    /// A kept put-back follows the re-key its Agent asks for: the retry queues the restart on the
+    /// new identity, and the Agent's next report under it is sent the restart. Run on each store.
+    fn a_kept_put_back_follows_a_rekey_the_agent_asks_for(
+        state: &AppState,
+        failing: &std::sync::atomic::AtomicBool,
+        stored: &dyn AgentStore,
+    ) {
+        let uid = InstanceUid([0x3b; 16]);
+        kept_put_back(state, failing, &uid);
+        let mut rekey = restartable(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let new = state
+            .process(rekey, Transport::WebSocket, Some(1))
+            .uid
+            .expect("carried");
+        assert_ne!(new, uid, "re-keyed");
+        assert_eq!(state.retry_restarts(), 0, "the retry held");
+        assert_eq!(queued(stored, &uid), None, "the old row is gone");
+        assert_eq!(
+            queued(stored, &new),
+            Some(true),
+            "queued on the new identity"
+        );
+        let reply = state
+            .process(restartable(&new, 3), Transport::WebSocket, Some(1))
+            .reply;
+        assert_eq!(
+            reply.command.map(|c| c.r#type),
+            Some(opamp::proto::CommandType::Restart as i32),
+            "the next report is sent it"
+        );
+    }
+
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_files() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        a_kept_put_back_follows_a_rekey_the_agent_asks_for(&state, &failing, &stored);
+    }
+
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_postgres() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_restarts.clone();
+        let state = on_postgres(&database, Box::new(hooked));
+        state.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let stored = crate::postgres::agents::PgAgentStore::new(database.clone());
+        a_kept_put_back_follows_a_rekey_the_agent_asks_for(&state, &failing, &stored);
+    }
+
+    /// A kept put-back follows a re-key whose answer was lost and whose read back failed, once a
+    /// read again of what is held reads it back as moved: the retry queues the restart on the new
+    /// identity.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_kept_put_back_follows_a_rekey_read_back_as_moved() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        a_kept_put_back_follows_a_rekey_read_back(&test, false);
+    }
+
+    /// A try of a kept put-back that finds the row gone while a re-key of this instance's own is
+    /// not read back yet keeps it, and the read back moves it: the restart is queued on the new
+    /// identity, not dropped.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_kept_put_back_tried_before_its_rekey_is_read_back_follows_it() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        a_kept_put_back_follows_a_rekey_read_back(&test, true);
+    }
+
+    /// A kept put-back and a re-key of its Agent whose answer was lost and whose read back failed;
+    /// the store answers again, a try is made before the read back where `tried_first`, and the
+    /// put-back is tried until it holds.
+    fn a_kept_put_back_follows_a_rekey_read_back(
+        test: &crate::postgres::testing::TestDatabase,
+        tried_first: bool,
+    ) {
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let (failing, losing, unreadable) = (
+            hooked.failing_restarts.clone(),
+            hooked.losing_rekeys.clone(),
+            hooked.failing_moved.clone(),
+        );
+        let a = on_postgres(&database, Box::new(hooked));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let stored = crate::postgres::agents::PgAgentStore::new(database.clone());
+        let uid = InstanceUid([0x3c; 16]);
+        kept_put_back(&a, &failing, &uid);
+        losing.store(true, Ordering::SeqCst);
+        unreadable.store(true, Ordering::SeqCst);
+        let mut rekey = restartable(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process(rekey, Transport::WebSocket, Some(1));
+        losing.store(false, Ordering::SeqCst);
+        assert_eq!(answered.uid, Some(uid), "not known: it keeps its identity");
+        unreadable.store(false, Ordering::SeqCst);
+        if tried_first {
+            assert_eq!(
+                a.retry_restarts(),
+                1,
+                "kept while the re-key is not read back"
+            );
+        }
+        a.catch_up().expect("read again");
+        let held = held_by(&a);
+        assert_eq!(held.len(), 1);
+        let new = InstanceUid::parse(&held[0]).expect("a uid");
+        assert_ne!(new, uid, "read back as moved");
+        let kept = (0..8).map(|_| a.retry_restarts()).find(|kept| *kept == 0);
+        assert_eq!(kept, Some(0), "the retry held");
+        assert_eq!(
+            queued(&stored, &new),
+            Some(true),
+            "queued on the new identity"
+        );
+    }
+
+    /// A put-back whose Agent was re-keyed through another instance while this one retried finds
+    /// its record gone: the restart is not tried again, and a warning names the Agent.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_kept_put_back_whose_row_another_instance_rekeyed_is_logged() {
+        crate::test_support::logged();
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x3e; 16]);
+        kept_put_back(&state, &failing, &uid);
+        state.mark_disconnected(&[uid], 1);
+        let new = InstanceUid([0x3f; 16]);
+        let record = stored.get(&uid).expect("get").expect("stored");
+        stored
+            .rekey(&uid, &new, &record)
+            .expect("re-keyed through another instance");
+        assert_eq!(state.retry_restarts(), 0, "not tried again");
+        assert_eq!(queued(&stored, &new), Some(false), "not seen");
+        assert_eq!(
+            crate::test_support::lines_with(&[
+                "the restart is no longer tried, the Agent's row is gone",
+                &uid.to_string(),
+            ])
+            .len(),
+            1,
+            "a warning names the Agent"
+        );
+    }
+
+    /// The re-key of a duplicate newcomer moves no row: a put-back kept for the Agent stays with
+    /// it, the retry queues the restart on its identity, and the newcomer is sent none.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_kept_put_back_stays_with_its_agent_when_a_duplicate_is_rekeyed() {
+        let (state, failing, stored, _dir) = with_failing_restarts();
+        let uid = InstanceUid([0x3d; 16]);
+        kept_put_back(&state, &failing, &uid);
+        let duplicate = state.process(restartable(&uid, 1), Transport::WebSocket, Some(2));
+        let newcomer = duplicate.uid.expect("carried");
+        assert_ne!(newcomer, uid, "the newcomer is re-keyed");
+        assert!(duplicate.reply.agent_identification.is_some());
+        assert!(duplicate.reply.command.is_none());
+        assert_eq!(state.retry_restarts(), 0, "the retry held");
+        assert_eq!(queued(&stored, &uid), Some(true), "queued on the Agent");
+        assert_ne!(
+            queued(&stored, &newcomer),
+            Some(true),
+            "not on the newcomer"
+        );
+        let reply = state
+            .process(restartable(&newcomer, 2), Transport::WebSocket, Some(2))
+            .reply;
+        assert!(reply.command.is_none(), "the newcomer is sent no restart");
+        let reply = state
+            .process(restartable(&uid, 2), Transport::WebSocket, Some(1))
+            .reply;
+        assert_eq!(
+            reply.command.map(|c| c.r#type),
+            Some(opamp::proto::CommandType::Restart as i32),
+            "the Agent is sent it"
+        );
+    }
+
+    /// A certificate of one host does not speak for another host's Agent: the reporter is re-keyed
+    /// to an identity of its own, and the Agent it claimed keeps its record.
+    /// Verifies: ADR-0026, G-17
+    #[test]
+    fn a_host_cannot_report_for_another_hosts_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_revocations(Some(revocations));
+        let presented = |host: &str, serial: &str| Presented {
+            id: CertId::new(b"CA", serial),
+            host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
+            not_after_ms: u64::MAX,
+        };
+        let victim = InstanceUid::default();
+        let own = state.process_presented(
+            {
+                let mut first = AgentToServer {
+                    instance_uid: victim.as_bytes().to_vec(),
+                    ..Default::default()
+                };
+                first.capabilities = opamp::proto::AgentCapabilities::ReportsStatus as u64;
+                first
+            },
+            Transport::Http,
+            None,
+            Some(&presented("h1", "01")),
+        );
+        assert_eq!(own.uid, Some(victim));
+        assert!(own.reply.agent_identification.is_none());
+
+        let claimed = state.process_presented(
+            AgentToServer {
+                instance_uid: victim.as_bytes().to_vec(),
+                flags: AgentToServerFlags::RequestInstanceUid as u64,
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&presented("h2", "02")),
+        );
+        let new_uid = claimed.uid.expect("an identity");
+        assert_ne!(new_uid, victim, "another host spoke for the Agent");
+        assert_eq!(
+            claimed.reply.instance_uid,
+            victim.as_bytes().to_vec(),
+            "the reply is addressed to the identity the reporter sent, or it routes to no one"
+        );
+        assert_eq!(
+            claimed
+                .reply
+                .agent_identification
+                .expect("told to adopt it")
+                .new_instance_uid,
+            new_uid.as_bytes().to_vec()
+        );
+        assert!(
+            state
+                .snapshot()
+                .iter()
+                .any(|agent| agent.instance_uid == victim.to_string()),
+            "the claimed Agent's record moved"
+        );
+
+        // Having adopted it, the reporter speaks under its new identity and is re-keyed no more:
+        // no further record appears for it.
+        let adopted = state.process_presented(
+            AgentToServer {
+                instance_uid: new_uid.as_bytes().to_vec(),
+                ..Default::default()
+            },
+            Transport::Http,
+            None,
+            Some(&presented("h2", "02")),
+        );
+        assert_eq!(adopted.uid, Some(new_uid));
+        assert!(adopted.reply.agent_identification.is_none());
+        assert_eq!(state.snapshot().len(), 2, "one record per Agent, no more");
+    }
+
+    /// Forgetting an Agent releases its binding: another host's report for it binds it, under the
+    /// identity it reported, where before it would have been re-keyed.
+    /// Verifies: ADR-0029
+    #[test]
+    fn forgetting_an_agent_releases_its_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_revocations(Some(revocations.clone()));
+        let presented = |host: &str| Presented {
+            id: CertId::new(b"CA", host),
+            host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
+            not_after_ms: u64::MAX,
+        };
+        let uid = InstanceUid::default();
+        let message = || AgentToServer {
+            instance_uid: uid.as_bytes().to_vec(),
+            capabilities: opamp::proto::AgentCapabilities::ReportsStatus as u64,
+            ..Default::default()
+        };
+        let conn = state.connection_id();
+        let first = state.process_presented(
+            message(),
+            Transport::WebSocket,
+            Some(conn),
+            Some(&presented("h1")),
+        );
+        assert_eq!(first.uid, Some(uid));
+        state.mark_disconnected(&[uid], conn);
+        assert!(state.forget_agent(&uid).is_ok(), "forgotten");
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            crate::revocation::SpeaksFor::Agents(std::collections::BTreeSet::new()),
+            "released from h1"
+        );
+
+        let other = state.process_presented(
+            message(),
+            Transport::WebSocket,
+            Some(state.connection_id()),
+            Some(&presented("h2")),
+        );
+        assert_eq!(other.uid, Some(uid), "bound by h2, not re-keyed");
+        assert!(other.reply.agent_identification.is_none());
+        assert_eq!(
+            revocations.speaks_for("h2"),
+            crate::revocation::SpeaksFor::Agents([uid.to_string().replace('-', "")].into())
+        );
+    }
+
+    /// A report refused at the record ceiling binds no `instance_uid` to the host that sent it,
+    /// so it cannot speak for that Agent once there is room — nor lock out the host it belongs to.
+    /// Verifies: ADR-0026, ADR-0029
+    #[test]
+    fn a_report_refused_at_the_ceiling_binds_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_max_agents(1)
+            .with_revocations(Some(revocations.clone()));
+        let presented = |host: &str| Presented {
+            id: CertId::new(b"CA", host),
+            host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
+            not_after_ms: u64::MAX,
+        };
+        let first = InstanceUid::default();
+        let accepted = state.process_presented(
+            report(&first, 1),
+            Transport::Http,
+            None,
+            Some(&presented("h1")),
+        );
+        assert!(accepted.reply.error_response.is_none());
+
+        for flags in [0, AgentToServerFlags::RequestInstanceUid as u64] {
+            let refused_uid = InstanceUid::default();
+            let mut refused = report(&refused_uid, 1);
+            refused.flags = flags;
+            let refused =
+                state.process_presented(refused, Transport::Http, None, Some(&presented("h2")));
+            assert_eq!(
+                refused.reply.error_response.expect("refused").r#type,
+                ServerErrorResponseType::Unavailable as i32
+            );
+            assert_eq!(
+                revocations.speaks_for("h2"),
+                SpeaksFor::Agents(BTreeSet::new()),
+                "a refused report bound an instance_uid (flags {flags})"
+            );
+        }
+        assert_eq!(
+            revocations.speaks_for("h1"),
+            SpeaksFor::Agents([hex::encode(first.as_bytes())].into())
+        );
+    }
+
+    /// A store that counts what reaches it: the record writes, and each presence batch as it is
+    /// written.
+    struct Counted {
+        inner: crate::fs::FsAgentStore,
+        puts: Arc<AtomicU64>,
+        batches: Arc<Mutex<Vec<Batch>>>,
+    }
+
+    /// One presence batch as it reached the store.
+    type Batch = Vec<(InstanceUid, Presence, Option<u64>)>;
+
+    impl AgentStore for Counted {
+        fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+            self.inner.load()
+        }
+        fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            self.inner.put(uid, record)
+        }
+        fn set_labels(
+            &self,
+            uid: &InstanceUid,
+            labels: &BTreeMap<String, String>,
+        ) -> Result<bool, String> {
+            self.inner.set_labels(uid, labels)
+        }
+        fn set_restart_pending(
+            &self,
+            uid: &InstanceUid,
+            pending: bool,
+        ) -> Result<Option<bool>, String> {
+            self.inner.set_restart_pending(uid, pending)
+        }
+        fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
+            self.inner.remove(uid)
+        }
+        fn write_presence(
+            &self,
+            _holder: &str,
+            presence: &[(InstanceUid, Presence, Option<u64>)],
+        ) -> Result<HashMap<InstanceUid, u64>, String> {
+            self.batches
+                .lock()
+                .expect("batches lock")
+                .push(presence.to_vec());
+            Ok(HashMap::new())
+        }
+        fn release(
+            &self,
+            revisions: &[crate::configs::Pinned],
+            agents: &[(InstanceUid, PersistedAgent)],
+        ) -> Result<Vec<InstanceUid>, String> {
+            self.inner.release(revisions, agents)
+        }
+        fn pinning(&self, pin: Pin<'_>) -> usize {
+            self.inner.pinning(pin)
+        }
+        fn referenced_revisions(&self, name: &str) -> BTreeSet<String> {
+            self.inner.referenced_revisions(name)
+        }
+    }
+
+    /// An instance carrying 1 000 Agents at a 30-second heartbeat writes their presence in
+    /// batches: no heartbeat writes a record or a presence, each batch writes every presence that
+    /// moved since the last one, in the order of the `instance_uid`, and nothing when none moved.
+    /// A disconnect is written in the next batch, and under a new holder every presence again.
+    /// Verifies: ADR-0029
+    #[test]
+    fn presence_is_written_in_batches_and_never_once_per_heartbeat() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (puts, batches) = (
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(Mutex::new(Vec::new())),
+        );
+        let now = Arc::new(AtomicU64::new(1_000_000));
+        let state = AppState::with_stores(
+            Box::new(Counted {
+                inner: crate::fs::FsAgentStore::open(dir.path()).expect("agents"),
+                puts: puts.clone(),
+                batches: batches.clone(),
+            }),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(Manual(now.clone())),
+        )
+        .expect("state")
+        .with_presence_interval(Duration::from_secs(30));
+        let uids: Vec<InstanceUid> = (0..1000).map(|_| InstanceUid::default()).collect();
+        for (conn, uid) in (1..).zip(&uids) {
+            state.process(report(uid, 1), Transport::WebSocket, Some(conn));
+        }
+        let first_reports = puts.load(Ordering::SeqCst);
+        assert!(
+            batches.lock().expect("batches").is_empty(),
+            "no report wrote a presence"
+        );
+        assert_eq!(state.write_presence("a"), Ok(1000));
+        {
+            let batches = batches.lock().expect("batches");
+            let mut ordered = uids.clone();
+            ordered.sort_by_key(|uid| uid.0);
+            let batch: Vec<InstanceUid> = batches[0].iter().map(|(uid, ..)| *uid).collect();
+            assert_eq!(batch, ordered, "in the order of the instance_uid");
+            assert!(batches[0].iter().all(|(_, presence, _)| presence.connected));
+        }
+
+        for beat in 2..=4u64 {
+            now.fetch_add(30_000, Ordering::SeqCst);
+            for (conn, uid) in (1..).zip(&uids) {
+                let heartbeat = AgentToServer {
+                    instance_uid: uid.as_bytes().to_vec(),
+                    sequence_num: beat,
+                    ..Default::default()
+                };
+                state.process(heartbeat, Transport::WebSocket, Some(conn));
+            }
+            assert_eq!(
+                puts.load(Ordering::SeqCst),
+                first_reports,
+                "no heartbeat writes a record"
+            );
+            assert_eq!(
+                batches.lock().expect("batches").len() as u64,
+                beat - 1,
+                "no heartbeat writes a presence"
+            );
+            assert_eq!(
+                state.write_presence("a"),
+                Ok(1000),
+                "one batch for the round"
+            );
+            let batches = batches.lock().expect("batches");
+            let last = batches.last().expect("a batch");
+            assert!(last
+                .iter()
+                .all(|(_, presence, _)| presence.last_seen_ms == now.load(Ordering::SeqCst)));
+        }
+        assert_eq!(state.write_presence("a"), Ok(0), "nothing moved");
+
+        state.mark_disconnected(&uids[..1], 1);
+        assert_eq!(state.write_presence("a"), Ok(1), "the disconnect");
+        assert!(
+            !batches.lock().expect("batches").last().expect("a batch")[0]
+                .1
+                .connected
+        );
+        assert_eq!(
+            state.write_presence("b"),
+            Ok(999),
+            "a new holder writes every connected one"
+        );
+    }
+
+    /// What is kept of an Agent's presence: a take's answer replaces the count, also a lower one,
+    /// as a record forgotten and created again counts from the start, and moves the generation; a
+    /// new holder writes every presence again and keeps the counts; a lost answer leaves no count
+    /// and makes the Agent unsure until a take answers; a re-key moves all of it to the new
+    /// identity.
+    /// Verifies: ADR-0029
+    #[test]
+    fn what_is_kept_of_an_agents_presence_follows_its_takes() {
+        let (uid, new) = (InstanceUid([1; 16]), InstanceUid([2; 16]));
+        let presence = Presence {
+            connected: true,
+            last_seen_ms: 1,
+        };
+        let mut written = held::PresenceWritten::default();
+        written.under("a");
+        written.taken(uid, presence, 3);
+        let first = written.generation(&uid);
+        written.taken(uid, presence, 1);
+        assert_eq!(written.takes.get(&uid), Some(&1), "a take's answer");
+        assert_ne!(
+            written.generation(&uid),
+            first,
+            "a take moves the generation"
+        );
+        written.under("b");
+        assert!(
+            written.agents.is_empty(),
+            "a new holder writes every presence again"
+        );
+        assert_eq!(written.takes.get(&uid), Some(&1), "and keeps the counts");
+        written.lost(uid);
+        assert!(written.unsure.contains(&uid), "a lost answer");
+        assert_eq!(written.takes.get(&uid), None, "leaves no count");
+        written.agents.insert(uid, presence);
+        written.rekey(&uid, new);
+        assert_eq!(
+            (
+                written.agents.get(&new),
+                written.takes.get(&new),
+                written.unsure.contains(&new)
+            ),
+            (Some(&presence), None, true),
+            "a re-key moves it"
+        );
+        written.taken(new, presence, 1);
+        written.rekey(&new, uid);
+        assert_eq!(written.takes.get(&uid), Some(&1), "and its count");
+        assert!(!written.takes.contains_key(&new) && !written.unsure.contains(&uid));
+        written.lost(uid);
+        written.taken(uid, presence, 2);
+        assert!(!written.unsure.contains(&uid), "a take answers");
+    }
+
+    /// The first presence batch of an instance writes the Agents it carries, not the fleet it
+    /// restored: a restored Agent is written once it is connected here.
+    /// Verifies: ADR-0029
+    #[test]
+    fn the_first_presence_batch_writes_only_the_agents_carried() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let restored: Vec<InstanceUid> = (0..100).map(|_| InstanceUid::default()).collect();
+        {
+            let store = crate::fs::FsAgentStore::open(dir.path()).expect("agents");
+            for uid in &restored {
+                store
+                    .put(uid, &crate::agent_store::tests::record())
+                    .expect("put");
+            }
+        }
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let state = AppState::with_stores(
+            Box::new(Counted {
+                inner: crate::fs::FsAgentStore::open(dir.path()).expect("agents"),
+                puts: Arc::new(AtomicU64::new(0)),
+                batches: batches.clone(),
+            }),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(crate::clock::SystemClock),
+        )
+        .expect("state");
+        assert_eq!(state.write_presence("a"), Ok(0), "none is carried");
+        state.process(report(&restored[0], 8), Transport::WebSocket, Some(1));
+        assert_eq!(state.write_presence("a"), Ok(1), "the one connected here");
+        assert_eq!(batches.lock().expect("batches")[0][0].0, restored[0]);
+    }
+
+    /// A store passing every call to `inner`, whose next reads of one record can be made to fail,
+    /// and which can run an act once right after a read of one record: what lets a test place
+    /// another instance's write between the read and what is done with it. It counts the reads of
+    /// one record and the reads of several, and its re-keys can be made to fail.
+    struct Hooked {
+        inner: Box<dyn AgentStore>,
+        failing_gets: Arc<AtomicU64>,
+        after_get: Arc<Mutex<Option<Act>>>,
+        /// What runs once after a batched read of records, before it is answered.
+        after_get_many: Arc<Mutex<Option<Act>>>,
+        loads: Arc<AtomicU64>,
+        whole_queries: Arc<AtomicU64>,
+        failing_rekeys: Arc<std::sync::atomic::AtomicBool>,
+        /// Re-keys written whose answer is then lost, as a connection dropped after the commit.
+        losing_rekeys: Arc<std::sync::atomic::AtomicBool>,
+        /// Read backs of a re-key that fail, as a database that does not answer.
+        failing_moved: Arc<std::sync::atomic::AtomicBool>,
+        /// The read backs of a re-key asked for.
+        moved_reads: Arc<AtomicU64>,
+        after_holders: Arc<Mutex<Option<Act>>>,
+        /// Takes written whose answer is then lost, as a connection dropped after the commit.
+        losing_takes: Arc<std::sync::atomic::AtomicBool>,
+        /// Takes refused before anything is written, as a database that does not answer.
+        failing_takes: Arc<std::sync::atomic::AtomicBool>,
+        /// What runs once after a presence batch committed, before its answers are applied.
+        after_presence: Arc<Mutex<Option<Act>>>,
+        /// The reads of holders and counts, and what runs once before and after the next of them.
+        takes_reads: Arc<AtomicU64>,
+        before_takes: Arc<Mutex<Option<Act>>>,
+        after_takes: Arc<Mutex<Option<Act>>>,
+        /// Restarts set queued that fail, as a database that does not answer, and how many were
+        /// asked for.
+        failing_restarts: Arc<std::sync::atomic::AtomicBool>,
+        restarts_set: Arc<AtomicU64>,
+        /// What runs before every call to the store, given the call and the Agent it names.
+        probe: Arc<Mutex<Option<Probe>>>,
+        /// What runs once after a take committed, before it is answered.
+        after_take: Arc<Mutex<Option<Act>>>,
+        /// What runs once after a re-key committed, before it is answered.
+        after_rekey: Arc<Mutex<Option<Act>>>,
+        /// What runs once after a queued restart was cleared, before the clear is answered.
+        after_clear: Arc<Mutex<Option<Act>>>,
+    }
+
+    /// What [`Hooked`] runs once after a read.
+    type Act = Box<dyn FnOnce() + Send>;
+
+    /// What [`Hooked`] runs before every call to the store.
+    type Probe = Arc<dyn Fn(&'static str, Option<&InstanceUid>) + Send + Sync>;
+
+    /// Runs the probe set in `probe`, if one is, for `call` naming `uid`.
+    fn probed(probe: &Mutex<Option<Probe>>, call: &'static str, uid: Option<&InstanceUid>) {
+        let probe = probe.lock().expect("hook lock").clone();
+        if let Some(probe) = probe {
+            probe(call, uid);
+        }
+    }
+
+    impl Hooked {
+        fn new(inner: Box<dyn AgentStore>) -> Self {
+            Hooked {
+                inner,
+                failing_gets: Arc::new(AtomicU64::new(0)),
+                after_get: Arc::new(Mutex::new(None)),
+                after_get_many: Arc::new(Mutex::new(None)),
+                loads: Arc::new(AtomicU64::new(0)),
+                whole_queries: Arc::new(AtomicU64::new(0)),
+                failing_rekeys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                losing_rekeys: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                failing_moved: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                moved_reads: Arc::new(AtomicU64::new(0)),
+                after_holders: Arc::new(Mutex::new(None)),
+                losing_takes: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                failing_takes: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                after_presence: Arc::new(Mutex::new(None)),
+                takes_reads: Arc::new(AtomicU64::new(0)),
+                before_takes: Arc::new(Mutex::new(None)),
+                after_takes: Arc::new(Mutex::new(None)),
+                failing_restarts: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                restarts_set: Arc::new(AtomicU64::new(0)),
+                probe: Arc::new(Mutex::new(None)),
+                after_take: Arc::new(Mutex::new(None)),
+                after_rekey: Arc::new(Mutex::new(None)),
+                after_clear: Arc::new(Mutex::new(None)),
+            }
+        }
+    }
+
+    impl AgentStore for Hooked {
+        fn load(&self) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            self.inner.load()
+        }
+        fn get(&self, uid: &InstanceUid) -> Result<Option<PersistedAgent>, String> {
+            probed(&self.probe, "get", Some(uid));
+            let failing = self
+                .failing_gets
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok();
+            if failing {
+                return Err("the read is held back".to_string());
+            }
+            let got = self.inner.get(uid);
+            let after = self.after_get.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            got
+        }
+        fn get_many(
+            &self,
+            uids: &[InstanceUid],
+        ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
+            probed(&self.probe, "get_many", None);
+            let got = self.inner.get_many(uids);
+            let after = self.after_get_many.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            got
+        }
+        fn query(
+            &self,
+            only: Option<&[InstanceUid]>,
+        ) -> Result<Vec<(InstanceUid, crate::agent_store::StoredAgent)>, String> {
+            if only.is_none() {
+                self.whole_queries.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.query(only)
+        }
+        fn query_page(
+            &self,
+            query: &crate::agent_store::PageQuery<'_>,
+        ) -> Result<crate::agent_store::AgentPage, String> {
+            probed(&self.probe, "query_page", None);
+            self.inner.query_page(query)
+        }
+        fn reported_values(
+            &self,
+            limit: usize,
+        ) -> Result<crate::agent_store::ReportedValues, String> {
+            self.inner.reported_values(limit)
+        }
+        fn is_shared(&self) -> bool {
+            self.inner.is_shared()
+        }
+        fn put(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<(), String> {
+            self.inner.put(uid, record)
+        }
+        fn write_report(&self, uid: &InstanceUid, record: &PersistedAgent) -> Result<bool, String> {
+            probed(&self.probe, "write_report", Some(uid));
+            self.inner.write_report(uid, record)
+        }
+        fn write_report_unless_held_elsewhere(
+            &self,
+            uid: &InstanceUid,
+            record: &PersistedAgent,
+            holder: Option<&str>,
+            take: Option<u64>,
+        ) -> Result<bool, String> {
+            self.inner
+                .write_report_unless_held_elsewhere(uid, record, holder, take)
+        }
+        fn create_within(
+            &self,
+            uid: &InstanceUid,
+            record: &PersistedAgent,
+            max_records: usize,
+        ) -> Result<Creation, String> {
+            probed(&self.probe, "create_within", Some(uid));
+            self.inner.create_within(uid, record, max_records)
+        }
+        fn set_labels(
+            &self,
+            uid: &InstanceUid,
+            labels: &BTreeMap<String, String>,
+        ) -> Result<bool, String> {
+            self.inner.set_labels(uid, labels)
+        }
+        fn set_restart_pending(
+            &self,
+            uid: &InstanceUid,
+            pending: bool,
+        ) -> Result<Option<bool>, String> {
+            probed(&self.probe, "set_restart_pending", Some(uid));
+            if pending {
+                self.restarts_set.fetch_add(1, Ordering::SeqCst);
+                if self.failing_restarts.load(Ordering::SeqCst) {
+                    return Err("the restart is held back".to_string());
+                }
+            }
+            let set = self.inner.set_restart_pending(uid, pending);
+            if !pending {
+                let after = self.after_clear.lock().expect("hook lock").take();
+                if let Some(after) = after {
+                    after();
+                }
+            }
+            set
+        }
+        fn remove(&self, uid: &InstanceUid) -> Result<(), String> {
+            self.inner.remove(uid)
+        }
+        fn write_presence(
+            &self,
+            holder: &str,
+            presence: &[(InstanceUid, Presence, Option<u64>)],
+        ) -> Result<HashMap<InstanceUid, u64>, String> {
+            let written = self.inner.write_presence(holder, presence);
+            let after = self.after_presence.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            written
+        }
+        fn takes(
+            &self,
+            uids: &[InstanceUid],
+        ) -> Result<HashMap<InstanceUid, (Option<String>, u64)>, String> {
+            self.takes_reads.fetch_add(1, Ordering::SeqCst);
+            let before = self.before_takes.lock().expect("hook lock").take();
+            if let Some(before) = before {
+                before();
+            }
+            let takes = self.inner.takes(uids);
+            let after = self.after_takes.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            takes
+        }
+        fn remove_if_silent(
+            &self,
+            uid: &InstanceUid,
+            silent_before_ms: u64,
+        ) -> Result<Option<crate::agent_store::Silenced>, String> {
+            self.inner.remove_if_silent(uid, silent_before_ms)
+        }
+        fn take(
+            &self,
+            uid: &InstanceUid,
+            holder: &str,
+            last_seen_ms: u64,
+        ) -> Result<Option<crate::agent_store::Taken>, String> {
+            probed(&self.probe, "take", Some(uid));
+            if self.failing_takes.load(Ordering::SeqCst) {
+                return Err("the take is not written".to_string());
+            }
+            let taken = self.inner.take(uid, holder, last_seen_ms);
+            let after = self.after_take.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            if self.losing_takes.load(Ordering::SeqCst) {
+                return Err("the answer of the take is lost".to_string());
+            }
+            taken
+        }
+        fn holders(
+            &self,
+            uids: &[InstanceUid],
+        ) -> Result<HashMap<InstanceUid, Option<String>>, String> {
+            probed(&self.probe, "holders", None);
+            let holders = self.inner.holders(uids);
+            let after = self.after_holders.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            holders
+        }
+        fn rekey(
+            &self,
+            old: &InstanceUid,
+            new: &InstanceUid,
+            record: &PersistedAgent,
+        ) -> Result<(), String> {
+            probed(&self.probe, "rekey", Some(old));
+            if self.failing_rekeys.load(Ordering::SeqCst) {
+                return Err("the move is held back".to_string());
+            }
+            self.inner.rekey(old, new, record)?;
+            let after = self.after_rekey.lock().expect("hook lock").take();
+            if let Some(after) = after {
+                after();
+            }
+            if self.losing_rekeys.load(Ordering::SeqCst) {
+                return Err("the move's answer is lost".to_string());
+            }
+            Ok(())
+        }
+        fn moved(&self, old: &InstanceUid, new: &InstanceUid) -> Result<bool, String> {
+            probed(&self.probe, "moved", Some(old));
+            self.moved_reads.fetch_add(1, Ordering::SeqCst);
+            if self.failing_moved.load(Ordering::SeqCst) {
+                return Err("the read back is held back".to_string());
+            }
+            self.inner.moved(old, new)
+        }
+        fn release(
+            &self,
+            revisions: &[crate::configs::Pinned],
+            agents: &[(InstanceUid, PersistedAgent)],
+        ) -> Result<Vec<InstanceUid>, String> {
+            self.inner.release(revisions, agents)
+        }
+        fn pinning(&self, pin: Pin<'_>) -> usize {
+            self.inner.pinning(pin)
+        }
+        fn referenced_revisions(&self, name: &str) -> BTreeSet<String> {
+            self.inner.referenced_revisions(name)
+        }
+    }
+
+    /// An instance on `database`, its Agent records in `agents`, and the host register on the
+    /// database read at once: what another instance binds after this is not known to it.
+    fn on_postgres(
+        database: &Arc<crate::postgres::Database>,
+        agents: Box<dyn AgentStore>,
+    ) -> AppState {
+        let revocations = Revocations::open(
+            Box::new(crate::postgres::ledger::PgLedgerStore::new(
+                database.clone(),
+            )),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        AppState::with_stores(
+            agents,
+            Box::new(crate::postgres::configs::PgConfigBackend::new(
+                database.clone(),
+            )),
+            Box::new(crate::clock::SystemClock),
+        )
+        .expect("state")
+        .with_revocations(Some(Arc::new(revocations)))
+    }
+
+    /// An instance on PostgreSQL loads no Agent record when it starts, holds none until one
+    /// reports to it, and reads again only the ones it holds when it reads everything again.
+    /// Verifies: ADR-0025, ADR-0023
+    #[test]
+    fn an_instance_on_postgres_loads_no_fleet_and_reads_again_only_what_it_holds() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let elsewhere = InstanceUid([0x81; 16]);
+        crate::postgres::agents::PgAgentStore::new(database.clone())
+            .put(&elsewhere, &crate::agent_store::tests::record())
+            .expect("another instance's record");
+        let hooked = Hooked::new(Box::new(
+            crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open"),
+        ));
+        let loads = hooked.loads.clone();
+        let state = on_postgres(&database, Box::new(hooked));
+        assert!(state.snapshot().is_empty(), "it holds no Agent");
+        let here = InstanceUid([0x82; 16]);
+        state.process(report(&here, 1), Transport::WebSocket, Some(1));
+        let held: Vec<String> = state
+            .snapshot()
+            .into_iter()
+            .map(|v| v.instance_uid)
+            .collect();
+        assert_eq!(
+            held,
+            [here.to_string()],
+            "it holds the Agent that reported to it"
+        );
+        state.catch_up().expect("read everything again");
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            0,
+            "no record loaded but those it holds"
+        );
+        assert_eq!(
+            state.fleet_view().expect("fleet").len(),
+            2,
+            "both are in the fleet"
+        );
+    }
+
+    /// On PostgreSQL an Agent's view and a rollout to it read the Agent and the Agents bound to its
+    /// Host, not the whole fleet, and the view inherits the labels of its Client Agent, which this
+    /// instance does not hold either.
+    /// Verifies: ADR-0025
+    #[test]
+    fn an_agents_view_and_a_rollout_to_it_read_its_host_and_not_the_fleet() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let a = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+        );
+        let (client, agent, other) = (
+            InstanceUid([0x91; 16]),
+            InstanceUid([0x92; 16]),
+            InstanceUid([0x93; 16]),
+        );
+        let subject = crate::revocation::SubjectValues::default;
+        report_over(
+            &a,
+            "h1",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        report_over(&a, "h1", subject(), agent, &[]);
+        report_over(&a, "h2", subject(), other, &[]);
+        label(&a, &client, &[("ring", "early")]);
+
+        let hooked = Hooked::new(Box::new(
+            crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open"),
+        ));
+        let whole = hooked.whole_queries.clone();
+        let dir = tempfile::tempdir().expect("blobs");
+        let b = delivering_on(&database, Box::new(hooked), dir.path());
+        aim_at_the_early_ring(&b);
+        let view = b.agent_view(&agent).expect("read").expect("known");
+        assert_eq!(
+            view.inherited_labels.get("ring").map(String::as_str),
+            Some("early")
+        );
+        assert_eq!(view.client_agent, client.to_string());
+        assert!(b
+            .agent_view(&InstanceUid([0x94; 16]))
+            .expect("read")
+            .is_none());
+        assert!(
+            b.rollout_to_agent(&agent, None).is_ok(),
+            "the Deployment aimed at the inherited label releases to it"
+        );
+        assert_eq!(
+            released_through(&database, &agent).as_deref(),
+            Some("early")
+        );
+        assert_eq!(
+            whole.load(Ordering::SeqCst),
+            0,
+            "no read of the whole fleet"
+        );
+        assert!(b.snapshot().is_empty());
+    }
+
+    /// An instance on PostgreSQL with package delivery, its blobs under `dir`.
+    fn delivering_on(
+        database: &Arc<crate::postgres::Database>,
+        agents: Box<dyn AgentStore>,
+        dir: &std::path::Path,
+    ) -> AppState {
+        let records = crate::Records::Postgres(database.clone());
+        let (packages, _) = PackageStore::open_on(
+            &records,
+            Some(dir),
+            &toml::from_str::<crate::config::BlobsConfig>("").expect("blobs"),
+            crate::clock::Elapsed::monotonic(),
+        )
+        .expect("packages");
+        on_postgres(database, agents).with_packages(Some(
+            PackageOffering::on(&records, packages).expect("deployments"),
+        ))
+    }
+
+    /// A Deployment `early`, selecting `ring=early`, that holds a Configuration for `otelcol`.
+    fn aim_at_the_early_ring(state: &AppState) {
+        state
+            .save_configuration(
+                "collector",
+                Revision {
+                    body: "receivers: {}\n".to_string(),
+                    role: String::new(),
+                    service_name: "otelcol".to_string(),
+                },
+            )
+            .expect("save");
+        state
+            .deployment_store()
+            .expect("deployments")
+            .put(
+                "early",
+                BTreeMap::from([("ring".to_string(), "early".to_string())]),
+            )
+            .expect("deployment");
+        state
+            .put_deployment_configuration("early", "collector")
+            .expect("hold it");
+    }
+
+    /// Two instances on `database`, A opened first: a Configuration `base` and a Package A saved,
+    /// an empty Deployment `stable`, and a Deployment `canary` that holds both, which B reads
+    /// when it opens. What B deletes after, A holds in memory until it takes it up.
+    fn holding_base_on_two_instances(
+        database: &Arc<crate::postgres::Database>,
+        dir: &std::path::Path,
+    ) -> (AppState, AppState, PackageId) {
+        let on = || {
+            delivering_on(
+                database,
+                Box::new(
+                    crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open"),
+                ),
+                dir,
+            )
+        };
+        let a = on();
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        a.save_configuration("base", body("receivers: {}\n"))
+            .expect("save");
+        a.create_package_set(&id).expect("package");
+        let deployments = a.deployment_store().expect("deployments");
+        for name in ["canary", "stable"] {
+            deployments
+                .put(
+                    name,
+                    BTreeMap::from([("ring".to_string(), name.to_string())]),
+                )
+                .expect("deployment");
+        }
+        a.put_deployment_configuration("canary", "base")
+            .expect("base in canary");
+        a.put_deployment_package("canary", &id, false)
+            .expect("the package in canary");
+        (a, on(), id)
+    }
+
+    /// The member rows the database stores, as `deployment member` lines.
+    fn stored_members(test: &crate::postgres::testing::TestDatabase) -> Vec<Vec<Option<String>>> {
+        test.rows(
+            "SELECT deployment || ' ' || configuration FROM deployment_configurations UNION ALL \
+             SELECT deployment || ' ' || agent_type || '@' || version FROM deployment_packages",
+        )
+    }
+
+    /// A Configuration and a Package deleted through B leave every Deployment that held them, in
+    /// B's memory too, and A, which has not taken up the deletions and still holds both in
+    /// memory, is refused when it adds either to a Deployment: the add reads the member it adds
+    /// in its own transaction and finds it gone, so no Deployment names it.
+    /// Verifies: ADR-0025, ADR-0032
+    #[test]
+    fn a_member_deleted_through_one_instance_is_refused_by_another_that_has_not_taken_it_up() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("blobs");
+        let (a, b, id) = holding_base_on_two_instances(&database, dir.path());
+
+        assert!(b.delete_configuration("base").expect("deleted"));
+        assert_eq!(b.delete_package_set(&id), Ok(true));
+        let canary = b
+            .deployment_store()
+            .expect("deployments")
+            .get("canary")
+            .expect("canary");
+        assert!(
+            canary.configurations.is_empty() && canary.packages.is_empty(),
+            "both left B's canary: {canary:?}"
+        );
+        assert!(stored_members(&test).is_empty(), "and the stored one");
+
+        assert!(
+            a.configurations().get("base").is_some(),
+            "A holds the Configuration in memory still"
+        );
+        assert!(matches!(
+            a.put_deployment_configuration("stable", "base"),
+            Err(DeploymentError::Missing(why)) if why.contains("\"base\"")
+        ));
+        assert!(matches!(
+            a.put_deployment_package("stable", &id, false),
+            Err(DeploymentError::Missing(why)) if why.contains("otelcol")
+        ));
+        assert!(
+            stored_members(&test).is_empty(),
+            "no Deployment names either"
+        );
+        let stable = a
+            .deployment_store()
+            .expect("deployments")
+            .get("stable")
+            .expect("stable");
+        assert!(
+            stable.configurations.is_empty() && stable.packages.is_empty(),
+            "nor does A's stable: {stable:?}"
+        );
+    }
+
+    /// An add through A that holds the Deployment's row, held at a gate in the database just
+    /// before it writes the member's row, while B deletes that member: the add holds the member's
+    /// row too, so the deletion waits for its commit, and then takes the member out of every
+    /// Deployment in the transaction that deletes it. Whichever commits first, no Deployment names
+    /// the deleted member once both have — for a Configuration and for a Package.
+    /// Verifies: ADR-0025, ADR-0032
+    #[test]
+    fn an_add_held_while_another_instance_deletes_the_member_leaves_no_deployment_naming_it() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("blobs");
+        let (a, b, id) = holding_base_on_two_instances(&database, dir.path());
+        let race = |table: &str,
+                    key: i64,
+                    add: &(dyn Fn() -> Result<Deployment, DeploymentError> + Sync),
+                    delete: &(dyn Fn() -> bool + Sync)| {
+            test.sql(&format!(
+                "CREATE FUNCTION fleet_test_hold_{table}() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN PERFORM pg_advisory_lock_shared({key}); \
+                 PERFORM pg_advisory_unlock_shared({key}); RETURN NEW; END $$; \
+                 CREATE TRIGGER fleet_test_hold BEFORE INSERT ON {table} \
+                 FOR EACH ROW EXECUTE FUNCTION fleet_test_hold_{table}();"
+            ));
+            let gate = test.gate(key);
+            std::thread::scope(|scope| {
+                let added = scope.spawn(add);
+                // A holds the Deployment's row and waits at the gate with its transaction open.
+                let a_pid = test.once(&format!(
+                    "SELECT pid::text FROM pg_locks WHERE locktype = 'advisory' AND NOT granted \
+                     AND objid::text = '{key}'"
+                ));
+                let deleted = scope.spawn(delete);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !deleted.is_finished()
+                    && test
+                        .rows(&format!(
+                            "SELECT 1 FROM pg_stat_activity \
+                             WHERE {a_pid} = ANY(pg_blocking_pids(pid))"
+                        ))
+                        .is_empty()
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "B's deletion neither waits for A nor ends"
+                    );
+                }
+                gate.open();
+                assert!(added.join().expect("A").is_ok(), "A's add commits first");
+                assert!(deleted.join().expect("B"), "B deletes it");
+            });
+        };
+
+        race(
+            "deployment_configurations",
+            0x25_0001,
+            &|| a.put_deployment_configuration("stable", "base"),
+            &|| b.delete_configuration("base").expect("deleted"),
+        );
+        race(
+            "deployment_packages",
+            0x25_0002,
+            &|| a.put_deployment_package("stable", &id, false),
+            &|| b.delete_package_set(&id).expect("deleted"),
+        );
+        assert!(
+            stored_members(&test).is_empty(),
+            "no Deployment names either: {:?}",
+            stored_members(&test)
+        );
+        b.deployment_store()
+            .expect("deployments")
+            .reload()
+            .expect("B reads the Deployments again");
+        assert!(b
+            .deployment_store()
+            .expect("deployments")
+            .list()
+            .iter()
+            .all(
+                |deployment| deployment.configurations.is_empty() && deployment.packages.is_empty()
+            ));
+    }
+
+    /// The Deployment the stored assignment of `uid` was released through.
+    fn released_through(
+        database: &Arc<crate::postgres::Database>,
+        uid: &InstanceUid,
+    ) -> Option<String> {
+        crate::postgres::agents::PgAgentStore::new(database.clone())
+            .get(uid)
+            .expect("read")
+            .and_then(|stored| stored.assignment)
+            .map(|assignment| assignment.deployment)
+    }
+
+    /// An Agent bound to a direct Host that reports over a Gateway since is placed by the Gateway
+    /// it arrived over: the list, its view and a rollout to it all inherit the labels of the
+    /// Client Agent behind that Gateway.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn an_agent_bound_to_a_direct_host_and_arriving_over_a_gateway_is_placed_by_the_gateway() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let a = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+        );
+        let (gateway, client, agent) = (
+            InstanceUid([0xa1; 16]),
+            InstanceUid([0xa2; 16]),
+            InstanceUid([0xa3; 16]),
+        );
+        let subject = crate::revocation::SubjectValues::default;
+        report_over(&a, "g", subject(), gateway, &[]);
+        assert_eq!(a.set_gateway("g", true), Ok(true));
+        report_over(&a, "h1", subject(), agent, &[]);
+        report_over(
+            &a,
+            "g",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true"), ("host.name", "m1")],
+        );
+        report_over(&a, "g", subject(), agent, &[("host.name", "m1")]);
+        label(&a, &client, &[("ring", "early")]);
+
+        let dir = tempfile::tempdir().expect("blobs");
+        let b = delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+            dir.path(),
+        );
+        aim_at_the_early_ring(&b);
+        let inherited =
+            |view: &AgentView| (view.inherited_labels.clone(), view.client_agent.clone());
+        let expected = (
+            BTreeMap::from([("ring".to_string(), "early".to_string())]),
+            client.to_string(),
+        );
+        let listed = b
+            .fleet_view()
+            .expect("fleet")
+            .into_iter()
+            .find(|view| view.instance_uid == agent.to_string())
+            .expect("listed");
+        assert_eq!(inherited(&listed), expected, "the list");
+        let viewed = b.agent_view(&agent).expect("read").expect("known");
+        assert_eq!(inherited(&viewed), expected, "its view");
+        assert!(b.rollout_to_agent(&agent, None).is_ok(), "a rollout to it");
+        assert_eq!(
+            released_through(&database, &agent).as_deref(),
+            Some("early")
+        );
+    }
+
+    /// A record that does not decode, which every read that meets it fails, can still be
+    /// forgotten through an instance that does not hold it, and is gone after, with what its
+    /// assignment pinned: the Deployment it was released through may be deleted then.
+    /// Verifies: ADR-0023, ADR-0029
+    #[test]
+    fn a_record_that_does_not_decode_can_be_forgotten() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        // The Deployment its assignment names is stored, so the store's own count decides.
+        test.sql(
+            "INSERT INTO deployments (name, selector, packages, configurations) \
+             VALUES ('stable', '{\"channel\": \"stable\"}', '[]', '{}')",
+        );
+        let uid = InstanceUid([0x84; 16]);
+        crate::postgres::agents::PgAgentStore::new(database.clone())
+            .put(&uid, &crate::agent_store::tests::record())
+            .expect("put");
+        test.sql("UPDATE agents SET health = '\\xff'::bytea");
+        let dir = tempfile::tempdir().expect("blobs");
+        let state = delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+            dir.path(),
+        );
+        assert!(
+            matches!(
+                state.delete_deployment("stable"),
+                Err(DeploymentError::Conflict(_))
+            ),
+            "its assignment pins the Deployment"
+        );
+        assert!(state.fleet_view().is_err(), "the fleet cannot be read");
+        assert!(
+            state.forget_agent(&uid).is_ok(),
+            "it is forgotten all the same"
+        );
+        // Before any read of the fleet, which would take up its absence.
+        assert!(
+            state.delete_deployment("stable").is_ok(),
+            "and pins nothing any more"
+        );
+        assert!(state.fleet_view().expect("readable again").is_empty());
+    }
+
+    /// Forgetting an Agent this instance on PostgreSQL does not hold collects the revision only its
+    /// assignment pinned, as forgetting one it holds does.
+    /// Verifies: ADR-0032, ADR-0023
+    #[test]
+    fn forgetting_an_agent_held_nowhere_collects_the_revision_only_it_pinned() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        // A rollout releases through a stored Deployment.
+        test.store_deployments(&["stable"]);
+        let body = |text: &str| crate::configs::Revision {
+            body: text.to_string(),
+            role: String::new(),
+            service_name: "otelcol".to_string(),
+        };
+        let (pinned, saved) = (body("v1\n"), body("v2\n"));
+        let hash = crate::configs::revision_hash(&pinned);
+        let configs = crate::postgres::configs::PgConfigBackend::new(database.clone());
+        configs.save("base", &pinned).expect("save");
+        let uid = InstanceUid([0x83; 16]);
+        let mut stored = crate::agent_store::tests::record();
+        stored.assignment = Some(Assignment {
+            deployment: "stable".to_string(),
+            package: None,
+            configurations: BTreeMap::from([("base".to_string(), hash.clone())]),
+        });
+        let agents = crate::postgres::agents::PgAgentStore::new(database.clone());
+        agents.put(&uid, &stored).expect("put");
+        agents
+            .release(
+                &[crate::configs::Pinned {
+                    configuration: "base".to_string(),
+                    hash: hash.clone(),
+                    revision: pinned,
+                }],
+                &[(uid, stored)],
+            )
+            .expect("release");
+        configs.save("base", &saved).expect("save again");
+
+        let state = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+        );
+        let retained = |state: &AppState| {
+            state
+                .configurations()
+                .get("base")
+                .expect("base")
+                .retained
+                .contains_key(&hash)
+        };
+        assert!(retained(&state), "pinned while the Agent is stored");
+        assert!(state.snapshot().is_empty(), "held nowhere");
+        assert!(state.forget_agent(&uid).is_ok(), "silent, so forgotten");
+        assert!(!retained(&state), "collected with it");
+    }
+
+    /// A certificate of `host`.
+    fn of_host(host: &str) -> Presented {
+        Presented {
+            id: CertId::new(b"CA", host),
+            host: Some(host.to_string()),
+            subject_values: crate::revocation::SubjectValues::default(),
+            not_after_ms: u64::MAX,
+        }
+    }
+
+    /// An Agent that comes back on a new connection of its host keeps its identity, the newest
+    /// connection carries it and the move is logged; a report of the older connection is taken up
+    /// and leaves it there, so the older one's close leaves it connected. On a connection of
+    /// another host the same identity is a duplicate, re-keyed.
+    /// Verifies: ADR-0025
+    #[test]
+    fn an_agent_on_a_new_connection_of_its_host_is_carried_by_it_and_not_rekeyed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::new(dir.path().join("configs"))
+            .expect("state")
+            .with_revocations(Some(revocations));
+        let uid = InstanceUid::default();
+        let (old, new, other) = (
+            state.connection_id(),
+            state.connection_id(),
+            state.connection_id(),
+        );
+        let carrier = |state: &AppState| {
+            state
+                .fleet
+                .lock()
+                .expect("fleet lock")
+                .get(&uid)
+                .map(|record| (record.connected, record.owner))
+        };
+        crate::test_support::logged();
+        {
+            let host = of_host("edge-1");
+            let first = state.process_presented(
+                report(&uid, 1),
+                Transport::WebSocket,
+                Some(old),
+                Some(&host),
+            );
+            assert!(first.reply.agent_identification.is_none());
+            let back = state.process_presented(
+                report(&uid, 2),
+                Transport::WebSocket,
+                Some(new),
+                Some(&host),
+            );
+            assert!(
+                back.reply.agent_identification.is_none(),
+                "not a duplicate of itself"
+            );
+            assert_eq!(carrier(&state), Some((true, Some(new))));
+            let late = state.process_presented(
+                report(&uid, 3),
+                Transport::WebSocket,
+                Some(old),
+                Some(&host),
+            );
+            assert!(late.reply.agent_identification.is_none());
+            assert!(late.reply.error_response.is_none(), "taken up");
+            assert_eq!(
+                carrier(&state),
+                Some((true, Some(new))),
+                "the older one takes it no more"
+            );
+            state.mark_disconnected(&[uid], old);
+            assert_eq!(carrier(&state), Some((true, Some(new))));
+
+            let clone = state.process_presented(
+                report(&uid, 1),
+                Transport::WebSocket,
+                Some(other),
+                Some(&of_host("edge-2")),
+            );
+            let new_uid = clone
+                .reply
+                .agent_identification
+                .expect("another host's is re-keyed");
+            assert_ne!(new_uid.new_instance_uid, uid.as_bytes().to_vec());
+        }
+        let came_back = crate::test_support::lines_with(&[
+            "came back on a new connection of its host",
+            &uid.to_string(),
+        ]);
+        assert_eq!(
+            came_back.len(),
+            1,
+            "the move to the new connection is logged once: {came_back:?}"
+        );
+    }
+
+    /// A state on files with a host register whose writes of the Hosts run `probe` first, and the
+    /// state `probe` may reach once it is made.
+    fn with_probed_register(
+        dir: &std::path::Path,
+        probe: Probe,
+        of: &Arc<OnceLock<std::sync::Weak<AppState>>>,
+    ) -> Arc<AppState> {
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(ProbedLedger {
+                    inner: Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
+                    probe,
+                }),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = Arc::new(
+            AppState::new(dir.join("configs"))
+                .expect("state")
+                .with_revocations(Some(revocations)),
+        );
+        of.set(Arc::downgrade(&state)).expect("set once");
+        state
+    }
+
+    /// Who carries `uid` in `state`'s memory: whether connected, and on which connection.
+    fn carrier_of(state: &AppState, uid: &InstanceUid) -> Option<(bool, Option<ConnId>)> {
+        state
+            .fleet
+            .lock()
+            .expect("fleet lock")
+            .get(uid)
+            .map(|record| (record.connected, record.owner))
+    }
+
+    /// A goodbye the older connection of a host delivers while a newer one carries the Agent does
+    /// not end the Agent's connection: it stays connected on the newer one.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_goodbye_on_an_older_connection_of_the_host_leaves_the_agent_with_the_newer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of = Arc::new(OnceLock::new());
+        let state = with_probed_register(dir.path(), Arc::new(|_, _| {}), &of);
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let host = of_host("edge-1");
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(old),
+            Some(&host),
+        );
+        state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(new),
+            Some(&host),
+        );
+        let mut goodbye = report(&uid, 2);
+        goodbye.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        let answered =
+            state.process_presented(goodbye, Transport::WebSocket, Some(old), Some(&host));
+        assert!(
+            answered.disconnected,
+            "the older connection lets the Agent go"
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(new))));
+    }
+
+    /// A queued restart is not sent on an older connection of the host while a newer one carries
+    /// the Agent: it stays queued, and the newer connection's next report is sent it.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_queued_restart_is_not_sent_on_an_older_connection_of_the_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of = Arc::new(OnceLock::new());
+        let state = with_probed_register(dir.path(), Arc::new(|_, _| {}), &of);
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let host = of_host("edge-1");
+        let restartable = |sequence_num| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+            msg
+        };
+        state.process_presented(restartable(1), Transport::WebSocket, Some(old), Some(&host));
+        state.process_presented(restartable(2), Transport::WebSocket, Some(new), Some(&host));
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+        let late =
+            state.process_presented(restartable(3), Transport::WebSocket, Some(old), Some(&host));
+        assert!(
+            late.reply.command.is_none(),
+            "not sent on the older connection"
+        );
+        assert!(state.fleet.lock().expect("fleet lock")[&uid].restart_pending);
+        let next =
+            state.process_presented(restartable(4), Transport::WebSocket, Some(new), Some(&host));
+        assert!(next.reply.command.is_some(), "sent on the newer one");
+    }
+
+    /// A queued restart pushed to every connection that named the Agent goes out only on the one
+    /// that carries it: an older connection of its host that still names it, its peer likely
+    /// gone, is handed none, and the restart stays queued for the newer one.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_pushed_restart_goes_out_only_on_the_connection_that_carries_the_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of = Arc::new(OnceLock::new());
+        let state = with_probed_register(dir.path(), Arc::new(|_, _| {}), &of);
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let host = of_host("edge-1");
+        let restartable = |sequence_num| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64;
+            msg
+        };
+        state.process_presented(restartable(1), Transport::WebSocket, Some(old), Some(&host));
+        state.process_presented(restartable(2), Transport::WebSocket, Some(new), Some(&host));
+        let late =
+            state.process_presented(restartable(3), Transport::WebSocket, Some(old), Some(&host));
+        assert_eq!(late.uid, Some(uid), "the older connection still names it");
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+        assert!(
+            state.restart_command_for(&uid, old).is_none(),
+            "not handed to the older connection"
+        );
+        assert!(state.fleet.lock().expect("fleet lock")[&uid].restart_pending);
+        assert!(
+            state.restart_command_for(&uid, new).is_some(),
+            "handed to the newer one"
+        );
+    }
+
+    /// A report of an older connection of the host does not use up the demand for the component
+    /// map: the newer connection is asked for it.
+    /// Verifies: ADR-0025
+    #[test]
+    fn an_older_connection_of_the_host_is_not_asked_for_the_component_map() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of = Arc::new(OnceLock::new());
+        let state = with_probed_register(dir.path(), Arc::new(|_, _| {}), &of);
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let host = of_host("edge-1");
+        let hashed = |sequence_num| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64;
+            msg.available_components = Some(opamp::proto::AvailableComponents {
+                hash: vec![sequence_num as u8],
+                ..Default::default()
+            });
+            msg
+        };
+        let asked = |processed: &Processed| {
+            processed.reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0
+        };
+        state.process_presented(hashed(1), Transport::WebSocket, Some(old), Some(&host));
+        state.process_presented(hashed(2), Transport::WebSocket, Some(new), Some(&host));
+        let late = state.process_presented(hashed(3), Transport::WebSocket, Some(old), Some(&host));
+        assert!(!asked(&late), "not asked on the older connection");
+        let next = state.process_presented(hashed(3), Transport::WebSocket, Some(new), Some(&host));
+        assert!(asked(&next), "asked on the newer one");
+    }
+
+    /// A state on files whose clock the test moves, with a host register in which `gw-1` is a
+    /// Gateway's Host; beside it the clock and a certificate of that Gateway.
+    fn with_a_gateway(
+        dir: &std::path::Path,
+        offer: Option<ConnectionOffer>,
+    ) -> (AppState, Arc<AtomicU64>, Presented) {
+        let now = Arc::new(AtomicU64::new(1_000_000));
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(crate::fs::FsLedgerStore::open(dir).expect("ledger")),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::with_stores(
+            Box::new(crate::fs::FsAgentStore::open(dir).expect("agents")),
+            Box::new(crate::fs::FsConfigBackend::open(dir).expect("configs")),
+            Box::new(Manual(now.clone())),
+        )
+        .expect("state")
+        .with_revocations(Some(revocations.clone()))
+        .with_connection_offer(offer);
+        let gateway = of_host("gw-1");
+        // Its first report makes its Host; the mark makes it a Gateway's.
+        let first = state.connection_id();
+        state.process_presented(
+            report(&InstanceUid::default(), 1),
+            Transport::WebSocket,
+            Some(first),
+            Some(&gateway),
+        );
+        assert!(revocations.set_gateway("gw-1", true).expect("mark"));
+        (state, now, gateway)
+    }
+
+    /// An Agent behind a Gateway that its pool moved from the newer of two open connections to the
+    /// older one is taken by its report there once the newer one has carried none of its reports
+    /// for a heartbeat interval: it is asked for its component map there, and its goodbye there
+    /// ends it.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_gateway_s_agent_moved_to_an_older_connection_is_taken_there_after_an_interval() {
+        crate::test_support::logged();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, now, gateway) = with_a_gateway(dir.path(), None);
+        let uid = InstanceUid::default();
+        let (older, newer) = (state.connection_id(), state.connection_id());
+        let hashed = |sequence_num: u64| {
+            let mut msg = report(&uid, sequence_num);
+            msg.capabilities |= opamp::proto::AgentCapabilities::ReportsAvailableComponents as u64;
+            msg.available_components = Some(opamp::proto::AvailableComponents {
+                hash: vec![7],
+                ..Default::default()
+            });
+            msg
+        };
+        let asked = |processed: &Processed| {
+            processed.reply.flags & ServerToAgentFlags::ReportAvailableComponents as u64 != 0
+        };
+        state.process_presented(hashed(1), Transport::WebSocket, Some(newer), Some(&gateway));
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(newer))));
+        // The Agent restarts, and the pool places it on the older connection; the newer one,
+        // carrying other Agents, stays open and carries none of its reports from now on.
+        now.fetch_add(DEFAULT_HEARTBEAT.as_millis() as u64, Ordering::SeqCst);
+        let taken =
+            state.process_presented(hashed(1), Transport::WebSocket, Some(older), Some(&gateway));
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((true, Some(older))),
+            "the older connection carries it"
+        );
+        assert!(asked(&taken), "asked for its component map there");
+        assert_eq!(
+            crate::test_support::lines_with(&["carried none of its reports", &uid.to_string()])
+                .len(),
+            1,
+            "the move to the stale carrier's older connection is logged"
+        );
+        let mut goodbye = report(&uid, 2);
+        goodbye.agent_disconnect = Some(opamp::proto::AgentDisconnect {});
+        state.process_presented(goodbye, Transport::WebSocket, Some(older), Some(&gateway));
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((false, None)),
+            "its goodbye ends it"
+        );
+    }
+
+    /// Within a heartbeat interval of the newer connection's last report of an Agent, a report on
+    /// an older connection of the same Gateway does not take the Agent back.
+    /// Verifies: ADR-0025
+    #[test]
+    fn within_an_interval_an_older_connection_of_a_gateway_does_not_take_the_agent_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (state, now, gateway) = with_a_gateway(dir.path(), None);
+        let uid = InstanceUid::default();
+        let (older, newer) = (state.connection_id(), state.connection_id());
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(newer),
+            Some(&gateway),
+        );
+        now.fetch_add(DEFAULT_HEARTBEAT.as_millis() as u64 - 1, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 2),
+            Transport::WebSocket,
+            Some(older),
+            Some(&gateway),
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(newer))));
+        // A report on the newer connection carries it on, so a heartbeat later the older one
+        // still does not take it.
+        state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(newer),
+            Some(&gateway),
+        );
+        now.fetch_add(DEFAULT_HEARTBEAT.as_millis() as u64 - 1, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 4),
+            Transport::WebSocket,
+            Some(older),
+            Some(&gateway),
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(newer))));
+    }
+
+    /// The interval this Server offers decides when a Gateway's newer connection is stale: at an
+    /// offered 60 seconds, a report on the older connection 30 seconds after the newer one's last
+    /// does not take the Agent, and one 60 seconds after does.
+    /// Verifies: ADR-0025
+    #[test]
+    fn the_offered_heartbeat_interval_decides_when_a_carrier_is_stale() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let offer = ConnectionOffer::from_config(
+            &toml::from_str::<crate::config::ConnectionOfferConfig>(
+                "heartbeat_interval_secs = 60\n",
+            )
+            .expect("offer config"),
+        );
+        let (state, now, gateway) = with_a_gateway(dir.path(), Some(offer));
+        let uid = InstanceUid::default();
+        let (older, newer) = (state.connection_id(), state.connection_id());
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(newer),
+            Some(&gateway),
+        );
+        now.fetch_add(30_000, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 2),
+            Transport::WebSocket,
+            Some(older),
+            Some(&gateway),
+        );
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((true, Some(newer))),
+            "30 s is within the offered interval"
+        );
+        now.fetch_add(30_000, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(older),
+            Some(&gateway),
+        );
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((true, Some(older))),
+            "60 s is one offered interval"
+        );
+    }
+
+    /// A newer connection whose report waited on the store for a heartbeat interval is as fresh as
+    /// its report once it took the Agent: the older connection's next report does not take the
+    /// Agent back.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_carrier_whose_report_waited_an_interval_is_not_stale_once_it_took_the_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let now = Arc::new(AtomicU64::new(1_000_000));
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe: Probe = {
+            let (now, armed) = (now.clone(), armed.clone());
+            Arc::new(move |call, _| {
+                if call == "save_hosts" && armed.swap(false, Ordering::SeqCst) {
+                    // The newer connection's round waits an interval on the store.
+                    now.fetch_add(DEFAULT_HEARTBEAT.as_millis() as u64, Ordering::SeqCst);
+                }
+            })
+        };
+        let revocations = Arc::new(
+            Revocations::open(
+                Box::new(ProbedLedger {
+                    inner: Box::new(crate::fs::FsLedgerStore::open(dir.path()).expect("ledger")),
+                    probe,
+                }),
+                Arc::new(crate::clock::SystemClock),
+                Vec::new(),
+            )
+            .expect("revocations"),
+        );
+        let state = AppState::with_stores(
+            Box::new(crate::fs::FsAgentStore::open(dir.path()).expect("agents")),
+            Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+            Box::new(Manual(now.clone())),
+        )
+        .expect("state")
+        .with_revocations(Some(revocations));
+        let uid = InstanceUid::default();
+        let (old, new) = (state.connection_id(), state.connection_id());
+        let until = |not_after_ms| Presented {
+            not_after_ms,
+            ..of_host("edge-1")
+        };
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(old),
+            Some(&until(1)),
+        );
+        armed.store(true, Ordering::SeqCst);
+        state.process_presented(
+            report(&uid, 2),
+            Transport::WebSocket,
+            Some(new),
+            Some(&until(2)),
+        );
+        assert!(
+            !armed.load(Ordering::SeqCst),
+            "the newer connection's round waited"
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(new))));
+        state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(old),
+            Some(&until(2)),
+        );
+        assert_eq!(
+            carrier_of(&state, &uid),
+            Some((true, Some(new))),
+            "the older connection's backlog does not take it back"
+        );
+    }
+
+    /// A report of an older connection of the host whose newer connection closes while the report
+    /// is taken up is not left without a connection: the older one carries the Agent again.
+    /// Verifies: ADR-0025
+    #[test]
+    fn an_older_connection_takes_the_agent_back_when_the_newer_closes_meanwhile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let of: Arc<OnceLock<std::sync::Weak<AppState>>> = Arc::new(OnceLock::new());
+        let uid = InstanceUid::default();
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let closing = Arc::new(Mutex::new(None::<ConnId>));
+        let probe: Probe = {
+            let (of, armed, closing) = (of.clone(), armed.clone(), closing.clone());
+            Arc::new(move |call, _| {
+                if call == "save_hosts" && armed.swap(false, Ordering::SeqCst) {
+                    // The newer connection closes while the older one's report moves its Host's
+                    // valid until.
+                    let state = of.get().and_then(std::sync::Weak::upgrade).expect("state");
+                    let conn = closing.lock().expect("closing").expect("a connection");
+                    state.mark_disconnected(&[uid], conn);
+                }
+            })
+        };
+        let state = with_probed_register(dir.path(), probe, &of);
+        let (old, new) = (state.connection_id(), state.connection_id());
+        *closing.lock().expect("closing") = Some(new);
+        let until = |not_after_ms| Presented {
+            not_after_ms,
+            ..of_host("edge-1")
+        };
+        state.process_presented(
+            report(&uid, 1),
+            Transport::WebSocket,
+            Some(old),
+            Some(&until(1)),
+        );
+        state.process_presented(
+            report(&uid, 2),
+            Transport::WebSocket,
+            Some(new),
+            Some(&until(1)),
+        );
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(new))));
+        armed.store(true, Ordering::SeqCst);
+        let late = state.process_presented(
+            report(&uid, 3),
+            Transport::WebSocket,
+            Some(old),
+            Some(&until(2)),
+        );
+        assert!(
+            !armed.load(Ordering::SeqCst),
+            "the newer connection closed meanwhile"
+        );
+        assert!(late.reply.error_response.is_none());
+        assert_eq!(carrier_of(&state, &uid), Some((true, Some(old))));
+    }
+
+    /// What an instance wrote of an Agent's presence, the count of takes among it, leaves with the
+    /// Agent wherever it leaves what the instance holds: when it is forgotten here, when it was
+    /// forgotten through another instance, and under its old identity when it is re-keyed.
+    /// Verifies: ADR-0029
+    #[test]
+    fn what_was_written_of_an_agents_presence_leaves_with_it() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let on = |lease: &str| {
+            let state = on_postgres(
+                &database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+            );
+            state.serve_under(tokio::sync::watch::channel(Some(lease.to_string())).1);
+            state
+        };
+        let (a, b) = (
+            on("00000000-0000-7000-8000-00000000000a"),
+            on("00000000-0000-7000-8000-00000000000b"),
+        );
+        let kept = |state: &AppState, uid: &InstanceUid| {
+            let written = state.kept.presence_written.lock().expect("presence lock");
+            (
+                written.agents.contains_key(uid),
+                written.takes.contains_key(uid),
+            )
+        };
+        let (forgotten, elsewhere, rekeyed) = (
+            InstanceUid([0x71; 16]),
+            InstanceUid([0x72; 16]),
+            InstanceUid([0x73; 16]),
+        );
+        for (conn, uid) in (1..).zip([forgotten, elsewhere, rekeyed]) {
+            a.process(report(&uid, 1), Transport::WebSocket, Some(conn));
+            assert_eq!(kept(&a, &uid), (true, true), "taken");
+        }
+
+        a.mark_disconnected(&[forgotten], 1);
+        a.mark_disconnected(&[elsewhere], 2);
+        assert!(a.forget_agent(&forgotten).is_ok(), "forget here");
+        assert_eq!(kept(&a, &forgotten), (false, false), "forgotten here");
+
+        assert!(b.forget_agent(&elsewhere).is_ok(), "forget through B");
+        // A report that changes the record finds it gone.
+        let mut changed = report(&elsewhere, 3);
+        changed.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            ..Default::default()
+        });
+        a.process(changed, Transport::WebSocket, Some(2));
+        assert_eq!(
+            kept(&a, &elsewhere),
+            (false, false),
+            "forgotten through another instance"
+        );
+
+        let mut rekey = report(&rekeyed, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        a.process(rekey, Transport::WebSocket, Some(3));
+        assert_eq!(kept(&a, &rekeyed), (false, false), "re-keyed");
+    }
+
+    /// An instance that heard another took an Agent reads its holder under the Agent's own lock: a
+    /// take of its own by the Agent's new connection here, made while the holder is read, waits
+    /// for the read and keeps the Agent carried.
+    /// Verifies: ADR-0025
+    #[test]
+    fn an_agent_taken_back_here_while_its_holder_is_read_stays_carried() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_holders = hooked.after_holders.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000a".to_string())).1,
+        );
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        b.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000b".to_string())).1,
+        );
+        let uid = InstanceUid([0x74; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        b.process(report(&uid, 2), Transport::WebSocket, Some(9));
+        // While A reads the holder, the Agent's old connection to A closes and it connects to A
+        // again, which takes it back.
+        let again = a.clone();
+        let (taken_back, taking_back) = std::sync::mpsc::channel();
+        *after_holders.lock().expect("hook lock") = Some(Box::new(move || {
+            std::thread::spawn(move || {
+                again.mark_disconnected(&[uid], 7);
+                again.process(report(&uid, 3), Transport::WebSocket, Some(8));
+                let _ = taken_back.send(());
+            });
+        }));
+        a.catch_up().expect("release");
+        assert!(
+            after_holders.lock().expect("hook lock").is_none(),
+            "the take came while the holder was read"
+        );
+        taking_back
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the Agent's new connection is answered");
+        assert!(view(&a, &uid).connected, "still carried");
+    }
+
+    /// On PostgreSQL a first report here whose read of the stored record failed goes on from the
+    /// record another instance created, as it is stored: its labels are held, and a report the
+    /// binding then refuses leaves it stored and its Agent carried where it is.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_record_another_instance_created_is_taken_as_stored_and_never_removed() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_gets.clone();
+        let a = on_postgres(&database, Box::new(hooked));
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let (bound, labelled) = (InstanceUid([0x61; 16]), InstanceUid([0x62; 16]));
+        for uid in [bound, labelled] {
+            b.process_presented(report(&uid, 1), Transport::Http, None, Some(&of_host("h1")));
+        }
+        label(&b, &labelled, &[("tier", "edge")]);
+
+        failing.store(1, Ordering::SeqCst);
+        let refused = a.process_presented(
+            report(&bound, 2),
+            Transport::Http,
+            None,
+            Some(&of_host("h2")),
+        );
+        assert!(
+            refused.reply.error_response.is_some(),
+            "the binding refuses it"
+        );
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT instance_uid FROM agents WHERE instance_uid = '{bound}'"
+            ))
+            .len(),
+            1,
+            "the record B created stays"
+        );
+
+        failing.store(1, Ordering::SeqCst);
+        a.process_presented(
+            report(&labelled, 2),
+            Transport::Http,
+            None,
+            Some(&of_host("h1")),
+        );
+        assert_eq!(view(&a, &labelled).labels["tier"], "edge", "held as stored");
+    }
+
+    /// A label change made on A after A's take-up read the records, before it took the fleet lock,
+    /// is not undone by what that read found: what differs is read again under the lock. A never
+    /// hears its own announcement, so nothing else would correct it.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_take_up_never_undoes_a_newer_act_of_its_own_instance() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_get_many = hooked.after_get_many.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let uid = InstanceUid([0x63; 16]);
+        a.process(report(&uid, 1), Transport::Http, None);
+        label(&b, &uid, &[("tier", "edge")]);
+
+        // A's take-up reads B's labels in its first read; then an operator sets other labels
+        // through A.
+        let on_a = Arc::downgrade(&a);
+        *after_get_many.lock().expect("hook lock") = Some(Box::new(move || {
+            let a = on_a.upgrade().expect("A");
+            // Another thread tries the fleet lock, so a first read under it fails here rather
+            // than deadlocking on the label.
+            let held = a.clone();
+            let locked = std::thread::spawn(move || held.fleet.try_lock().is_err())
+                .join()
+                .expect("tried");
+            assert!(!locked, "the first read comes before the fleet lock");
+            label(&a, &uid, &[("tier", "core")]);
+        }));
+        a.take_up_agents(&HashSet::from([uid])).expect("take up");
+        assert!(
+            after_get_many.lock().expect("hook lock").is_none(),
+            "the act came after the first read"
+        );
+        assert_eq!(view(&a, &uid).labels["tier"], "core", "A's own act stays");
+    }
+
+    /// A re-key whose move of the stored record fails leaves the Agent under the identity it has:
+    /// the reply assigns no new one, the record stays stored and held under the old uid, and the
+    /// session is not ended as one of an Agent forgotten.
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_rekey_whose_move_fails_keeps_the_agent_under_its_identity() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_rekeys.clone();
+        let a = on_postgres(&database, Box::new(hooked));
+        let uid = InstanceUid([0x67; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+
+        failing.store(true, Ordering::SeqCst);
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process(rekey, Transport::WebSocket, Some(7));
+        assert_eq!(answered.uid, Some(uid), "carried under its identity");
+        assert!(
+            answered.reply.agent_identification.is_none(),
+            "no new identity is assigned"
+        );
+        assert!(a.take_forgotten(7).is_empty(), "its session goes on");
+        assert_eq!(view(&a, &uid).instance_uid, uid.to_string());
+        assert_eq!(
+            test.rows("SELECT instance_uid FROM agents"),
+            [vec![Some(uid.to_string())]],
+            "the record stays stored under it"
+        );
+    }
+
+    /// A take-up reads the records of the Agents it holds in one read before the fleet lock, and
+    /// what differs again under the lock in one read, however many records differ: neither read
+    /// takes one round trip per record.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_take_up_reads_again_what_differs_in_one_read() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let probe = hooked.probe.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let uids = [0x64, 0x65, 0x66].map(|byte| InstanceUid([byte; 16]));
+        for uid in &uids {
+            a.process(report(uid, 1), Transport::Http, None);
+            label(&b, uid, &[("tier", "edge")]);
+        }
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (reads, on) = (reads.clone(), Arc::downgrade(&a));
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, _| {
+                if call != "get" && call != "get_many" {
+                    return;
+                }
+                // Whether the fleet lock is held at the read: another thread tries it.
+                let a = on.upgrade().expect("A");
+                let locked = std::thread::spawn(move || a.fleet.try_lock().is_err())
+                    .join()
+                    .expect("tried");
+                reads.lock().expect("reads").push((call, locked));
+            }));
+        }
+
+        a.take_up_agents(&HashSet::from(uids)).expect("take up");
+        *probe.lock().expect("hook lock") = None;
+        for uid in &uids {
+            assert_eq!(view(&a, uid).labels["tier"], "edge", "{uid} taken up");
+        }
+        assert_eq!(
+            reads.lock().expect("reads").clone(),
+            [("get_many", false), ("get_many", true)],
+            "one read of all three before the lock, and one under it"
+        );
+    }
+
+    /// A catch-up after a missed notification takes up every kind of state this instance keeps of
+    /// the Agents it holds from one read of their records and one of their holders, however many
+    /// kinds there are: an assignment, labels, the labels of a Client Agent another instance
+    /// carries, which the group inherits, of a Host and behind a Gateway, a requested restart, a
+    /// put-back kept for retry, and a take. The Agents behind the Gateway are read once, before the
+    /// fleet lock.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_catch_up_reads_the_records_once_and_the_holders_once() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let (probe, failing) = (hooked.probe.clone(), hooked.failing_restarts.clone());
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000a".to_string())).1,
+        );
+        let dir = tempfile::tempdir().expect("blobs");
+        let b = delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+            dir.path(),
+        );
+        b.serve_under(
+            tokio::sync::watch::channel(Some("00000000-0000-7000-8000-00000000000b".to_string())).1,
+        );
+        let [client, agent, restarted, kept, taken, gateway, behind_client, behind] =
+            [0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8].map(|byte| InstanceUid([byte; 16]));
+        let subject = crate::revocation::SubjectValues::default;
+        report_over(
+            &b,
+            "h1",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        report_over(
+            &b,
+            "gw",
+            subject(),
+            gateway,
+            &[("supervisor.kind.collector", "true"), ("host.id", "gw-1")],
+        );
+        assert!(b.set_gateway("gw", true).expect("marked"));
+        report_over(
+            &b,
+            "gw",
+            subject(),
+            behind_client,
+            &[("supervisor.kind.collector", "true"), ("host.id", "m-1")],
+        );
+        a.revocations()
+            .expect("register")
+            .reload_ledger()
+            .expect("the binding and the mark B made");
+        report_over(&a, "h1", subject(), agent, &[]);
+        report_over(&a, "gw", subject(), behind, &[("host.id", "m-1")]);
+        a.process(restartable(&restarted, 1), Transport::WebSocket, Some(1));
+        kept_put_back(&a, &failing, &kept);
+        a.process(report(&taken, 1), Transport::WebSocket, Some(2));
+
+        // What B changes, A hears nothing of.
+        label(&b, &client, &[("site", "wien")]);
+        label(&b, &agent, &[("ring", "early")]);
+        label(&b, &behind_client, &[("site", "graz")]);
+        aim_at_the_early_ring(&b);
+        assert!(b.rollout_to_agent(&agent, None).is_ok(), "released");
+        assert!(b.request_restart(&restarted).is_ok(), "requested");
+        assert!(b.request_restart(&kept).is_ok(), "requested again");
+        b.process(report(&taken, 2), Transport::WebSocket, Some(9));
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (calls, on) = (calls.clone(), Arc::downgrade(&a));
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, _| {
+                // Whether the fleet lock is held at the call: another thread tries it.
+                let a = on.upgrade().expect("A");
+                let locked = std::thread::spawn(move || a.fleet.try_lock().is_err())
+                    .join()
+                    .expect("tried");
+                calls.lock().expect("calls").push((call, locked));
+            }));
+        }
+        a.catch_up().expect("caught up");
+        *probe.lock().expect("hook lock") = None;
+        let calls = calls.lock().expect("calls").clone();
+        let count = |name: &str| calls.iter().filter(|(call, _)| *call == name).count();
+        assert_eq!(
+            (
+                count("get"),
+                count("get_many"),
+                count("holders"),
+                count("query_page")
+            ),
+            (0, 1, 1, 1),
+            "one read of the records, one of the holders and one of the Gateway: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|(call, locked)| *locked == (*call == "get_many")),
+            "only the records are read under the fleet lock: {calls:?}"
+        );
+
+        let held = view(&a, &agent);
+        assert_eq!(held.assigned_deployment, "early", "the assignment");
+        assert_eq!(held.labels["ring"], "early", "the labels");
+        assert_eq!(
+            held.inherited_labels.get("site").map(String::as_str),
+            Some("wien"),
+            "the Client Agent's labels"
+        );
+        assert!(
+            a.fleet.lock().expect("fleet")[&restarted].restart_pending,
+            "the restart requested"
+        );
+        assert!(
+            !a.kept
+                .unput_restarts
+                .lock()
+                .expect("restarts lock")
+                .contains_key(&kept),
+            "the put-back, its restart queued again"
+        );
+        assert!(!view(&a, &taken).connected, "the take");
+        assert_eq!(
+            view(&a, &behind)
+                .inherited_labels
+                .get("site")
+                .map(String::as_str),
+            Some("graz"),
+            "the labels of the Client Agent behind the Gateway"
+        );
+    }
+
+    /// On PostgreSQL the check of a Gateway's package download, and the view of an Agent behind
+    /// it, read the Agents that arrived over the Gateway's Host through the port's `query_page`,
+    /// not the whole fleet, and still find the Client Agent behind the Gateway whose labels the
+    /// Agent inherits.
+    /// Verifies: ADR-0030, ADR-0033
+    #[test]
+    fn a_gateways_download_and_an_agent_behind_it_read_the_gateways_agents_and_not_the_fleet() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let dir = tempfile::tempdir().expect("blobs");
+        let a = delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open")),
+            dir.path(),
+        );
+        let (client, agent, other) = (
+            InstanceUid([0xb1; 16]),
+            InstanceUid([0xb2; 16]),
+            InstanceUid([0xb3; 16]),
+        );
+        let none = crate::revocation::SubjectValues::default;
+        let takes = opamp::proto::AgentCapabilities::ReportsStatus as u64
+            | opamp::proto::AgentCapabilities::AcceptsPackages as u64
+            | opamp::proto::AgentCapabilities::ReportsPackageStatuses as u64;
+        report_listed(
+            &a,
+            "gw",
+            none(),
+            client,
+            1,
+            takes,
+            &[("service.name", "fleet-agent")],
+            &[("supervisor.kind.otelcol", "true"), ("host.name", "m1")],
+        );
+        assert_eq!(a.set_gateway("gw", true), Ok(true));
+        report_listed(
+            &a,
+            "gw",
+            none(),
+            agent,
+            1,
+            takes,
+            &[("service.name", "otelcol")],
+            &[
+                ("os.type", "linux"),
+                ("host.arch", "amd64"),
+                ("host.name", "m1"),
+            ],
+        );
+        report_listed(
+            &a,
+            "h2",
+            none(),
+            other,
+            1,
+            takes,
+            &[("service.name", "otelcol")],
+            &[("os.type", "linux"), ("host.arch", "amd64")],
+        );
+        label(&a, &client, &[("ring", "early")]);
+        let id = PackageId::new("otelcol", "1.0.0").expect("id");
+        let linux = Platform::new("linux", "amd64").expect("platform");
+        a.create_package_set(&id).expect("set");
+        a.put_package_entry(&id, &linux, &mut &b"v1"[..])
+            .expect("entry");
+        a.put_package_entry_signature(&id, &linux, vec![1; 64])
+            .expect("signature");
+        a.deployment_store()
+            .expect("deployments")
+            .put(
+                "early",
+                BTreeMap::from([("ring".to_string(), "early".to_string())]),
+            )
+            .expect("deployment");
+        a.put_deployment_package("early", &id, true)
+            .expect("hold it");
+        assert_eq!(
+            a.rollout_deployment("early").expect("rollout"),
+            1,
+            "the inheriting Agent"
+        );
+
+        let hooked = Hooked::new(Box::new(
+            crate::postgres::agents::PgAgentStore::open(database.clone()).expect("open"),
+        ));
+        let whole = hooked.whole_queries.clone();
+        let b = delivering_on(&database, Box::new(hooked), dir.path());
+        assert!(
+            b.offers_artifact("gw", &id, &linux),
+            "the Gateway fetches what its Agent was released"
+        );
+        assert!(
+            !b.offers_artifact("h2", &id, &linux),
+            "nothing was released over h2"
+        );
+        let view = b.agent_view(&agent).expect("read").expect("known");
+        assert_eq!(
+            view.inherited_labels.get("ring").map(String::as_str),
+            Some("early")
+        );
+        assert_eq!(view.client_agent, client.to_string());
+        assert_eq!(
+            whole.load(Ordering::SeqCst),
+            0,
+            "no read of the whole fleet"
+        );
+    }
+
+    /// The hooks of A's store that the presence tests use.
+    struct PresenceHooks {
+        losing_takes: Arc<std::sync::atomic::AtomicBool>,
+        failing_takes: Arc<std::sync::atomic::AtomicBool>,
+        after_presence: Arc<Mutex<Option<Act>>>,
+        before_takes: Arc<Mutex<Option<Act>>>,
+        after_takes: Arc<Mutex<Option<Act>>>,
+        takes_reads: Arc<AtomicU64>,
+    }
+
+    const LEASE_A: &str = "00000000-0000-7000-8000-00000000000a";
+
+    const LEASE_B: &str = "00000000-0000-7000-8000-00000000000b";
+
+    /// Instance A on `database`, its store hooked, and B, serving under `LEASE_A` and `LEASE_B`;
+    /// neither lease is in the database, so neither is live.
+    fn hooked_pair(
+        database: &Arc<crate::postgres::Database>,
+    ) -> (Arc<AppState>, Arc<AppState>, PresenceHooks) {
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let hooks = PresenceHooks {
+            losing_takes: hooked.losing_takes.clone(),
+            failing_takes: hooked.failing_takes.clone(),
+            after_presence: hooked.after_presence.clone(),
+            before_takes: hooked.before_takes.clone(),
+            after_takes: hooked.after_takes.clone(),
+            takes_reads: hooked.takes_reads.clone(),
+        };
+        let a = Arc::new(on_postgres(database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let b = Arc::new(on_postgres(
+            database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        ));
+        b.serve_under(tokio::sync::watch::channel(Some(LEASE_B.to_string())).1);
+        (a, b, hooks)
+    }
+
+    /// The stored holder (`none` where it names none), `connected` and the count of takes of `uid`.
+    fn stored_presence(test: &crate::postgres::testing::TestDatabase, uid: &InstanceUid) -> String {
+        test.rows(&format!(
+            "SELECT coalesce(holder::text, 'none') || ' ' || connected || ' ' || takes \
+             FROM agents WHERE instance_uid = '{uid}'"
+        ))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect()
+    }
+
+    /// Waits for the system clock to reach its next millisecond, so a report after it moves the
+    /// presence an instance last wrote.
+    fn next_millisecond() {
+        let now = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_millis()
+        };
+        let start = now();
+        while now() == start {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// An Agent whose connecting take was written and whose answer was lost, and that disconnects
+    /// before the next batch, has its row name no holder after that batch: the batch reads the
+    /// row's holder and count first and writes the disconnect under the count it read, once.
+    /// Verifies: ADR-0025
+    #[test]
+    fn the_goodbye_of_an_agent_whose_take_lost_its_answer_is_written() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, _b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x75; 16]);
+        hooks.losing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        hooks.losing_takes.store(false, Ordering::SeqCst);
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_A} true 1"));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        assert_eq!(hooks.takes_reads.load(Ordering::SeqCst), 1, "read once");
+        a.write_presence(LEASE_A).expect("A's next batch");
+        assert_eq!(hooks.takes_reads.load(Ordering::SeqCst), 1, "and no more");
+    }
+
+    /// Of two Agents whose takes lost their answers, one B took since is not written by A's batch,
+    /// and one A took again after the batch first looked at it and before it read the rows is left
+    /// as that take wrote it.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_lost_take_whose_row_was_taken_since_writes_no_goodbye() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let (moved, back) = (InstanceUid([0x76; 16]), InstanceUid([0x77; 16]));
+        hooks.losing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&moved, 1), Transport::WebSocket, Some(7));
+        a.process(report(&back, 1), Transport::WebSocket, Some(8));
+        hooks.losing_takes.store(false, Ordering::SeqCst);
+        b.process(report(&moved, 2), Transport::WebSocket, Some(9));
+        a.mark_disconnected(&[moved], 7);
+        a.mark_disconnected(&[back], 8);
+        let again = a.clone();
+        *hooks.before_takes.lock().expect("hook lock") = Some(Box::new(move || {
+            again.process(report(&back, 2), Transport::WebSocket, Some(10));
+        }));
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert!(
+            hooks.before_takes.lock().expect("hook lock").is_none(),
+            "the take came before the read"
+        );
+        assert_eq!(
+            stored_presence(&test, &moved),
+            format!("{LEASE_B} true 2"),
+            "B's take stays"
+        );
+        assert_eq!(
+            stored_presence(&test, &back),
+            format!("{LEASE_A} true 2"),
+            "A's new take stays"
+        );
+    }
+
+    /// An Agent re-keyed on A that disconnects before A's next batch has the row under its new
+    /// identity name no holder after that batch: what A wrote of its presence moves with it.
+    /// Verifies: ADR-0025
+    #[test]
+    fn the_goodbye_of_an_agent_rekeyed_is_written_under_its_new_identity() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, _b, _hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x78; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process(rekey, Transport::WebSocket, Some(7));
+        let new = answered.uid.expect("carried");
+        assert_ne!(new, uid, "re-keyed");
+        assert_eq!(stored_presence(&test, &new), format!("{LEASE_A} true 1"));
+        a.mark_disconnected(&[new], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored_presence(&test, &new), "none false 1");
+    }
+
+    /// Waits until `done`, and fails naming `what` after 30 seconds without.
+    fn until(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Instance A on a database of its own, and B on another that follows the notifications on a
+    /// runtime of its own, once it has read everything; both on the schema of `test`.
+    struct FollowingB {
+        a: Arc<AppState>,
+        a_database: Arc<crate::postgres::Database>,
+        b: Arc<AppState>,
+        following: crate::instance::Following,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl FollowingB {
+        fn on(test: &crate::postgres::testing::TestDatabase) -> Self {
+            let a_database = test.shared();
+            let a = Arc::new(on_postgres(
+                &a_database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(
+                    a_database.clone(),
+                )),
+            ));
+            a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+            let b_database = test.shared();
+            let b = Arc::new(on_postgres(
+                &b_database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(
+                    b_database.clone(),
+                )),
+            ));
+            b.serve_under(tokio::sync::watch::channel(Some(LEASE_B.to_string())).1);
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let following = {
+                let _entered = runtime.enter();
+                crate::instance::follow(&b_database, b.clone(), None)
+            };
+            until("B's first read once listening", || following.reads() > 0);
+            FollowingB {
+                a,
+                a_database,
+                b,
+                following,
+                _runtime: runtime,
+            }
+        }
+
+        /// Whether `agent`, as B holds it, inherits `labels` from `client`.
+        fn inherits(
+            &self,
+            agent: &InstanceUid,
+            client: &InstanceUid,
+            labels: &[(&str, &str)],
+        ) -> bool {
+            let fleet = self.b.fleet.lock().expect("fleet lock");
+            fleet.get(agent).is_some_and(|record| {
+                record.placement.client_agent == Some(*client)
+                    && record.placement.inherited
+                        == labels
+                            .iter()
+                            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                            .collect::<BTreeMap<_, _>>()
+            })
+        }
+
+        /// The Client Agent `agent` is placed under in B's memory.
+        fn client_of(&self, agent: &InstanceUid) -> Option<InstanceUid> {
+            self.b
+                .fleet
+                .lock()
+                .expect("fleet lock")
+                .get(agent)
+                .and_then(|record| record.placement.client_agent)
+        }
+    }
+
+    /// A fellow Agent B placed before the binding of its Host's Client Agent through A reached B
+    /// inherits the Client Agent's labels in B's memory once the binding's notice reaches B. The
+    /// notice is held back from B, as one still on its way is, until the test sends it.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn a_fellow_agent_inherits_once_the_notice_of_its_client_agents_binding_arrives() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let pair = FollowingB::on(&test);
+        let (client, fellow) = (InstanceUid([0xb1; 16]), InstanceUid([0xb2; 16]));
+        let subject = crate::revocation::SubjectValues::default;
+        // A's notices after a commit, its binding's among them, do not reach B.
+        pair.a_database.afterwards().drop_all(true);
+        report_over(
+            &pair.a,
+            "h1",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true")],
+        );
+        let reads = pair.following.reads();
+        label(&pair.a, &client, &[("tier", "edge")]);
+        until("B took up the labels' notice", || {
+            pair.following.reads() > reads
+        });
+        report_over(&pair.b, "h1", subject(), fellow, &[]);
+        assert_eq!(
+            pair.client_of(&fellow),
+            None,
+            "B placed the fellow Agent before it knew of the binding"
+        );
+
+        test.sql(
+            "SELECT pg_notify('opamp_fleet:' || coalesce(current_schema(), ''), \
+             '{\"kind\": \"host\", \"id\": \"h1\"}')",
+        );
+        until("the fellow Agent inherits in B's memory", || {
+            pair.inherits(&fellow, &client, &[("tier", "edge")])
+        });
+    }
+
+    /// A fellow Agent behind a Gateway that B placed inherits in B's memory the labels of its
+    /// Client Agent that arrives behind the same Gateway through A afterwards.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn a_fellow_agent_behind_a_gateway_inherits_from_a_client_agent_arriving_on_another_instance() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let pair = FollowingB::on(&test);
+        let (gateway, client, fellow) = (
+            InstanceUid([0xb3; 16]),
+            InstanceUid([0xb4; 16]),
+            InstanceUid([0xb5; 16]),
+        );
+        let subject = crate::revocation::SubjectValues::default;
+        report_over(&pair.a, "g", subject(), gateway, &[]);
+        assert_eq!(pair.a.set_gateway("g", true), Ok(true));
+        let marked = pair.b.revocations().expect("register").clone();
+        until("B took up the Gateway's mark", || marked.is_gateway("g"));
+        report_over(&pair.b, "g", subject(), fellow, &[("host.name", "m1")]);
+        assert_eq!(pair.client_of(&fellow), None, "no Client Agent yet");
+
+        report_over(
+            &pair.a,
+            "g",
+            subject(),
+            client,
+            &[("supervisor.kind.collector", "true"), ("host.name", "m1")],
+        );
+        label(&pair.a, &client, &[("tier", "edge")]);
+        until("the fellow Agent inherits in B's memory", || {
+            pair.inherits(&fellow, &client, &[("tier", "edge")])
+        });
+    }
+
+    /// How long the one call whose answer a test loses waits for it: short of the five seconds of
+    /// `lock_timeout` a read back that follows it waits for the row, and long enough for a
+    /// database slowed by the tests beside it.
+    const LOST_WITHIN: Duration = Duration::from_secs(3);
+
+    /// Runs `act` with every call on `database` bounded by [`LOST_WITHIN`], and the usual bound
+    /// again after it.
+    fn losing_the_answer_of<T>(database: &crate::postgres::Database, act: impl FnOnce() -> T) -> T {
+        database.bound_calls_by(LOST_WITHIN);
+        let answered = act();
+        database.bound_calls_by(crate::postgres::CALL_TIMEOUT);
+        answered
+    }
+
+    /// Has the pool of `database` hold three idle connections, so the call after one that lost its
+    /// answer is not queued behind that call's commit on its connection.
+    fn spare_connections(database: &crate::postgres::Database) {
+        database
+            .run(|pool| async move {
+                let held = (
+                    crate::postgres::client(&pool).await?,
+                    crate::postgres::client(&pool).await?,
+                    crate::postgres::client(&pool).await?,
+                );
+                drop(held);
+                Ok(())
+            })
+            .expect("three connections");
+    }
+
+    /// Instance A on a database of the usual bound, with floors and a revocation list of a
+    /// `client` CA, following the notifications on a runtime of its own; it has read everything
+    /// once. The one call whose answer a test loses is bounded short ([`LOST_WITHIN`]).
+    struct LosingAnswers {
+        a: Arc<AppState>,
+        database: Arc<crate::postgres::Database>,
+        following: crate::instance::Following,
+        _runtime: tokio::runtime::Runtime,
+    }
+
+    impl LosingAnswers {
+        fn on(test: &crate::postgres::testing::TestDatabase) -> Self {
+            let database = test.shared();
+            let records = crate::Records::Postgres(database.clone());
+            let revocations = Revocations::open(
+                records.ledger().expect("ledger"),
+                Arc::new(crate::clock::SystemClock),
+                vec![crate::revocation::Authority {
+                    role: "client".to_string(),
+                    subject: "ab".repeat(32),
+                    name: "CN=test".to_string(),
+                }],
+            )
+            .expect("revocations");
+            let a = Arc::new(
+                on_postgres(
+                    &database,
+                    Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+                )
+                .with_revocations(Some(Arc::new(revocations)))
+                .with_floors(Some(Arc::new(
+                    crate::floors::PackageFloors::open(records.floors()).expect("floors"),
+                ))),
+            );
+            a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            let following = {
+                let _entered = runtime.enter();
+                crate::instance::follow(&database, a.clone(), None)
+            };
+            until("the first read once listening", || following.reads() > 0);
+            spare_connections(&database);
+            LosingAnswers {
+                a,
+                database,
+                following,
+                _runtime: runtime,
+            }
+        }
+
+        /// Runs `act`, whose commit `gate` holds, and expects it to fail on its bound; then waits
+        /// for the read it calls for, finds `taken_up` not yet, opens the gate and waits for it.
+        fn lose_the_answer_of<T: std::fmt::Debug>(
+            &self,
+            gate: crate::postgres::testing::Gate,
+            act: impl FnOnce(&AppState) -> Result<T, String>,
+            taken_up: impl Fn(&AppState) -> bool,
+        ) {
+            let reads = self.following.reads();
+            let failed = losing_the_answer_of(&self.database, || act(&self.a))
+                .expect_err("the call's answer is lost to its bound");
+            assert!(failed.contains("no answer within"), "{failed}");
+            until("the read the lost answer calls for", || {
+                self.following.reads() > reads
+            });
+            assert!(!taken_up(&self.a), "the commit is held yet");
+            gate.open();
+            until("the commit taken up once it landed", || taken_up(&self.a));
+        }
+    }
+
+    /// A label set whose commit lands after its call lost its answer is held in the memory of the
+    /// instance that carries the Agent once it lands, though its own notification is otherwise
+    /// passed over.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_label_whose_answer_was_lost_is_taken_up_once_it_commits() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let losing = LosingAnswers::on(&test);
+        let uid = InstanceUid([0x28; 16]);
+        losing
+            .a
+            .process(report(&uid, 1), Transport::WebSocket, Some(7));
+        let gate = test.hold_commits("agents", 0x28_0001);
+        losing.lose_the_answer_of(
+            gate,
+            |a| match a.set_labels(&uid, BTreeMap::from([("site".into(), "linz".into())])) {
+                Ok(()) => Ok(()),
+                Err(LabelError::Storage(e)) => Err(e),
+                Err(_) => Err("refused".to_string()),
+            },
+            |a| {
+                a.fleet
+                    .lock()
+                    .expect("fleet lock")
+                    .get(&uid)
+                    .map(|r| r.labels.clone())
+                    == Some(BTreeMap::from([("site".into(), "linz".into())]))
+            },
+        );
+    }
+
+    /// A floor set whose commit lands after its call lost its answer is served by the instance
+    /// that set it once it lands.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_floor_whose_answer_was_lost_is_taken_up_once_it_commits() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let losing = LosingAnswers::on(&test);
+        let gate = test.hold_commits("package_floors", 0x28_0002);
+        losing.lose_the_answer_of(
+            gate,
+            |a| {
+                a.floors()
+                    .expect("floors")
+                    .put("otelcol", "1.2.0", vec![7; 64])
+                    .map_err(|e| format!("{e:?}"))
+            },
+            |a| {
+                a.floors()
+                    .expect("floors")
+                    .all()
+                    .get("otelcol")
+                    .map(|floor| floor.version.clone())
+                    .as_deref()
+                    == Some("1.2.0")
+            },
+        );
+    }
+
+    /// A revocation whose commit lands after its call lost its answer is in the list of the
+    /// instance that made it once it lands, renewals aside.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_revocation_whose_answer_was_lost_is_taken_up_once_it_commits() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let losing = LosingAnswers::on(&test);
+        let gate = test.hold_commits("revocations", 0x28_0003);
+        losing.lose_the_answer_of(
+            gate,
+            |a| {
+                a.revocations()
+                    .expect("revocations")
+                    .revoke_certificate("client", "0a1b")
+                    .map_err(|e| format!("{e:?}"))
+            },
+            |a| a.revocations().expect("revocations").list().len() == 1,
+        );
+    }
+
+    /// A re-key whose commit lands after its call lost its answer is read back under a lock that
+    /// waits for it: the Agent is assigned the identity its record moved to, one row names it,
+    /// under that identity, and no record is created for the old one when it reports again.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_rekey_whose_answer_was_lost_is_read_back_and_stands() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let losing = LosingAnswers::on(&test);
+        let (a, uid) = (losing.a.clone(), InstanceUid([0x29; 16]));
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        let gate = test.hold_commits("agents", 0x28_0004);
+        let (answered, answer) = std::sync::mpsc::channel();
+        let rekeying = std::thread::spawn({
+            let (a, database) = (a.clone(), losing.database.clone());
+            move || {
+                let mut rekey = report(&uid, 2);
+                rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+                let _ = answered.send(losing_the_answer_of(&database, || {
+                    a.process(rekey, Transport::WebSocket, Some(7))
+                }));
+            }
+        });
+        // Its commit is held; once the call lost its answer, its read back waits for the row.
+        until("the read back waiting for the move, or the answer", || {
+            rekeying.is_finished() || test.sessions("wait_event IN ('transactionid', 'tuple')") > 0
+        });
+        gate.open();
+        let processed = answer
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the re-key answers");
+        rekeying.join().expect("the re-key's thread");
+        let new = processed.uid.expect("carried");
+        assert_ne!(new, uid, "re-keyed");
+        assert_eq!(
+            processed
+                .reply
+                .agent_identification
+                .as_ref()
+                .map(|id| id.new_instance_uid.clone()),
+            Some(new.as_bytes().to_vec()),
+            "the identity it moved to is assigned"
+        );
+        let stored = || -> Vec<String> {
+            test.rows("SELECT instance_uid FROM agents")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect()
+        };
+        assert_eq!(
+            stored(),
+            [new.to_string()],
+            "one row, under the new identity"
+        );
+        a.process(report(&new, 3), Transport::WebSocket, Some(7));
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(
+            stored(),
+            [new.to_string()],
+            "and still one after its next report"
+        );
+        let held: Vec<String> = a.snapshot().into_iter().map(|v| v.instance_uid).collect();
+        assert_eq!(
+            held,
+            [new.to_string()],
+            "A holds it under the new identity alone"
+        );
+    }
+
+    /// A re-key whose answer was lost and whose read back failed is read back at the Agent's next
+    /// report, whether it asks again or not, and assigns the identity the record moved to; no other
+    /// is minted and no record is created for the old one.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_rekey_whose_read_back_failed_is_read_back_at_the_next_report() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let (losing, failing) = (hooked.losing_rekeys.clone(), hooked.failing_moved.clone());
+        let a = on_postgres(&database, Box::new(hooked));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x2a; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        losing.store(true, Ordering::SeqCst);
+        failing.store(true, Ordering::SeqCst);
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let first = a.process(rekey, Transport::WebSocket, Some(7));
+        losing.store(false, Ordering::SeqCst);
+        assert_eq!(first.uid, Some(uid), "not known: it keeps its identity");
+        assert!(first.reply.agent_identification.is_none());
+        let stored = || -> Vec<String> {
+            test.rows("SELECT instance_uid FROM agents")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect()
+        };
+        let moved_to = stored();
+        assert_eq!(moved_to.len(), 1);
+        assert_ne!(moved_to[0], uid.to_string(), "the move committed");
+        let unknown = a.process(report(&uid, 3), Transport::WebSocket, Some(7));
+        assert_eq!(unknown.uid, Some(uid), "not known still");
+        // Held no more, as after a restart of what is held: a report under the old identity is
+        // refused while the move is not known, and creates nothing.
+        a.fleet.lock().expect("fleet lock").remove(&uid);
+        let refused = a.process(report(&uid, 4), Transport::WebSocket, Some(7));
+        assert_eq!(refused.uid, None, "not carried");
+        assert_eq!(
+            refused.reply.error_response.as_ref().map(|e| e.r#type),
+            Some(ServerErrorResponseType::Unavailable as i32),
+            "refused for now"
+        );
+        assert_eq!(stored(), moved_to, "no record for the old identity");
+        failing.store(false, Ordering::SeqCst);
+        let next = a.process(report(&uid, 5), Transport::WebSocket, Some(7));
+        let new = next.uid.expect("carried");
+        assert_eq!(new.to_string(), moved_to[0], "the identity it moved to");
+        assert_eq!(
+            next.reply
+                .agent_identification
+                .as_ref()
+                .map(|id| id.new_instance_uid.clone()),
+            Some(new.as_bytes().to_vec())
+        );
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(
+            stored(),
+            moved_to,
+            "one row, under the identity it moved to"
+        );
+        let held: Vec<String> = a.snapshot().into_iter().map(|v| v.instance_uid).collect();
+        assert_eq!(held, moved_to, "A holds it under that identity alone");
+    }
+
+    /// A re-key whose answer was lost and whose read back failed, whose commit lands after that:
+    /// its own notification that the old identity is forgotten reads the re-key back, and what A
+    /// holds moves to the new identity, the Agent's session not ended. A disconnect on that session
+    /// under the old identity is written to the new row, and a report under the old identity, on a
+    /// new connection, is assigned the new one; one row names the Agent throughout.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_rekey_whose_read_back_failed_is_taken_up_when_its_commit_lands() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.shared();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let failing = hooked.failing_moved.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let following = {
+            let _entered = runtime.enter();
+            crate::instance::follow(&database, a.clone(), None)
+        };
+        until("the first read once listening", || following.reads() > 0);
+        spare_connections(&database);
+        let uid = InstanceUid([0x2c; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.write_presence(LEASE_A).expect("A's batch");
+        let gate = test.hold_commits("agents", 0x28_0007);
+        failing.store(true, Ordering::SeqCst);
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = losing_the_answer_of(&database, || {
+            a.process(rekey, Transport::WebSocket, Some(7))
+        });
+        assert_eq!(answered.uid, Some(uid), "not known: it keeps its identity");
+        assert!(answered.reply.agent_identification.is_none());
+        failing.store(false, Ordering::SeqCst);
+        gate.open();
+        let stored = || -> Vec<String> {
+            test.rows("SELECT instance_uid FROM agents")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect()
+        };
+        until("the move landed", || {
+            stored().first().is_some_and(|row| *row != uid.to_string())
+        });
+        let new = InstanceUid::parse(&stored()[0]).expect("a uid");
+        let held = || -> Vec<String> { a.snapshot().into_iter().map(|v| v.instance_uid).collect() };
+        until("A holds it under the new identity", || {
+            held() == [new.to_string()]
+        });
+        assert!(a.take_forgotten(7).is_empty(), "the session is not ended");
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert!(
+            stored_presence(&test, &new).starts_with("none false"),
+            "the disconnect is written to the new row: {}",
+            stored_presence(&test, &new)
+        );
+        let next = a.process(report(&uid, 3), Transport::WebSocket, Some(8));
+        assert_eq!(next.uid, Some(new), "assigned the identity it moved to");
+        assert_eq!(
+            next.reply
+                .agent_identification
+                .as_ref()
+                .map(|id| id.new_instance_uid.clone()),
+            Some(new.as_bytes().to_vec())
+        );
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored(), [new.to_string()], "one row throughout");
+        assert_eq!(held(), [new.to_string()]);
+    }
+
+    /// Instance A, its store hooked, following on a runtime of its own, and an Agent it carries on
+    /// connection 7 whose re-key lost its answer and whose read back failed; the move has
+    /// committed since, and its own notification's read back failed too, so A still holds the
+    /// Agent under its old identity. Answers A, the switch that fails the read backs, the old and
+    /// the new identity, and what keeps the instance running.
+    fn rekey_unknown_after_it_landed(
+        test: &crate::postgres::testing::TestDatabase,
+    ) -> (
+        Arc<AppState>,
+        Arc<std::sync::atomic::AtomicBool>,
+        InstanceUid,
+        InstanceUid,
+        tokio::runtime::Runtime,
+    ) {
+        let database = test.shared();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let (failing, reads) = (hooked.failing_moved.clone(), hooked.moved_reads.clone());
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let following = {
+            let _entered = runtime.enter();
+            crate::instance::follow(&database, a.clone(), None)
+        };
+        until("the first read once listening", || following.reads() > 0);
+        spare_connections(&database);
+        let uid = InstanceUid([0x2d; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.write_presence(LEASE_A).expect("A's batch");
+        let gate = test.hold_commits("agents", 0x28_0008);
+        failing.store(true, Ordering::SeqCst);
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = losing_the_answer_of(&database, || {
+            a.process(rekey, Transport::WebSocket, Some(7))
+        });
+        assert_eq!(answered.uid, Some(uid), "not known: it keeps its identity");
+        let asked = reads.load(Ordering::SeqCst);
+        gate.open();
+        let rows = || -> Vec<String> {
+            test.rows("SELECT instance_uid FROM agents")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect()
+        };
+        until("the move landed", || {
+            rows().first().is_some_and(|row| *row != uid.to_string())
+        });
+        until("its notification's read back tried", || {
+            reads.load(Ordering::SeqCst) > asked
+        });
+        let new = InstanceUid::parse(&rows()[0]).expect("a uid");
+        (a, failing, uid, new, runtime)
+    }
+
+    /// The held identities of `a`.
+    fn held_by(a: &AppState) -> Vec<String> {
+        a.snapshot().into_iter().map(|v| v.instance_uid).collect()
+    }
+
+    /// A re-key whose read back fails at its own notification too keeps the Agent and its session
+    /// under the old identity, and is read back again until it holds: a session that ended
+    /// meanwhile has its disconnect written to the row the move landed in, though a batch wrote
+    /// it to the old row before, and the next report
+    /// under the old identity is assigned the new one.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_rekey_whose_read_back_fails_at_its_notification_keeps_the_agent_until_it_holds() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let (a, failing, uid, new, _runtime) = rekey_unknown_after_it_landed(&test);
+        assert_eq!(
+            held_by(&a),
+            [uid.to_string()],
+            "kept under the old identity"
+        );
+        assert!(a.take_forgotten(7).is_empty(), "the session is not ended");
+        a.mark_disconnected(&[uid], 7);
+        // A batch while the move is not known writes the disconnect to the old row, which is gone.
+        a.write_presence(LEASE_A).expect("A's batch");
+        failing.store(false, Ordering::SeqCst);
+        until("read back again until it held", || {
+            held_by(&a) == [new.to_string()]
+        });
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert!(
+            stored_presence(&test, &new).starts_with("none false"),
+            "the disconnect is written to the new row: {}",
+            stored_presence(&test, &new)
+        );
+        let next = a.process(report(&uid, 3), Transport::WebSocket, Some(8));
+        assert_eq!(next.uid, Some(new), "assigned the identity it moved to");
+        let rows: Vec<String> = test
+            .rows("SELECT instance_uid FROM agents")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect();
+        assert_eq!(rows, [new.to_string()], "one row throughout");
+    }
+
+    /// A report whose write finds the old row gone, while the re-key that moved it is not known,
+    /// keeps the Agent and its session and the pending re-key, and creates nothing; once the
+    /// store answers, the next report is assigned the new identity.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_report_that_finds_the_old_row_gone_keeps_a_rekey_not_known() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let (a, failing, uid, new, _runtime) = rekey_unknown_after_it_landed(&test);
+        let mut moved = report(&uid, 3);
+        moved.agent_description = Some(AgentDescription::default());
+        let answered = a.process(moved, Transport::WebSocket, Some(7));
+        assert_eq!(answered.uid, Some(uid), "the connection still carries it");
+        assert_eq!(
+            held_by(&a),
+            [uid.to_string()],
+            "kept under the old identity"
+        );
+        assert!(a.take_forgotten(7).is_empty(), "the session is not ended");
+        failing.store(false, Ordering::SeqCst);
+        let next = a.process(report(&uid, 4), Transport::WebSocket, Some(7));
+        assert_eq!(next.uid, Some(new), "assigned the identity it moved to");
+        a.write_presence(LEASE_A).expect("A's batch");
+        let rows: Vec<String> = test
+            .rows("SELECT instance_uid FROM agents")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect();
+        assert_eq!(rows, [new.to_string()], "one row, under the new identity");
+        assert_eq!(held_by(&a), [new.to_string()]);
+    }
+
+    /// The read back of a take still in flight waits for it: an Agent whose take's answer was lost
+    /// and that disconnected has its disconnect written under the count that take commits, so the
+    /// row names no holder once the batch ran.
+    /// Verifies: ADR-0025
+    #[test]
+    fn the_read_back_of_a_take_waits_for_a_take_still_in_flight() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, _b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x2b; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        // A takes it on a new connection, and the take's call gives up before the take is
+        // written, which commits after A read its row back.
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        a.mark_disconnected(&[uid], 8);
+        let gate = test.gate(0x28_0005);
+        std::thread::scope(|scope| {
+            let in_flight = scope.spawn(|| {
+                test.sql(&format!(
+                    "BEGIN; UPDATE agents SET connected = true, holder = '{LEASE_A}', \
+                     takes = takes + 1 WHERE instance_uid = '{uid}'; \
+                     SELECT pg_advisory_lock_shared({}); COMMIT;",
+                    0x28_0005
+                ));
+            });
+            until("the take holding the row", || test.waits_for(0x28_0005));
+            let batch = scope.spawn(|| a.write_presence(LEASE_A));
+            until("A's batch waiting for the take, or done", || {
+                batch.is_finished() || test.sessions("wait_event IN ('transactionid', 'tuple')") > 0
+            });
+            gate.open();
+            in_flight.join().expect("the take's thread");
+            batch
+                .join()
+                .expect("the batch's thread")
+                .expect("A's batch");
+        });
+        assert_eq!(stored_presence(&test, &uid), "none false 2");
+    }
+
+    /// A batch held between its commit and its answers, while the Agent is forgotten through B,
+    /// comes back through B and reconnects to A, which takes it again, leaves the newer take's count kept, though
+    /// the record counts from the start again and the batch answered a greater one: the Agent's
+    /// goodbye is then written.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_batch_answered_after_a_newer_take_keeps_that_takes_count() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x79; 16]);
+        for conn in [1, 2] {
+            a.process(report(&uid, conn), Transport::WebSocket, Some(conn));
+            a.mark_disconnected(&[uid], conn);
+        }
+        a.process(report(&uid, 3), Transport::WebSocket, Some(3));
+        next_millisecond();
+        a.process(report(&uid, 4), Transport::WebSocket, Some(3));
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_A} true 3"));
+        let (again, through) = (a.clone(), b.clone());
+        *hooks.after_presence.lock().expect("hook lock") = Some(Box::new(move || {
+            assert!(through.forget_agent(&uid).is_ok(), "forgotten through B");
+            through.process(report(&uid, 1), Transport::WebSocket, Some(5));
+            again.mark_disconnected(&[uid], 3);
+            again.process(report(&uid, 2), Transport::WebSocket, Some(6));
+        }));
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert!(
+            hooks.after_presence.lock().expect("hook lock").is_none(),
+            "the take came before the answers"
+        );
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_A} true 2"));
+        a.mark_disconnected(&[uid], 6);
+        a.write_presence(LEASE_A).expect("A's next batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 2", "the goodbye");
+    }
+
+    /// An Agent that A took and that B took since does not name A after A's batch: neither once B
+    /// wrote its disconnect, before A heard of the take, nor while B, whose lease is not live,
+    /// still names itself; A stops carrying both when it hears of the takes.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_batch_names_its_instance_over_no_take_counted_since_its_own() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, _hooks) = hooked_pair(&database);
+        let (gone, dead) = (InstanceUid([0x7a; 16]), InstanceUid([0x7b; 16]));
+        for (conn, uid) in [(7, gone), (8, dead)] {
+            a.process(report(&uid, 1), Transport::WebSocket, Some(conn));
+        }
+        next_millisecond();
+        // Heartbeats A has not written yet, then the Agents move to B.
+        for (conn, uid) in [(7, gone), (8, dead)] {
+            a.process(report(&uid, 2), Transport::WebSocket, Some(conn));
+            b.process(report(&uid, 3), Transport::WebSocket, Some(9));
+        }
+        b.mark_disconnected(&[gone], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        assert_eq!(stored_presence(&test, &gone), "none false 2");
+        assert_eq!(stored_presence(&test, &dead), format!("{LEASE_B} true 2"));
+
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(
+            stored_presence(&test, &gone),
+            "none false 2",
+            "B's goodbye stays"
+        );
+        assert_eq!(
+            stored_presence(&test, &dead),
+            format!("{LEASE_B} true 2"),
+            "B's take stays"
+        );
+        a.catch_up().expect("A hears of the takes");
+        for uid in [gone, dead] {
+            assert!(!view(&a, &uid).connected, "A no longer carries {uid}");
+        }
+    }
+
+    /// An Agent that disconnected under a lease A then lost has its record flushed at A's
+    /// shutdown, whether or not A wrote a batch under its new lease: the count of takes outlives
+    /// the lease it was answered under.
+    /// Verifies: ADR-0025
+    #[test]
+    fn an_agent_disconnected_under_a_lost_lease_is_flushed_at_shutdown() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let a = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let (lease, leases) = tokio::sync::watch::channel(Some(LEASE_A.to_string()));
+        a.serve_under(leases);
+        let uid = InstanceUid([0x7c; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        let renewed = "00000000-0000-7000-8000-0000000000aa";
+        lease.send_replace(Some(renewed.to_string()));
+        let sequence = || {
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            ))
+        };
+        let forget = || {
+            test.sql(&format!(
+                "UPDATE agents SET sequence_num = 0 WHERE instance_uid = '{uid}'"
+            ));
+        };
+
+        forget();
+        a.flush_agents();
+        assert_eq!(
+            sequence(),
+            [[Some("2".to_string())]],
+            "flushed before a batch"
+        );
+        forget();
+        a.write_presence(renewed)
+            .expect("A's batch under its new lease");
+        a.flush_agents();
+        assert_eq!(sequence(), [[Some("2".to_string())]], "and after one");
+    }
+
+    /// An Agent whose row named another holder when A's batch read it, and that connected to A
+    /// again before the batch went on, with that take's answer lost too, and disconnected, stays
+    /// unsure: A's next batch reads it again and writes its goodbye.
+    /// Verifies: ADR-0025
+    #[test]
+    fn an_agent_taken_again_after_the_batch_read_its_row_is_read_again() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x7d; 16]);
+        hooks.losing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        b.process(report(&uid, 2), Transport::WebSocket, Some(9));
+        a.mark_disconnected(&[uid], 7);
+        let again = a.clone();
+        *hooks.after_takes.lock().expect("hook lock") = Some(Box::new(move || {
+            again.process(report(&uid, 3), Transport::WebSocket, Some(8));
+            again.mark_disconnected(&[uid], 8);
+        }));
+        a.write_presence(LEASE_A).expect("A's batch");
+        hooks.losing_takes.store(false, Ordering::SeqCst);
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_A} true 3"));
+        a.write_presence(LEASE_A).expect("A's next batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 3", "the goodbye");
+    }
+
+    /// Writes a live lease of `instance_id`, which the presence batches then read as live.
+    fn live_lease(test: &crate::postgres::testing::TestDatabase, instance_id: &str) {
+        test.sql(&format!(
+            "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at) \
+             VALUES ('{instance_id}', 'b', false, now(), now(), now() + interval '1 hour')"
+        ));
+    }
+
+    /// An Agent that B took and disconnected, which then connects to A again with a take that is
+    /// not written, is named by A's next batch: a take that failed leaves A no count, so the batch
+    /// takes back a row no instance holds whatever its count, and A, which carries the Agent, is
+    /// named.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_connect_whose_take_was_not_written_is_named_by_the_next_batch() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x91; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        b.process(report(&uid, 2), Transport::WebSocket, Some(9));
+        b.mark_disconnected(&[uid], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 2");
+        a.catch_up().expect("A hears of the take");
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 3), Transport::WebSocket, Some(8));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        assert!(view(&a, &uid).connected, "A carries it");
+        assert_eq!(
+            stored_presence(&test, &uid),
+            "none false 2",
+            "the take is not written"
+        );
+        a.write_presence(LEASE_A).expect("A's batch");
+        a.write_presence(LEASE_A).expect("A's next batch");
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_A} true 3"));
+    }
+
+    /// An Agent whose take on A was not written, and that disconnected before A's next batch, has
+    /// its last record written by A's shutdown flush: the batch read a row that names no holder
+    /// and no take since, so what A heard of it last is the newest.
+    /// Verifies: ADR-0025
+    #[test]
+    fn the_shutdown_flush_writes_an_agent_whose_take_was_not_written() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, _b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x92; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        a.mark_disconnected(&[uid], 8);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(
+            stored_presence(&test, &uid),
+            "none false 1",
+            "the take is not written"
+        );
+        test.sql(&format!(
+            "UPDATE agents SET sequence_num = 0 WHERE instance_uid = '{uid}'"
+        ));
+        a.flush_agents();
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            )),
+            [[Some("2".to_string())]],
+            "the last record is written"
+        );
+    }
+
+    /// An Agent whose take on A was not written, that B took and let go before A's next batch
+    /// read the row, keeps what B flushed of it at A's shutdown flush: the row names no holder,
+    /// but B's take counted since the one A was answered.
+    /// Verifies: ADR-0025
+    #[test]
+    fn the_shutdown_flush_of_a_lost_take_keeps_a_take_counted_since() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x93; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        a.mark_disconnected(&[uid], 8);
+        b.process(report(&uid, 5), Transport::WebSocket, Some(9));
+        b.mark_disconnected(&[uid], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        b.flush_agents();
+        assert_eq!(stored_presence(&test, &uid), "none false 2");
+        a.write_presence(LEASE_A).expect("A's batch");
+        a.flush_agents();
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            )),
+            [[Some("5".to_string())]],
+            "B's record stays"
+        );
+    }
+
+    /// An Agent first heard on A, whose record A created and whose take was not written, and that
+    /// disconnected before A's next batch, has its last record written by A's shutdown flush: the
+    /// record counted no take when A created it.
+    /// Verifies: ADR-0025
+    #[test]
+    fn the_shutdown_flush_writes_an_agent_created_here_whose_take_was_not_written() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, _b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x94; 16]);
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(
+            stored_presence(&test, &uid),
+            "none false 0",
+            "the take is not written"
+        );
+        test.sql(&format!(
+            "UPDATE agents SET sequence_num = 0 WHERE instance_uid = '{uid}'"
+        ));
+        a.flush_agents();
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            )),
+            [[Some("2".to_string())]],
+            "the last record is written"
+        );
+    }
+
+    /// An Agent that B carried and wrote the disconnect of, and that A then carried with a take that
+    /// was not written, keeps what A wrote of it at B's shutdown flush: the row names no holder at
+    /// the count B was answered, but holds the higher sequence number of A's newer record.
+    /// Verifies: ADR-0029
+    #[test]
+    fn the_shutdown_flush_keeps_a_newer_carriers_record_whose_take_was_not_written() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x95; 16]);
+        b.process(report(&uid, 1), Transport::WebSocket, Some(9));
+        b.mark_disconnected(&[uid], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        let mut newer = report(&uid, 2);
+        newer.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            status: "running".to_string(),
+            ..Default::default()
+        });
+        a.process(newer, Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        assert_eq!(
+            stored_presence(&test, &uid),
+            "none false 1",
+            "A's take is not written, and its report takes nothing"
+        );
+        let stored = || {
+            test.rows(&format!(
+                "SELECT sequence_num::text, (health IS NOT NULL)::text FROM agents \
+                 WHERE instance_uid = '{uid}'"
+            ))
+        };
+        assert_eq!(
+            stored(),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A wrote its report"
+        );
+        b.flush_agents();
+        assert_eq!(
+            stored(),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A's newer record stays"
+        );
+    }
+
+    /// An Agent another instance with a live lease holds is not taken by a report of A, whose take
+    /// was not written: the report is written, and the holder and its count stay. The holder's
+    /// shutdown flush, as it stops, writes no lower sequence number over A's report.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_report_whose_take_was_not_written_takes_no_agent_a_live_instance_holds() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        live_lease(&test, LEASE_B);
+        let uid = InstanceUid([0x96; 16]);
+        b.process(report(&uid, 1), Transport::WebSocket, Some(9));
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_B} true 1"));
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        let mut newer = report(&uid, 2);
+        newer.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            ..Default::default()
+        });
+        a.process(newer, Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_B} true 1"));
+        let stored = || {
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            ))
+        };
+        assert_eq!(stored(), [[Some("2".to_string())]], "A's report is written");
+        b.flush_agents();
+        assert_eq!(
+            stored(),
+            [[Some("2".to_string())]],
+            "B's flush writes no older sequence number over A's report"
+        );
+    }
+
+    /// The sequence number and health stored of `uid`, as text.
+    fn stored_report(
+        test: &crate::postgres::testing::TestDatabase,
+        uid: &InstanceUid,
+    ) -> Vec<Vec<Option<String>>> {
+        test.rows(&format!(
+            "SELECT sequence_num::text, (health IS NOT NULL)::text FROM agents \
+             WHERE instance_uid = '{uid}'"
+        ))
+    }
+
+    /// The report of `uid` with `sequence_num` and a health.
+    fn healthy_report(uid: &InstanceUid, sequence_num: u64) -> AgentToServer {
+        let mut healthy = report(uid, sequence_num);
+        healthy.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            ..Default::default()
+        });
+        healthy
+    }
+
+    /// An Agent that B carried up to a high sequence number and wrote the disconnect of, that
+    /// started again and is carried by A with a take that was not written, has A's record again at
+    /// A's next report, though B's shutdown flush wrote its older record over A's: A, answered no
+    /// count for the Agent, writes every report of it.
+    /// Verifies: ADR-0029, ADR-0025
+    #[test]
+    fn a_record_an_older_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x98; 16]);
+        b.process(report(&uid, 50), Transport::WebSocket, Some(9));
+        b.mark_disconnected(&[uid], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(healthy_report(&uid, 1), Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("1".to_string()), Some("true".to_string())]],
+            "A wrote its report"
+        );
+        b.flush_agents();
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("50".to_string()), Some("false".to_string())]],
+            "B's flush finds no holder, its count, and a lower sequence number"
+        );
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A's next report writes A's record again"
+        );
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(
+            stored_presence(&test, &uid),
+            format!("{LEASE_A} true 2"),
+            "the batch takes the Agent and answers a count"
+        );
+        a.process(report(&uid, 3), Transport::WebSocket, Some(7));
+        let sequence = || {
+            test.rows(&format!(
+                "SELECT sequence_num::text FROM agents WHERE instance_uid = '{uid}'"
+            ))
+        };
+        assert_eq!(
+            sequence(),
+            [[Some("3".to_string())]],
+            "no digest was kept before"
+        );
+        test.sql(&format!(
+            "UPDATE agents SET sequence_num = 0 WHERE instance_uid = '{uid}'"
+        ));
+        a.process(report(&uid, 4), Transport::WebSocket, Some(7));
+        assert_eq!(
+            sequence(),
+            [[Some("0".to_string())]],
+            "with a count, a report that changes nothing durable writes nothing"
+        );
+    }
+
+    /// An Agent that B, stopping, still holds with a live lease, that started again and is carried
+    /// by A with a take that was not written, has A's record again at A's next report, though B's
+    /// shutdown flush wrote its older record over A's.
+    /// Verifies: ADR-0029, ADR-0025
+    #[test]
+    fn a_record_a_stopping_holders_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        live_lease(&test, LEASE_B);
+        let uid = InstanceUid([0x99; 16]);
+        b.process(report(&uid, 50), Transport::WebSocket, Some(9));
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_B} true 1"));
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        a.process(healthy_report(&uid, 1), Transport::WebSocket, Some(7));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        b.flush_agents();
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("50".to_string()), Some("false".to_string())]],
+            "B's flush, holding the row, finds a lower sequence number"
+        );
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        assert_eq!(
+            stored_report(&test, &uid),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A's next report writes A's record again"
+        );
+    }
+
+    /// An Agent A carried, that was forgotten through B and created again there, and that A then
+    /// carries with a take that was not written, keeps what A wrote of it at B's shutdown flush:
+    /// the count B was answered of the record created again is the one stored, but the row holds
+    /// the higher sequence number of A's report.
+    /// Verifies: ADR-0029, ADR-0025
+    #[test]
+    fn the_shutdown_flush_keeps_a_newer_carriers_record_after_a_record_created_again() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, hooks) = hooked_pair(&database);
+        let uid = InstanceUid([0x97; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        assert!(b.forget_agent(&uid).is_ok(), "forgotten through B");
+        b.process(report(&uid, 1), Transport::WebSocket, Some(9));
+        b.mark_disconnected(&[uid], 9);
+        b.write_presence(LEASE_B).expect("B's batch");
+        assert_eq!(
+            stored_presence(&test, &uid),
+            "none false 1",
+            "created again"
+        );
+        hooks.failing_takes.store(true, Ordering::SeqCst);
+        let mut newer = report(&uid, 2);
+        newer.health = Some(opamp::proto::ComponentHealth {
+            healthy: true,
+            ..Default::default()
+        });
+        a.process(newer, Transport::WebSocket, Some(8));
+        hooks.failing_takes.store(false, Ordering::SeqCst);
+        b.flush_agents();
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT sequence_num::text, (health IS NOT NULL)::text FROM agents \
+                 WHERE instance_uid = '{uid}'"
+            )),
+            [[Some("2".to_string()), Some("true".to_string())]],
+            "A's newer record stays"
+        );
+    }
+
+    /// An Agent whose take was written under A's old lease and whose answer was lost is named by
+    /// A's batch under its new lease: A keeps no count from before the lost take to refuse it with.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_lost_take_under_an_old_lease_is_named_by_the_batch_under_the_new_one() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let losing = hooked.losing_takes.clone();
+        let a = on_postgres(&database, Box::new(hooked));
+        let (lease, leases) = tokio::sync::watch::channel(Some(LEASE_A.to_string()));
+        a.serve_under(leases);
+        let uid = InstanceUid([0x93; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        a.write_presence(LEASE_A).expect("A's batch");
+        assert_eq!(stored_presence(&test, &uid), "none false 1");
+        losing.store(true, Ordering::SeqCst);
+        a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        losing.store(false, Ordering::SeqCst);
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_A} true 2"));
+        let renewed = "00000000-0000-7000-8000-0000000000aa";
+        lease.send_replace(Some(renewed.to_string()));
+        a.write_presence(renewed)
+            .expect("A's batch under its new lease");
+        assert_eq!(stored_presence(&test, &uid), format!("{renewed} true 3"));
+    }
+
+    /// A batch never names its instance over a live take whose count equals its own: an Agent
+    /// forgotten through B and created again there counts its takes from the start, and A, which
+    /// has not heard of the forget, writes nothing of it.
+    /// Verifies: ADR-0029, ADR-0025
+    #[test]
+    fn a_batch_never_names_its_instance_over_a_live_take_of_a_record_created_again() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let (a, b, _hooks) = hooked_pair(&database);
+        live_lease(&test, LEASE_B);
+        let uid = InstanceUid([0x92; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        next_millisecond();
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        assert!(b.forget_agent(&uid).is_ok(), "forgotten through B");
+        b.process(report(&uid, 1), Transport::WebSocket, Some(9));
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_B} true 1"));
+        a.write_presence(LEASE_A)
+            .expect("A's batch before it hears of the forget");
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_B} true 1"));
+    }
+
+    /// A batch that meets a change of lease between its commit and its answers keeps the counts
+    /// it was answered: the Agent it named anew under the lease before is named again under the
+    /// next one. Each batch takes back the row its instance's previous lease, now not live, holds
+    /// under the count it was answered.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_batch_that_meets_a_change_of_lease_keeps_the_counts_it_was_answered() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_presence = hooked.after_presence.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let (lease, leases) = tokio::sync::watch::channel(Some(LEASE_A.to_string()));
+        a.serve_under(leases);
+        let (uid, other) = (InstanceUid([0x94; 16]), InstanceUid([0x95; 16]));
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        assert_eq!(stored_presence(&test, &uid), format!("{LEASE_A} true 1"));
+        let (second, third) = (
+            "00000000-0000-7000-8000-0000000000a2",
+            "00000000-0000-7000-8000-0000000000a3",
+        );
+        lease.send_replace(Some(second.to_string()));
+        // Between the batch's commit and its answers the lease changes again, and a connect is
+        // taken under the new one.
+        let again = a.clone();
+        *after_presence.lock().expect("hook lock") = Some(Box::new(move || {
+            lease.send_replace(Some(third.to_string()));
+            again.process(report(&other, 1), Transport::WebSocket, Some(8));
+        }));
+        a.write_presence(second)
+            .expect("A's batch under its second lease");
+        assert_eq!(stored_presence(&test, &uid), format!("{second} true 2"));
+        a.write_presence(third)
+            .expect("A's batch under its third lease");
+        assert_eq!(stored_presence(&test, &uid), format!("{third} true 3"));
+    }
+
+    /// A report that re-keyed its Agent and then finds it no longer carried, its connection
+    /// marked closed meanwhile, goes on under the identity it assigned rather than start again
+    /// from the message: a next round would mint a second identity and leave the first record
+    /// behind. The Agent stays disconnected, as the closed connection left it.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn a_report_that_rekeyed_its_agent_does_not_start_again() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let of: Arc<OnceLock<std::sync::Weak<AppState>>> = Arc::new(OnceLock::new());
+        let uid = InstanceUid([0x9c; 16]);
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe: Probe = {
+            let (of, armed) = (of.clone(), armed.clone());
+            Arc::new(move |call, _| {
+                if call == "rebind" && armed.swap(false, Ordering::SeqCst) {
+                    // The connection closes while the report moves the binding.
+                    let a = of.get().and_then(std::sync::Weak::upgrade).expect("A");
+                    a.mark_disconnected(&[uid], 7);
+                }
+            })
+        };
+        let revocations = Revocations::open(
+            Box::new(ProbedLedger {
+                inner: Box::new(crate::postgres::ledger::PgLedgerStore::new(
+                    database.clone(),
+                )),
+                probe,
+            }),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        let a = Arc::new(
+            AppState::with_stores(
+                Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+                Box::new(crate::postgres::configs::PgConfigBackend::new(
+                    database.clone(),
+                )),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state")
+            .with_revocations(Some(Arc::new(revocations))),
+        );
+        of.set(Arc::downgrade(&a)).expect("set once");
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let host = of_host("h9c");
+        a.process_presented(report(&uid, 1), Transport::WebSocket, Some(7), Some(&host));
+        armed.store(true, Ordering::SeqCst);
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process_presented(rekey, Transport::WebSocket, Some(7), Some(&host));
+        let assigned = answered
+            .reply
+            .agent_identification
+            .as_ref()
+            .map(|identification| identification.new_instance_uid.clone())
+            .expect("re-keyed");
+        let rows = test.rows("SELECT instance_uid FROM agents");
+        assert_eq!(rows.len(), 1, "one record: {rows:?}");
+        assert_eq!(
+            answered.uid.map(|uid| uid.as_bytes().to_vec()),
+            Some(assigned)
+        );
+        let moved = answered.uid.expect("the new identity");
+        assert!(
+            !view(&a, &moved).connected,
+            "left disconnected, as its closed connection left it"
+        );
+    }
+
+    /// A ledger store that runs a probe before each write a report makes of the host register:
+    /// binding an `instance_uid`, writing a Host and moving a binding.
+    struct ProbedLedger {
+        inner: Box<dyn crate::revocation::LedgerStore>,
+        probe: Probe,
+    }
+
+    impl crate::revocation::LedgerStore for ProbedLedger {
+        fn load(&self) -> Result<crate::revocation::Ledger, String> {
+            self.inner.load()
+        }
+        fn put_issued(&self, issued: &crate::revocation::Issued) -> Result<(), String> {
+            self.inner.put_issued(issued)
+        }
+        fn remove_issued(&self, id: &CertId, now_ms: u64) -> Result<bool, String> {
+            self.inner.remove_issued(id, now_ms)
+        }
+        fn register_issued(
+            &self,
+            issued: &crate::revocation::Issued,
+            bounds: &crate::revocation::RegisterBounds,
+        ) -> Result<crate::revocation::Registered, String> {
+            self.inner.register_issued(issued, bounds)
+        }
+        fn register_minting(
+            &self,
+            issued: &crate::revocation::Issued,
+            bounds: &crate::revocation::RegisterBounds,
+            mint: Option<(&str, &crate::revocation::Host)>,
+            bootstrap: Option<&CertId>,
+        ) -> Result<crate::revocation::Registered, String> {
+            self.inner.register_minting(issued, bounds, mint, bootstrap)
+        }
+        fn add_revocation(
+            &self,
+            entry: &crate::revocation::Revocation,
+            bound: usize,
+        ) -> Result<crate::revocation::Added, String> {
+            self.inner.add_revocation(entry, bound)
+        }
+        fn list_version(&self) -> Option<u64> {
+            self.inner.list_version()
+        }
+        fn remove_revocation(&self, id: &str) -> Result<bool, String> {
+            self.inner.remove_revocation(id)
+        }
+        fn bind(&self, instance_uid: &str, host: &str) -> Result<crate::revocation::Bound, String> {
+            (self.probe)("bind", None);
+            self.inner.bind(instance_uid, host)
+        }
+        fn bind_seen(
+            &self,
+            instance_uid: &str,
+            host: &str,
+            row: &crate::revocation::Host,
+        ) -> Result<crate::revocation::Bound, String> {
+            (self.probe)("bind_seen", None);
+            self.inner.bind_seen(instance_uid, host, row)
+        }
+        fn unbind(&self, instance_uid: &str) -> Result<Option<String>, String> {
+            self.inner.unbind(instance_uid)
+        }
+        fn rebind(
+            &self,
+            old: &str,
+            new: &str,
+        ) -> Result<Option<(String, crate::revocation::Bound)>, String> {
+            (self.probe)("rebind", None);
+            self.inner.rebind(old, new)
+        }
+        fn unbind_host(&self, host: &str) -> Result<(), String> {
+            self.inner.unbind_host(host)
+        }
+        fn writes_hosts_by_act(&self) -> bool {
+            self.inner.writes_hosts_by_act()
+        }
+        fn write_host_act(&self, act: &crate::revocation::HostAct) -> Result<bool, String> {
+            (self.probe)("write_host_act", None);
+            self.inner.write_host_act(act)
+        }
+        fn save_hosts(
+            &self,
+            hosts: &BTreeMap<String, crate::revocation::Host>,
+        ) -> Result<(), String> {
+            (self.probe)("save_hosts", None);
+            self.inner.save_hosts(hosts)
+        }
+    }
+
+    /// A probe that notes each call with whether the fleet lock of the state `of` names was free
+    /// as it was made.
+    fn lock_probe(
+        of: &Arc<OnceLock<std::sync::Weak<AppState>>>,
+        seen: &Arc<Mutex<Vec<(&'static str, bool)>>>,
+    ) -> Probe {
+        let (of, seen) = (of.clone(), seen.clone());
+        Arc::new(move |call, _| {
+            let free = of
+                .get()
+                .and_then(std::sync::Weak::upgrade)
+                .is_none_or(|state| state.fleet.try_lock().is_ok());
+            seen.lock().expect("seen lock").push((call, free));
+        })
+    }
+
+    /// No call a report makes to the database holds the fleet lock: the creation of a new Agent's
+    /// record, the binding of its `instance_uid` and the write of its Host, its take, the read of
+    /// its group's Client Agents another instance carries, the write of what it reported, and a
+    /// re-key it asks for with the move of its binding are each made with the lock free, so no
+    /// other report waits for them.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn a_report_holds_the_fleet_lock_across_no_call_to_the_database() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        // Another instance carries an Agent of the same Host, so placing this one reads it.
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let elsewhere = InstanceUid([0x90; 16]);
+        b.process_presented(
+            report(&elsewhere, 1),
+            Transport::WebSocket,
+            Some(1),
+            Some(&of_host("h91")),
+        );
+        let (of, seen) = (Arc::new(OnceLock::new()), Arc::new(Mutex::new(Vec::new())));
+        let probe = lock_probe(&of, &seen);
+        *hooked.probe.lock().expect("hook lock") = Some(probe.clone());
+        let revocations = Revocations::open(
+            Box::new(ProbedLedger {
+                inner: Box::new(crate::postgres::ledger::PgLedgerStore::new(
+                    database.clone(),
+                )),
+                probe,
+            }),
+            Arc::new(crate::clock::SystemClock),
+            Vec::new(),
+        )
+        .expect("revocations");
+        let a = Arc::new(
+            AppState::with_stores(
+                Box::new(hooked),
+                Box::new(crate::postgres::configs::PgConfigBackend::new(
+                    database.clone(),
+                )),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state")
+            .with_revocations(Some(Arc::new(revocations))),
+        );
+        of.set(Arc::downgrade(&a)).expect("set once");
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+
+        let uid = InstanceUid([0x91; 16]);
+        let host = of_host("h91");
+        a.process_presented(report(&uid, 1), Transport::WebSocket, Some(7), Some(&host));
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process_presented(rekey, Transport::WebSocket, Some(7), Some(&host));
+        assert!(
+            answered.reply.agent_identification.is_some(),
+            "re-keyed: {:?}",
+            answered.reply
+        );
+
+        let seen = seen.lock().expect("seen lock").clone();
+        for call in [
+            "create_within",
+            "get_many",
+            "bind_seen",
+            "write_host_act",
+            "take",
+            "write_report",
+            "rekey",
+            "rebind",
+        ] {
+            assert!(
+                seen.iter().any(|(made, _)| *made == call),
+                "{call} was made: {seen:?}"
+            );
+        }
+        let held: Vec<&(&str, bool)> = seen.iter().filter(|(_, free)| !free).collect();
+        assert!(held.is_empty(), "the fleet lock was held across {held:?}");
+    }
+
+    /// While one Agent's report waits for a call to its store, another Agent's report is answered:
+    /// what the fleet lock guards is applied before and after the call, never across it.
+    /// Verifies: ADR-0025
+    #[test]
+    fn another_agents_report_is_answered_while_one_agents_write_waits() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooked = Hooked::new(Box::new(
+            crate::fs::FsAgentStore::open(dir.path()).expect("agents"),
+        ));
+        let (held, other) = (InstanceUid([0x92; 16]), InstanceUid([0x93; 16]));
+        let (entered, entering) = std::sync::mpsc::channel::<()>();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let released = Arc::new(Mutex::new(released));
+        *hooked.probe.lock().expect("hook lock") = Some(Arc::new(move |call, uid| {
+            if call == "write_report" && uid == Some(&held) {
+                let _ = entered.send(());
+                let _ = released
+                    .lock()
+                    .expect("release lock")
+                    .recv_timeout(Duration::from_secs(30));
+            }
+        }));
+        let state = Arc::new(
+            AppState::with_stores(
+                Box::new(hooked),
+                Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state"),
+        );
+        let waiting = {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                state.process(report(&held, 1), Transport::WebSocket, Some(1))
+            })
+        };
+        entering
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the held Agent's write is under way");
+        let (answered, answering) = std::sync::mpsc::channel();
+        {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                let _ =
+                    answered.send(state.process(report(&other, 1), Transport::WebSocket, Some(2)));
+            });
+        }
+        let other_answer = answering.recv_timeout(Duration::from_secs(30));
+        let _ = release.send(());
+        let held_answer = waiting.join().expect("the held report");
+        let other_answer = other_answer.expect("the other Agent is answered while the write waits");
+        assert_eq!(other_answer.uid, Some(other));
+        assert_eq!(held_answer.uid, Some(held));
+    }
+
+    /// An instance whose take of an Agent another instance's take overtakes before it holds the
+    /// Agent in memory stops carrying it once it hears of that take: hearing of it waits for the
+    /// report under way here, so it reads the holder after this instance holds the Agent, and the
+    /// newest connection keeps the Agent.
+    /// Verifies: ADR-0025
+    #[test]
+    fn an_instance_whose_take_is_overtaken_before_it_holds_the_agent_stops_carrying_it() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let b = Arc::new(on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        ));
+        b.serve_under(tokio::sync::watch::channel(Some(LEASE_B.to_string())).1);
+        let uid = InstanceUid([0x94; 16]);
+        b.process(report(&uid, 1), Transport::WebSocket, Some(3));
+
+        // A's take commits; then B takes the Agent again, and A hears of it while its report has
+        // not yet taken the Agent into what it holds.
+        let (heard, hearing) = std::sync::mpsc::channel();
+        let waits_before = a.agent_lock_waits();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (a, b, finished) = (Arc::downgrade(&a), b.clone(), finished.clone());
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                // The Agent's connection to B closed, and it opens another to B.
+                b.mark_disconnected(&[uid], 3);
+                b.process(report(&uid, 2), Transport::WebSocket, Some(4));
+                let a = a.upgrade().expect("A");
+                let (on_a, done) = (a.clone(), finished.clone());
+                std::thread::spawn(move || {
+                    let read = on_a.release_taken(&HashSet::from([uid]));
+                    done.store(true, Ordering::SeqCst);
+                    let _ = heard.send(read);
+                });
+                // Hearing waits for this report, or is done before it goes on.
+                until("A hears of B's take", || {
+                    a.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        a.process(report(&uid, 2), Transport::WebSocket, Some(7));
+        hearing
+            .recv_timeout(Duration::from_secs(30))
+            .expect("A heard of the take")
+            .expect("A read the holder");
+        assert!(!view(&a, &uid).connected, "A no longer carries it");
+        assert!(
+            stored_presence(&test, &uid).starts_with(&format!("{LEASE_B} true")),
+            "B holds it: {}",
+            stored_presence(&test, &uid)
+        );
+    }
+
+    /// What another instance commits to a new Agent's record between its creation here and the
+    /// end of the report that created it is taken into what this instance holds when it hears of
+    /// it: the record is held from its creation on, so the take-up finds it, and the report goes
+    /// on from it rather than from a record of its own. A label is what such a commit can carry:
+    /// a rollout then releases nothing and a restart is refused, since the record names neither a
+    /// description nor a capability before the report that created it is written, and what is
+    /// held agrees with the store on all three.
+    /// Verifies: ADR-0025
+    #[test]
+    fn what_another_instance_commits_to_a_new_agent_while_its_report_runs_is_held() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let blobs = tempfile::tempdir().expect("blobs");
+        let a = Arc::new(delivering_on(&database, Box::new(hooked), blobs.path()));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let b = Arc::new(delivering_on(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+            blobs.path(),
+        ));
+        aim_at_the_early_ring(&b);
+        let uid = InstanceUid([0x98; 16]);
+        {
+            let (a, b) = (Arc::downgrade(&a), b.clone());
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                // The record is committed; B labels it, rolls its Deployment out to it and asks
+                // it to restart, and A hears of it before its report holds the Agent.
+                label(&b, &uid, &[("ring", "early")]);
+                b.rollout_to_agent(&uid, None)
+                    .expect("the rollout through B");
+                assert!(
+                    matches!(b.request_restart(&uid), Err(RestartError::NoCapability)),
+                    "a restart is refused before the record names its capabilities"
+                );
+                let a = a.upgrade().expect("A");
+                a.take_up_agents(&HashSet::from([uid]))
+                    .expect("A takes it up");
+            }));
+        }
+        let created = a.process(restartable(&uid, 1), Transport::WebSocket, Some(7));
+        assert_eq!(created.uid, Some(uid));
+        let stored = crate::postgres::agents::PgAgentStore::new(database.clone())
+            .get(&uid)
+            .expect("read")
+            .expect("stored");
+        let held = view(&a, &uid);
+        assert_eq!(held.labels, stored.labels, "the label is held");
+        assert_eq!(held.labels.get("ring").map(String::as_str), Some("early"));
+        assert_eq!(
+            held.assigned_deployment,
+            stored
+                .assignment
+                .map(|assignment| assignment.deployment)
+                .unwrap_or_default(),
+            "the assignment held is the one stored"
+        );
+        assert!(!stored.restart_pending && created.reply.command.is_none());
+    }
+
+    /// A new Agent's record is held from its creation on but not carried until its report holds
+    /// it: a presence batch run meanwhile writes nothing of it, and the Agent is not connected
+    /// here until the report ends.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_new_agents_record_is_held_from_its_creation_but_not_carried_before_its_report_ends() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x9d; 16]);
+        let (looked, look) = std::sync::mpsc::channel();
+        {
+            let a = Arc::downgrade(&a);
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                let a = a.upgrade().expect("A");
+                let held = a
+                    .fleet
+                    .lock()
+                    .expect("fleet lock")
+                    .get(&uid)
+                    .map(|record| (record.connected, record.owner));
+                let _ = looked.send((held, a.write_presence(LEASE_A)));
+            }));
+        }
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        let (held, batch) = look.recv_timeout(Duration::from_secs(30)).expect("looked");
+        assert_eq!(held, Some((false, None)), "held, not carried");
+        assert_eq!(batch, Ok(0), "no presence written of it");
+        assert!(view(&a, &uid).connected, "carried once the report ends");
+    }
+
+    /// A new Agent's report that the host register refuses leaves no record, neither stored nor
+    /// held: the record its creation made goes from both.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_new_agents_report_the_register_refuses_leaves_no_record_held_or_stored() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let probe = hooked.probe.clone();
+        let a = on_postgres(&database, Box::new(hooked));
+        let b = Arc::new(on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        ));
+        let uid = InstanceUid([0x99; 16]);
+        let subject = crate::revocation::SubjectValues::default;
+        {
+            // Before A creates the record, B binds the Agent to another host, and its record is
+            // forgotten again, the binding staying: A's creation goes ahead, and the register
+            // then refuses the report.
+            let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let sql = test.sql_runner();
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, named| {
+                if call != "create_within"
+                    || named != Some(&uid)
+                    || !armed.swap(false, Ordering::SeqCst)
+                {
+                    return;
+                }
+                report_over(&b, "h2", subject(), uid, &[]);
+                sql(&format!("DELETE FROM agents WHERE instance_uid = '{uid}'"));
+            }));
+        }
+        let refused = report_over(&a, "h1", subject(), uid, &[]);
+        assert_eq!(refused.uid, None, "refused");
+        assert!(
+            !a.fleet.lock().expect("fleet lock").contains_key(&uid),
+            "not held"
+        );
+        assert!(
+            test.rows(&format!(
+                "SELECT instance_uid FROM agents WHERE instance_uid = '{uid}'"
+            ))
+            .is_empty(),
+            "not stored"
+        );
+    }
+
+    /// A new Agent forgotten through another instance between its creation here and the end of
+    /// the report that created it is created anew by a next round of that report, so what is held
+    /// is stored.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn a_new_agent_forgotten_while_its_report_runs_is_created_anew() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x9a; 16]);
+        {
+            let on = Arc::downgrade(&a);
+            let gone = format!("DELETE FROM agents WHERE instance_uid = '{uid}'");
+            let test = test.sql_runner();
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                test(&gone);
+                on.upgrade()
+                    .expect("A")
+                    .take_up_agents(&HashSet::from([uid]))
+                    .expect("A hears the Agent forgotten");
+            }));
+        }
+        let answered = a.process(report(&uid, 1), Transport::WebSocket, Some(8));
+        assert_eq!(answered.uid, Some(uid), "carried");
+        assert!(view(&a, &uid).connected, "held");
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT instance_uid FROM agents WHERE instance_uid = '{uid}'"
+            ))
+            .len(),
+            1,
+            "stored anew"
+        );
+    }
+
+    /// A restart requested while a delivery of the one queued before clears it is not lost: the
+    /// request waits for the delivery, which holds the Agent's own lock across its clear, and is
+    /// queued after it, so the Agent is sent it next.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_restart_requested_while_a_delivery_clears_one_stays_queued() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooked = Hooked::new(Box::new(
+            crate::fs::FsAgentStore::open(dir.path()).expect("agents"),
+        ));
+        let probe = hooked.probe.clone();
+        let state = Arc::new(
+            AppState::with_stores(
+                Box::new(hooked),
+                Box::new(crate::fs::FsConfigBackend::open(dir.path()).expect("configs")),
+                Box::new(crate::clock::SystemClock),
+            )
+            .expect("state"),
+        );
+        let uid = InstanceUid([0x95; 16]);
+        state.process(restartable(&uid, 1), Transport::WebSocket, Some(1));
+        assert!(state.request_restart(&uid).is_ok(), "queued");
+
+        let (requested, requesting) = std::sync::mpsc::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let waits_before = state.agent_lock_waits();
+        {
+            let (on, finished) = (Arc::downgrade(&state), finished.clone());
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, _| {
+                if call != "set_restart_pending" || !armed.swap(false, Ordering::SeqCst) {
+                    return;
+                }
+                let state = on.upgrade().expect("state");
+                let (again, done, requested) = (state.clone(), finished.clone(), requested.clone());
+                std::thread::spawn(move || {
+                    let request = again.request_restart(&uid).is_ok();
+                    done.store(true, Ordering::SeqCst);
+                    let _ = requested.send(request);
+                });
+                until("the request waits for the delivery or is done", || {
+                    state.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        let delivered = state.process(restartable(&uid, 2), Transport::WebSocket, Some(1));
+        assert!(
+            delivered.reply.command.is_some(),
+            "the first restart is delivered"
+        );
+        assert!(
+            requesting
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the second request is answered"),
+            "queued again"
+        );
+        assert!(
+            state.restart_command_for(&uid, 1).is_some(),
+            "the second restart is sent next"
+        );
+    }
+
+    /// A restart requested through one instance after the carrying instance cleared the one it
+    /// delivers, but before it took the clear into memory, is not lost: the take-up of its
+    /// announcement waits for the delivery, which holds the Agent's own lock, and then holds the
+    /// request, which is sent next.
+    /// Verifies: ADR-0029, ADR-0025
+    #[test]
+    fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_next() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_clear = hooked.after_clear.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let b = Arc::new(on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        ));
+        let uid = InstanceUid([0x99; 16]);
+        a.process(restartable(&uid, 1), Transport::WebSocket, Some(1));
+        assert!(a.request_restart(&uid).is_ok(), "queued");
+
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waits_before = a.agent_lock_waits();
+        let (answered, answering) = std::sync::mpsc::channel();
+        {
+            let (on, b, finished) = (Arc::downgrade(&a), b.clone(), finished.clone());
+            *after_clear.lock().expect("hook lock") = Some(Box::new(move || {
+                let a = on.upgrade().expect("A");
+                let (again, done) = (a.clone(), finished.clone());
+                std::thread::spawn(move || {
+                    let requested = b.request_restart(&uid).is_ok();
+                    // The announcement, once the request committed.
+                    let named = HashSet::from([uid]);
+                    let taken = again.take_up_agents(&named).is_ok()
+                        && again.take_up_restarts(&named).is_ok();
+                    done.store(true, Ordering::SeqCst);
+                    let _ = answered.send(requested && taken);
+                });
+                until("the take-up waits for the delivery or is done", || {
+                    a.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        assert!(
+            a.restart_command_for(&uid, 1).is_some(),
+            "the first restart is delivered"
+        );
+        assert!(
+            answering
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the request and its take-up are answered"),
+            "requested and taken up"
+        );
+        assert!(
+            a.restart_command_for(&uid, 1).is_some(),
+            "the request made between the clear and the delivery's end is sent next"
+        );
+    }
+
+    /// The same request taken up after a missed notification, which names no Agent, is not lost
+    /// either: the catch-up reads the restart the store queues under the Agent's own lock, waits
+    /// for the delivery, and holds the request, which is sent next.
+    /// Verifies: ADR-0029, ADR-0025
+    #[test]
+    fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_after_a_missed_notification(
+    ) {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_clear = hooked.after_clear.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let b = Arc::new(on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        ));
+        let uid = InstanceUid([0x96; 16]);
+        a.process(restartable(&uid, 1), Transport::WebSocket, Some(1));
+        assert!(a.request_restart(&uid).is_ok(), "queued");
+
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waits_before = a.agent_lock_waits();
+        let (answered, answering) = std::sync::mpsc::channel();
+        {
+            let (on, b, finished) = (Arc::downgrade(&a), b.clone(), finished.clone());
+            *after_clear.lock().expect("hook lock") = Some(Box::new(move || {
+                let a = on.upgrade().expect("A");
+                let (again, done) = (a.clone(), finished.clone());
+                std::thread::spawn(move || {
+                    let requested = b.request_restart(&uid).is_ok();
+                    // The announcement is missed: the instance catches up, as it does then.
+                    let taken = again.catch_up().is_ok();
+                    done.store(true, Ordering::SeqCst);
+                    let _ = answered.send(requested && taken);
+                });
+                until("the take-up waits for the delivery or is done", || {
+                    a.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        assert!(
+            a.restart_command_for(&uid, 1).is_some(),
+            "the first restart is delivered"
+        );
+        assert!(
+            answering
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the request and its take-up are answered"),
+            "requested and taken up"
+        );
+        assert!(
+            a.restart_command_for(&uid, 1).is_some(),
+            "the request made between the clear and the delivery's end is sent next"
+        );
+    }
+
+    /// A restart requested through one instance while the instance that carries the Agent
+    /// delivers the one queued before is not lost, however the two meet: where the request came
+    /// before the delivery's clear, the restart sent is both; where it came after, it stays queued
+    /// and is sent next, once the carrying instance takes the announcement up.
+    /// Verifies: ADR-0029, ADR-0025
+    #[test]
+    fn a_restart_requested_through_one_instance_while_another_delivers_one_stays_until_sent() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let on = || {
+            Arc::new(on_postgres(
+                &database,
+                Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+            ))
+        };
+        let (a, b) = (on(), on());
+        let uid = InstanceUid([0x97; 16]);
+        a.process(restartable(&uid, 1), Transport::WebSocket, Some(1));
+        let queued = || {
+            test.rows(&format!(
+                "SELECT restart_pending::text FROM agents WHERE instance_uid = '{uid}'"
+            ))[0][0]
+                .clone()
+                .expect("a value")
+                == "true"
+        };
+        let (mut merged, mut after) = (0, 0);
+        for round in 0..40u64 {
+            assert!(a.request_restart(&uid).is_ok(), "round {round}: queued");
+            let met = Arc::new(std::sync::Barrier::new(2));
+            let delivering = {
+                let (a, met) = (a.clone(), met.clone());
+                std::thread::spawn(move || {
+                    met.wait();
+                    // Later by a step each round, so the request meets the delivery before its
+                    // clear, during it, and after it.
+                    std::thread::sleep(Duration::from_micros(round * 25));
+                    a.restart_command_for(&uid, 1).is_some()
+                })
+            };
+            let requesting = {
+                let (a, b, met) = (a.clone(), b.clone(), met.clone());
+                std::thread::spawn(move || {
+                    met.wait();
+                    let requested = b.request_restart(&uid).is_ok();
+                    // The announcement reaches the carrying instance once the request committed,
+                    // which takes the Agent up and then its kept restarts, as a notice does.
+                    let named = HashSet::from([uid]);
+                    a.take_up_agents(&named).expect("taken up");
+                    a.take_up_restarts(&named).expect("taken up");
+                    requested
+                })
+            };
+            assert!(
+                delivering.join().expect("delivery"),
+                "round {round}: the first restart is delivered"
+            );
+            assert!(
+                requesting.join().expect("request"),
+                "round {round}: the second request is answered"
+            );
+            if queued() {
+                after += 1;
+                assert!(
+                    a.restart_command_for(&uid, 1).is_some(),
+                    "round {round}: the request that stayed queued is sent next"
+                );
+                assert!(!queued(), "round {round}: sending it cleared it");
+            } else {
+                merged += 1;
+                assert!(
+                    a.restart_command_for(&uid, 1).is_none(),
+                    "round {round}: a request the delivery took is not sent twice"
+                );
+            }
+        }
+        eprintln!("{merged} requests taken by the delivery, {after} queued after it");
+    }
+
+    /// A label set while a report reads the Agent's record from the store, before it holds it, is
+    /// not undone by what the read found: the label waits for the report, which holds the Agent's
+    /// own lock, and is then taken into the record held.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_label_set_while_a_report_reads_the_record_is_not_undone() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_get = hooked.after_get.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        let b = on_postgres(
+            &database,
+            Box::new(crate::postgres::agents::PgAgentStore::new(database.clone())),
+        );
+        let uid = InstanceUid([0x96; 16]);
+        b.process(report(&uid, 1), Transport::Http, None);
+        label(&b, &uid, &[("tier", "edge")]);
+
+        let (labelled, labelling) = std::sync::mpsc::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waits_before = a.agent_lock_waits();
+        {
+            let (on, finished) = (Arc::downgrade(&a), finished.clone());
+            *after_get.lock().expect("hook lock") = Some(Box::new(move || {
+                let a = on.upgrade().expect("A");
+                let (again, done) = (a.clone(), finished.clone());
+                std::thread::spawn(move || {
+                    label(&again, &uid, &[("tier", "core")]);
+                    done.store(true, Ordering::SeqCst);
+                    let _ = labelled.send(());
+                });
+                until("the label waits for the report or is done", || {
+                    a.agent_lock_waits() > waits_before || finished.load(Ordering::SeqCst)
+                });
+            }));
+        }
+        a.process(report(&uid, 2), Transport::Http, None);
+        labelling
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the label is set");
+        assert_eq!(view(&a, &uid).labels["tier"], "core", "the label set stays");
+    }
+
+    /// A report whose Agent leaves memory while it reads and writes the store — forgotten through
+    /// another instance — starts again from what the store holds then, and the Agent is held
+    /// under a record created anew.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn a_report_whose_agent_leaves_memory_meanwhile_starts_again() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_take = hooked.after_take.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x97; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        {
+            let on = Arc::downgrade(&a);
+            let gone = format!("DELETE FROM agents WHERE instance_uid = '{uid}'");
+            let test = test.sql_runner();
+            *after_take.lock().expect("hook lock") = Some(Box::new(move || {
+                test(&gone);
+                on.upgrade()
+                    .expect("A")
+                    .take_up_agents(&HashSet::from([uid]))
+                    .expect("A hears the Agent forgotten");
+            }));
+        }
+        let answered = a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        assert_eq!(answered.uid, Some(uid), "carried");
+        assert!(view(&a, &uid).connected, "held");
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT instance_uid FROM agents WHERE instance_uid = '{uid}'"
+            ))
+            .len(),
+            1,
+            "stored anew"
+        );
+    }
+
+    /// A report whose Agent leaves memory in each of its rounds is answered `Unavailable`, so the
+    /// Agent retries, rather than starting again without end.
+    /// Verifies: ADR-0025
+    #[test]
+    fn a_report_whose_agent_leaves_memory_in_every_round_is_answered_unavailable() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let probe = hooked.probe.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x98; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        a.mark_disconnected(&[uid], 7);
+        let rounds = Arc::new(AtomicU64::new(0));
+        {
+            let (on, rounds) = (Arc::downgrade(&a), rounds.clone());
+            let other = crate::postgres::agents::PgAgentStore::new(database.clone());
+            let gone = format!("DELETE FROM agents WHERE instance_uid = '{uid}'");
+            let test = test.sql_runner();
+            *probe.lock().expect("hook lock") = Some(Arc::new(move |call, _| {
+                if call != "take" {
+                    return;
+                }
+                rounds.fetch_add(1, Ordering::SeqCst);
+                // Forgotten and heard of here, then stored again by another instance.
+                test(&gone);
+                on.upgrade()
+                    .expect("A")
+                    .take_up_agents(&HashSet::from([uid]))
+                    .expect("A hears the Agent forgotten");
+                other
+                    .put(&uid, &crate::agent_store::tests::record())
+                    .expect("stored again");
+            }));
+        }
+        let answered = a.process(report(&uid, 2), Transport::WebSocket, Some(8));
+        assert_eq!(rounds.load(Ordering::SeqCst), REPORT_ROUNDS as u64);
+        assert!(
+            answered
+                .reply
+                .error_response
+                .as_ref()
+                .is_some_and(|error| error.error_message.contains("retry later")),
+            "answered unavailable: {:?}",
+            answered.reply
+        );
+        assert_eq!(answered.uid, None);
+    }
+
+    /// A re-key an Agent asked for that a read again finds made before the report holds the Agent
+    /// under its new identity keeps the Agent: the move is pending until then, so the read again
+    /// reads it back and moves what is held, and the session goes on, its labels with it.
+    /// Verifies: ADR-0025, ADR-0029
+    #[test]
+    fn a_rekey_a_read_again_finds_before_the_report_holds_it_keeps_the_agent() {
+        let Some(test) = crate::postgres::testing::TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let hooked = Hooked::new(Box::new(crate::postgres::agents::PgAgentStore::new(
+            database.clone(),
+        )));
+        let after_rekey = hooked.after_rekey.clone();
+        let a = Arc::new(on_postgres(&database, Box::new(hooked)));
+        a.serve_under(tokio::sync::watch::channel(Some(LEASE_A.to_string())).1);
+        let uid = InstanceUid([0x99; 16]);
+        a.process(report(&uid, 1), Transport::WebSocket, Some(7));
+        label(&a, &uid, &[("tier", "edge")]);
+        {
+            let on = Arc::downgrade(&a);
+            *after_rekey.lock().expect("hook lock") = Some(Box::new(move || {
+                // As on a notice naming it. A catch-up cannot come here: it waits for the
+                // Agent's own lock, which the report holds.
+                on.upgrade()
+                    .expect("A")
+                    .take_up_agents(&HashSet::from([uid]))
+                    .expect("read again");
+            }));
+        }
+        let mut rekey = report(&uid, 2);
+        rekey.flags = AgentToServerFlags::RequestInstanceUid as u64;
+        let answered = a.process(rekey, Transport::WebSocket, Some(7));
+        let new = answered.uid.expect("carried");
+        assert_ne!(new, uid, "re-keyed");
+        assert!(a.take_forgotten(7).is_empty(), "its session goes on");
+        assert_eq!(view(&a, &new).labels["tier"], "edge", "its labels with it");
+    }
+}

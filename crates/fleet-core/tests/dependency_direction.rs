@@ -122,6 +122,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("fleet::held", Core),
             ("fleet::placement", Core),
             ("fleet::rollout", Core),
+            ("fleet::session", Core),
             ("fleet::views", Core),
             ("floors", Core),
             ("labels", Core),

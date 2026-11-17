@@ -252,6 +252,13 @@ no module.
   what was issued and signed
   ([ADR-0027](adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md))
   — are the core module `fleet::approval`, behind the same `AppState` entry points.
+  The round of an Agent's report — a report processed under the Agent's lock, its record created,
+  taken or settled, the reply and the connection settings it is offered, the persist path, a
+  goodbye and a forget, and the answers a refused report gets — is the core module
+  `fleet::session`, behind the same `AppState` entry points. What is left in the module root of
+  `fleet` is the state, its construction and limits, the lease, the reads of the fleet and the
+  audit helpers every context calls, and the types they share; the test helpers they share are
+  the test-only `fleet::fixtures`.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
