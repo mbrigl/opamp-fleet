@@ -26,6 +26,12 @@ SENSOR="$ROOT/scripts/sensor-implements-adrs.sh"
 # The draft identifiers of the fixtures are built here, so that the documentation check, which
 # holds every draft identifier against docs/adr/, does not read them as references.
 D="draft"
+# The numbers too, so that a normalization, which moves every literal ADR identifier and file
+# name of the tree (scripts/test-normalize-remap.sh), leaves the fixtures as they are.
+# id <n> — the identifier ADR-NNNN of n; file <n> <slug> — the file name NNNN-<slug>.md.
+id() { printf 'ADR-%04d' "$1"; }
+file() { printf '%04d-%s.md' "$1" "$2"; }
+A1="$(id 1)" A2="$(id 2)" A3="$(id 3)" A4="$(id 4)" A5="$(id 5)" A9="$(id 9)"
 NEW="ADR-$D-a-new-rule" OLD="ADR-$D-the-old-rule" LOST="ADR-$D-nobody-wrote-it"
 
 # git_in <dir> <args...> — git in the fixture, with an author.
@@ -42,16 +48,16 @@ adr() {
   printf '# ADR\n\n- **Status:** %s\n- **Date:** 2026-01-01\n' "$3" > "$1/docs/adr/$2"
 }
 
-# repo <name> — a repository whose main holds four ADRs: 0001 accepted, 0002 superseded by 0001,
-# 0003 rejected, 0004 proposed; then a branch feat/x, checked out. Printed as its path.
+# repo <name> — a repository whose main holds four ADRs: 1 accepted, 2 superseded by 1, 3
+# rejected, 4 proposed; then a branch feat/x, checked out. Printed as its path.
 repo() {
   local dir="$work/$1"
   mkdir -p "$dir"
   git -C "${dir:?}" init -q -b main
-  adr "$dir" 0001-one.md "🟢 accepted"
-  adr "$dir" 0002-two.md "⚪ superseded by [ADR-0001](0001-one.md)"
-  adr "$dir" 0003-three.md "🔴 rejected"
-  adr "$dir" 0004-four.md "🟡 proposed"
+  adr "$dir" "$(file 1 one)" "🟢 accepted"
+  adr "$dir" "$(file 2 two)" "⚪ superseded by [$A1]($(file 1 one))"
+  adr "$dir" "$(file 3 three)" "🔴 rejected"
+  adr "$dir" "$(file 4 four)" "🟡 proposed"
   git_in "$dir" add docs
   git_in "$dir" commit -q -m "the ADRs"
   git_in "$dir" switch -q -c feat/x
@@ -80,23 +86,23 @@ expect() {
 # --- cases -----------------------------------------------------------------------------------
 
 r="$(repo in-force)"
-commit "$r" $'feat: one\n\nImplements ADR-0001.'
-commit "$r" $'feat: four\n\n- Implements: ADR-0004, its second rule'
+commit "$r" "feat: one"$'\n\n'"Implements $A1."
+commit "$r" "feat: four"$'\n\n'"- Implements: $A4, its second rule"
 expect 0 "accepted and proposed: counted, none listed" "$r" \
   "2 commit(s) name an ADR they implement; 0 name one not in force."
 
 r="$(repo superseded)"
-commit "$r" $'fix: the old way\n\nImplements ADR-0002'
+commit "$r" "fix: the old way"$'\n\n'"Implements $A2"
 expect 0 "a superseded ADR: listed with its successor" "$r" \
-  "fix: the old way — ADR-0002: superseded by ADR-0001"
+  "fix: the old way — $A2: superseded by $A1"
 
 r="$(repo rejected)"
-commit "$r" $'fix: the rejected way\n\nImplements ADR-0003'
-expect 0 "a rejected ADR: listed" "$r" "— ADR-0003: rejected"
+commit "$r" "fix: the rejected way"$'\n\n'"Implements $A3"
+expect 0 "a rejected ADR: listed" "$r" "— $A3: rejected"
 
 r="$(repo missing)"
-commit "$r" $'fix: a number from elsewhere\n\nImplements ADR-0009'
-expect 0 "a number the head does not have: listed" "$r" "— ADR-0009: no ADR of that number"
+commit "$r" "fix: a number from elsewhere"$'\n\n'"Implements $A9"
+expect 0 "a number the head does not have: listed" "$r" "— $A9: no ADR of that number"
 
 r="$(repo draft)"
 adr "$r" "$D-a-new-rule.md" "🟡 proposed"
@@ -108,18 +114,18 @@ r="$(repo numbered)"
 adr "$r" "$D-a-new-rule.md" "🟡 proposed"
 git_in "$r" add docs
 commit "$r" "feat: the new rule"$'\n\nImplements '"$NEW"
-git_in "$r" mv "docs/adr/$D-a-new-rule.md" docs/adr/0005-a-new-rule.md
-adr "$r" 0005-a-new-rule.md "🟢 accepted"
+git_in "$r" mv "docs/adr/$D-a-new-rule.md" "docs/adr/$(file 5 a-new-rule)"
+adr "$r" "$(file 5 a-new-rule)" "🟢 accepted"
 git_in "$r" add docs
-commit "$r" "docs(adr): number the drafts"$'\n\n'"$NEW → ADR-0005"
+commit "$r" "docs(adr): number the drafts"$'\n\n'"$NEW → $A5"
 expect 0 "a draft numbered to an accepted ADR: in force through the map" "$r" \
   "0 name one not in force."
 
 r="$(repo numbered-superseded)"
 commit "$r" "feat: an old draft"$'\n\nImplements '"$OLD"
-commit "$r" "docs(adr): number the drafts"$'\n\n'"$OLD → ADR-0002"
+commit "$r" "docs(adr): number the drafts"$'\n\n'"$OLD → $A2"
 expect 0 "a draft numbered to a superseded ADR: listed through the map" "$r" \
-  "$OLD: superseded by ADR-0001 (numbered ADR-0002)"
+  "$OLD: superseded by $A1 (numbered $A2)"
 
 r="$(repo no-draft)"
 commit "$r" "feat: a lost draft"$'\n\nImplements '"$LOST"
@@ -128,9 +134,9 @@ expect 0 "a draft with neither file nor number: listed" "$r" \
 
 r="$(repo nothing)"
 commit "$r" $'chore: tidy\n\nImplements: none'
-commit "$r" $'docs: ADR-0002 is cited here, on a line that implements nothing'
+commit "$r" "docs: $A2 is cited here, on a line that implements nothing"
 expect 0 "no Implements line naming an ADR: nothing counted" "$r" \
-  "0 commit(s) name an ADR they implement" "ADR-0002"
+  "0 commit(s) name an ADR they implement" "$A2"
 
 r="$(repo same)"
 expect 0 "base and head the same: says so" "$r" \
