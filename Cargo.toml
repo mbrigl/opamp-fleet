@@ -211,6 +211,15 @@ dialoguer = { version = "0.12", default-features = false, features = ["password"
 # without which the SCM kills the service with error 1053. Compiled on Windows targets only.
 windows-service = "0.8"
 
+# A test that decides where code sits reads the sources as a syntax tree (ADR-0008 clause 16): a
+# development dependency only, which links into no artifact. All three are already in the tree as
+# the dependencies of the derive macros; `syn` without its default features, so no proc-macro
+# bridge is asked for, with `full` for every item and expression, `printing` and `quote` to turn a
+# tree back into tokens, and `visit` and `visit-mut` to walk and to cut one.
+syn = { version = "3", default-features = false, features = ["full", "parsing", "printing", "visit", "visit-mut"] }
+quote = { version = "1", default-features = false }
+proc-macro2 = { version = "1", default-features = false }
+
 # The key derivations of the bootstrap PKCS#12 file (ADR-0027) run 600 000 iterations: unoptimized,
 # a test that seals and opens one file waits seconds. The crates their loops are compiled in are
 # optimized in the dev profile too; nothing else is.
