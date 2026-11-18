@@ -266,10 +266,11 @@ async fn a_host_supervises_and_gateways_at_the_same_time() {
     // The two local ones are untouched by the third arriving — the modes do not interfere.
     assert!(view(&agents, "edge-host").is_some());
     assert!(view(&agents, "local-agent").is_some());
-    assert!(
-        marker.exists(),
-        "the supervised process is still the one running"
-    );
+    // The stub touches its marker on its own time; the Agent in the view does not wait for it.
+    common::wait_until("the supervised process is still the one running", || {
+        marker.exists().then_some(())
+    })
+    .await;
 }
 
 /// The interaction that only exists because both modes share a process: a verified connection
@@ -542,5 +543,9 @@ async fn an_unreadable_store_of_bindings_refuses_downstream_and_the_host_goes_on
         "opamp-fleet-gateway-bindings 99\n",
         "the store is left for the operator"
     );
-    assert!(marker.exists(), "the supervised process runs");
+    // The stub touches its marker on its own time; the Agent in the view does not wait for it.
+    common::wait_until("the supervised process runs", || {
+        marker.exists().then_some(())
+    })
+    .await;
 }
