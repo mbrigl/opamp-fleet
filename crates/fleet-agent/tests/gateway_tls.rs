@@ -175,14 +175,13 @@ async fn spawn_bounded_gateway(
     let config: ClientConfig = toml::from_str(&toml).expect("gateway config");
     let (tx, shutdown) = shutdown_channel();
     tokio::spawn(async move {
-        fleet_agent::gateway::run_on_bounded(
-            Arc::new(config),
-            listener,
-            shutdown,
+        let timings = fleet_agent::gateway::Timings {
             header_read_timeout,
-        )
-        .await
-        .expect("gateway");
+            ..fleet_agent::gateway::Timings::default()
+        };
+        fleet_agent::gateway::run_on_timed(Arc::new(config), listener, shutdown, timings)
+            .await
+            .expect("gateway");
     });
     // Wait for the listener to accept before anyone dials it.
     for _ in 0..100 {

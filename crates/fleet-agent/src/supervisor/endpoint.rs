@@ -34,7 +34,7 @@ pub struct Endpoint {
     /// The message size limit this endpoint enforces in both directions. It speaks the Server
     /// side of the protocol, so the Baseline's limits bind it exactly as they bind the Server.
     max_message_size: usize,
-    /// How long a connection may take to send its request headers.
+    /// How long a connection may take to its first request, and an HTTP/1 request to its headers.
     header_read_timeout: Duration,
     /// What a connection must present as `Authorization: Bearer …` (ADR-0016); empty asks nothing.
     /// Wiped when it is dropped (ADR-0015).

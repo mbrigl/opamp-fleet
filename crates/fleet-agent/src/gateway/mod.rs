@@ -177,6 +177,8 @@ fn not_an_enrolment(report: &AgentToServer, presented: &[u8]) -> Option<&'static
 /// The time bounds a Gateway runs with: the constants, unless a test drives them short.
 #[derive(Debug, Clone, Copy)]
 pub struct Timings {
+    /// How long a downstream connection may take to its first request, and an HTTP/1 request to
+    /// its headers.
     pub header_read_timeout: std::time::Duration,
     pub revocation_refresh: std::time::Duration,
     pub revocation_max_age: std::time::Duration,
@@ -227,25 +229,7 @@ pub async fn run_on(
     listener: std::net::TcpListener,
     shutdown: Shutdown,
 ) -> Result<(), String> {
-    run_on_bounded(config, listener, shutdown, HEADER_READ_TIMEOUT).await
-}
-
-/// [`run_on`] with the header bound tightened — what a test waits out instead of the 30 seconds
-/// every OpAMP listener applies (ADR-0008).
-///
-/// # Errors
-/// As [`run_on`].
-pub async fn run_on_bounded(
-    config: Arc<ClientConfig>,
-    listener: std::net::TcpListener,
-    shutdown: Shutdown,
-    header_read_timeout: std::time::Duration,
-) -> Result<(), String> {
-    let timings = Timings {
-        header_read_timeout,
-        ..Timings::default()
-    };
-    run_on_timed(config, listener, shutdown, timings).await
+    run_on_timed(config, listener, shutdown, Timings::default()).await
 }
 
 /// [`run_on`] with every time bound stated — what a test drives short.
