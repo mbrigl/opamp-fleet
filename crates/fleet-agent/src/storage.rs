@@ -649,7 +649,7 @@ pub(crate) mod handle {
 
     use tracing::warn;
 
-    use fleet_util::nofollow::at::{self, open, DIRECTORY};
+    use fleet_util::nofollow::at::{self, open, Flags, DIRECTORY};
 
     use super::ProcessAccountGroup;
 
@@ -660,23 +660,28 @@ pub(crate) mod handle {
     /// service, as the process account, through a Supervisor's directory (`0710`, ADR-0022
     /// clause 21) to what it purges. On Linux a path-only handle.
     #[cfg(target_os = "linux")]
-    pub(crate) const SEARCH: libc::c_int =
-        libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    pub(crate) const SEARCH: Flags = Flags::O_PATH
+        .or(Flags::O_DIRECTORY)
+        .or(Flags::O_NOFOLLOW)
+        .or(Flags::O_CLOEXEC);
     /// On macOS `O_SEARCH` (`O_EXEC | O_DIRECTORY`), which XNU authorizes as a search of the
     /// directory and not as a read (`vn_authorize_open_existing`). macOS has it from macOS 13 on,
     /// the oldest macOS a Client runs on (ADR-0022 clause 7); an older kernel would open for
     /// reading (`FFLAGS`), and a walk through a directory it may only search would fail there
     /// rather than reach further.
     #[cfg(target_os = "macos")]
-    pub(crate) const SEARCH: libc::c_int = libc::O_SEARCH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    pub(crate) const SEARCH: Flags = Flags::O_SEARCH.or(Flags::O_NOFOLLOW).or(Flags::O_CLOEXEC);
     /// Elsewhere a directory read, as [`DIRECTORY`].
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    pub(crate) const SEARCH: libc::c_int = DIRECTORY;
+    pub(crate) const SEARCH: Flags = DIRECTORY;
 
     /// A regular file, opened to change its owner and mode: never through a link, and never
     /// blocking on a FIFO or taking a terminal.
-    const FILE: libc::c_int =
-        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
+    const FILE: Flags = Flags::O_RDONLY
+        .or(Flags::O_NOFOLLOW)
+        .or(Flags::O_NONBLOCK)
+        .or(Flags::O_NOCTTY)
+        .or(Flags::O_CLOEXEC);
 
     /// What `handle` holds, as the kernel sees it.
     pub(crate) fn fstat(handle: &OwnedFd) -> io::Result<libc::stat> {
@@ -762,7 +767,7 @@ pub(crate) mod handle {
     pub(crate) fn open_beneath(
         root: &Path,
         dir: &Path,
-        flags: libc::c_int,
+        flags: Flags,
         made: Made<'_>,
         trusted: libc::uid_t,
     ) -> io::Result<OwnedFd> {
@@ -800,7 +805,7 @@ pub(crate) mod handle {
         let mut handle = open(
             libc::AT_FDCWD,
             start,
-            (if total == 0 { flags } else { SEARCH }) & !libc::O_NOFOLLOW,
+            (if total == 0 { flags } else { SEARCH }).without(Flags::O_NOFOLLOW),
         )?;
         let mut hops = 0;
         for (at, name) in prefix.iter().enumerate() {
@@ -829,7 +834,7 @@ pub(crate) mod handle {
     fn step_trusting(
         dir: &OwnedFd,
         name: &CStr,
-        flags: libc::c_int,
+        flags: Flags,
         made: Made<'_>,
         trusted: libc::uid_t,
         hops: &mut u32,
@@ -862,7 +867,7 @@ pub(crate) mod handle {
         }
         let target = read_link_at(dir.as_raw_fd(), name)?;
         let mut at = if target.is_absolute() {
-            open(libc::AT_FDCWD, c"/", SEARCH & !libc::O_NOFOLLOW)?
+            open(libc::AT_FDCWD, c"/", SEARCH.without(Flags::O_NOFOLLOW))?
         } else {
             dir.try_clone()?
         };
@@ -876,7 +881,7 @@ pub(crate) mod handle {
             .map(|name| CString::new(name.as_bytes()))
             .collect::<Result<Vec<_>, _>>()?;
         let Some((last, on_the_way)) = names.split_last() else {
-            return open(at.as_raw_fd(), c".", flags & !libc::O_NOFOLLOW);
+            return open(at.as_raw_fd(), c".", flags.without(Flags::O_NOFOLLOW));
         };
         for name in on_the_way {
             at = step_trusting(&at, name, SEARCH, None, trusted, hops)?;
@@ -933,7 +938,7 @@ pub(crate) mod handle {
 
     /// The directory `name` in `dir`, opened with `flags`, as [`open_beneath`] takes each
     /// component; with `made`, created first where it is missing.
-    fn step(dir: &OwnedFd, name: &CStr, flags: libc::c_int, made: Made<'_>) -> io::Result<OwnedFd> {
+    fn step(dir: &OwnedFd, name: &CStr, flags: Flags, made: Made<'_>) -> io::Result<OwnedFd> {
         let error = match open(dir.as_raw_fd(), name, flags) {
             Ok(next) => return Ok(next),
             Err(e) => e,
@@ -944,7 +949,11 @@ pub(crate) mod handle {
         match at::mkdir(dir.as_raw_fd(), name, 0o700) {
             Ok(()) => {
                 // Opened as `flags` says of links: one swapped in since is refused here too.
-                let read = (DIRECTORY & !libc::O_NOFOLLOW) | (flags & libc::O_NOFOLLOW);
+                let read = if flags.contains(Flags::O_NOFOLLOW) {
+                    DIRECTORY
+                } else {
+                    DIRECTORY.without(Flags::O_NOFOLLOW)
+                };
                 made(&open(dir.as_raw_fd(), name, read)?)?;
             }
             Err(e) if e.raw_os_error() != Some(libc::EEXIST) => return Err(e),

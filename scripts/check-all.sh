@@ -242,6 +242,8 @@ run "Implements sensor self-test" scripts/test-sensor-implements-adrs.sh
 run "Implements sensor" scripts/sensor-implements-adrs.sh
 run "Review binding sensor self-test" scripts/test-sensor-review-binding.sh
 run "Review binding sensor" scripts/sensor-review-binding.sh
+run "Changelog sensor self-test" scripts/test-sensor-changelog.sh
+run "Changelog sensor" scripts/sensor-changelog.sh
 run "Action reference self-test" scripts/test-check-action-refs.sh
 run "Action references" scripts/check-action-refs.sh
 run "Build hardening self-test" scripts/test-check-build-hardening.sh

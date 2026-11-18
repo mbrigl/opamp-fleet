@@ -487,37 +487,115 @@ pub mod at {
     use std::io;
     use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 
+    /// The flags of an [`open`], which creates nothing. They are built only from the named flags
+    /// below, none of which creates, so no value of this type carries `O_CREAT` or `O_TMPFILE`:
+    /// [`or`](Self::or) joins the bits of two values and [`without`](Self::without) drops bits.
+    /// A flag that creates is [`create`]'s, which passes the mode `openat` then reads.
+    ///
+    /// Each example below differs from this one, which compiles, in the flags alone:
+    ///
+    /// ```
+    /// use fleet_util::nofollow::at::{self, Flags};
+    /// let _ = at::open(libc::AT_FDCWD, c"new", Flags::O_WRONLY.or(Flags::O_NOFOLLOW));
+    /// ```
+    ///
+    /// Raw flags do not compile, so `O_CREAT` cannot reach [`open`]:
+    ///
+    /// ```compile_fail,E0308
+    /// use fleet_util::nofollow::at::{self, Flags};
+    /// let _ = at::open(libc::AT_FDCWD, c"new", libc::O_WRONLY | libc::O_CREAT);
+    /// ```
+    ///
+    /// Nor does a value built from them, as the field is private:
+    ///
+    /// ```compile_fail,E0423
+    /// use fleet_util::nofollow::at::{self, Flags};
+    /// let _ = at::open(libc::AT_FDCWD, c"new", Flags(libc::O_WRONLY | libc::O_CREAT));
+    /// ```
+    ///
+    /// And no named flag creates:
+    ///
+    /// ```compile_fail,E0599
+    /// use fleet_util::nofollow::at::{self, Flags};
+    /// let _ = at::open(libc::AT_FDCWD, c"new", Flags::O_WRONLY.or(Flags::O_CREAT));
+    /// ```
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Flags(libc::c_int);
+
+    impl Flags {
+        /// Opens for reading.
+        pub const O_RDONLY: Self = Self::named(libc::O_RDONLY);
+        /// Opens for writing.
+        pub const O_WRONLY: Self = Self::named(libc::O_WRONLY);
+        /// Opens a directory or nothing.
+        pub const O_DIRECTORY: Self = Self::named(libc::O_DIRECTORY);
+        /// Opens no link at the last component.
+        pub const O_NOFOLLOW: Self = Self::named(libc::O_NOFOLLOW);
+        /// Closes the descriptor across an `exec`.
+        pub const O_CLOEXEC: Self = Self::named(libc::O_CLOEXEC);
+        /// Never blocks on a FIFO.
+        pub const O_NONBLOCK: Self = Self::named(libc::O_NONBLOCK);
+        /// Never takes a terminal as the controlling one.
+        pub const O_NOCTTY: Self = Self::named(libc::O_NOCTTY);
+        /// Opens a path-only handle.
+        #[cfg(target_os = "linux")]
+        pub const O_PATH: Self = Self::named(libc::O_PATH);
+        /// Opens a directory to search it, not to read it.
+        #[cfg(target_os = "macos")]
+        pub const O_SEARCH: Self = Self::named(libc::O_SEARCH);
+        /// Opens a link itself.
+        #[cfg(target_os = "macos")]
+        pub const O_SYMLINK: Self = Self::named(libc::O_SYMLINK);
+
+        /// The flags of `self` and of `other`.
+        #[must_use]
+        pub const fn or(self, other: Self) -> Self {
+            Self(self.0 | other.0)
+        }
+
+        /// The flags of `self` without those of `other`.
+        #[must_use]
+        pub const fn without(self, other: Self) -> Self {
+            Self(self.0 & !other.0)
+        }
+
+        /// Whether `self` holds every flag of `other`. `O_RDONLY` is no bit, so every value holds
+        /// it.
+        #[must_use]
+        pub const fn contains(self, other: Self) -> bool {
+            self.0 & other.0 == other.0
+        }
+
+        /// The flag `bits`, which must not create: a named flag that does fails to compile, as the
+        /// assertion is evaluated with the constant. `O_TMPFILE` holds `O_DIRECTORY`, which opens
+        /// nothing new, so only its own bit is the one that creates.
+        const fn named(bits: libc::c_int) -> Self {
+            #[cfg(target_os = "linux")]
+            let tmpfile = libc::O_TMPFILE & !libc::O_DIRECTORY;
+            #[cfg(not(target_os = "linux"))]
+            let tmpfile = 0;
+            assert!(bits & (libc::O_CREAT | tmpfile) == 0, "a flag that creates");
+            Self(bits)
+        }
+    }
+
     /// A directory, opened as one and never through a link.
-    pub const DIRECTORY: libc::c_int =
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    pub const DIRECTORY: Flags = Flags::O_RDONLY
+        .or(Flags::O_DIRECTORY)
+        .or(Flags::O_NOFOLLOW)
+        .or(Flags::O_CLOEXEC);
 
     /// `name` in `dir`, opened with `flags`; the last component never follows a link where
-    /// `flags` says `O_NOFOLLOW`. A flag that creates, `O_CREAT` or `O_TMPFILE`, is refused as
-    /// `InvalidInput`: `openat` would read a mode this call does not pass, which [`create`] does.
-    pub fn open(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
-        if creates(flags) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a flag that creates needs a mode: at::create",
-            ));
-        }
-        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; no flag that creates, so
-        // no mode.
-        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
+    /// `flags` says `O_NOFOLLOW`. Nothing is created ([`Flags`]), so `openat` reads no mode.
+    pub fn open(dir: RawFd, name: &CStr, flags: Flags) -> io::Result<OwnedFd> {
+        // SAFETY: a descriptor or `AT_FDCWD` and a NUL-terminated name; `Flags` holds no flag
+        // that creates, so no mode.
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags.0) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: `openat` returned a new descriptor that nothing else owns.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-
-    /// Whether `flags` create a file, so that `openat` reads a mode.
-    fn creates(flags: libc::c_int) -> bool {
-        #[cfg(target_os = "linux")]
-        let tmpfile = flags & libc::O_TMPFILE == libc::O_TMPFILE;
-        #[cfg(not(target_os = "linux"))]
-        let tmpfile = false;
-        flags & libc::O_CREAT != 0 || tmpfile
     }
 
     /// `name` in `dir`, created with `flags`, which name `O_CREAT`, at `mode` before the umask.
@@ -594,7 +672,7 @@ mod sys {
     use std::os::unix::ffi::OsStrExt as _;
     use std::path::Path;
 
-    use super::at::{self, DIRECTORY};
+    use super::at::{self, Flags, DIRECTORY};
     use super::{refused_link, HeldDir};
 
     fn c_name(name: &OsStr) -> io::Result<CString> {
@@ -623,7 +701,7 @@ mod sys {
         let fd = at::open(
             libc::AT_FDCWD,
             &c_name(path.as_os_str())?,
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            Flags::O_RDONLY.or(Flags::O_DIRECTORY).or(Flags::O_CLOEXEC),
         )?;
         Ok(HeldDir {
             path: path.to_path_buf(),
@@ -641,7 +719,7 @@ mod sys {
         let parent_fd = at::open(
             libc::AT_FDCWD,
             &c_name(parent.as_os_str())?,
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            Flags::O_RDONLY.or(Flags::O_DIRECTORY).or(Flags::O_CLOEXEC),
         )?;
         let name = c_name(name)?;
         if create {
@@ -663,20 +741,23 @@ mod sys {
     }
 
     pub(super) fn open_file(held: &HeldDir, name: &str) -> io::Result<File> {
-        open_regular(held, name, libc::O_RDONLY)
+        open_regular(held, name, Flags::O_RDONLY)
     }
 
     pub(super) fn open_for_writing(held: &HeldDir, name: &str) -> io::Result<File> {
-        open_regular(held, name, libc::O_WRONLY)
+        open_regular(held, name, Flags::O_WRONLY)
     }
 
-    fn open_regular(held: &HeldDir, name: &str, access: libc::c_int) -> io::Result<File> {
+    fn open_regular(held: &HeldDir, name: &str, access: Flags) -> io::Result<File> {
         let path = held.path.join(name);
         // `O_NONBLOCK`: a FIFO at the name must not stall a privileged run; a regular file ignores it.
         let fd = at::open(
             held.fd.as_raw_fd(),
             &c_name(OsStr::new(name))?,
-            access | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            access
+                .or(Flags::O_NOFOLLOW)
+                .or(Flags::O_NONBLOCK)
+                .or(Flags::O_CLOEXEC),
         )
         .map_err(|e| named(e, &path))?;
         let file = File::from(fd);
@@ -934,7 +1015,6 @@ mod sys {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::fd::AsRawFd as _;
 
     /// A link at the file's own name is refused for a path the account's file offered, and
     /// followed for the administrator's; a file over the bound is refused, naming the bound.
@@ -960,32 +1040,5 @@ mod tests {
             over.contains("larger than") && over.contains("4 bytes"),
             "{over}"
         );
-    }
-
-    /// `at::open` passes no mode, so it refuses a flag that creates rather than let `openat` read
-    /// one; `at::create` is the call that does.
-    #[test]
-    fn a_flag_that_creates_is_refused_by_the_open_that_passes_no_mode() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let held = at::open(
-            libc::AT_FDCWD,
-            &std::ffi::CString::new(dir.path().as_os_str().as_encoded_bytes()).expect("path"),
-            at::DIRECTORY,
-        )
-        .expect("the directory");
-        let refused = at::open(
-            held.as_raw_fd(),
-            c"new",
-            libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
-        )
-        .expect_err("O_CREAT without a mode");
-        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
-        assert!(!dir.path().join("new").exists());
-        #[cfg(target_os = "linux")]
-        {
-            let refused = at::open(held.as_raw_fd(), c".", libc::O_RDWR | libc::O_TMPFILE)
-                .expect_err("O_TMPFILE without a mode");
-            assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
-        }
     }
 }

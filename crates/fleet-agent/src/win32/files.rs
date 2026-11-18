@@ -26,7 +26,7 @@ use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 
 use super::acl::Dacl;
-use super::Sid;
+use super::{Sid, AS_ITSELF, REPARSE_POINT};
 
 const OWNER_SECURITY_INFORMATION: u32 = 0x1;
 const DACL_SECURITY_INFORMATION: u32 = 0x4;
@@ -38,15 +38,9 @@ const FILE_READ_ATTRIBUTES: u32 = 0x0080;
 /// `FILE_READ_DATA`, `FILE_LIST_DIRECTORY` for a directory.
 const FILE_READ_DATA: u32 = 0x0001;
 const SYNCHRONIZE: u32 = 0x0010_0000;
-/// `FILE_FLAG_BACKUP_SEMANTICS`, which opens a directory — and, where the backup and restore
-/// privileges are enabled ([`super::BackupPrivileges`]), whatever its DACL says — and
-/// `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a link as itself.
-const AS_ITSELF: u32 = 0x0200_0000 | 0x0020_0000;
 const FILE_SHARE_READ: u32 = 0x1;
 const FILE_SHARE_WRITE: u32 = 0x2;
 const FILE_SHARE_DELETE: u32 = 0x4;
-/// `FILE_ATTRIBUTE_REPARSE_POINT`.
-const REPARSE_POINT: u32 = 0x400;
 /// `ERROR_ACCESS_DENIED`.
 const ACCESS_DENIED: i32 = 5;
 /// `ERROR_SHARING_VIOLATION`.

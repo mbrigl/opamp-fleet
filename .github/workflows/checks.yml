@@ -11,7 +11,7 @@ name: Checks
 #
 # The sensors report for the reviewer and fail on nothing they count, except the action
 # references once a project runs that sensor with --require; their self-tests fail like any
-# check's. The sensors job checks out the full history because seven sensors read it. The review
+# check's. The sensors job checks out the full history because eight sensors read it. The review
 # binding sensor runs in review-binding.yml, the repository settings sensor on a human's
 # instruction (ADR-0002); this workflow runs the self-test of each.
 #
@@ -211,6 +211,12 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the review binding sensor
         run: bash scripts/test-sensor-review-binding.sh
+      - name: Self-test the changelog sensor
+        run: bash scripts/test-sensor-changelog.sh
+      - name: Report the commits of the change a deployment sees when it touches no CHANGELOG.md
+        run: bash scripts/sensor-changelog.sh "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       # The repository settings sensor itself runs on a human's instruction (ADR-0002).
       - name: Self-test the repository settings sensor
         run: bash scripts/test-sensor-repo-settings.sh
