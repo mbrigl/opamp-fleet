@@ -2,11 +2,19 @@
 //! ADR-0025 clause 8): the rule for one group, which the fleet in memory and a page read from the
 //! store share, the index of the groups this instance holds members of, how the Client Agents of a
 //! group another instance carries are read, and the placing again after a notice or a catch-up.
-//! Behind the same `AppState` entry points as before.
+//! Its entry points are methods of `AppState`.
 
-use std::sync::MutexGuard;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Mutex, MutexGuard};
 
-use super::*;
+use opamp::proto::AgentDescription;
+use opamp::uid::InstanceUid;
+use tracing::warn;
+
+use crate::agent_store::PersistedAgent;
+use crate::revocation::SpeaksFor;
+
+use super::{parse_hex_uid, AgentRecord, AppState};
 
 /// The Agents one Client presents (ADR-0029 clause 19), as far as the Server can tell them apart.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -476,7 +484,7 @@ impl AppState {
     }
 
     /// The records of the Agents that last arrived over `host`, as stored, through
-    /// [`AgentStore::query_page`] filtered on that Host
+    /// [`AgentStore::query_page`](crate::agent_store::AgentStore::query_page) filtered on that Host
     /// (ADR-0030
     /// clause 9): the Agents behind a Gateway, whichever instance carries them.
     pub(super) fn arrived_over(
@@ -747,6 +755,7 @@ pub(super) fn elsewhere_from(
 mod tests {
     use super::*;
     use crate::fleet::fixtures::*;
+    use std::sync::Arc;
 
     /// The one rule for a group: one Client Agent places every member and the others inherit its
     /// labels; several place nobody and mark every member ambiguous; none places nobody.

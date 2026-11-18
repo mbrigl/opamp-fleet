@@ -26,6 +26,8 @@ set -uo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=lib/git.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/adr.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/adr.sh"
 
 enter_root "Implements sensor" "${BASH_SOURCE[0]}" "$@"
 shift "$ROOT_TAKEN"
@@ -39,7 +41,7 @@ fi
 
 # state <id> — 'in force' for an ADR accepted or proposed at the head, else what it is.
 state() {
-  local id="$1" file status
+  local id="$1" file status line f
   if [[ "$id" == ADR-draft-* ]]; then
     if git cat-file -e "$head:docs/adr/${id#ADR-}.md" 2>/dev/null; then
       echo "in force"
@@ -48,17 +50,25 @@ state() {
     # A numbered draft: the map of the numbering commit, 'ADR-draft-<slug> → ADR-NNNN'.
     local number
     number="$(git log --format=%B -F --grep="$id → ADR-" "$head" \
-      | grep -m 1 -oE "^$id → ADR-[0-9]{4}" | grep -oE 'ADR-[0-9]{4}$')"
+      | grep -m 1 -oE "^$id → ADR-$ADR_NUMBER_RE" | grep -oE "ADR-$ADR_NUMBER_RE\$")"
     [[ -n "$number" ]] || { echo "no draft of that name and no number for it"; return; }
     id="$number"
     local through=" (numbered $number)"
   fi
-  file="$(git ls-tree --name-only "$head" docs/adr/ 2>/dev/null \
-    | grep -m 1 -E "^docs/adr/${id#ADR-}-[^/]*\.md$")"
+  file=""
+  while IFS= read -r f; do
+    adr_is_file "$f" || continue
+    adr_key_of "$f"
+    [[ "$ADR_KEY" == "${id#ADR-}" ]] && { file="$f"; break; }
+  done < <(git ls-tree --name-only "$head" docs/adr/ 2>/dev/null)
   [[ -n "$file" ]] || { echo "no ADR of that number${through:-}"; return; }
   # The status without its emoji and with a link's text alone: 'superseded by ADR-NNNN'.
-  status="$(git show "$head:$file" | sed -n 's/^- \*\*Status:\*\* *//p' | head -n 1 \
-    | sed -E 's/\[([^]]*)\]\([^)]*\)/\1/g; s/^[^A-Za-z]*//')"
+  status=""
+  if line="$(git show "$head:$file" | adr_field_line - Status)"; then
+    adr_field_value "$line" Status
+    status="$(sed -E 's/\[([^]]*)\]\([^)]*\)/\1/g' <<< "$ADR_VALUE")"
+    status="${status#"${status%%[A-Za-z]*}"}"
+  fi
   case "$status" in
     *accepted* | *proposed*) echo "in force" ;;
     "") echo "no status line${through:-}" ;;
@@ -69,7 +79,7 @@ state() {
 findings=() count=0
 while read -r commit; do
   ids="$(git log -1 --format=%B "$commit" | grep -w 'Implements' \
-    | grep -oE 'ADR-([0-9]{4}|draft-[a-z0-9]+(-[a-z0-9]+)*)' | sort -u)"
+    | grep -oE "$ADR_REF_RE" | sort -u)"
   [[ -n "$ids" ]] || continue
   count=$((count + 1))
   while read -r id; do

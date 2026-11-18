@@ -31,8 +31,11 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-# The tests read the workspace's manifests (ADR-0008 clause 16).
+# The tests read the workspace's manifests and, as a syntax tree, its sources (ADR-0008 clause 16).
 toml.workspace = true
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
 # The PKCS#12 reader's test seals a bootstrap file from a key and a certificate it makes.
 rcgen.workspace = true
 # Tests build the `.7z` fixtures they then open; the Client itself only ever decompresses.

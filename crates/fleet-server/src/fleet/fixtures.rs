@@ -1,7 +1,16 @@
 //! The test helpers the contexts of `fleet` share: an Agent put into the fleet, a report, the
 //! view of one Agent, labels, the list read a page at a time, and a clock the test moves.
 
+use std::collections::BTreeSet;
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use opamp::proto::AgentToServer;
+
+use crate::agent_store::{Creation, Pin};
+use crate::configs::Revision;
+use crate::packages::Platform;
+use crate::revocation::Presented;
 
 use super::*;
 

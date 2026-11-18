@@ -1,10 +1,27 @@
 //! Configurations, Deployments and rollouts (ADR-0031, ADR-0032): the catalogue of
 //! Configurations, the Configurations and Packages a Deployment releases, the rollout acts that
 //! assign them to an Agent, what waits for an Agent's next press, the offer of a remote
-//! configuration, labels, and the restart an operator requests. Behind the same `AppState` entry
-//! points as before.
+//! configuration, labels, and the restart an operator requests. Its entry points are methods of
+//! `AppState`.
 
-use super::*;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use opamp::proto::{AgentConfigMap, AgentConfigObject, AgentRemoteConfig, ServerToAgent};
+use opamp::uid::InstanceUid;
+use tracing::{info, warn};
+
+use crate::agent_store::{PersistedAgent, Pin};
+use crate::configs::{ConfigStore, Configuration, DesiredConfig, Removal, Revision};
+use crate::deployments::{self, deployment_for, Deployment, DeploymentError};
+use crate::labels::LabelError;
+use crate::packages::PackageStore;
+
+use super::delivery::PackageOffering;
+use super::views::{DeploymentReach, PendingConfigurationView, PendingPackageView};
+use super::{
+    AgentRecord, AppState, Assignment, ConnId, DeleteError, RestartError, RolloutError,
+    NO_CONFIGURATIONS,
+};
 
 impl AppState {
     /// Reads the Configurations and, where package delivery is armed, the Deployments and the
@@ -922,7 +939,15 @@ fn refuse_unreleasable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_store::AgentStore;
     use crate::fleet::fixtures::*;
+    use crate::fleet::session::Processed;
+    use crate::fleet::views::AgentView;
+    use crate::fleet::Transport;
+    use crate::packages::PackageId;
+    use crate::revocation::{CertId, Presented};
+    use opamp::proto::{AgentDescription, AgentToServer, PackageStatuses, RemoteConfigStatus};
+    use std::sync::Arc;
 
     /// A fleet on `dir` whose Deployments are armed: an empty package store under `packages`, and
     /// the `stable` channel claiming every `otelcol` holding the Configuration `fleet`.
@@ -1183,7 +1208,7 @@ mod tests {
                 }),
                 remote_config_status: (!config_hash.is_empty()).then(|| RemoteConfigStatus {
                     last_remote_config_hash: config_hash.to_vec(),
-                    status: RemoteConfigStatuses::Applied as i32,
+                    status: opamp::proto::RemoteConfigStatuses::Applied as i32,
                     ..Default::default()
                 }),
                 package_statuses: (!packages_hash.is_empty()).then(|| PackageStatuses {

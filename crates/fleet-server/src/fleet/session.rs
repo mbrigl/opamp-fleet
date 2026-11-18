@@ -1,10 +1,33 @@
 //! The round of an Agent's report (ADR-0025, ADR-0029): a report processed under the Agent's
 //! lock, its record created, taken or settled, the reply it is answered with, the connection
 //! settings it is offered, the persist path that writes what changed, a goodbye and a forget, and
-//! the answers every refused report gets. Behind the same `AppState` entry points as before.
+//! the answers every refused report gets. Its entry points are methods of `AppState`.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use opamp::proto::{
+    AgentConfigMap, AgentIdentification, AgentToServer, AgentToServerFlags,
+    ConnectionSettingsOffers, OpAmpConnectionSettings, PackageStatuses, ServerErrorResponse,
+    ServerErrorResponseType, ServerToAgent, ServerToAgentFlags, TlsCertificate,
+};
+use opamp::uid::InstanceUid;
+use prost::Message as _;
+use sha2::{Digest, Sha256};
+use tokio::sync::watch;
+use tracing::{info, warn};
+
+use crate::agent_store::{Creation, PersistedAgent};
+use crate::audit::Entry;
+use crate::revocation::Presented;
+
+use super::held::{Carried, PendingRekey, Settled, Taking, Took, UnsureRekey};
+use super::placement::{Elsewhere, Group, Placement};
 use super::rollout::{offer, restart_command};
-use super::*;
+use super::{
+    is_silent, AgentRecord, AppState, ConnId, ForgetError, TelemetryOffer, Transport,
+    SERVER_CAPABILITIES,
+};
 
 impl AppState {
     /// A fresh identity for one WebSocket connection.
@@ -34,8 +57,9 @@ impl AppState {
     /// `connected` alone would not do. Behind a Gateway the open connection is the *Gateway's*, so
     /// a Gatewayed Agent that died still reads as connected; and plain-HTTP polling has no socket
     /// to close, so an Agent that stops polling without saying goodbye stays connected forever.
-    /// Silence is the second half of the test — and it is [`is_silent`], not [`is_stale`]: an
-    /// Agent that declared no heartbeat is never called stale, and gating on staleness would leave
+    /// Silence is the second half of the test — and it is [`is_silent`], not
+    /// [`is_stale`](super::is_stale): an Agent that declared no heartbeat is never called stale,
+    /// and gating on staleness would leave
     /// its row on a decommissioned host permanently unremovable.
     pub fn forget_agent(&self, uid: &InstanceUid) -> Result<(), ForgetError> {
         let _agent = self.agent_lock(uid);
@@ -1458,7 +1482,17 @@ fn config_map_text(map: Option<&AgentConfigMap>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_store::AgentStore;
+    use crate::configs::ConfigBackend;
+    use crate::deployments::DeploymentError;
     use crate::fleet::fixtures::*;
+    use crate::fleet::views::AgentView;
+    use crate::fleet::{is_stale, Assignment};
+    use crate::revocation::{CertId, Revocations, SpeaksFor};
+    use std::collections::HashSet;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::Duration;
 
     /// ADR-0029. The tidy-up case: a host that was decommissioned, its Agent gone with it.
     #[test]

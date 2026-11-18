@@ -238,10 +238,35 @@ pub fn sanitize(text: &str) -> String {
     text.replace('\0', "\u{fffd}")
 }
 
-/// The derived values of one record.
+/// The display values of one Agent: what its listed record and its view both show of what it
+/// reported, derived here alone, so the list and the view cannot drift apart. Unsanitized; the
+/// derived values sanitize what they keep.
+pub struct DisplayValues {
+    /// The identifying attributes as the API shows them.
+    pub identifying: BTreeMap<String, String>,
+    /// The non-identifying attributes as the API shows them.
+    pub non_identifying: BTreeMap<String, String>,
+    pub service_name: String,
+    pub instance_name: String,
+    /// The `service.version` the Agent reported.
+    pub build: String,
+    /// The version a reader is shown (ADR-0037).
+    pub version: String,
+    /// `os.description`, or `os.type` where no description is reported.
+    pub os: String,
+    /// The Platform the offer reads (ADR-0033 clause 14), empty where none is reported.
+    pub platform: String,
+    /// The name of the remote configuration status, `UNSET` where none is reported.
+    pub config: &'static str,
+}
+
+/// The display values of an Agent that reported `description` and `status`.
 #[must_use]
-pub fn derive(source: &Source<'_>) -> Derived {
-    let (identifying, non_identifying) = match source.description {
+pub fn display_values(
+    description: Option<&AgentDescription>,
+    status: Option<&RemoteConfigStatus>,
+) -> DisplayValues {
+    let (identifying, non_identifying) = match description {
         Some(d) => (
             crate::fleet::attr_map(&d.identifying_attributes),
             crate::fleet::attr_map(&d.non_identifying_attributes),
@@ -251,8 +276,45 @@ pub fn derive(source: &Source<'_>) -> Derived {
     let lookup = |map: &BTreeMap<String, String>, key: &str| -> String {
         map.get(key).cloned().unwrap_or_default()
     };
-    let service_name = lookup(&identifying, attributes::SERVICE_NAME);
-    let instance_name = lookup(&non_identifying, attributes::SERVICE_INSTANCE_NAME);
+    let build = lookup(&identifying, attributes::SERVICE_VERSION);
+    let os = match lookup(&non_identifying, attributes::OS_DESCRIPTION) {
+        description if !description.is_empty() => description,
+        _ => lookup(&non_identifying, attributes::OS_TYPE),
+    };
+    DisplayValues {
+        service_name: lookup(&identifying, attributes::SERVICE_NAME),
+        instance_name: lookup(&non_identifying, attributes::SERVICE_INSTANCE_NAME),
+        version: crate::fleet::display_version(&build),
+        build,
+        os,
+        platform: crate::packages::Platform::reported(description)
+            .map(|platform| platform.tag())
+            .unwrap_or_default(),
+        config: match status.map(|s| s.status) {
+            Some(s) if s == RemoteConfigStatuses::Applied as i32 => "APPLIED",
+            Some(s) if s == RemoteConfigStatuses::Applying as i32 => "APPLYING",
+            Some(s) if s == RemoteConfigStatuses::Failed as i32 => "FAILED",
+            _ => "UNSET",
+        },
+        identifying,
+        non_identifying,
+    }
+}
+
+/// The derived values of one record.
+#[must_use]
+pub fn derive(source: &Source<'_>) -> Derived {
+    let DisplayValues {
+        identifying,
+        non_identifying,
+        service_name,
+        instance_name,
+        build,
+        version,
+        os,
+        platform,
+        config,
+    } = display_values(source.description, source.remote_config_status);
     let uid = source.uid.to_string();
     let name = if !instance_name.is_empty() {
         instance_name.clone()
@@ -261,23 +323,7 @@ pub fn derive(source: &Source<'_>) -> Derived {
     } else {
         uid.clone()
     };
-    let build = lookup(&identifying, attributes::SERVICE_VERSION);
-    let version = crate::fleet::display_version(&build);
-    let os = match lookup(&non_identifying, attributes::OS_DESCRIPTION) {
-        description if !description.is_empty() => description,
-        _ => lookup(&non_identifying, attributes::OS_TYPE),
-    };
-    // The Platform the offer reads (ADR-0033 clause 14): what an upload is keyed by.
-    let platform = crate::packages::Platform::reported(source.description)
-        .map(|platform| platform.tag())
-        .unwrap_or_default();
-    let config = match source.remote_config_status.map(|s| s.status) {
-        Some(s) if s == RemoteConfigStatuses::Applied as i32 => "APPLIED",
-        Some(s) if s == RemoteConfigStatuses::Applying as i32 => "APPLYING",
-        Some(s) if s == RemoteConfigStatuses::Failed as i32 => "FAILED",
-        _ => "UNSET",
-    }
-    .to_string();
+    let config = config.to_string();
     let healthy = source.health.is_some_and(|h| h.healthy);
     let health_status = source.health.map(|h| h.status.clone()).unwrap_or_default();
     let health_error = source

@@ -1,10 +1,22 @@
 //! The views of the fleet: the Agents each Host carries (ADR-0029 clause 24), the views of an
 //! Agent and of the whole fleet, the list of Agents a page at a time (ADR-0030 clauses 3 to 8), and
-//! the version a reader of the fleet table is shown (ADR-0037). Behind the same `AppState` entry
-//! points as before.
+//! the version a reader of the fleet table is shown (ADR-0037). Its entry points are methods of
+//! `AppState`.
 
+use std::collections::{BTreeMap, HashMap};
+
+use opamp::attributes;
+use opamp::proto::{any_value, KeyValue};
+use opamp::uid::InstanceUid;
+use serde::Serialize;
+
+use crate::configs::DesiredConfig;
+use crate::deployments::{deployment_for, Deployment, DeploymentStore};
+use crate::packages::PackageId;
+
+use super::placement::{Group, Placement};
 use super::rollout::{waiting, Waiting};
-use super::*;
+use super::{is_stale, AgentRecord, AppState};
 
 impl AppState {
     /// The Agents each Host carries (ADR-0029 clause 24) — those whose record names it as the Host
@@ -114,8 +126,10 @@ impl AppState {
     /// One page of the list of Agents
     /// (ADR-0030
     /// clauses 3 to 6 and 8): on a store this Server alone writes, cut from what it holds; on a
-    /// shared store read through [`AgentStore::query_page`], each Agent placed under the Client
-    /// Agent the store found for it and with the values of the Host it arrived over.
+    /// shared store read through
+    /// [`AgentStore::query_page`](crate::agent_store::AgentStore::query_page), each Agent placed
+    /// under the Client Agent the store found for it and with the values of the Host it arrived
+    /// over.
     ///
     /// # Errors
     /// Returns an error when the shared store cannot be read.
@@ -717,23 +731,11 @@ impl AgentView {
         waits: Waiting,
         stale: bool,
     ) -> Self {
-        let (identifying, non_identifying) = match &record.description {
-            Some(d) => (
-                attr_map(&d.identifying_attributes),
-                attr_map(&d.non_identifying_attributes),
-            ),
-            None => (BTreeMap::new(), BTreeMap::new()),
-        };
-        let lookup = |map: &BTreeMap<String, String>, key: &str| -> String {
-            map.get(key).cloned().unwrap_or_default()
-        };
+        let shown = crate::listing::display_values(
+            record.description.as_ref(),
+            record.remote_config_status.as_ref(),
+        );
         let status = record.remote_config_status.as_ref();
-        let status_name = match status.map(|s| s.status) {
-            Some(s) if s == RemoteConfigStatuses::Applied as i32 => "APPLIED",
-            Some(s) if s == RemoteConfigStatuses::Applying as i32 => "APPLYING",
-            Some(s) if s == RemoteConfigStatuses::Failed as i32 => "FAILED",
-            _ => "UNSET",
-        };
         // In sync means: runs exactly the composed set — trivially true when nothing matches,
         // since an unmatched Agent is deliberately left alone (goal 9).
         let in_sync = match desired {
@@ -742,23 +744,17 @@ impl AgentView {
                 status.map(|s| s.last_remote_config_hash.as_slice()) == Some(d.hash.as_slice())
             }
         };
-        // What the Agent said, and what a reader of a table wants out of it (ADR-0037).
-        let service_build = lookup(&identifying, attributes::SERVICE_VERSION);
         AgentView {
             instance_uid: uid.to_string(),
-            service_name: lookup(&identifying, attributes::SERVICE_NAME),
-            service_instance_name: lookup(&non_identifying, attributes::SERVICE_INSTANCE_NAME),
-            service_version: display_version(&service_build),
-            service_build,
-            os: match lookup(&non_identifying, attributes::OS_DESCRIPTION) {
-                description if !description.is_empty() => description,
-                _ => lookup(&non_identifying, attributes::OS_TYPE),
-            },
-            platform: Platform::reported(record.description.as_ref())
-                .map(|p| p.tag())
-                .unwrap_or_default(),
-            identifying_attributes: identifying,
-            non_identifying_attributes: non_identifying,
+            service_name: shown.service_name,
+            service_instance_name: shown.instance_name,
+            // What the Agent said, and what a reader of a table wants out of it (ADR-0037).
+            service_version: shown.version,
+            service_build: shown.build,
+            os: shown.os,
+            platform: shown.platform,
+            identifying_attributes: shown.identifying,
+            non_identifying_attributes: shown.non_identifying,
             matched_configurations,
             assigned_configurations: record.assigned_configurations().keys().cloned().collect(),
             deployment: claiming_deployment,
@@ -818,7 +814,7 @@ impl AgentView {
                 .map(|h| h.last_error.clone())
                 .unwrap_or_default(),
             effective_config: record.effective_config.clone().unwrap_or_default(),
-            remote_config_status: status_name.to_string(),
+            remote_config_status: shown.config.to_string(),
             remote_config_error: status.map(|s| s.error_message.clone()).unwrap_or_default(),
             in_sync,
             sequence_num: record.sequence_num,
@@ -855,6 +851,11 @@ impl AgentView {
 mod tests {
     use super::*;
     use crate::fleet::fixtures::*;
+    use crate::revocation::Revocations;
+    use opamp::proto::{AgentDescription, RemoteConfigStatus};
+    use prost::Message as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     /// The view of an array-valued attribute — the shape `host.ip` and `host.mac` arrive in
     /// (ADR-0018): joined for reading, not dumped in debug form.
@@ -1417,6 +1418,85 @@ mod tests {
         assert_eq!(view(&state, &raw).platform, "linux-amd64");
         assert_eq!(view(&state, &identifying).platform, "darwin-arm64");
         assert_eq!(view(&state, &silent).platform, "");
+    }
+
+    /// What an Agent's listed record is sorted, filtered and searched by and what its view shows
+    /// are one derivation: the service name, the instance name, the version, the OS (its
+    /// description, else its type), the platform and the configuration status agree (ADR-0030,
+    /// ADR-0037).
+    /// Verifies: ADR-0030, ADR-0037
+    #[test]
+    fn an_agents_listed_record_and_its_view_show_the_same_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let pairs = |pairs: &[(&str, &str)]| -> Vec<KeyValue> {
+            pairs
+                .iter()
+                .map(|(key, value)| opamp::attributes::string_attr(key, value))
+                .collect()
+        };
+        let described = |identifying: &[(&str, &str)], non_identifying: &[(&str, &str)]| {
+            Some(AgentDescription {
+                identifying_attributes: pairs(identifying),
+                non_identifying_attributes: pairs(non_identifying),
+            })
+        };
+        let status = |status: opamp::proto::RemoteConfigStatuses| {
+            Some(RemoteConfigStatus {
+                status: status as i32,
+                ..Default::default()
+            })
+        };
+        let mut described_os = record_with(0);
+        described_os.description = described(
+            &[
+                ("service.name", "otelcol"),
+                ("service.version", "1.2.3-rc.1+abc123"),
+            ],
+            &[
+                ("service.instance.name", "edge-1"),
+                ("os.description", "Debian 12"),
+                ("os.type", "linux"),
+                ("host.arch", "x86_64"),
+            ],
+        );
+        described_os.remote_config_status = status(opamp::proto::RemoteConfigStatuses::Failed);
+        let mut typed_os = record_with(0);
+        typed_os.description = described(
+            &[
+                ("service.name", "telegraf"),
+                ("service.version", "0.9.0"),
+                ("host.arch", "aarch64"),
+            ],
+            &[("service.instance.name", "edge-2"), ("os.type", "windows")],
+        );
+        typed_os.remote_config_status = status(opamp::proto::RemoteConfigStatuses::Applied);
+        let (first, second) = (InstanceUid([0xd1; 16]), InstanceUid([0xd2; 16]));
+        for (uid, record) in [(first, described_os), (second, typed_os)] {
+            state.fleet.lock().expect("fleet lock").insert(uid, record);
+        }
+        for uid in [first, second] {
+            let derived = {
+                let fleet = state.fleet.lock().expect("fleet lock");
+                crate::listing::derive(&fleet[&uid].source(&uid))
+            };
+            let shown = view(&state, &uid);
+            let searched: Vec<&str> = derived.search.lines().collect();
+            assert!(!shown.service_instance_name.is_empty() && !shown.platform.is_empty());
+            assert_eq!(derived.service_name, shown.service_name);
+            assert_eq!(derived.name, shown.service_instance_name);
+            assert!(searched.contains(&shown.service_instance_name.to_lowercase().as_str()));
+            assert_eq!(derived.version, shown.service_version);
+            assert_eq!(derived.os, shown.os);
+            assert!(searched.contains(&shown.platform.as_str()));
+            assert_eq!(derived.config, shown.remote_config_status);
+        }
+        assert_eq!(view(&state, &first).os, "Debian 12");
+        assert_eq!(view(&state, &first).service_version, "1.2.3-rc.1");
+        assert_eq!(view(&state, &first).remote_config_status, "FAILED");
+        assert_eq!(view(&state, &second).os, "windows");
+        assert_eq!(view(&state, &second).platform, "windows-arm64");
+        assert_eq!(view(&state, &second).remote_config_status, "APPLIED");
     }
 
     /// On PostgreSQL an Agent's view and a rollout to it read the Agent and the Agents bound to its

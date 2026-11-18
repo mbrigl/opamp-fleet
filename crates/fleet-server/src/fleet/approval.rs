@@ -2,10 +2,22 @@
 //! enrolment and its take-back, the answer an enrolling Agent is given, the issuing and renewal of
 //! a host certificate on the connection the request arrived over, the records of what was issued
 //! and signed, each written with its decision, and the mark of a host as a Gateway (ADR-0027
-//! clause 11). Behind the same `AppState` entry points as before.
+//! clause 11). Its entry points are methods of `AppState`.
 
-use super::session::{compose_settings_offer, Ending};
-use super::*;
+use opamp::proto::{OpAmpConnectionSettings, ServerCapabilities, ServerToAgent, TlsCertificate};
+use opamp::uid::InstanceUid;
+use tracing::{info, warn};
+
+use crate::agent_store::PersistedAgent;
+use crate::audit::Entry;
+use crate::enrolment::{DecisionError, Recorder, Registrar};
+use crate::revocation::{CertId, Facts, Presented, Signed, SubjectValues};
+
+use super::session::{
+    bad_request, compose_settings_offer, unavailable, Ending, Processed, MEMBER_DOES_NOT_ENROL,
+    NEEDS_A_PROOF,
+};
+use super::{AppState, CertificateSigner, TelemetryOffer, UseCase};
 
 impl AppState {
     /// Records a certificate the client CA signed on a renewal, before it is offered (ADR-0023
@@ -415,7 +427,11 @@ impl Recorder for Approving<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::enrolment::Enrolment;
     use crate::fleet::fixtures::*;
+    use crate::fleet::Clock;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     // ---- An approval records its certificate with its decision (ADR-0023 clause 9) ----
 

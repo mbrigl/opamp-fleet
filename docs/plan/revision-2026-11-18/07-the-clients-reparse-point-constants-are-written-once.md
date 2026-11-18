@@ -9,7 +9,7 @@ The Windows constants for opening an entry as itself are declared three times in
   `REPARSE_POINT`;
 - `crates/fleet-agent/src/supervisor/channel/windows.rs`, near lines 469 to 475:
   `OPEN_AS_ITSELF`, `REPARSE_POINT`;
-- `crates/fleet-agent/src/service/run_as.rs`, near lines 1822 and 1959: `0x0200_0000`
+- `crates/fleet-agent/src/service/run_as.rs`, near lines 1796 and 1933: `0x0200_0000`
   (`FILE_FLAG_BACKUP_SEMANTICS`) as a bare literal.
 
 The overview names `win32` as the place where the Client declares the Windows system calls

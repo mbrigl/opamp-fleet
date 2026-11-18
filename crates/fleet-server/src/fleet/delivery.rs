@@ -1,9 +1,20 @@
 //! Packages in the fleet (ADR-0033, ADR-0034): the Package Sets, their entries and signatures the
 //! Operator plane writes, the upload limit of the store, the offer of a Package to an Agent and of
-//! an artifact to a Host, and the Packages a Deployment holds. Behind the same `AppState` entry
-//! points as before.
+//! an artifact to a Host, and the Packages a Deployment holds. Its entry points are methods of
+//! `AppState`.
 
-use super::*;
+use std::sync::atomic::Ordering;
+
+use opamp::proto::PackagesAvailable;
+use opamp::uid::InstanceUid;
+use tracing::{info, warn};
+
+use crate::agent_store::Pin;
+use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
+use crate::packages::{PackageError, PackageId, PackageStore, Platform, Refusal, SignatureState};
+use crate::revocation::SpeaksFor;
+
+use super::{parse_hex_uid, AgentRecord, AppState};
 
 impl AppState {
     /// The total bytes of stored package artifacts right now, or `0` when package delivery is not
@@ -145,8 +156,8 @@ impl AppState {
     /// rolled out to keeps its offer, because nothing distributes or un-distributes by itself
     /// (ADR-0032). Creating an overlapping channel must not withdraw anything from a running host.
     ///
-    /// `claim` is what [`deployment_for`] answered for this Agent — `Ok(None)` when package
-    /// delivery, which arms the Deployments, is not configured.
+    /// `claim` is what [`deployment_for`](crate::deployments::deployment_for) answered for this
+    /// Agent — `Ok(None)` when package delivery, which arms the Deployments, is not configured.
     pub(super) fn package_conflict(claim: &Result<Option<&Deployment>, String>) -> Option<String> {
         claim.as_ref().err().cloned()
     }
@@ -471,6 +482,12 @@ fn accepts_packages(record: &AgentRecord) -> bool {
 mod tests {
     use super::*;
     use crate::fleet::fixtures::*;
+    use crate::fleet::session::Processed;
+    use crate::fleet::Transport;
+    use crate::revocation::{CertId, Presented};
+    use opamp::proto::{AgentDescription, AgentToServer, PackageStatuses};
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     /// Without package delivery every write of the Package routes is a `404`, the signature's
     /// included: what each route's contract names, whatever the text.

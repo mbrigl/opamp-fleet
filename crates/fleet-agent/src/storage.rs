@@ -997,6 +997,34 @@ pub(crate) mod handle {
         at::fchmod(handle, mode)
     }
 
+    /// Gives what `handle` holds to the owner `uid` and the group `gid`, a link as a link: the
+    /// re-own walk of the hand-over (ADR-0022 clause 1). On Linux the handle may be path-only,
+    /// which `fchown` refuses; an empty name with `AT_EMPTY_PATH` changes the handle's own entry.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn chown(handle: &OwnedFd, uid: u32, gid: u32) -> io::Result<()> {
+        // SAFETY: a valid descriptor and a NUL-terminated (empty) name.
+        let rc = unsafe {
+            libc::fchownat(
+                handle.as_raw_fd(),
+                c"".as_ptr(),
+                uid,
+                gid,
+                libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Gives what `handle` holds to the owner `uid` and the group `gid`; a handle opened with
+    /// `O_SYMLINK` holds the link itself.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn chown(handle: &OwnedFd, uid: u32, gid: u32) -> io::Result<()> {
+        std::os::unix::fs::fchown(handle, Some(uid), Some(gid))
+    }
+
     /// The names in `dir`, read from the handle, without `.` and `..`.
     pub(crate) fn entries(dir: &OwnedFd) -> io::Result<Vec<CString>> {
         // `fdopendir` takes the descriptor it is given; it gets a duplicate, and `dir` stays ours.

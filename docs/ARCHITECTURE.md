@@ -119,9 +119,9 @@ Six crates in one workspace
   reader of a password file (`password`), and a bootstrap identity as PEM (`identity`), opened
   from a PKCS#12 file by the adapter `identity::pkcs12`. The Unix `*at` system calls of
   `nofollow` are wrapped once in `nofollow::at`, which the Client's work by directory handle
-  calls too. The calls only the Client makes stay in its `storage::handle`, but for the
-  `fchownat` of the re-own walk in `service::run_as`. A test decides from who names a module
-  whether it belongs here or in `fleet-core`.
+  calls too. The calls only the Client makes stay in its `storage::handle`, and a test decides
+  that each of the Client's `*at` calls is in one of the two. A test decides from who names a
+  module whether it belongs here or in `fleet-core`.
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the
   effective description Selectors match (`labels`), packages and Deployments, the Agent plane, and
   the Operator plane, whose credential check is `credentials`.
@@ -265,7 +265,9 @@ no module.
   state, its construction and limits, the lease, the reads of the fleet, the audit helpers, the
   capabilities the Server declares, the staleness rule, and the types the contexts share, with the
   tests of staleness, of the host a register derives, and of label inheritance. The test helpers
-  the contexts share are the test-only `fleet::fixtures`.
+  the contexts share are the test-only `fleet::fixtures`. Each context imports by name what it
+  takes from the root, from its siblings and from the crate; `clippy::wildcard_imports`, denied in
+  `fleet`, refuses a glob import in its production code.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
