@@ -1793,7 +1793,7 @@ mod tests {
             std::fs::OpenOptions::new()
                 .access_mode(0x0001_0000 | 0x0080)
                 .share_mode(0x7)
-                .custom_flags(0x0200_0000)
+                .custom_flags(crate::win32::BACKUP_SEMANTICS)
                 .open(path)
                 .expect("held for deleting")
         };
@@ -1930,7 +1930,7 @@ mod tests {
             std::fs::OpenOptions::new()
                 .access_mode(0x0001_0000 | 0x0080)
                 .share_mode(0x7)
-                .custom_flags(0x0200_0000)
+                .custom_flags(crate::win32::BACKUP_SEMANTICS)
                 .open(&held)
                 .expect("held for deleting")
         };

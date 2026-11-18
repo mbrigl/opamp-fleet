@@ -464,15 +464,8 @@ async fn sweep(thread: String) {
     }
 }
 
-/// `FILE_FLAG_BACKUP_SEMANTICS`, which opens a directory, and `FILE_FLAG_OPEN_REPARSE_POINT`, which
-/// opens a link as itself.
-const OPEN_AS_ITSELF: u32 = 0x0200_0000 | 0x0020_0000;
-
 /// `READ_CONTROL`: enough to read the owner.
 const READ_CONTROL: u32 = 0x0002_0000;
-
-/// `FILE_ATTRIBUTE_REPARSE_POINT`: a symbolic link or a junction.
-const REPARSE_POINT: u32 = 0x400;
 
 /// Removes what the process account wrote under `dir`, the tombstone of the Supervisor named
 /// `supervisor` (ADR-0022 clause 20), as [`super::purge`] does on Unix: every entry this service's
@@ -575,14 +568,14 @@ fn plain_beneath(dir: &Path, relative: &Path) -> Result<Option<PathBuf>, String>
 
 /// A directory, and not a link or junction to one.
 fn is_directory(meta: &std::fs::Metadata) -> bool {
-    meta.is_dir() && meta.file_attributes() & REPARSE_POINT == 0
+    meta.is_dir() && meta.file_attributes() & win32::REPARSE_POINT == 0
 }
 
 /// The owner of `path`, opened as itself.
 fn owner(path: &Path) -> io::Result<Sid> {
     let file = std::fs::OpenOptions::new()
         .access_mode(READ_CONTROL)
-        .custom_flags(OPEN_AS_ITSELF)
+        .custom_flags(win32::AS_ITSELF)
         .open(path)?;
     win32::file_owner(file.as_raw_handle())
 }

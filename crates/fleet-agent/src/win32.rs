@@ -193,6 +193,25 @@ pub fn thread_sddl(own: &Sid) -> String {
     )
 }
 
+/// `FILE_FLAG_BACKUP_SEMANTICS`, which opens a directory — and, where the backup and restore
+/// privileges are enabled ([`BackupPrivileges`]), whatever its DACL says (CreateFileW).
+#[cfg(windows)]
+pub(crate) const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT`, which opens a symbolic link or a junction as itself, not what it
+/// names (CreateFileW).
+#[cfg(windows)]
+pub(crate) const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// [`BACKUP_SEMANTICS`] and [`OPEN_REPARSE_POINT`]: an entry, a directory among them, opened as
+/// itself.
+#[cfg(windows)]
+pub(crate) const AS_ITSELF: u32 = BACKUP_SEMANTICS | OPEN_REPARSE_POINT;
+
+/// `FILE_ATTRIBUTE_REPARSE_POINT`: a symbolic link or a junction.
+#[cfg(windows)]
+pub(crate) const REPARSE_POINT: u32 = 0x400;
+
 pub mod acl;
 #[cfg(windows)]
 pub mod files;
