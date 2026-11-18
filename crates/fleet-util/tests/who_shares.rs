@@ -477,8 +477,14 @@ impl Workspace {
                 let text = fs::read_to_string(&file).expect("read a source file");
                 let code =
                     shipped(&text).unwrap_or_else(|e| panic!("parse {}: {e}", file.display()));
+                // Named with `/` on every host, so a message reads alike on Windows.
                 let name = file.strip_prefix(&self.root).unwrap_or(&file);
-                (name.display().to_string(), code)
+                let name = name
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                (name, code)
             })
             .collect()
     }
