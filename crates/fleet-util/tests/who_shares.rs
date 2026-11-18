@@ -157,25 +157,71 @@ fn foreign_item_attrs(item: &ForeignItem) -> &[Attribute] {
     }
 }
 
-/// The outer attributes of an expression; only the forms a statement starts with carry one here.
+/// The outer attributes of an expression, of every kind `syn` names; `Verbatim`, tokens it could
+/// not parse, carries none.
 fn expr_attrs(expr: &Expr) -> &[Attribute] {
     match expr {
+        Expr::Array(e) => &e.attrs,
         Expr::Assign(e) => &e.attrs,
         Expr::Async(e) => &e.attrs,
+        Expr::Await(e) => &e.attrs,
+        Expr::Binary(e) => &e.attrs,
         Expr::Block(e) => &e.attrs,
+        Expr::Break(e) => &e.attrs,
         Expr::Call(e) => &e.attrs,
+        Expr::Cast(e) => &e.attrs,
+        Expr::Closure(e) => &e.attrs,
+        Expr::Const(e) => &e.attrs,
+        Expr::Continue(e) => &e.attrs,
+        Expr::Field(e) => &e.attrs,
         Expr::ForLoop(e) => &e.attrs,
+        Expr::Group(e) => &e.attrs,
         Expr::If(e) => &e.attrs,
+        Expr::Index(e) => &e.attrs,
+        Expr::Infer(e) => &e.attrs,
+        Expr::Let(e) => &e.attrs,
+        Expr::Lit(e) => &e.attrs,
         Expr::Loop(e) => &e.attrs,
         Expr::Macro(e) => &e.attrs,
         Expr::Match(e) => &e.attrs,
         Expr::MethodCall(e) => &e.attrs,
+        Expr::Paren(e) => &e.attrs,
         Expr::Path(e) => &e.attrs,
+        Expr::Range(e) => &e.attrs,
+        Expr::RawAddr(e) => &e.attrs,
+        Expr::Reference(e) => &e.attrs,
+        Expr::Repeat(e) => &e.attrs,
         Expr::Return(e) => &e.attrs,
         Expr::Struct(e) => &e.attrs,
         Expr::Try(e) => &e.attrs,
+        Expr::TryBlock(e) => &e.attrs,
+        Expr::Tuple(e) => &e.attrs,
+        Expr::Unary(e) => &e.attrs,
         Expr::Unsafe(e) => &e.attrs,
         Expr::While(e) => &e.attrs,
+        Expr::Yield(e) => &e.attrs,
+        _ => &[],
+    }
+}
+
+/// The outer attributes a statement's expression starts with: `syn` gives `#[a] *n += 1` the
+/// attribute on its leftmost operand, `*n`.
+fn leading_attrs(expr: &Expr) -> &[Attribute] {
+    let own = expr_attrs(expr);
+    if !own.is_empty() {
+        return own;
+    }
+    match expr {
+        Expr::Assign(e) => leading_attrs(&e.left),
+        Expr::Await(e) => leading_attrs(&e.base),
+        Expr::Binary(e) => leading_attrs(&e.left),
+        Expr::Call(e) => leading_attrs(&e.func),
+        Expr::Cast(e) => leading_attrs(&e.expr),
+        Expr::Field(e) => leading_attrs(&e.base),
+        Expr::Index(e) => leading_attrs(&e.expr),
+        Expr::MethodCall(e) => leading_attrs(&e.receiver),
+        Expr::Range(e) => e.start.as_deref().map_or(&[], leading_attrs),
+        Expr::Try(e) => leading_attrs(&e.expr),
         _ => &[],
     }
 }
@@ -184,7 +230,7 @@ fn stmt_attrs(stmt: &Stmt) -> &[Attribute] {
     match stmt {
         Stmt::Local(local) => &local.attrs,
         Stmt::Item(item) => item_attrs(item),
-        Stmt::Expr(expr, _) => expr_attrs(expr),
+        Stmt::Expr(expr, _) => leading_attrs(expr),
         Stmt::Macro(mac) => &mac.attrs,
     }
 }
@@ -820,6 +866,7 @@ fn comments_literals_and_test_code_are_not_read() {
         names(concat!(
             "fn f() -> S {\n",
             "    #[cfg(test)]\n    fleet_util::tree::x();\n",
+            "    #[cfg(test)]\n    *n += fleet_util::identity::x();\n",
             "    S { #[cfg(test)] t: fleet_util::password::x(), a: fleet_util::archive::x() }\n",
             "}\n",
             "impl S {\n    #[cfg(test)]\n    fn t() { fleet_util::nofollow::x(); }\n}",
