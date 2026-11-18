@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
-- **Applies to:** the `[connection_offer]` section of `server.toml` and its startup check in `crates/fleet-server/src/config.rs`, the offer composition and capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling and its verification of an offered endpoint in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb` and how it is loaded, every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs`, and every document that tells an operator where an offer may move a fleet
+- **Applies to:** the `[connection_offer]` section of `server.toml` and its startup check in `crates/fleet-server/src/config.rs`, the offer composition in `crates/fleet-server/src/fleet/session.rs` and the capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling and its verification of an offered endpoint in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb` and how it is loaded, every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs`, and every document that tells an operator where an offer may move a fleet
 
 ## Context
 

@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-12
 - **Deciders:** Markus Brigl
-- **Applies to:** the in-memory fleet and its push in `crates/fleet-server/src/fleet.rs`, the sessions and their guard in `crates/fleet-server/src/transport.rs`, the ports, the PostgreSQL adapters and the change signals of the enrolment window and its queue in `crates/fleet-server/src/enrolment.rs` and of the certificate register, the revocation list and the Hosts in `crates/fleet-server/src/revocation.rs`, the per-instance tables of `crates/fleet-server/src/agent_rate.rs` and `crates/fleet-server/src/throttle.rs`, the package floors in `crates/fleet-server/src/floors.rs` and `crates/fleet-server/src/postgres/floors.rs`, the PostgreSQL adapters of Configurations, Deployments and Packages in `crates/fleet-server/src/postgres/`, the PostgreSQL adapters and their schema, the presence batches in `crates/fleet-server/src/instance.rs`, the WebSocket driver in `crates/opamp/src/client/ws.rs`, the audit port in `crates/fleet-server/src/audit.rs` and its PostgreSQL adapter where an instance closes the chain of a lapsed lease, the `[database]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, `docs/ARCHITECTURE.md`, and the operator manual's pages on replication, load balancing and rolling updates
+- **Applies to:** the in-memory fleet and its push in `crates/fleet-server/src/fleet.rs`, what one instance holds of it in `crates/fleet-server/src/fleet/held.rs`, the sessions and their guard in `crates/fleet-server/src/transport.rs`, the ports, the PostgreSQL adapters and the change signals of the enrolment window and its queue in `crates/fleet-server/src/enrolment.rs` and of the certificate register, the revocation list and the Hosts in `crates/fleet-server/src/revocation.rs`, the per-instance tables of `crates/fleet-server/src/agent_rate.rs` and `crates/fleet-server/src/throttle.rs`, the package floors in `crates/fleet-server/src/floors.rs` and `crates/fleet-server/src/postgres/floors.rs`, the PostgreSQL adapters of Configurations, Deployments and Packages in `crates/fleet-server/src/postgres/`, the PostgreSQL adapters and their schema, the presence batches in `crates/fleet-server/src/instance.rs`, the WebSocket driver in `crates/opamp/src/client/ws.rs`, the audit port in `crates/fleet-server/src/audit.rs` and its PostgreSQL adapter where an instance closes the chain of a lapsed lease, the `[database]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, `docs/ARCHITECTURE.md`, and the operator manual's pages on replication, load balancing and rolling updates
 
 ## Context
 
@@ -602,8 +602,10 @@ database cluster, which the operator runs.
   [advisory locks](https://www.postgresql.org/docs/current/explicit-locking.html#ADVISORY-LOCKS).
 - [Patroni](https://patroni.readthedocs.io/) and [CloudNativePG](https://cloudnative-pg.io/) for
   synchronous replication and failover run beside the application.
-- The code as it stands: `AppState`, its `push` channel and the duplicate detection in
-  `crates/fleet-server/src/fleet.rs`; the session guard in `crates/fleet-server/src/transport.rs`;
+- The code as it stands: `AppState` and its `push` channel in `crates/fleet-server/src/fleet.rs`;
+  the duplicate detection in `crates/fleet-server/src/fleet/session.rs` and
+  `crates/fleet-server/src/fleet/held.rs`; the session guard in
+  `crates/fleet-server/src/transport.rs`;
   `subscribe` in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/enrolment.rs`.
 
 ## Consequences

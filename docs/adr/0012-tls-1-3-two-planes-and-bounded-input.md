@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-02
 - **Deciders:** Markus Brigl
-- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, the reconnect delays in `crates/opamp/src/client/backoff.rs` and `crates/opamp/src/client/ws.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the `rustls` features in `Cargo.toml`, the `listen`, `max_connections`, `max_new_connections_per_sec`, `[rest]`, `[tls]` and `[rest.tls]` keys of `server.toml` and their parsing and startup checks in `crates/fleet-server/src/config.rs`, the certificates `server pki status` lists and the running Server watches in `crates/fleet-server/src/pki.rs`, `config/server.toml`, the message limit in `crates/fleet-server/src/agent_rate.rs`, `on_message` and `on_unreadable` of the Server's handler, the enrolment refusals in `Fleet::enrol` and the download guard `admit_download` in `crates/fleet-server/src/transport.rs`, every `Unavailable` reply in `crates/fleet-server/src/fleet.rs`, the `[agent_rate_limit]` section of `server.toml` and its startup warning, the `agent_rate.throttled` audit event, every outbound connection the Server opens, and every document that tells an operator which certificate the Operator plane serves or how a browser or `opamp-fleetctl` trusts it
+- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, the reconnect delays in `crates/opamp/src/client/backoff.rs` and `crates/opamp/src/client/ws.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the `rustls` features in `Cargo.toml`, the `listen`, `max_connections`, `max_new_connections_per_sec`, `[rest]`, `[tls]` and `[rest.tls]` keys of `server.toml` and their parsing and startup checks in `crates/fleet-server/src/config.rs`, the certificates `server pki status` lists and the running Server watches in `crates/fleet-server/src/pki.rs`, `config/server.toml`, the message limit in `crates/fleet-server/src/agent_rate.rs`, `on_message` and `on_unreadable` of the Server's handler, the enrolment refusals in `Fleet::enrol` and the download guard `admit_download` in `crates/fleet-server/src/transport.rs`, every `Unavailable` reply in `crates/fleet-server/src/fleet/session.rs` and `crates/fleet-server/src/fleet/approval.rs`, the `[agent_rate_limit]` section of `server.toml` and its startup warning, the `agent_rate.throttled` audit event, every outbound connection the Server opens, and every document that tells an operator which certificate the Operator plane serves or how a browser or `opamp-fleetctl` trusts it
 
 ## Context
 
@@ -137,9 +137,9 @@ Forces that shape the rate limit:
     that *"SHOULD be used only for the client's attempts to reconnect"*.
   - *"The minimum recommended retry interval is 30 seconds."*
   - This Server answers `Unavailable` with `retry_info` of 30 s (`RETRY_AFTER` in
-    [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)) in four places besides the rate limit:
-    at the Agent-record ceiling, when the enrolment queue is full, when no enrolment window is
-    open (ADR-0026), and when the audit record holds back a CSR
+    [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs)) in four places
+    besides the rate limit: at the Agent-record ceiling, when the enrolment queue is full, when
+    no enrolment window is open (ADR-0026), and when the audit record holds back a CSR
     ([ADR-0028](0028-the-audit-record.md)).
 - **The Client honours `Unavailable` on both transports.**
   [`opamp::client::protocol`](../../crates/opamp/src/client/protocol.rs) turns it into a wait,
@@ -149,7 +149,7 @@ Forces that shape the rate limit:
   - On plain HTTP it waits and resumes its routine reports
     ([`http.rs`](../../crates/opamp/src/client/http.rs)).
 - **A refused message loses nothing.** The Server detects a gap in `sequence_num` and answers the
-  next message it processes with `ReportFullState` (`fleet.rs`). The Baseline's *Retrying
+  next message it processes with `ReportFullState` (`fleet/session.rs`). The Baseline's *Retrying
   Messages* section lets a Client keep one up-to-date message of each kind rather than a queue.
 - **A reply reaches an Agent only when it carries that Agent's `instance_uid`.** This project's
   own Client routes every reply by that field and drops one without it, on every connection
@@ -301,14 +301,21 @@ Agent plane with token buckets.
     interface (`0.0.0.0:4320` and `127.0.0.1:4320`), is refused at load with a message naming both
     keys. Both listeners are bound before either serves, and a bind failure names the plane.
 
-15. **Every plane's server is built in one place, with an HTTP/1 header-read timeout of 30
-    seconds.** `listen::plane` serves both planes on `opamp::server::listen`
-    ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)), which serves plain and TLS through
-    `axum_server`, installs `hyper_util::rt::TokioTimer` on the HTTP/1 builder, and sets
-    `header_read_timeout` to `HEADER_READ_TIMEOUT` (30 s, hyper's own default and what axum
-    applies once it installs the timer itself). The timeout is a parameter of the serving function
-    so a test can drive it short. `hyper-util` is a dependency of `opamp`'s `server` feature for
-    this.
+15. **Every plane's server is built in one place, and 30 seconds bound the time to a
+    connection's first request and to each HTTP/1 header read.** `listen::plane` serves both planes
+    on `opamp::server::listen` ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)), which serves
+    plain and TLS through `axum_server`. Its `bounded` sets `HEADER_READ_TIMEOUT`, 30 seconds and
+    hyper's own default, in two places on every listener:
+    - as the HTTP/1 `header_read_timeout`, with `hyper_util::rt::TokioTimer` installed on the
+      HTTP/1 builder;
+    - as `axum_server`'s `first_request_timeout`, which bounds the time to a connection's first
+      request. That time counts from the connection, or from the end of the TLS handshake on a
+      TLS listener.
+
+    `axum_server` 0.9 installs a timer itself but turns the header-read timeout off. So the
+    listener sets the timer and both timeouts, and rests on no default of the library. The
+    timeout is a setting of the listener, `with_header_read_timeout`, so a test can drive it short.
+    `hyper-util` is a dependency of `opamp`'s `server` feature for this.
 
 16. **The TLS handshake deadline is stated, not inherited.** `TLS_HANDSHAKE_TIMEOUT` is 10 seconds
     on both planes' acceptors: `axum_server`'s default value, named in this code so it reads as a
@@ -442,7 +449,7 @@ Agent plane with token buckets.
     and
     [ADR-0028](0028-the-audit-record.md).
     Those replies are:
-    - the Agent-record ceiling in `fleet.rs`;
+    - the Agent-record ceiling in `fleet/session.rs`;
     - a CSR held back for its audit record;
     - the full enrolment queue and the closed enrolment window in `Fleet::enrol`.
 
@@ -741,8 +748,8 @@ Agent plane with token buckets.
     `Proofs` and `Fleet::enrol`;
   - [`throttle.rs`](../../crates/fleet-server/src/throttle.rs): the per-address throttle and its
     bounded table;
-  - [`fleet.rs`](../../crates/fleet-server/src/fleet.rs): `unavailable`, `RETRY_AFTER` and the
-    `sequence_num` gap;
+  - [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs): `unavailable`,
+    `RETRY_AFTER` and the `sequence_num` gap;
   - [`audit_log.rs`](../../crates/fleet-server/src/audit_log.rs): the `unrecorded_before` count;
   - [`server.rs`](../../crates/opamp/src/server.rs): the `Handler` dispatch;
   - the Client's handling of `Unavailable` in
@@ -892,6 +899,10 @@ Agent plane with token buckets.
   [`crates/fleet-server/tests/connection_setup.rs`](../../crates/fleet-server/tests/connection_setup.rs):
   `a_connection_that_never_finishes_its_headers_is_hung_up_on`,
   `an_established_session_outlives_the_header_bound` (clauses 15, 18).
+- Clause 15's first-request bound, with the bound driven short:
+  [`crates/opamp/tests/server_listen.rs`](../../crates/opamp/tests/server_listen.rs):
+  `a_peer_silent_before_its_first_request_is_hung_up_on`,
+  `a_peer_silent_after_the_tls_handshake_is_hung_up_on`.
 - Clause 18's floor, over real connections to `opamp`'s listener with the floor driven short, in
   real time, since a paused clock fires a socket's timeouts at once:
   [`crates/opamp/tests/server_listen.rs`](../../crates/opamp/tests/server_listen.rs):

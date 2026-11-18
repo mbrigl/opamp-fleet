@@ -510,7 +510,8 @@ which approvals and provisioned certificates already limit.
   [ADR-0018](0018-what-an-agent-reports-about-itself.md): `host.name`, `host.id`, `host.ip` and
   `host.mac` are reported attributes.
 - The code: `check_report` and `prune` in `crates/fleet-server/src/revocation.rs`, the host minted
-  at approval and `forget_agent` in `crates/fleet-server/src/fleet.rs`. Read in the source.
+  at approval in `crates/fleet-server/src/fleet/approval.rs` and `forget_agent` in
+  `crates/fleet-server/src/fleet/session.rs`. Read in the source.
 
 ## Consequences
 
@@ -554,20 +555,24 @@ which approvals and provisioned certificates already limit.
 - [`fleet.rs`](../../crates/fleet-server/src/fleet.rs) unit tests:
   `an_agent_that_stopped_reporting_is_stale_while_its_connection_is_up`,
   `an_agent_inside_its_budget_is_not_stale`, `an_agent_that_promised_no_heartbeat_never_goes_stale`,
-  `an_offered_heartbeat_interval_sets_the_budget`, `a_disconnected_agent_is_forgotten`,
+  `an_offered_heartbeat_interval_sets_the_budget`,
+  `a_direct_agent_matches_its_hosts_values_and_none_it_reports_itself`,
+  `a_supervisor_agent_inherits_its_client_agents_labels_below_its_own`,
+  `a_stored_label_in_the_supervisors_space_matches_nothing`,
+  `behind_a_gateway_agents_sharing_a_host_id_inherit_unless_ambiguous`,
+  `a_client_agent_rekeyed_without_a_description_keeps_its_group_inheriting`;
+  [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs):
+  `a_disconnected_agent_is_forgotten`,
   `an_agent_that_is_still_reporting_is_refused`, `a_connected_agent_that_went_quiet_is_forgotten`,
   `a_silent_agent_is_forgotten_although_it_can_never_be_stale`,
   `forgetting_an_agent_that_was_never_known_says_so`,
   `the_fleet_is_restored_disconnected_after_a_restart`,
   `a_restored_agent_is_not_demanded_a_full_report`, `a_heartbeat_writes_nothing`,
   `forgetting_an_agent_removes_its_stored_record`, `a_rekeyed_agent_moves_its_stored_record`,
-  `a_queued_restart_survives_a_restart`, `forgetting_an_agent_releases_its_binding`,
-  `a_direct_agent_matches_its_hosts_values_and_none_it_reports_itself`,
-  `a_supervisor_agent_inherits_its_client_agents_labels_below_its_own`,
-  `a_stored_label_in_the_supervisors_space_matches_nothing`,
-  `behind_a_gateway_agents_sharing_a_host_id_inherit_unless_ambiguous`,
-  `a_client_agent_rekeyed_without_a_description_keeps_its_group_inheriting`,
-  `forgetting_an_agent_removes_its_labels_and_a_rekey_keeps_them`.
+  `forgetting_an_agent_releases_its_binding`,
+  `forgetting_an_agent_removes_its_labels_and_a_rekey_keeps_them`;
+  [`fleet/rollout.rs`](../../crates/fleet-server/src/fleet/rollout.rs):
+  `a_queued_restart_survives_a_restart`.
 - [`agent_store.rs`](../../crates/fleet-server/src/agent_store.rs):
   `a_heartbeat_does_not_change_the_durable_digest`;
   [`fs/agents.rs`](../../crates/fleet-server/src/fs/agents.rs): `a_record_survives_the_round_trip`,
@@ -621,7 +626,7 @@ which approvals and provisioned certificates already limit.
     `the_agent_port_contract_holds_on_postgres`, which carry the marker of
     [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md).
   - That a restart requested while another is delivered stays pending is decided on the filesystem
-    store by [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
+    store by [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs)
     `a_restart_requested_while_a_delivery_clears_one_stays_queued`, which carries the marker of
     [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md).
     Across two instances on PostgreSQL,
@@ -629,7 +634,7 @@ which approvals and provisioned certificates already limit.
     `a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it` decides
     that a request stays queued until the carrying instance sends it, and that one made after the
     send is queued again.
-    [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
+    [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs)
     `a_restart_requested_through_one_instance_while_another_delivers_one_stays_until_sent` races
     a request through one instance against a delivery through another. It decides that the
     request is not lost, whether it comes before or after the delivery's clear. It carries the

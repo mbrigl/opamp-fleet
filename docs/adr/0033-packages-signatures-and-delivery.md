@@ -1191,7 +1191,8 @@ reproducible tree mode for `opamp-fleetctl package pack`.
   fetch and the LRU bound of clauses 41 and 45 follow that shape, with offers deciding what is
   evicted first.
 - The code read for the download route: `offer_for_assigned`, `assigned_entry` and `to_available`
-  in `crates/fleet-server/src/packages.rs`; `packages_offer` and `AgentRecord` in
+  in `crates/fleet-server/src/packages.rs`; `packages_offer` in
+  `crates/fleet-server/src/fleet/delivery.rs` and `AgentRecord` in
   `crates/fleet-server/src/fleet.rs`; `check_report` and `Host` in
   `crates/fleet-server/src/revocation.rs`; `download_package` in `crates/fleet-server/src/api.rs`;
   `admit_download` and `Proofs` in `crates/fleet-server/src/transport.rs`; `resolve_url` and
@@ -1413,7 +1414,8 @@ marker citing this decision ([ADR-0002](0002-decisions-verified-by-tests.md)).
 - `crates/fleet-server/tests/rest_api.rs`: `the_openapi_document_describes_the_contract` (the
   Package and signature routes are in the contract, and no Selector or rollout route on a Package
   is).
-- `crates/fleet-server/src/fleet.rs`: `a_record_without_assignments_loads_assigned_to_nothing`.
+- `crates/fleet-server/src/fleet/rollout.rs`:
+  `a_record_without_assignments_loads_assigned_to_nothing`.
 - The signatures on the entry and the Server's check (clauses 3, 4, 12, 18, 19, 33, 35, 42, 51):
   tests that carry `Verifies:` for this decision show that a signature is written on an entry,
   offered to an Agent of that Platform, and removed when new bytes are uploaded to the entry; that
@@ -1446,7 +1448,7 @@ marker citing this decision ([ADR-0002](0002-decisions-verified-by-tests.md)).
   - `an_agent_reporting_another_type_is_offered_nothing` (clause 35).
 - `crates/fleet-server/src/revocation.rs`:
   `a_host_speaks_for_the_agents_bound_to_it_and_a_gateway_for_any` (clause 37).
-- `crates/fleet-server/src/fleet.rs`:
+- `crates/fleet-server/src/fleet/delivery.rs`:
   - `an_artifact_is_offered_to_a_host_only_through_an_agent_it_speaks_for` (clauses 35, 37).
   - `an_offer_still_stands_after_its_hash_is_echoed` (clause 36).
   - `a_version_waiting_for_its_press_is_offered_to_no_host` (clause 36).

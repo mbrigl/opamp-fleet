@@ -639,7 +639,7 @@ fn each_shared_module_sits_in_the_crate_its_users_choose() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
-// --- The report for ticket 11 -------------------------------------------------------------------
+// --- The per-item report ------------------------------------------------------------------------
 
 /// The public items of the module whose shipped code is `items`, at `path`, declared in `dir`'s
 /// files, with the modules declared there followed into their files.
@@ -743,8 +743,8 @@ fn full_paths(file: &syn::File) -> Vec<Vec<String>> {
 }
 
 /// Lists each public item of `fleet-util` with the crates that name it in shipped code, as input
-/// to ticket 11's decision on what moves. A glob import names every item of its module. It
-/// asserts nothing.
+/// to a decision on whether the shared crates are cut again. A glob import names every item of
+/// its module. It asserts nothing.
 #[test]
 #[ignore = "a report: run with --ignored --nocapture"]
 fn report_the_crates_that_name_each_public_item_of_fleet_util() {

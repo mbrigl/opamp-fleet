@@ -676,7 +676,8 @@ clause 39) where a token is needed:
   `an_audit_that_cannot_write_issues_no_certificate`: with the record unavailable, a CSR on a
   member connection gets no certificate and is answered `Unavailable` with `retry_info`
   (clause 5); `an_unmarked_member_asking_for_the_list_leaves_a_refusal` (clause 1).
-- `crates/fleet-server/src/fleet.rs`: `unavailable_tells_the_agent_when_to_retry` (clause 5).
+- `crates/fleet-server/src/fleet/session.rs`: `unavailable_tells_the_agent_when_to_retry`
+  (clause 5).
 - A failed write on PostgreSQL is kept and written once, whether or not its answer was lost:
   `crates/fleet-server/src/postgres/audit.rs` tests
   `a_write_whose_answer_was_lost_is_not_written_again` and
