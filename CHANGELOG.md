@@ -21,7 +21,7 @@ once its tag exists.
 ### Fixed
 
 - **A peer that sends no request is hung up on after 30 seconds**
-  ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md) clause 19). On both planes
+  ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md) clause 15). On both planes
   of the Server, a Client's Gateway and a Supervisor Endpoint, a peer that completed the TCP
   connection, or the TLS handshake, and then sent no request held its place under the connection
   cap until it closed or the listener stopped; enough such peers filled the cap, and every new
