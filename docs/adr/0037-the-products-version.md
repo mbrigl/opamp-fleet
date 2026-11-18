@@ -268,7 +268,7 @@ flow is wanted.
   `the_probe_refuses_a_development_build_offered_as_a_release`,
   `the_probe_refuses_a_client_of_the_wrong_version`,
   `the_probe_refuses_an_offer_that_is_not_a_version`.
-- `crates/fleet-server/src/fleet.rs`
+- `crates/fleet-server/src/fleet/views.rs`
   `the_displayed_version_drops_the_commit_and_keeps_the_pre_release`.
 - The `version` job of [`.github/workflows/release.yml`](../../.github/workflows/release.yml): the
   steps *Read the version out of Cargo.toml*, *This version has not been released yet*, *Tag this

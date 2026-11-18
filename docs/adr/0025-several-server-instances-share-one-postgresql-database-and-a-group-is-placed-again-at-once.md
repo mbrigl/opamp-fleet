@@ -602,8 +602,10 @@ database cluster, which the operator runs.
   [advisory locks](https://www.postgresql.org/docs/current/explicit-locking.html#ADVISORY-LOCKS).
 - [Patroni](https://patroni.readthedocs.io/) and [CloudNativePG](https://cloudnative-pg.io/) for
   synchronous replication and failover run beside the application.
-- The code as it stands: `AppState`, its `push` channel and the duplicate detection in
-  `crates/fleet-server/src/fleet.rs`; the session guard in `crates/fleet-server/src/transport.rs`;
+- The code as it stands: `AppState` and its `push` channel in `crates/fleet-server/src/fleet.rs`;
+  the duplicate detection in `crates/fleet-server/src/fleet/session.rs` and
+  `crates/fleet-server/src/fleet/held.rs`; the session guard in
+  `crates/fleet-server/src/transport.rs`;
   `subscribe` in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/enrolment.rs`.
 
 ## Consequences

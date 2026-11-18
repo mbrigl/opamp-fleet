@@ -685,8 +685,9 @@ description ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)).
   Label listed, any `supervisor.kind.*` key making a Client Agent and the machine behind a Gateway
   keyed by `host.id`, else `host.name`, in `crates/fleet-server/src/labels.rs`; the group behind a
   Gateway and two Client Agents in a group marking all ambiguous in
-  `crates/fleet-server/src/fleet.rs`; the platform from the reported `os.type` and `host.arch` and
-  a Package resolved for the reported type in `crates/fleet-server/src/packages.rs`.
+  `crates/fleet-server/src/fleet/placement.rs`; the platform from the reported `os.type` and
+  `host.arch` and a Package resolved for the reported type in
+  `crates/fleet-server/src/packages.rs`.
 - `docs/manual/rollout.md`: `channel` in `[attributes]` as a way into a channel.
 - `SECURITY.md`: a host that reports another partition's attributes is assigned by that
   partition's next rollout, the same mechanism one level up.
@@ -834,7 +835,8 @@ description ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)).
   report carrying another `host.name`, a `supervisor.kind.*` attribute and a `service.name` that
   differs from the block's type reaches the Server under the block's type, with the Supervisor's
   `host.name`, without the kind attribute, and with its `service.version` and health (clause 8).
-- Server: [`crates/fleet-server/src/fleet.rs`](../../crates/fleet-server/src/fleet.rs) unit test
+- Server: [`crates/fleet-server/src/fleet/views.rs`](../../crates/fleet-server/src/fleet/views.rs)
+  unit test
   `the_view_joins_a_string_array_attribute` (clauses 6, 11).
 - [`crates/fleet-agent/src/telemetry.rs`](../../crates/fleet-agent/src/telemetry.rs) tests:
   `no_destination_builds_nothing` (clause 26),

@@ -141,8 +141,9 @@ offer of a remote configuration).
 
 The Server offers a remote configuration only to an Agent declaring `AcceptsRemoteConfig`
 ([ADR-0031](0031-configurations-and-the-rest-api.md), `offer` in
-`crates/fleet-server/src/fleet.rs`), as the Baseline requires, and a Client's capabilities bind
-what it reports and acts on ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md),
+`crates/fleet-server/src/fleet/rollout.rs`), as the Baseline requires, and a Client's
+capabilities bind what it reports and acts on
+([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md),
 the Client's capabilities); read the other way, an Agent that does not declare a capability does
 not act on it. A Client whose Client Agent, or a Supervisor's Agent, does not declare the bit is
 therefore offered no remote configuration, with no change on the Server.
@@ -1049,7 +1050,7 @@ program the Client starts itself on Windows.
   `config_entries` in `crates/fleet-agent/src/storage.rs`; the self-Agent dispatch in
   `crates/fleet-agent/src/engine.rs`; `apply_inner` in `crates/fleet-agent/src/reconfigure.rs`;
   each kind's configuration source in `collector.rs` and `command.rs`; and the
-  `AcceptsRemoteConfig` gate, `offer`, in `crates/fleet-server/src/fleet.rs`.
+  `AcceptsRemoteConfig` gate, `offer`, in `crates/fleet-server/src/fleet/rollout.rs`.
 
 ## Consequences
 

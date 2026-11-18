@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-07
 - **Deciders:** Markus Brigl
-- **Applies to:** every storage port in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `blobs.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`, `audit.rs`) and every adapter under `crates/fleet-server/src/fs/`, `crates/fleet-server/src/postgres/` and `crates/fleet-server/src/s3.rs`, the embedded schema and its migrations, the wiring in `crates/fleet-server/src/lib.rs` and `crates/fleet-server/src/main.rs`, `data_dir`, the `[blobs]` and `[database]` sections and the `[audit]` keys `max_file_bytes`, `keep_files` and `retain_days` of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `server migrate`, `server migrate-to-postgres` and `server blobs-to-s3` commands, the `object_store`, `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls` dependencies in `Cargo.toml` and `deny.toml`, the S3 and PostgreSQL adapters' tests and the CI jobs that run them, the rustfs and postgres services in `observability/compose.yaml` and their forward into the Dev Container, the approval of an enrolment request in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/api.rs` and the audit entries it writes, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its state
+- **Applies to:** every storage port in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `blobs.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`, `audit.rs`) and every adapter under `crates/fleet-server/src/fs/`, `crates/fleet-server/src/postgres/` and `crates/fleet-server/src/s3.rs`, the embedded schema and its migrations, the wiring in `crates/fleet-server/src/lib.rs` and `crates/fleet-server/src/main.rs`, `data_dir`, the `[blobs]` and `[database]` sections and the `[audit]` keys `max_file_bytes`, `keep_files` and `retain_days` of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `server migrate`, `server migrate-to-postgres` and `server blobs-to-s3` commands, the `object_store`, `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls` dependencies in `Cargo.toml` and `deny.toml`, the S3 and PostgreSQL adapters' tests and the CI jobs that run them, the rustfs and postgres services in `observability/compose.yaml` and their forward into the Dev Container, the approval of an enrolment request in `crates/fleet-server/src/fleet/approval.rs` and `crates/fleet-server/src/api.rs` and the audit entries it writes, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its state
 
 ## Context
 
@@ -983,7 +983,8 @@ Tests that carry `Verifies: ADR-0023`:
   `a_leftover_config_dir_or_packages_dir_fails_startup_naming_server_migrate`;
   [`fs/agents.rs`](../../crates/fleet-server/src/fs/agents.rs)
   `a_rollout_cut_short_after_its_revisions_leaves_a_state_the_next_load_accepts`,
-  `the_store_answers_what_its_assignments_pin`; [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
+  `the_store_answers_what_its_assignments_pin`;
+  [`fleet/rollout.rs`](../../crates/fleet-server/src/fleet/rollout.rs)
   `a_rollout_that_fails_part_way_leaves_disk_and_memory_as_they_were`;
   [`fs/revocation.rs`](../../crates/fleet-server/src/fs/revocation.rs)
   `each_host_is_a_file_of_its_own_and_its_name_must_match`;
@@ -1096,7 +1097,7 @@ Tests that carry `Verifies: ADR-0023`:
   `a_sweep_whose_hold_is_lost_cleans_up_no_staging_object`,
   `a_sweep_waits_its_whole_wait_for_the_lock_and_an_upload_five_seconds`,
   `a_startup_sweep_that_cannot_have_the_lock_fails_naming_it`;
-  [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
+  [`fleet/delivery.rs`](../../crates/fleet-server/src/fleet/delivery.rs)
   `a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go`;
   [`postgres/import.rs`](../../crates/fleet-server/src/postgres/import.rs)
   `migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir`,
@@ -1167,7 +1168,7 @@ Tests that carry `Verifies: ADR-0023`:
   `a_signature_whose_decision_was_not_written_is_recorded_undecided`,
   `a_read_back_that_finds_another_certificate_rolls_the_signature_back`,
   `a_refusal_the_database_answers_is_rolled_back_without_a_read_back`;
-  [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)
+  [`fleet/approval.rs`](../../crates/fleet-server/src/fleet/approval.rs)
   `an_approval_on_files_whose_register_entry_fails_takes_its_decision_back`,
   `a_decision_found_at_startup_without_its_register_entry_waits_again`,
   `the_audit_record_of_an_approval_that_did_not_commit_verifies_and_names_it_undecided`.
