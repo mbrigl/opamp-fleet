@@ -3,7 +3,7 @@
 ## What to build
 
 Accepted ADRs are immutable outside a normalization
-([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) rule 5), so three drifts wait for the next one:
+([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) rule 5), so two drifts wait for the next one:
 
 - **`fleet.rs` for code now in `fleet/*.rs`.** PR #202 moved the Server's `fleet` into
   submodules. Fifteen accepted ADRs still cite `crates/fleet-server/src/fleet.rs` for code and
@@ -21,38 +21,46 @@ Accepted ADRs are immutable outside a normalization
   `fleet.rs` that keep moved types at their old paths (`fleet::PackageOffering`, the view types)
   stay; they are the public paths `api` and the suites use.
 - **ADR-0012 clause 15** names an HTTP/1 header-read timeout of 30 seconds and a timer on the
-  HTTP/1 builder. Since axum-server 0.9 (PR #195) and the silent-peer fix (PR #196) the same
-  value also bounds the time to a connection's first request, and HTTP/2 has its own timer with
-  bounds on streams and pings (`bounded` in `crates/opamp/src/server/listen.rs`). The clause's
-  parenthesis on what axum applies describes axum-server 0.8.
-- **ADR-0008's Enforcement of clause 16** describes
-  `each_shared_module_sits_in_the_crate_its_users_choose` as deciding per module. Once ticket
-  04 adds the per-item check, the restated Enforcement names it beside the module cases.
+  HTTP/1 builder, and its parenthesis on what axum applies describes axum-server 0.8. Since
+  axum-server 0.9 (PR #195) the library turns the timeout off unless the listener sets it, which
+  `bounded` in `crates/opamp/src/server/listen.rs` does. The HTTP/2 bounds stay with clause 20,
+  which decides them; the restated clause 15 does not repeat them.
 
-The normalization rewrites each citation to the file that holds the code, and restates clause 15
-with the bounds as they stand. It changes no decision.
+The normalization rewrites each citation to the file that holds the code, and corrects clause
+15's account of axum-server. Neither changes a decision.
+
+**Open question for the human, before the normalization:** since the silent-peer fix (PR #196),
+the same 30-second value also bounds the time to a connection's first request
+(`first_request_timeout`). No clause names that bound today. Writing it into clause 15 records
+what #196 chose, which a normalization does not do, since it changes no decision
+([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) rule 5). The human either:
+
+- counts it as the implementation of ADR-0012's bounded input, so the restated clause names it;
+- or has it proposed as a decision of its own through the skill `propose-adr`, before or apart
+  from the normalization.
 
 ## Acceptance criteria
 
 - [ ] Given the normalized record, when it is searched for `fleet.rs`, then each citation names
   code that `fleet.rs` holds.
-- [ ] Given the normalized ADR that carries clause 15, when it is read against `bounded`, then it
-  names the first-request bound and the HTTP/2 bounds.
-- [ ] Given the normalized ADR that carries clause 16, when its Enforcement is read against
-  `who_shares.rs`, then it names the per-item check, if ticket 04 has landed.
+- [ ] Given the normalized ADR that carries clause 15, when it is read against `bounded`, then
+  what it says of axum-server and the header-read timeout holds, and it names the first-request
+  bound only as the human answered the open question.
 
 ## Read first
 
 - Touches: `docs/adr/`
-- The skill `normalize`; ADR-0012 clause 15; `crates/fleet-server/src/fleet.rs` and
+- The skill `normalize`; ADR-0012 clauses 15 and 20; `crates/fleet-server/src/fleet.rs` and
   `crates/fleet-server/src/fleet/`.
 
 ## Blocked by
 
-- None (can start immediately)
+- docs/plan/revision-2026-11-18/11-decide-whether-the-shared-crates-are-cut-again-by-cohesion.md
 
 ## Mode
 
-with the human: it waits for a human's instruction to normalize
+with the human, and not claimable on its own. It waits for a human's instruction to normalize
 ([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) rule 5) and is worked as part of that
-normalization, not alone; ADR-0007 clause 5 keeps every part of the system with the human.
+normalization. It waits for ticket 11 too: a re-cut of the shared crates moves paths the same
+ADRs cite, and the record is re-pointed once. ADR-0007 clause 5 keeps every part of the system
+with the human.

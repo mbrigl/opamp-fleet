@@ -5,7 +5,7 @@
 The Windows constants for opening an entry as itself are declared three times inside
 `fleet-agent`:
 
-- `crates/fleet-agent/src/win32/files.rs`, near lines 44 to 49: `AS_ITSELF`, `FILE_SHARE_*`,
+- `crates/fleet-agent/src/win32/files.rs`, near lines 44 to 49: `AS_ITSELF` and
   `REPARSE_POINT`;
 - `crates/fleet-agent/src/supervisor/channel/windows.rs`, near lines 469 to 475:
   `OPEN_AS_ITSELF`, `REPARSE_POINT`;
@@ -20,7 +20,7 @@ neither the standard library nor a dependency offers. The constants are declared
 leaves it alone. Sharing it across the two crates has no cheap way:
 
 - a public constant in `fleet-util` that only the Client names is against ADR-0008 clause 16
-  and against ticket 04's per-item check;
+  and the module rule would admit it only by a judgement ticket 11 has not made;
 - no manifest declares `windows-sys`, which reaches the lock only through other crates (0.52,
   0.59 and 0.61), so taking the constants from it would add a direct dependency.
 
@@ -31,7 +31,8 @@ same value and stays where it is.
 ## Acceptance criteria
 
 - [ ] Given the change, when `fleet-agent`'s sources are searched for `0x0020_0000`,
-  `0x0200_0000` and the reparse-point attribute, then each is declared once, in `win32`.
+  `0x0200_0000` and `0x400` as the reparse-point attribute, then each is declared once, in
+  `win32`.
 - [ ] Given the change, when the Windows build and tests run in CI, then they pass.
 
 ## Read first
@@ -42,9 +43,12 @@ same value and stays where it is.
 
 ## Blocked by
 
-- None (can start immediately)
+- docs/plan/revision-2026-11-18/06-the-re-own-walk-goes-through-the-clients-handle-layer.md
 
 ## Mode
 
 with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap
 on open unattended work at zero.
+
+Tickets 06, 07 and 08 all change `crates/fleet-agent/src/service/run_as.rs`, so they run one
+after the other, in that order, not in parallel worktrees.

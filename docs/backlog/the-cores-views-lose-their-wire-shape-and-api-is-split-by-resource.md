@@ -1,19 +1,17 @@
-# `fleet.rs` and `api.rs` are split in four slices
+# The core's views lose their wire shape, and `api.rs` is split by resource
 
 **Kind:** idea, structure.
 
-**Observed.** PR #202 split `crates/fleet-server/src/fleet.rs` into one module per context, so
-the first two slices below have their module: report processing is `fleet::session`, and
-Package and Deployment administration are `fleet::delivery` and `fleet::rollout`. What is left
-of the two slices, report processing cut into named steps a unit test can call and the
-administration as a use case `api` calls, waits for the decision of ticket 13 of
-revision-2026-11-18 (service structs per context). The other two slices are open:
+**Observed.** Two slices are open of a four-slice split of `fleet.rs` and `api.rs`. The other
+two, report processing and Package and Deployment administration, got their modules with PR
+#202 (`fleet::session`, `fleet::delivery`, `fleet::rollout`); what is left of them waits for
+ticket 13 of revision-2026-11-18 (service structs per context).
 
-3. **The wire shape of the views.** The view types in `crates/fleet-server/src/fleet/views.rs`
+1. **The wire shape of the views.** The view types in `crates/fleet-server/src/fleet/views.rs`
    (`AgentView`, `PendingConfigurationView`, `PendingPackageView`, `PackageStatusView`, near lines
    384 to 593) derive `Serialize`, while `api.rs` mirrors each with a response type and a
    field-by-field `From`, the doc comments copied. The core's `Serialize` looks unused (ADR-0031).
-4. **The REST API by resource.** Every route, view and conversion of about ten resources lives in
+2. **The REST API by resource.** Every route, view and conversion of about ten resources lives in
    `crates/fleet-server/src/api.rs` (4 581 lines on `main`); only the cursor paging is in
    `api/paging.rs` (ADR-0030).
 
@@ -27,6 +25,7 @@ It overlaps the draft
 cut leads.
 
 **From.** Revision tickets 13, 26, 27 and 28 of `feat/revision-2026-10-31`, open, not worked;
-merged into one entry from four on `feat/bugfixes` (2026-11-14). Trimmed by the design revision
-of 2026-11-18: the double derivation of the display values went to its ticket 01, and the
-first two slices to #202 and its ticket 13.
+merged into one entry from four on `feat/bugfixes` (2026-11-14) as
+`fleet-and-api-are-split-in-four-slices`. Trimmed and retitled by the design revision of
+2026-11-18: the double derivation of the display values went to its ticket 01, and the first
+two slices to #202 and its ticket 13.

@@ -24,10 +24,12 @@ read as production code. A self-test of the reader pins both.
 - [ ] Given a test-only module declared as `#[cfg(test)] mod x;` whose file names a
   capability, when the matrix reads the crate, then the capability does not count as declared.
 - [ ] Given the change, when the two matrix tests run on `main`, then they pass.
+- [ ] Given the change, when `docs/CONVENTIONS.md` is read, then its entry on putting every
+  `#[cfg(test)]` item after the production code of a `fleet` source file is gone.
 
 ## Read first
 
-- Touches: `crates/fleet-server/tests/conformance_matrix.rs`
+- Touches: `crates/fleet-server/tests/conformance_matrix.rs`, `docs/CONVENTIONS.md`
 - `docs/CONFORMANCE.md`, the two capability tables; goal G-12.
 
 ## Blocked by

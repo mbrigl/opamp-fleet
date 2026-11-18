@@ -10,9 +10,10 @@ can now: `fleet::views`, `delivery`, `rollout`, `approval` and `session` beside 
 
 What the human weighs:
 
-- The backlog entry `docs/backlog/fleet-and-api-are-split-in-four-slices.md`: what is left
-  of its slices 1 and 2 (report processing cut into named steps, the administration as a use
-  case `api` calls) waits for this decision; its slices 3 and 4 are independent of it.
+- The backlog entry
+  `docs/backlog/the-cores-views-lose-their-wire-shape-and-api-is-split-by-resource.md`: what is
+  left of report processing (cut into named steps) and of the administration (a use case `api`
+  calls) waits for this decision; the entry's two open slices are independent of it.
 - The draft `draft-two-use-case-layers-stand-between-the-servers-planes-and-its-core.md` on
   `feat/server-drafts`, which places such use cases in a layer of their own.
 - Ticket 02 of this revision, which makes the dependencies between the contexts visible first.
@@ -25,7 +26,8 @@ What the human weighs:
 
 ## Read first
 
-- Touches: `docs/plan/`, `docs/backlog/fleet-and-api-are-split-in-four-slices.md`
+- Touches: `docs/plan/`,
+  `docs/backlog/the-cores-views-lose-their-wire-shape-and-api-is-split-by-resource.md`
 - `crates/fleet-server/src/fleet.rs`; ADR-0009 (ports and adapters), ADR-0025 (instances).
 
 ## Blocked by

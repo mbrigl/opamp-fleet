@@ -1,15 +1,14 @@
-# Ticket: The who-shares test decides per item, on a syntax tree
+# Ticket: The who-shares test reads a syntax tree, and reports what each item's users are
 
 ## What to build
 
-ADR-0008 clause 16 says who shares an *item* chooses its crate.
-`crates/fleet-util/tests/who_shares.rs` decides it per *module*, with a lexer of its own
+`crates/fleet-util/tests/who_shares.rs` decides ADR-0008 clause 16 module by module, as the
+ADR's Context, its rejected alternatives and its Enforcement have it, with a lexer of its own
 (`without_literals`, `without_test_items`, a cfg evaluator `predicate`, line-wise matches in
-`modules_of` and the re-export check). Three rounds of fixes followed it in PR #193
+`modules_named` and the re-export check). Three rounds of fixes followed it in PR #193
 (9468ffa88, b709af165, 66957b200): `cfg(not(test))` read as test code, raw byte strings
 misread, an alias in a group missed, a loop that did not end, a slice at a byte inside a char,
-and asserts that decided nothing. And it could not see `lstat_at` and `rmdir` in
-`fleet_util::nofollow::at`, used by the Client alone; PR #197 found and moved them by hand.
+and asserts that decided nothing.
 
 The test `each_shared_module_sits_in_the_crate_its_users_choose` keeps its name and every case
 ADR-0008's Enforcement lists for clause 16:
@@ -23,22 +22,26 @@ ADR-0008's Enforcement lists for clause 16:
 It reads the sources as a syntax tree (`syn` as a dev-dependency, which is dev-only tooling
 under
 [`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules)
-rule 2) in place of its own lexer. On top of the module cases it adds the per-item check: each
-public item of `fleet-util` is named in shipped code by both the Client and the operator tool,
-or the test fails naming the item. The Enforcement's wording "per module" is left as it reads;
-ticket 10 restates it at the next normalization.
+rule 2) in place of its own lexer. It decides nothing new and moves nothing.
+
+Beside the test, a report lists each public item of `fleet-util` with the crates that name it
+in shipped code, and the session puts that list into its hand-off as input to ticket 11. On
+`main` the tool names in shipped code only `archive::unix_mode_attributes`,
+`nofollow::{read_privileged, Named}`, `password::read_password_file`,
+`identity::pkcs12::open` and `tree::{KeptLink, is_kept}`, so most items would fail a per-item
+rule. Some could not move at all: `read_privileged` builds on `HeldDir`. The report fails
+nothing; whether items move is ticket 11's decision.
 
 ## Acceptance criteria
 
-- [ ] Given a public item of `fleet-util` that only the Client names in shipped code, when the
-  test runs, then it fails and names the item.
 - [ ] Given each case the Enforcement of ADR-0008 lists for clause 16, when a fixture builds it,
   then the test fails naming the module, the re-export or the manifest, as it does today.
 - [ ] Given the fixtures of the current test (a `cfg(not(test))` item, a raw byte string, an
   alias in a group), when the new reader reads them, then it decides each as the current test
   does.
-- [ ] Given `main`, when the test runs, then it passes, or it names the items to move, which
-  the session moves as clause 16 says.
+- [ ] Given `main`, when the test runs, then it passes.
+- [ ] Given `main`, when the report runs, then it lists each public item of `fleet-util` with
+  the crates that name it in shipped code, and fails nothing.
 
 ## Read first
 

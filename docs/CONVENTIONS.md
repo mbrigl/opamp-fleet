@@ -40,6 +40,16 @@ skimmed. The design revision drops what prevented nothing
   method of one context that another context calls becomes `pub(super)`. A `pub` method in any
   context's `impl AppState` widens the public interface of `AppState` for every caller of the
   crate.
+- **A context of `fleet` is not named after a module of its crate** — the contexts for Packages
+  and enrolment are `fleet::delivery` and `fleet::approval`, not `packages` and `enrolment`.
+  The crate has modules of those names, and a reader who sees `packages` in a path takes it for
+  the store.
+- **A `fleet` source file puts every `#[cfg(test)]` item after all its production code** — the
+  capability matrix of `conformance_matrix.rs` reads each file only up to its first
+  `#[cfg(test)]`, so production code after one goes unread. `fleet::held` and `fleet::placement`
+  carried test-only items among their production code before the split and keep them, since
+  neither names a capability. Ticket 03 of revision-2026-11-18
+  makes the matrix read past it, and the change that lands it deletes this entry.
 - **A caller tells errors apart by their kind, never by their text** — where a caller answers two
   errors differently, the error carries a kind it matches on. A message is reworded for the
   operator, and a match on its text then answers the wrong status without a test noticing.

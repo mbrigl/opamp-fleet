@@ -21,14 +21,24 @@ caller in `fleet-util` and `fleet-agent` moves to it.
 ## Read first
 
 - Touches: `crates/fleet-util/src/nofollow.rs`, `crates/fleet-agent/src/storage.rs`,
-  `crates/fleet-agent/src/service/run_as.rs`
+  `crates/fleet-agent/src/service/run_as.rs`, and the other callers of `at::open`:
+  `crates/fleet-agent/src/service/manager.rs` (near lines 520, 546 and 1829),
+  `crates/fleet-agent/src/supervisor/channel.rs` (near lines 1130 to 1136); and those that pass
+  raw flags through `storage::handle::open_beneath`:
+  `crates/fleet-agent/src/supervisor/process.rs` (near line 2242) and
+  `crates/fleet-agent/src/reconfigure.rs` (near lines 337 and 469)
 - ADR-0022 (no link is followed beneath a held root).
 
 ## Blocked by
 
-- None (can start immediately)
+- docs/plan/revision-2026-11-18/06-the-re-own-walk-goes-through-the-clients-handle-layer.md
+- docs/plan/revision-2026-11-18/07-the-clients-reparse-point-constants-are-written-once.md
 
 ## Mode
 
 with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap
 on open unattended work at zero.
+
+Tickets 06, 07 and 08 all change `crates/fleet-agent/src/service/run_as.rs`, and 06 and 08
+`crates/fleet-agent/src/storage.rs`, so they run one after the other, not in parallel
+worktrees.

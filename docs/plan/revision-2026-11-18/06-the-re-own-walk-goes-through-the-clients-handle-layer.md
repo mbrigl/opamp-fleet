@@ -36,3 +36,7 @@ its exception for `run_as`.
 
 with the human: ADR-0007 clause 5 keeps every part of the system with the human and sets the cap
 on open unattended work at zero.
+
+Tickets 07 and 08 change `crates/fleet-agent/src/service/run_as.rs` too, and 08
+`crates/fleet-agent/src/storage.rs`; both wait for this one, so they do not run in parallel
+worktrees beside it.

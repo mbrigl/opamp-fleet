@@ -15,6 +15,8 @@ For a re-cut, from the work since 2026-11-15:
   and `rmdir` from `fleet_util::nofollow::at` to the Client by hand, and clause 16 moves an item
   of `fleet-util` the Server comes to use into `fleet-core`.
 - The test that decides membership needed three rounds of fixes (ticket 04 of this revision).
+- The module rule lets items in that only one of the two users names: the per-item report of
+  ticket 04 lists them.
 
 Against it:
 
@@ -24,7 +26,8 @@ Against it:
   enters a crate to make it look less small, and the dependency rule it keeps (the Server links
   nothing it does not use, the tool links neither end) holds and is tested.
 - Ticket 04 may remove the cost of the membership test without a new decision, and the
-  decision waits for what a per-item test finds.
+  decision waits for the per-item report it adds. A per-item rule would move most of
+  `fleet-util`, and some items, such as `read_privileged` on `HeldDir`, cannot move alone.
 
 Splitting `fleet-agent` (65 000 lines, one crate) into crates was weighed too and is not filed:
 nothing in the work since 2026-11-15 went wrong at its crate boundary, and the module split of
@@ -44,7 +47,7 @@ stays rejected (ADR-0008: `CARGO_BIN_EXE_*` resolves only in the declaring crate
 
 ## Blocked by
 
-- docs/plan/revision-2026-11-18/04-the-who-shares-test-decides-per-item-on-a-syntax-tree.md
+- docs/plan/revision-2026-11-18/04-the-who-shares-test-reads-a-syntax-tree.md
 
 ## Mode
 
