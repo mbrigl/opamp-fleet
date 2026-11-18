@@ -40,10 +40,10 @@ with the bounds as they stand. It changes no decision.
 
 ## Blocked by
 
-- A human's instruction to normalize ([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) rule 5).
-  It is worked as part of that normalization, not alone.
+- None (can start immediately)
 
 ## Mode
 
-with the human: only a human starts a normalization, and ADR-0007 clause 5 keeps every part of
-the system with the human.
+with the human: it waits for a human's instruction to normalize
+([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) rule 5) and is worked as part of that
+normalization, not alone; ADR-0007 clause 5 keeps every part of the system with the human.

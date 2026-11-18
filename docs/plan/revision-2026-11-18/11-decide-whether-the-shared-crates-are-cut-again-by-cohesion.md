@@ -23,7 +23,8 @@ Against it:
 - `fleet-core` is 2 700 lines and `fleet-util` 4 000; ADR-0008 clause 16 already says nothing
   enters a crate to make it look less small, and the dependency rule it keeps (the Server links
   nothing it does not use, the tool links neither end) holds and is tested.
-- Ticket 04 may remove the cost of the membership test without a new decision.
+- Ticket 04 may remove the cost of the membership test without a new decision, and the
+  decision waits for what a per-item test finds.
 
 Splitting `fleet-agent` (65 000 lines, one crate) into crates was weighed too and is not filed:
 nothing in the work since 2026-11-15 went wrong at its crate boundary, and the module split of
@@ -43,8 +44,7 @@ stays rejected (ADR-0008: `CARGO_BIN_EXE_*` resolves only in the declaring crate
 
 ## Blocked by
 
-- docs/plan/revision-2026-11-18/04-the-who-shares-test-decides-per-item-on-a-syntax-tree.md, so
-  the decision sees what a per-item test finds.
+- docs/plan/revision-2026-11-18/04-the-who-shares-test-decides-per-item-on-a-syntax-tree.md
 
 ## Mode
 
