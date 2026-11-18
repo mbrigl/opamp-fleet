@@ -12,9 +12,9 @@ use opamp::proto::{
     any_value, AgentConfigMap, AgentConfigObject, AgentDescription, AgentIdentification,
     AgentRemoteConfig, AgentToServer, AgentToServerFlags, AvailableComponents, ComponentHealth,
     ConnectionSettingsOffers, ConnectionSettingsStatus, KeyValue, OpAmpConnectionSettings,
-    PackageStatuses, PackagesAvailable, RemoteConfigStatus, RemoteConfigStatuses,
-    ServerCapabilities, ServerErrorResponse, ServerErrorResponseType, ServerToAgent,
-    ServerToAgentFlags, TelemetryConnectionSettings, TlsCertificate,
+    PackageStatuses, PackagesAvailable, RemoteConfigStatus, ServerCapabilities,
+    ServerErrorResponse, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
+    TelemetryConnectionSettings, TlsCertificate,
 };
 use opamp::uid::InstanceUid;
 use prost::Message as _;

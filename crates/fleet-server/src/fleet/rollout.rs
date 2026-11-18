@@ -1183,7 +1183,7 @@ mod tests {
                 }),
                 remote_config_status: (!config_hash.is_empty()).then(|| RemoteConfigStatus {
                     last_remote_config_hash: config_hash.to_vec(),
-                    status: RemoteConfigStatuses::Applied as i32,
+                    status: opamp::proto::RemoteConfigStatuses::Applied as i32,
                     ..Default::default()
                 }),
                 package_statuses: (!packages_hash.is_empty()).then(|| PackageStatuses {
