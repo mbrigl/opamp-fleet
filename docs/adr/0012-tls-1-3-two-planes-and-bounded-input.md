@@ -301,8 +301,8 @@ Agent plane with token buckets.
     interface (`0.0.0.0:4320` and `127.0.0.1:4320`), is refused at load with a message naming both
     keys. Both listeners are bound before either serves, and a bind failure names the plane.
 
-15. **Every plane's server is built in one place, with an HTTP/1 header-read timeout of 30
-    seconds that also bounds the time to the first request.** `listen::plane` serves both planes
+15. **Every plane's server is built in one place, and 30 seconds bound the time to a
+    connection's first request and to each HTTP/1 header read.** `listen::plane` serves both planes
     on `opamp::server::listen` ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)), which serves
     plain and TLS through `axum_server`. Its `bounded` sets `HEADER_READ_TIMEOUT`, 30 seconds and
     hyper's own default, in two places on every listener:
