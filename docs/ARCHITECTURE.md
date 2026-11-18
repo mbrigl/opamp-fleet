@@ -82,12 +82,13 @@ Six crates in one workspace
   and both drivers draw their reconnects and their waits after a refusal or an `Unavailable` from
   `client::backoff`. `uid` is the `InstanceUid` and `attributes` the attribute keys both sides use.
   Behind `server`, the endpoint around a `Handler`, which answers a WebSocket's pings while it
-  handles a message, `server::listen`, the listener with its TLS and its bounds on connection
-  setup — one timeout on the time to a connection's first request and on an HTTP/1 request's
-  headers, and HTTP/2's streams and pings — and `server::pace`, the floor every body and
-  WebSocket message it serves is held to. The server side takes a WebSocket over through hyper's
-  upgrade and reads its frames with
-  `tokio-tungstenite`, the library the client side uses too.
+  handles a message, `server::listen`, the listener with its TLS and its bounds — among them a
+  cap on the connections it holds and the new ones it takes a second, a deadline on the TLS
+  handshake, one timeout on the time to a connection's first request and on an HTTP/1 request's
+  headers, and HTTP/2's bounds on streams and pings — and `server::pace`, the floor every body
+  and WebSocket message it serves is held to. The server side takes a WebSocket over through
+  hyper's upgrade and reads its frames with `tokio-tungstenite`, the library the client side
+  uses too.
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
@@ -114,13 +115,13 @@ Six crates in one workspace
   ([ADR-0008](adr/0008-six-crates-on-tokio-and-axum.md)):
   the unpackers of a package's artifact and the 7z Unix-mode convention (`archive`), the links a
   kind's tree package keeps, which `opamp-fleetctl` packs and the Client creates (`tree`), though
-  no kind on `main` states one yet, the file operations that follow no link (`nofollow`), whose
-  Unix `*at` system calls, wrapped once in `nofollow::at`, the Client's work by directory handle
-  calls too, while the calls only the Client makes stay in its `storage::handle`, but for the
-`fchownat` of the re-own walk in `service::run_as`, the reader of a
-  password file (`password`), and a bootstrap identity as PEM
-  (`identity`), opened from a PKCS#12 file by the adapter `identity::pkcs12`. A test decides from
-  who names a module whether it belongs here or in `fleet-core`.
+  no kind on `main` states one yet, the file operations that follow no link (`nofollow`), the
+  reader of a password file (`password`), and a bootstrap identity as PEM (`identity`), opened
+  from a PKCS#12 file by the adapter `identity::pkcs12`. The Unix `*at` system calls of
+  `nofollow` are wrapped once in `nofollow::at`, which the Client's work by directory handle
+  calls too. The calls only the Client makes stay in its `storage::handle`, but for the
+  `fchownat` of the re-own walk in `service::run_as`. A test decides from who names a module
+  whether it belongs here or in `fleet-core`.
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the
   effective description Selectors match (`labels`), packages and Deployments, the Agent plane, and
   the Operator plane, whose credential check is `credentials`.

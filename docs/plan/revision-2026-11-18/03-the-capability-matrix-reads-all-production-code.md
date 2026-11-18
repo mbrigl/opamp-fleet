@@ -10,8 +10,10 @@ implemented then passes against code that declares it. During PR #202 a `#[cfg(t
 fixtures;` at the top of `fleet.rs` cut the root before `SERVER_CAPABILITIES`, and the test
 failed loudly; the opposite case fails nothing.
 
-The matrix leaves out the items under `#[cfg(test)]` and reads the rest of the file, test
-modules declared by `mod x;` included. A self-test of the reader pins it.
+The matrix reads only production modules, and each of them in full but for its items under
+`#[cfg(test)]`, wherever they stand. A module declared under `#[cfg(test)]`, such as
+`#[cfg(test)] mod fixtures;` in `fleet.rs`, is test code: its file (`fleet/fixtures.rs`) is not
+read as production code. A self-test of the reader pins both.
 
 ## Acceptance criteria
 
@@ -19,6 +21,8 @@ modules declared by `mod x;` included. A self-test of the reader pins it.
   matrix reads it, then the declaration is found.
 - [ ] Given a source whose test module is `#[cfg(test)] mod tests { … }`, when the matrix reads
   it, then nothing inside the module counts as declared.
+- [ ] Given a test-only module declared as `#[cfg(test)] mod x;` whose file names a
+  capability, when the matrix reads the crate, then the capability does not count as declared.
 - [ ] Given the change, when the two matrix tests run on `main`, then they pass.
 
 ## Read first

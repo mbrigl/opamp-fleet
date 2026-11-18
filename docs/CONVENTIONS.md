@@ -33,7 +33,13 @@ skimmed. The design revision drops what prevented nothing
 - **An item lives in the context it changes, and a test with the context it verifies** — in a
   module split by context, such as the Server's `fleet`, a method goes to the context whose state
   it changes, not to the one it reads, and one that two contexts would claim stays in the module
-  root. A reviewer reads from the file which context a change may affect.
+  root. A unit test goes to the context whose behaviour it decides, with the helpers only it
+  uses. A reviewer reads from the file which context a change may affect, and a test elsewhere
+  hides which context it pins.
+- **A context calls another's private item through `pub(super)`, never `pub`** — a private
+  method of one context that another context calls becomes `pub(super)`. A `pub` method in any
+  context's `impl AppState` widens the public interface of `AppState` for every caller of the
+  crate.
 - **A caller tells errors apart by their kind, never by their text** — where a caller answers two
   errors differently, the error carries a kind it matches on. A message is reworded for the
   operator, and a match on its text then answers the wrong status without a test noticing.

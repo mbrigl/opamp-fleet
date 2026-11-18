@@ -20,16 +20,17 @@ list and the view keep their shapes and their tests.
   equal, decided by one test over both.
 - [ ] Given the change, when `listing.rs` and `fleet/views.rs` are read, then the attribute
   lookups and the status names are written once.
-- [ ] Given the change, when the fleet's unit tests and the Server's suites run, then they pass
-  unchanged in number and name.
+- [ ] Given the change, when the fleet's unit tests and the Server's suites run, then every
+  existing test passes under its name, and the one test of the first criterion is the only one
+  added.
 
 ## Read first
 
 - Touches: `crates/fleet-server/src/listing.rs`, `crates/fleet-server/src/fleet/views.rs`
 - `docs/CONVENTIONS.md`: "A rule two paths apply is one function".
 - ADR-0030 (what a page derives from each record), ADR-0037 (the version a reader is shown).
-- The backlog entry `docs/backlog/fleet-and-api-are-split-in-four-slices.md` names the same
-  copy in its last paragraph; the human trims it when this lands.
+- The backlog entry `docs/backlog/fleet-and-api-are-split-in-four-slices.md` named the same
+  copy; the revision moved that paragraph here.
 
 ## Blocked by
 

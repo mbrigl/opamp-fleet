@@ -2,32 +2,24 @@
 
 **Kind:** idea, structure.
 
-**Observed.** `crates/fleet-server/src/fleet.rs` is 14 074 lines and
-`crates/fleet-server/src/api.rs` 4 539 on `main`. What an instance holds of the Agents it carries
-has moved to `fleet::held` (revision-2026-11-06 ticket 03), and the cursor paging to
-`api/paging.rs` (ADR-0030); the rest is in the two files:
+**Observed.** PR #202 split `crates/fleet-server/src/fleet.rs` into one module per context, so
+the first two slices below have their module: report processing is `fleet::session`, and
+Package and Deployment administration are `fleet::delivery` and `fleet::rollout`. What is left
+of the two slices, report processing cut into named steps a unit test can call and the
+administration as a use case `api` calls, waits for the decision of ticket 13 of
+revision-2026-11-18 (service structs per context). The other two slices are open:
 
-1. **Report processing.** `report_round` in `fleet.rs`, about 540 lines, processes an Agent's
-   report; `process_presented` (near line 2863) is about 50.
-2. **Package and Deployment administration.** It mostly forwards to the package and Deployment
-   stores and adds the refusal of what an assignment still names, inside an `AppState` of many
-   public methods (near lines 5167 to 5280 of `fleet.rs`).
-3. **The wire shape of the views.** The view types in `fleet.rs` (near lines 5928, 6084, 6110 and
-   6126) derive `Serialize`, while `api.rs` mirrors each with a response type and a
+3. **The wire shape of the views.** The view types in `crates/fleet-server/src/fleet/views.rs`
+   (`AgentView`, `PendingConfigurationView`, `PendingPackageView`, `PackageStatusView`, near lines
+   384 to 593) derive `Serialize`, while `api.rs` mirrors each with a response type and a
    field-by-field `From`, the doc comments copied. The core's `Serialize` looks unused (ADR-0031).
 4. **The REST API by resource.** Every route, view and conversion of about ten resources lives in
-   `api.rs`.
+   `crates/fleet-server/src/api.rs` (4 581 lines on `main`); only the cursor paging is in
+   `api/paging.rs` (ADR-0030).
 
-`listing::derive` in `crates/fleet-server/src/listing.rs` and the build of `AgentView` in
-`fleet.rs` (near lines 4783 to 4804) also derive the same display values twice: the attribute
-split, the remote configuration status, the service version and the OS description fallback.
-
-**Idea.** In that order, one slice a change: report processing into a module of its own, cut into
-named steps a unit test can call, behind the same `AppState` entry point; Package and Deployment
-administration into a module `api` calls, keeping the refusal; the core's serialization of the
-views dropped where nothing needs it, so `api` owns the wire shape alone; `api` split into one
-module per resource behind the same router and OpenAPI derivation. Each slice updates the
-overview.
+**Idea.** In that order, one slice a change: the core's serialization of the views dropped where
+nothing needs it, so `api` owns the wire shape alone; `api` split into one module per resource
+behind the same router and OpenAPI derivation. Each slice updates the overview.
 
 It overlaps the draft
 `draft-two-use-case-layers-stand-between-the-servers-planes-and-its-core.md` on
@@ -35,4 +27,6 @@ It overlaps the draft
 cut leads.
 
 **From.** Revision tickets 13, 26, 27 and 28 of `feat/revision-2026-10-31`, open, not worked;
-merged into one entry from four on `feat/bugfixes` (2026-11-14).
+merged into one entry from four on `feat/bugfixes` (2026-11-14). Trimmed by the design revision
+of 2026-11-18: the double derivation of the display values went to its ticket 01, and the
+first two slices to #202 and its ticket 13.

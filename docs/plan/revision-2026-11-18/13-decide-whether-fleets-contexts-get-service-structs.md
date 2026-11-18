@@ -10,10 +10,9 @@ can now: `fleet::views`, `delivery`, `rollout`, `approval` and `session` beside 
 
 What the human weighs:
 
-- The backlog entry `docs/backlog/fleet-and-api-are-split-in-four-slices.md`: its slices 1 and
-  2 (report processing, Package and Deployment administration) are now `fleet::session` and
-  `fleet::delivery`; its slices 3 and 4 (the views' wire shape, `api` by resource) are open, and
-  its line numbers point into the old `fleet.rs`.
+- The backlog entry `docs/backlog/fleet-and-api-are-split-in-four-slices.md`: what is left
+  of its slices 1 and 2 (report processing cut into named steps, the administration as a use
+  case `api` calls) waits for this decision; its slices 3 and 4 are independent of it.
 - The draft `draft-two-use-case-layers-stand-between-the-servers-planes-and-its-core.md` on
   `feat/server-drafts`, which places such use cases in a layer of their own.
 - Ticket 02 of this revision, which makes the dependencies between the contexts visible first.

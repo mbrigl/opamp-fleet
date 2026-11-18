@@ -3,14 +3,18 @@
 ## What to build
 
 Accepted ADRs are immutable outside a normalization
-([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) rule 5), so two drifts wait for the next one:
+([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) rule 5), so three drifts wait for the next one:
 
 - **`fleet.rs` for code now in `fleet/*.rs`.** PR #202 moved the Server's `fleet` into
-  submodules. ADR-0012, -0013, -0018, -0019, -0023, -0025, -0026, -0028, -0029, -0032, -0033 and
-  -0037 still cite `crates/fleet-server/src/fleet.rs` for code and tests now in
-  `fleet/session.rs`, `fleet/held.rs`, `fleet/rollout.rs`, `fleet/views.rs`,
-  `fleet/delivery.rs` and `fleet/approval.rs` (for example ADR-0028's
-  `unavailable_tells_the_agent_when_to_retry`, ADR-0029's `forget_agent`, ADR-0019's `offer`).
+  submodules. Fifteen accepted ADRs still cite `crates/fleet-server/src/fleet.rs` for code and
+  tests now in `fleet/session.rs`, `fleet/held.rs`, `fleet/rollout.rs`, `fleet/views.rs`,
+  `fleet/delivery.rs` and `fleet/approval.rs`:
+  - in their text: ADR-0012, -0013, -0018, -0019, -0023, -0025, -0026, -0028, -0029, -0032,
+    -0033 and -0037 (for example ADR-0028's `unavailable_tells_the_agent_when_to_retry`,
+    ADR-0029's `forget_agent`, ADR-0019's `offer`);
+  - in their *Applies to* alone: ADR-0016 (the host and predecessor a CSR is issued to, now in
+    `fleet/approval.rs`), ADR-0027 (the approval and renewal paths, `fleet/approval.rs`) and
+    ADR-0030 (the queries the fleet answers for the lists, `fleet/views.rs`).
   `scripts/check-traceability.sh` finds a named test in any file and
   `scripts/sensor-binding-adrs.sh` routes `fleet/` to `fleet.rs`'s ADRs, so nothing fails; a
   reader who opens `fleet.rs` does not find what the ADR names. The `pub use` lines in
@@ -21,6 +25,9 @@ Accepted ADRs are immutable outside a normalization
   value also bounds the time to a connection's first request, and HTTP/2 has its own timer with
   bounds on streams and pings (`bounded` in `crates/opamp/src/server/listen.rs`). The clause's
   parenthesis on what axum applies describes axum-server 0.8.
+- **ADR-0008's Enforcement of clause 16** describes
+  `each_shared_module_sits_in_the_crate_its_users_choose` as deciding per module. Once ticket
+  04 adds the per-item check, the restated Enforcement names it beside the module cases.
 
 The normalization rewrites each citation to the file that holds the code, and restates clause 15
 with the bounds as they stand. It changes no decision.
@@ -31,6 +38,8 @@ with the bounds as they stand. It changes no decision.
   code that `fleet.rs` holds.
 - [ ] Given the normalized ADR that carries clause 15, when it is read against `bounded`, then it
   names the first-request bound and the HTTP/2 bounds.
+- [ ] Given the normalized ADR that carries clause 16, when its Enforcement is read against
+  `who_shares.rs`, then it names the per-item check, if ticket 04 has landed.
 
 ## Read first
 
