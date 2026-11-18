@@ -81,3 +81,7 @@ zeroize.workspace = true
 fleet-agent = { path = "../fleet-agent" }
 tokio-tungstenite.workspace = true
 tempfile = "3"
+# The capability matrix reads the production code as a syntax tree (G-12).
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
