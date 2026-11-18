@@ -9,7 +9,7 @@
 > **Kept current by:** Markus Brigl. A document everyone may edit and nobody owns is
 > the one that goes stale.
 >
-> **Last design revision:** 2026-11-15, due after 20 changes. The revision that took the count
+> **Last design revision:** 2026-11-18, due after 20 changes. The revision that took the count
 > moves the date; the number is this project's to set; a sensor counts the changes outside
 > `docs/` since the commit that set the date and says when the next is due
 > ([ADR-0006](adr/0006-feature-layer.md)).
@@ -82,10 +82,13 @@ Six crates in one workspace
   and both drivers draw their reconnects and their waits after a refusal or an `Unavailable` from
   `client::backoff`. `uid` is the `InstanceUid` and `attributes` the attribute keys both sides use.
   Behind `server`, the endpoint around a `Handler`, which answers a WebSocket's pings while it
-  handles a message, `server::listen`, the listener with its TLS and its bounds on connection
-  setup, and `server::pace`, the floor every body and WebSocket message it serves is held to. The
-  server side takes a WebSocket over through hyper's upgrade and reads its frames with
-  `tokio-tungstenite`, the library the client side uses too.
+  handles a message, `server::listen`, the listener with its TLS and its bounds — among them a
+  cap on the connections it holds and the new ones it takes a second, a deadline on the TLS
+  handshake, one timeout on the time to a connection's first request and on an HTTP/1 request's
+  headers, and HTTP/2's bounds on streams and pings — and `server::pace`, the floor every body
+  and WebSocket message it serves is held to. The server side takes a WebSocket over through
+  hyper's upgrade and reads its frames with `tokio-tungstenite`, the library the client side
+  uses too.
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
@@ -112,12 +115,13 @@ Six crates in one workspace
   ([ADR-0008](adr/0008-six-crates-on-tokio-and-axum.md)):
   the unpackers of a package's artifact and the 7z Unix-mode convention (`archive`), the links a
   kind's tree package keeps, which `opamp-fleetctl` packs and the Client creates (`tree`), though
-  no kind on `main` states one yet, the file operations that follow no link (`nofollow`), whose
-  Unix `*at` system calls, wrapped once in `nofollow::at`, the Client's work by directory handle
-  calls too, while the calls only the Client makes stay in its `storage::handle`, the reader of a
-  password file (`password`), and a bootstrap identity as PEM
-  (`identity`), opened from a PKCS#12 file by the adapter `identity::pkcs12`. A test decides from
-  who names a module whether it belongs here or in `fleet-core`.
+  no kind on `main` states one yet, the file operations that follow no link (`nofollow`), the
+  reader of a password file (`password`), and a bootstrap identity as PEM (`identity`), opened
+  from a PKCS#12 file by the adapter `identity::pkcs12`. The Unix `*at` system calls of
+  `nofollow` are wrapped once in `nofollow::at`, which the Client's work by directory handle
+  calls too. The calls only the Client makes stay in its `storage::handle`, but for the
+  `fchownat` of the re-own walk in `service::run_as`. A test decides from who names a module
+  whether it belongs here or in `fleet-core`.
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the
   effective description Selectors match (`labels`), packages and Deployments, the Agent plane, and
   the Operator plane, whose credential check is `credentials`.
@@ -132,8 +136,10 @@ Six crates in one workspace
   of a PKCS#12 file (ADR-0036). `gpgv` verifies an upstream's OpenPGP signature (ADR-0036 clause
   29); no command calls it yet. It depends on neither end: what it shares with the Client — the 7z
   Unix-mode convention (`archive::unix_mode_attributes`; its tests also use the unpacker), the
-  PKCS#12 reader (`identity::pkcs12::open`), and the reads of an administrator's file
-  (`nofollow::read_privileged`, `password::read_password_file`) — it takes from `fleet-util`.
+  links a tree package keeps (`tree::KeptLink`, `tree::is_kept`), the PKCS#12 reader
+  (`identity::pkcs12::open`), and the reads of an administrator's file
+  (`nofollow::read_privileged` with `nofollow::Named`, `password::read_password_file`) — it takes
+  from `fleet-util`.
 
 Inside the Server and the Client the code is ports and adapters
 ([ADR-0009](adr/0009-ports-and-adapters.md)): a **core** that holds the domain and owns its
