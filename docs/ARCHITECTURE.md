@@ -119,9 +119,9 @@ Six crates in one workspace
   reader of a password file (`password`), and a bootstrap identity as PEM (`identity`), opened
   from a PKCS#12 file by the adapter `identity::pkcs12`. The Unix `*at` system calls of
   `nofollow` are wrapped once in `nofollow::at`, which the Client's work by directory handle
-  calls too. The calls only the Client makes stay in its `storage::handle`, but for the
-  `fchownat` of the re-own walk in `service::run_as`. A test decides from who names a module
-  whether it belongs here or in `fleet-core`.
+  calls too. The calls only the Client makes stay in its `storage::handle`, and a test decides
+  that each of the Client's `*at` calls is in one of the two. A test decides from who names a
+  module whether it belongs here or in `fleet-core`.
 - **`fleet-server`** — the Server: the fleet and its Hosts, its Configurations, labels and the
   effective description Selectors match (`labels`), packages and Deployments, the Agent plane, and
   the Operator plane, whose credential check is `credentials`.

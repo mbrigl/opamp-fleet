@@ -1319,7 +1319,7 @@ mod walk {
     use std::path::Path;
 
     use super::Skipped;
-    use crate::storage::handle::{entries, fstat, mode};
+    use crate::storage::handle::{chown, entries, fstat, mode};
     use fleet_util::nofollow::at::{fchmod, open};
 
     /// The entry a name stands for, opened as what it is and never through a link. On Linux this
@@ -1475,32 +1475,6 @@ mod walk {
             }
             Ok(())
         }
-    }
-
-    /// Re-own what `handle` holds, a link as a link. On Linux the handle may be path-only, which
-    /// `fchown` refuses; an empty name with `AT_EMPTY_PATH` changes the handle's own entry.
-    #[cfg(target_os = "linux")]
-    fn chown(handle: &OwnedFd, uid: u32, gid: u32) -> io::Result<()> {
-        // SAFETY: a valid descriptor and a NUL-terminated (empty) name.
-        let rc = unsafe {
-            libc::fchownat(
-                handle.as_raw_fd(),
-                c"".as_ptr(),
-                uid,
-                gid,
-                libc::AT_EMPTY_PATH | libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    /// Re-own what `handle` holds; a handle opened with `O_SYMLINK` holds the link itself.
-    #[cfg(target_os = "macos")]
-    fn chown(handle: &OwnedFd, uid: u32, gid: u32) -> io::Result<()> {
-        std::os::unix::fs::fchown(handle, Some(uid), Some(gid))
     }
 }
 
