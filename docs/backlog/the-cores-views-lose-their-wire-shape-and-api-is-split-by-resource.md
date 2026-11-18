@@ -19,10 +19,11 @@ ticket 13 of revision-2026-11-18 (service structs per context).
 nothing needs it, so `api` owns the wire shape alone; `api` split into one module per resource
 behind the same router and OpenAPI derivation. Each slice updates the overview.
 
-It overlaps the draft
+Neither slice depends on how the Server's use cases are cut, which ticket 13 of
+revision-2026-11-18 and the draft
 `draft-two-use-case-layers-stand-between-the-servers-planes-and-its-core.md` on
-`feat/server-drafts`, which places such use cases in a layer of their own; the human decides which
-cut leads.
+`feat/server-drafts` leave to the human: the wire shape and the split of `api` by resource hold
+under either cut.
 
 **From.** Revision tickets 13, 26, 27 and 28 of `feat/revision-2026-10-31`, open, not worked;
 merged into one entry from four on `feat/bugfixes` (2026-11-14) as

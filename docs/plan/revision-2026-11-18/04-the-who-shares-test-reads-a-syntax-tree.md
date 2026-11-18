@@ -25,7 +25,11 @@ under
 rule 2) in place of its own lexer. It decides nothing new and moves nothing.
 
 Beside the test, a report lists each public item of `fleet-util` with the crates that name it
-in shipped code, and the session puts that list into its hand-off as input to ticket 11. On
+in shipped code, and the session puts that list into its hand-off as input to ticket 11. The
+report is a second test in `who_shares.rs`, marked `#[ignore]`, that prints the list on
+`cargo test -p fleet-util --test who_shares -- --ignored --nocapture` and asserts nothing; it
+shares the syntax-tree reader, so no second reader is written. The change that closes ticket
+11 deletes it, unless ticket 11 keeps it as its check. On
 `main` the tool names in shipped code only `archive::unix_mode_attributes`,
 `nofollow::{read_privileged, Named}`, `password::read_password_file`,
 `identity::pkcs12::open` and `tree::{KeptLink, is_kept}`, so most items would fail a per-item
@@ -40,8 +44,8 @@ nothing; whether items move is ticket 11's decision.
   alias in a group), when the new reader reads them, then it decides each as the current test
   does.
 - [ ] Given `main`, when the test runs, then it passes.
-- [ ] Given `main`, when the report runs, then it lists each public item of `fleet-util` with
-  the crates that name it in shipped code, and fails nothing.
+- [ ] Given `main`, when the ignored report test runs, then it prints each public item of
+  `fleet-util` with the crates that name it in shipped code, and fails nothing.
 
 ## Read first
 

@@ -22,8 +22,9 @@ names the OpAMP control loop, which is `fleet::session` now.
 
 ## Acceptance criteria
 
-- [ ] Given the change, when `fleet.rs`'s imports are read, then each name is used in the
-  root's own code.
+- [ ] Given the change, when `fleet.rs`'s private imports are read, then each name is used in
+  the root's own code. The `pub use` and `pub(crate) use` re-exports (near lines 44 to 54) are
+  exempt: they keep the old paths that `api`, the suites and the ADRs of ticket 10 use.
 - [ ] Given a production submodule of `fleet`, when a `use super::*` is added to it, then
   `scripts/check-all.sh` fails.
 - [ ] Given the change, when the fleet's unit tests run, then the same 155 tests pass.

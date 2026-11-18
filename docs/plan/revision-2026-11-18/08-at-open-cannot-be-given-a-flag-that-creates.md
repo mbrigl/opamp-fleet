@@ -23,7 +23,9 @@ caller in `fleet-util` and `fleet-agent` moves to it.
 - Touches: `crates/fleet-util/src/nofollow.rs`, `crates/fleet-agent/src/storage.rs`,
   `crates/fleet-agent/src/service/run_as.rs`, and the other callers of `at::open`:
   `crates/fleet-agent/src/service/manager.rs` (near lines 520, 546 and 1829),
-  `crates/fleet-agent/src/supervisor/channel.rs` (near lines 1130 to 1136); and those that pass
+  `crates/fleet-agent/src/supervisor/channel.rs` (near lines 1130 to 1136 and 1170), beside
+  the callers inside `nofollow.rs` itself and the imports in `storage.rs` and `run_as.rs`; and
+  those that pass
   raw flags through `storage::handle::open_beneath`:
   `crates/fleet-agent/src/supervisor/process.rs` (near line 2242) and
   `crates/fleet-agent/src/reconfigure.rs` (near lines 337 and 469)

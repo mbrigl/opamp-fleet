@@ -19,8 +19,10 @@ neither the standard library nor a dependency offers. The constants are declared
 `crates/fleet-util/src/nofollow.rs` (near lines 785 to 789) keeps its own copy, and this ticket
 leaves it alone. Sharing it across the two crates has no cheap way:
 
-- a public constant in `fleet-util` that only the Client names is against ADR-0008 clause 16
-  and the module rule would admit it only by a judgement ticket 11 has not made;
+- a public constant in `nofollow` that only the Client names is against the wording of
+  ADR-0008 clause 16, which says who shares an item chooses its crate; the module test does not
+  enforce that wording and would accept it, since both users name `nofollow`, so the choice is
+  one of the judgements ticket 11 weighs;
 - no manifest declares `windows-sys`, which reaches the lock only through other crates (0.52,
   0.59 and 0.61), so taking the constants from it would add a direct dependency.
 
