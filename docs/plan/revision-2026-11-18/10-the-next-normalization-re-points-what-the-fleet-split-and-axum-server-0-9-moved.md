@@ -55,12 +55,10 @@ what #196 chose, which a normalization does not do, since it changes no decision
 
 ## Blocked by
 
-- docs/plan/revision-2026-11-18/11-decide-whether-the-shared-crates-are-cut-again-by-cohesion.md
+None (can start immediately)
 
 ## Mode
 
 with the human, and not claimable on its own. It waits for a human's instruction to normalize
 ([`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules) rule 5) and is worked as part of that
-normalization. It waits for ticket 11 too: a re-cut of the shared crates moves paths the same
-ADRs cite, and the record is re-pointed once. ADR-0007 clause 5 keeps every part of the system
-with the human.
+normalization. ADR-0007 clause 5 keeps every part of the system with the human.
