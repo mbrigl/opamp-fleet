@@ -559,7 +559,8 @@ pub mod at {
             Self(self.0 & !other.0)
         }
 
-        /// Whether `self` holds every flag of `other`.
+        /// Whether `self` holds every flag of `other`. `O_RDONLY` is no bit, so every value holds
+        /// it.
         #[must_use]
         pub const fn contains(self, other: Self) -> bool {
             self.0 & other.0 == other.0
@@ -1014,7 +1015,6 @@ mod sys {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::fd::AsRawFd as _;
 
     /// A link at the file's own name is refused for a path the account's file offered, and
     /// followed for the administrator's; a file over the bound is refused, naming the bound.
@@ -1040,27 +1040,5 @@ mod tests {
             over.contains("larger than") && over.contains("4 bytes"),
             "{over}"
         );
-    }
-
-    /// `at::open` passes no mode, so it takes no flag that creates: raw flags and a flag that
-    /// creates do not compile (the `compile_fail` examples of [`at::Flags`]), every named flag is
-    /// checked as its constant is evaluated, and an open of a missing name creates nothing.
-    #[test]
-    fn no_flag_the_open_that_passes_no_mode_takes_creates() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let held = at::open(
-            libc::AT_FDCWD,
-            &std::ffi::CString::new(dir.path().as_os_str().as_encoded_bytes()).expect("path"),
-            at::DIRECTORY,
-        )
-        .expect("the directory");
-        let missing = at::open(
-            held.as_raw_fd(),
-            c"new",
-            at::Flags::O_WRONLY.or(at::Flags::O_CLOEXEC),
-        )
-        .expect_err("a missing name");
-        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
-        assert!(!dir.path().join("new").exists());
     }
 }

@@ -8,10 +8,11 @@
 # CHANGELOG.md on main, adds commits on a branch, runs the sensor against the branch, and asserts
 # the exit code and a line a reader would meet. The cases form a table: a fix to a crate's src/
 # without an entry, the same branch once a commit touches CHANGELOG.md, a feat to packaging/, a
-# breaking change of another type by '!' and by its footer, commits of the types refactor, test,
-# docs and chore, a fix that touches only tests, docs/ or scripts/, a merge that brings in a
-# fix, nothing to compare, and a base or a head that does not resolve. Last, the pull request
-# template's 'CHANGELOG.md:' line and the two lines of scripts/check-all.sh that run the sensor.
+# fix to Cargo.lock and to a crate's static/, a breaking change of another type by '!' and by its
+# footer, commits of the types refactor, test, docs and chore, a fix that touches only tests,
+# docs/ or scripts/, a merge that brings in a fix, nothing to compare, and a base or a head that
+# does not resolve. Last, the pull request template's 'CHANGELOG.md:' line and the two lines of
+# scripts/check-all.sh that run the sensor.
 #
 # Inputs: scripts/sensor-changelog.sh scripts/lib/ scripts/check-all.sh .github/PULL_REQUEST_TEMPLATE.md
 #
@@ -89,6 +90,14 @@ r="$(repo packaging)"
 change "$r" packaging/linux/postinst "feat(packaging): a new unit"
 expect 0 "a feat to packaging/: listed" "$r" "  - " "" main HEAD
 expect 0 "a feat to packaging/: its subject" "$r" "feat(packaging): a new unit"
+
+r="$(repo deps)"
+change "$r" Cargo.lock "fix(deps): take up a patched crate"
+expect 0 "a fix to Cargo.lock: listed" "$r" "fix(deps): take up a patched crate"
+
+r="$(repo ui)"
+change "$r" crates/fleet-server/static/app.js "fix(server): the page shows the version"
+expect 0 "a fix to a crate's static/: listed" "$r" "fix(server): the page shows the version"
 
 r="$(repo bang)"
 change "$r" crates/opamp/src/lib.rs "refactor(opamp)!: rename the wire field"

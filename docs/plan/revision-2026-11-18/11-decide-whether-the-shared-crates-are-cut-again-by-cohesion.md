@@ -17,6 +17,11 @@ For a re-cut, from the work since 2026-11-15:
 - The test that decides membership needed three rounds of fixes (ticket 04 of this revision).
 - The module rule lets items in that only one of the two users names: the per-item report of
   ticket 04 lists them.
+- The Windows reparse-point constants are written twice, once in `fleet_util::nofollow` and
+  once in the Client's `win32` (since ticket 07, which declared the Client's three copies once).
+  Sharing them takes either a public item of `fleet-util` only the Client names, against clause
+  16's wording though the module test lets it in, or a direct `windows-sys` dependency, which no
+  manifest declares today.
 
 Against it:
 

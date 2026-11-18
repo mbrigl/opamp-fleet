@@ -6,9 +6,10 @@
 # Lists the commits between a base and a head that a running deployment may have to be told
 # about, when no commit of the change touches CHANGELOG.md. Such a commit has a Conventional
 # Commits subject of type fix or feat, or marks a breaking change with a '!' after its type or a
-# 'BREAKING CHANGE' line, and it touches the shipped code: the src/ of a crate the products are
-# built from, crates/{opamp,fleet-core,fleet-util,fleet-server,fleet-agent,fleet-tools}/src/, or
-# packaging/. A merge commit counts for the CHANGELOG.md it touches, never as such a commit.
+# 'BREAKING CHANGE' line, and it touches the shipped code: of a crate the products are built
+# from, crates/{opamp,fleet-core,fleet-util,fleet-server,fleet-agent,fleet-tools}/, its src/,
+# proto/ or static/, its build.rs or its Cargo.toml; Cargo.lock, which a dependency's fix moves;
+# or packaging/. A merge commit counts for the CHANGELOG.md it touches, never as such a commit.
 # A change no deployment sees answers the sensor in its pull request, on the line
 # 'CHANGELOG.md:' under Documents and decisions (.github/PULL_REQUEST_TEMPLATE.md). It reports
 # and never fails.
@@ -38,7 +39,7 @@ if [[ "$(git rev-parse "$base^{commit}")" == "$(git rev-parse "$head^{commit}")"
 fi
 
 range="$(git rev-parse --short "$base")..$(git rev-parse --short "$head")"
-shipped='^(crates/(opamp|fleet-core|fleet-util|fleet-server|fleet-agent|fleet-tools)/src/|packaging/)'
+shipped='^(Cargo\.lock$|crates/(opamp|fleet-core|fleet-util|fleet-server|fleet-agent|fleet-tools)/(src/|proto/|static/|build\.rs$|Cargo\.toml$)|packaging/)'
 # A subject 'fix: …', 'feat(scope): …', or any type with '!' before the colon.
 visible='^((fix|feat)(\([^)]*\))?!?|[A-Za-z]+(\([^)]*\))?!):'
 
