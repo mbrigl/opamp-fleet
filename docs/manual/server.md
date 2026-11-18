@@ -3105,8 +3105,10 @@ Each plane is bounded before a request is parsed:
 - **A rate of new connections** on the Agent plane: `max_new_connections_per_sec` (default 200).
   A connection past it is answered `503` with a `Retry-After` drawn from 1 to 30 seconds, over
   HTTP/1.1 so the connection closes after the answer.
-- **The TLS handshake** must complete within 10 seconds, and a peer has 30 seconds to send its
-  HTTP/1 request headers.
+- **The TLS handshake** must complete within 10 seconds. After it, a peer has 30 seconds to send
+  its first request, and after each answer 30 seconds for the HTTP/1 request headers of the next,
+  so an idle HTTP/1 connection closes 30 seconds after its last answer. A peer that sends nothing
+  in that time is hung up on, and its place under the cap is freed.
 - **HTTP/2** allows 100 concurrent streams per connection. A keep-alive ping goes out every 30
   seconds, and a peer that leaves one unanswered for 20 seconds is dropped.
 

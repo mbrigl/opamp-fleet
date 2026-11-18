@@ -18,6 +18,14 @@ once its tag exists.
 
 ### Fixed
 
+- **A peer that sends no request is hung up on after 30 seconds**
+  ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md) clause 19). On both planes
+  of the Server, a Client's Gateway and a Supervisor Endpoint, a peer that completed the TCP
+  connection, or the TLS handshake, and then sent no request held its place under the connection
+  cap until it closed or the listener stopped; enough such peers filled the cap, and every new
+  connection was refused. The 30 seconds a peer has for its request headers now also bound the
+  time to its first request, counted from the connection, or from the end of the TLS handshake on
+  a TLS listener. **What to do:** nothing.
 - **`libz-sys` 1.1.33 (RUSTSEC-2026-0544).** The heap buffer overflow lies in a crate only the
   build script of `fleet-core` links, through `git2`, to stamp the version with git's provenance;
   no shipped binary contains it. `chrono` and `humantime`, flagged as unmaintained on the same day
