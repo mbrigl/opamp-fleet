@@ -1,9 +1,22 @@
 //! What one instance holds of the Agents it carries on a shared store (ADR-0025 clause 8): the
 //! take and the release of an Agent, the presence it writes, the re-keys whose
 //! answer was lost, the restarts kept for retry, the take-up of what other instances announced, and
-//! the per-Agent locks. Behind the same `AppState` entry points as before.
+//! the per-Agent locks. Its entry points are methods of `AppState`.
 
-use super::*;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use opamp::proto::{ServerToAgent, TlsCertificate};
+use opamp::uid::InstanceUid;
+use tracing::{debug, info, warn};
+
+use crate::agent_store::{PersistedAgent, Presence};
+
+use super::placement::Elsewhere;
+use super::session::Processed;
+use super::{placement, AgentRecord, AppState, ConnId};
 
 /// How many locks the Agents' own locks are spread over: two Agents share one only by their
 /// `instance_uid`, and then one waits for the other's report.
@@ -1486,7 +1499,18 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::agent_store::{AgentStore, Pin};
     use crate::fleet::fixtures::*;
+    use crate::fleet::{ConnectionOffer, RestartError, Transport, DEFAULT_HEARTBEAT};
+    use crate::labels::LabelError;
+    use crate::revocation::{Presented, Revocations};
+    use opamp::proto::{
+        AgentDescription, AgentToServer, AgentToServerFlags, ServerErrorResponseType,
+        ServerToAgentFlags,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Arc, OnceLock};
 
     /// A restart whose command was not sent is queued again, on a lease that lapsed meanwhile
     /// too, and the Agent's next connection is sent it, once; a message that carries no restart
@@ -2509,7 +2533,7 @@ mod tests {
             connected: true,
             last_seen_ms: 1,
         };
-        let mut written = held::PresenceWritten::default();
+        let mut written = PresenceWritten::default();
         written.under("a");
         written.taken(uid, presence, 3);
         let first = written.generation(&uid);

@@ -265,7 +265,9 @@ no module.
   state, its construction and limits, the lease, the reads of the fleet, the audit helpers, the
   capabilities the Server declares, the staleness rule, and the types the contexts share, with the
   tests of staleness, of the host a register derives, and of label inheritance. The test helpers
-  the contexts share are the test-only `fleet::fixtures`.
+  the contexts share are the test-only `fleet::fixtures`. Each context imports by name what it
+  takes from the root, from its siblings and from the crate; `clippy::wildcard_imports`, denied in
+  `fleet`, refuses a glob import in its production code.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the

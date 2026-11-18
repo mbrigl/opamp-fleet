@@ -1,38 +1,32 @@
-//! In-memory fleet state and the OpAMP control loop, keyed by Instance UID — never by the
-//! connection that carried a message (ADR-0016).
+//! In-memory fleet state, keyed by Instance UID — never by the connection that carried a message
+//! (ADR-0016). Each context that changes it is a submodule, which imports by name what it takes
+//! from the root, its siblings and the crate.
+
+#![deny(clippy::wildcard_imports)]
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use opamp::attributes;
 use opamp::proto::{
-    any_value, AgentConfigMap, AgentConfigObject, AgentDescription, AgentIdentification,
-    AgentRemoteConfig, AgentToServer, AgentToServerFlags, AvailableComponents, ComponentHealth,
-    ConnectionSettingsOffers, ConnectionSettingsStatus, KeyValue, OpAmpConnectionSettings,
-    PackageStatuses, PackagesAvailable, RemoteConfigStatus, ServerCapabilities,
-    ServerErrorResponse, ServerErrorResponseType, ServerToAgent, ServerToAgentFlags,
-    TelemetryConnectionSettings, TlsCertificate,
+    AgentDescription, AvailableComponents, ComponentHealth, ConnectionSettingsStatus,
+    OpAmpConnectionSettings, PackageStatuses, RemoteConfigStatus, ServerCapabilities,
+    TelemetryConnectionSettings,
 };
 use opamp::uid::InstanceUid;
-use prost::Message as _;
-use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
-use tracing::{debug, info, warn};
+use tracing::info;
 
-use crate::agent_store::{AgentStore, Creation, PersistedAgent, Pin, Presence};
+use crate::agent_store::{AgentStore, PersistedAgent, Presence};
 use crate::audit::{Audit, Entry};
-use crate::configs::{ConfigBackend, ConfigStore, Configuration, DesiredConfig, Removal, Revision};
-use crate::deployments::{self, deployment_for, Deployment, DeploymentError, DeploymentStore};
-use crate::enrolment::{DecisionError, Enrolment, Recorder, Registrar};
-use crate::labels::{LabelError, Sources};
-use crate::packages::{
-    InstalledVersions, PackageError, PackageId, PackageStore, Platform, Refusal, SignatureState,
-};
-use crate::revocation::{CertId, Facts, Presented, Revocations, Signed, SpeaksFor, SubjectValues};
+use crate::configs::{ConfigBackend, ConfigStore};
+use crate::deployments::DeploymentStore;
+use crate::enrolment::Enrolment;
+use crate::labels::Sources;
+use crate::packages::{InstalledVersions, PackageId, PackageStore};
+use crate::revocation::{CertId, Facts, Revocations, Signed, SpeaksFor, SubjectValues};
 
 mod approval;
 mod delivery;
@@ -42,8 +36,8 @@ mod rollout;
 mod session;
 mod views;
 pub use delivery::{PackageOffering, StoreFull, UploadReservation};
-use held::{Carried, Kept, PendingRekey, Settled, Taking, Took, UnsureRekey, AGENT_LOCKS};
-use placement::{Elsewhere, Groups};
+use held::{Kept, AGENT_LOCKS};
+use placement::Groups;
 pub use placement::{Group, Placement};
 pub use session::{
     bad_request, unavailable, Processed, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER,
@@ -1188,7 +1182,10 @@ mod tests {
     }
 
     use super::*;
+    use crate::deployments;
     use crate::fleet::fixtures::*;
+    use crate::revocation::Presented;
+    use opamp::proto::{AgentToServer, AgentToServerFlags};
 
     // ---- Hosts, the effective description and label inheritance (ADR-0029) ----
 

@@ -1,10 +1,22 @@
 //! The views of the fleet: the Agents each Host carries (ADR-0029 clause 24), the views of an
 //! Agent and of the whole fleet, the list of Agents a page at a time (ADR-0030 clauses 3 to 8), and
-//! the version a reader of the fleet table is shown (ADR-0037). Behind the same `AppState` entry
-//! points as before.
+//! the version a reader of the fleet table is shown (ADR-0037). Its entry points are methods of
+//! `AppState`.
 
+use std::collections::{BTreeMap, HashMap};
+
+use opamp::attributes;
+use opamp::proto::{any_value, KeyValue};
+use opamp::uid::InstanceUid;
+use serde::Serialize;
+
+use crate::configs::DesiredConfig;
+use crate::deployments::{deployment_for, Deployment, DeploymentStore};
+use crate::packages::PackageId;
+
+use super::placement::{Group, Placement};
 use super::rollout::{waiting, Waiting};
-use super::*;
+use super::{is_stale, AgentRecord, AppState};
 
 impl AppState {
     /// The Agents each Host carries (ADR-0029 clause 24) — those whose record names it as the Host
@@ -114,8 +126,10 @@ impl AppState {
     /// One page of the list of Agents
     /// (ADR-0030
     /// clauses 3 to 6 and 8): on a store this Server alone writes, cut from what it holds; on a
-    /// shared store read through [`AgentStore::query_page`], each Agent placed under the Client
-    /// Agent the store found for it and with the values of the Host it arrived over.
+    /// shared store read through
+    /// [`AgentStore::query_page`](crate::agent_store::AgentStore::query_page), each Agent placed
+    /// under the Client Agent the store found for it and with the values of the Host it arrived
+    /// over.
     ///
     /// # Errors
     /// Returns an error when the shared store cannot be read.
@@ -837,6 +851,11 @@ impl AgentView {
 mod tests {
     use super::*;
     use crate::fleet::fixtures::*;
+    use crate::revocation::Revocations;
+    use opamp::proto::{AgentDescription, RemoteConfigStatus};
+    use prost::Message as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     /// The view of an array-valued attribute — the shape `host.ip` and `host.mac` arrive in
     /// (ADR-0018): joined for reading, not dumped in debug form.
