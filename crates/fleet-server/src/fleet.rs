@@ -1105,8 +1105,7 @@ fn is_silent(record: &AgentRecord, budget: Duration, now_ms: u64) -> bool {
     now_ms.saturating_sub(record.last_seen_ms) > budget.as_millis() as u64
 }
 
-// The test helpers the contexts share, declared here and not above: a reader of the production
-// code that stops at the first test attribute must see all of it.
+// The test helpers the contexts share.
 #[cfg(test)]
 mod fixtures;
 

@@ -27,18 +27,20 @@ const HOMES: [(&str, &[&str]); 2] = [
     ("fleet-util", &["nofollow", "at"]),
 ];
 
-/// The `*at` system calls of `libc`: each takes a directory handle with a name. A list rather
-/// than a rule on the name, which `creat` and `stat` would pass or fail by accident.
+/// The functions of `libc` on Linux and macOS that take a directory handle with a name. A list
+/// rather than a rule on the name, which `creat` and `stat` would pass or fail by accident. A call
+/// through `libc::syscall`, or through an alias of the crate, is not seen.
 const AT_CALLS: &[&str] = &[
+    "clonefileat",
     "execveat",
     "faccessat",
-    "faccessat2",
+    "fanotify_mark",
     "fchmodat",
-    "fchmodat2",
     "fchownat",
+    "fclonefileat",
     "fstatat",
     "fstatat64",
-    "futimesat",
+    "getattrlistat",
     "linkat",
     "mkdirat",
     "mkfifoat",
@@ -46,12 +48,12 @@ const AT_CALLS: &[&str] = &[
     "name_to_handle_at",
     "open_by_handle_at",
     "openat",
-    "openat2",
     "openat64",
     "readlinkat",
     "renameat",
     "renameat2",
     "renameatx_np",
+    "setattrlistat",
     "statx",
     "symlinkat",
     "unlinkat",

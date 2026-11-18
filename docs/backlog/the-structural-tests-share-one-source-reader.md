@@ -15,7 +15,10 @@ a reader of its own:
 
 They disagree on what is shipped. `who_shares` reads the files of modules declared
 `#[cfg(test)] mod x;`, such as `crates/fleet-server/src/fleet/fixtures.rs` and
-`crates/fleet-server/src/test_support.rs`, as shipped code; the matrix never reaches them.
+`crates/fleet-server/src/test_support.rs`, as shipped code; the matrix never reaches them. And
+the cut the matrix and `who_shares` share sees only outer attributes: a module file headed by an
+inner `#![cfg(test)]`, a tuple-struct field, a parameter, or a macro body under a test-only `cfg`
+is read as shipped. None of the crates has such a case today.
 
 **Open.** Sharing a reader across crates takes a crate of its own, which ADR-0008 clause 11 counts
 and decides, or a `#[path]` module that each test includes. Which one, and whether the
