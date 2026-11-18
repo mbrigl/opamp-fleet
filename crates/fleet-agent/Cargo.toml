@@ -169,3 +169,8 @@ flate2.workspace = true
 tar.workspace = true
 # ADR-0019: the end-to-end test runs the real Server in-process against the real Client binary.
 fleet-server = { path = "../fleet-server" }
+# The test of the Client's two homes for `*at` system calls reads its sources and `fleet-util`'s
+# as a syntax tree.
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true

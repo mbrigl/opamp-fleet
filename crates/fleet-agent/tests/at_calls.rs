@@ -1,17 +1,23 @@
 //! The Client's `*at` system calls have two homes (the `fleet-util` bullet of
 //! `docs/ARCHITECTURE.md`).
 //!
-//! The Unix `*at` system calls of `nofollow` are wrapped once in `fleet_util::nofollow::at`, and
-//! the calls only the Client makes stay in its `storage::handle`. Every walk by directory handle
-//! goes through one of the two, so a call that follows no link is written, and reviewed, in one
-//! place. This test reads the sources of `fleet-agent` and `fleet-util`, test code and every `cfg`
-//! branch included, as a syntax tree, and fails on each `libc::` `*at` call outside those two
-//! modules. Tokens inside a macro's arguments are read too; comments and literals are no tokens.
+//! What it decides: the Unix `*at` system calls of `nofollow` are wrapped once in
+//! `fleet_util::nofollow::at`, and the calls only the Client makes stay in its `storage::handle`.
+//! Every walk by directory handle goes through one of the two, so a call that follows no link is
+//! written, and reviewed, in one place. This test reads the sources of `fleet-agent` and
+//! `fleet-util`, test code and every `cfg` branch included, as a syntax tree, and fails on each
+//! `libc::` `*at` call outside those two modules, and on each `*at` name a `use` imports from
+//! `libc` there. Tokens inside a macro's arguments are read too; comments and literals are no
+//! tokens.
+//!
+//! Why it lives here: the rule binds the Client's walks, and `fleet-util`'s `nofollow::at` only as
+//! the Client's other home, so `cargo test -p fleet-agent` has to decide it. It reads
+//! `fleet-util`'s sources by path, as the Client depends on that crate.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use proc_macro2::{Spacing, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::Item;
 
@@ -21,16 +27,39 @@ const HOMES: [(&str, &[&str]); 2] = [
     ("fleet-util", &["nofollow", "at"]),
 ];
 
-/// Whether `name`, a function of `libc`, is an `*at` system call: one that takes a directory
-/// handle with a name, as `openat`, `fstatat`, `fchownat`, `renameat2` and `renameatx_np` do.
-/// `stat`, `fstat` and `lstat` end in `at` and are none.
+/// The `*at` system calls of `libc`: each takes a directory handle with a name. A list rather
+/// than a rule on the name, which `creat` and `stat` would pass or fail by accident.
+const AT_CALLS: &[&str] = &[
+    "execveat",
+    "faccessat",
+    "faccessat2",
+    "fchmodat",
+    "fchmodat2",
+    "fchownat",
+    "fstatat",
+    "fstatat64",
+    "futimesat",
+    "linkat",
+    "mkdirat",
+    "mkfifoat",
+    "mknodat",
+    "name_to_handle_at",
+    "open_by_handle_at",
+    "openat",
+    "openat2",
+    "openat64",
+    "readlinkat",
+    "renameat",
+    "renameat2",
+    "renameatx_np",
+    "statx",
+    "symlinkat",
+    "unlinkat",
+    "utimensat",
+];
+
 fn at_call(name: &str) -> bool {
-    let stem = name
-        .strip_suffix("x_np")
-        .or_else(|| name.strip_suffix("64"))
-        .or_else(|| name.strip_suffix('2'))
-        .unwrap_or(name);
-    name == "statx" || (stem.ends_with("at") && !matches!(stem, "stat" | "fstat" | "lstat"))
+    AT_CALLS.contains(&name)
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -64,7 +93,8 @@ fn module_of(relative: &Path) -> Vec<String> {
     path
 }
 
-/// The `*at` calls of `libc` in `tokens`, by name, groups and macro arguments included.
+/// The `*at` calls of `libc` in `tokens`, by name, groups and macro arguments included: each
+/// `libc::name`, each name of a `libc::{…}` group a `use` imports, and a glob `libc::*` as `*`.
 fn at_calls_in(tokens: TokenStream, out: &mut Vec<String>) {
     let trees: Vec<TokenTree> = tokens.into_iter().collect();
     for (at, tree) in trees.iter().enumerate() {
@@ -75,15 +105,32 @@ fn at_calls_in(tokens: TokenStream, out: &mut Vec<String>) {
                     matches!(trees.get(i), Some(TokenTree::Punct(p))
                         if p.as_char() == ':' && p.spacing() == spacing)
                 };
-                if sep(at + 1, Spacing::Joint) && sep(at + 2, Spacing::Alone) {
-                    if let Some(TokenTree::Ident(name)) = trees.get(at + 3) {
-                        let name = name.to_string();
-                        if at_call(&name) {
-                            out.push(name);
-                        }
+                if !(sep(at + 1, Spacing::Joint) && sep(at + 2, Spacing::Alone)) {
+                    continue;
+                }
+                match trees.get(at + 3) {
+                    Some(TokenTree::Ident(name)) if at_call(&name.to_string()) => {
+                        out.push(name.to_string());
                     }
+                    Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace => {
+                        names_in(group.stream(), out);
+                    }
+                    Some(TokenTree::Punct(p)) if p.as_char() == '*' => out.push("*".to_string()),
+                    _ => {}
                 }
             }
+            _ => {}
+        }
+    }
+}
+
+/// The `*at` names in a `use libc::{…}` group, nested groups and renamed names included.
+fn names_in(tokens: TokenStream, out: &mut Vec<String>) {
+    for tree in tokens {
+        match tree {
+            TokenTree::Group(group) => names_in(group.stream(), out),
+            TokenTree::Ident(name) if at_call(&name.to_string()) => out.push(name.to_string()),
+            TokenTree::Punct(p) if p.as_char() == '*' => out.push("*".to_string()),
             _ => {}
         }
     }
@@ -161,6 +208,8 @@ fn the_reader_finds_at_calls_by_module() {
         }
         // libc::unlinkat(dir, name, 0) in a comment
         fn d() { let _ = "libc::openat"; let _ = libc::AT_FDCWD; }
+        fn e() { let _ = unsafe { libc::creat(p, 0) } + unsafe { libc::creat64(p, 0) }; }
+        use libc::{c_int, fchmodat, nested::{mkdirat as make}};
         "#,
         &module,
     );
@@ -172,10 +221,25 @@ fn the_reader_finds_at_calls_by_module() {
                 vec!["service".to_string(), "walk".to_string()],
                 "renameat2".to_string()
             ),
+            (vec!["service".to_string()], "fchmodat".to_string()),
+            (vec!["service".to_string()], "mkdirat".to_string()),
         ]
     );
+    assert_eq!(
+        at_calls_of("use libc::*;", &module),
+        [(vec!["service".to_string()], "*".to_string())]
+    );
     assert!(at_call("renameatx_np") && at_call("fstatat64") && at_call("statx"));
-    assert!(!at_call("lstat") && !at_call("fstat64") && !at_call("fdopendir"));
+    for not_at in [
+        "lstat",
+        "fstat64",
+        "fdopendir",
+        "creat",
+        "creat64",
+        "tcgetattr",
+    ] {
+        assert!(!at_call(not_at), "{not_at}");
+    }
     assert_eq!(
         module_of(Path::new("service/run_as.rs")),
         ["service", "run_as"]
