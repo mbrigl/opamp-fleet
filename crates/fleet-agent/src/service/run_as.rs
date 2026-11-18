@@ -1320,21 +1320,22 @@ mod walk {
 
     use super::Skipped;
     use crate::storage::handle::{chown, entries, fstat, mode};
-    use fleet_util::nofollow::at::{fchmod, open};
+    #[cfg(target_os = "linux")]
+    use fleet_util::nofollow::at::DIRECTORY;
+    use fleet_util::nofollow::at::{fchmod, open, Flags};
 
     /// The entry a name stands for, opened as what it is and never through a link. On Linux this
     /// is a path-only handle: it holds a link, a device or a FIFO without opening what it is.
     #[cfg(target_os = "linux")]
-    const ENTRY: libc::c_int = libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    const ENTRY: Flags = Flags::O_PATH.or(Flags::O_NOFOLLOW).or(Flags::O_CLOEXEC);
     /// On macOS `O_SYMLINK` opens a link itself; anything else is opened without blocking on a
     /// FIFO or taking a terminal.
     #[cfg(target_os = "macos")]
-    const ENTRY: libc::c_int =
-        libc::O_RDONLY | libc::O_SYMLINK | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC;
-    /// A directory already held, opened again for reading its entries.
-    #[cfg(target_os = "linux")]
-    const DIRECTORY: libc::c_int =
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    const ENTRY: Flags = Flags::O_RDONLY
+        .or(Flags::O_SYMLINK)
+        .or(Flags::O_NONBLOCK)
+        .or(Flags::O_NOCTTY)
+        .or(Flags::O_CLOEXEC);
 
     /// What the walk leaves to the process account (ADR-0022 clause 1): an entry `uid` owns is
     /// not re-owned and not entered, and an entry in the group `gid` keeps it.
