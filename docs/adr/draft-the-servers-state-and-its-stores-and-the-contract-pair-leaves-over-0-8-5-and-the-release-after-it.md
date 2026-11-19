@@ -676,7 +676,7 @@ that decides its request, and move an old layout by an offline command.
         one in an upsert, nor reads one.
       - A Server of 0.8.4 beside it still writes the columns and still takes a released
         `instance_uid` out of an array. It reads no mirror column, and it reads each array only
-        to discard it, so a row that release 0.8.5 left at the defaults misleads none of its
+        to discard it. A row that release 0.8.5 left at the defaults misleads none of its
         decisions.
       - The release after 0.8.5 drops the columns by a migration that names 0.8.5 as the oldest
         Server.
@@ -922,9 +922,9 @@ monitors a production store or database.
   default changes no stored row.
 - **0.8.1 as the oldest Server.** It is the technical minimum: a Server of 0.8.0 still reads an
   array for an `instance_uid` that no binding holds. Clause 16 of ADR-0025 lets only N and N+1
-  serve side by side, so the rule's own reading for 0.8.5 is 0.8.4. A rolling update from 0.8.1
-  to 0.8.3 straight to 0.8.5 is refused; such a skip scales the old instances to zero first, as
-  the manual already asks.
+  serve side by side, so the rule's own reading for 0.8.5 is 0.8.4. A rolling update from any of
+  0.8.1 to 0.8.3 straight to 0.8.5 is refused; such a skip scales the old instances to zero
+  first, as the manual already asks.
 - **Only the rule, the schedule in the backlog.** Clause 22 would keep the rule and leave the
   steps to backlog entries. Then no further delay would need a supersession. But the record would
   name no plan for the columns, and the tests that hold the steps would cite no clause.
@@ -1037,7 +1037,8 @@ Of the restatement of clause 22:
   is one a Server of the release before it survives.
 - Negative / trade-offs: the default's `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock on
   `deployments` and `hosts` for the moment it changes the catalogue, at the start of the first
-  instance of 0.8.5. A rolling update straight from 0.8.1 to 0.8.3 to 0.8.5 is refused.
+  instance of 0.8.5. A rolling update straight from any of 0.8.1 to 0.8.3 to 0.8.5 is
+  refused.
 - Follow-ups: the release after 0.8.5 drops the columns, and the comments that keep them go with
   them.
 
