@@ -420,7 +420,7 @@ async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
 }
 
 /// The files of the bootstrap certificate `serial` in the Server's `bootstrap/`, named
-/// `<issuer>-<serial>.json` and `.p12` (ADR-0023).
+/// `<issuer>-<serial>.json` and `.p12` (ADR-0039).
 fn bootstrap_files(served: &Served, serial: &str) -> Vec<String> {
     std::fs::read_dir(served.config_dir.join("fleet-configs/bootstrap"))
         .expect("bootstrap/")
@@ -849,7 +849,7 @@ async fn decode(response: reqwest::Response) -> ServerToAgent {
 
 /// A bootstrap certificate opens nothing outside an enrolment window: the handshake passes, and
 /// the endpoint answers `503` — the handshake proved the certificate, so it is no failure
-/// (ADR-0023 clause 8, ADR-0027 clause 9, and ADR-0026 clause 19).
+/// (ADR-0039 clause 8, ADR-0027 clause 9, and ADR-0026 clause 19).
 /// Verifies: ADR-0026
 #[tokio::test]
 async fn a_bootstrap_certificate_is_refused_outside_an_enrolment_window() {
@@ -878,7 +878,7 @@ async fn a_bootstrap_certificate_is_refused_outside_an_enrolment_window() {
 /// The whole enrolment: an operator opens the window, the host's request waits in the queue without
 /// becoming an Agent, an operator approves it, and the host is handed its certificate. A bootstrap
 /// certificate never reaches the package download, and the standing offer the fleet's members get
-/// never reaches an enrolling host (ADR-0026 clauses 4 and 18, ADR-0023 clause 8 and ADR-0027
+/// never reaches an enrolling host (ADR-0026 clauses 4 and 18, ADR-0039 clause 8 and ADR-0027
 /// clauses 9 and 10).
 /// Verifies: ADR-0026
 #[tokio::test]
@@ -984,7 +984,7 @@ async fn an_enrolment_request_waits_for_an_operator_and_is_issued_on_approval() 
 }
 
 /// A rejected request is answered `BadRequest`, and closing the window shuts out every bootstrap
-/// certificate again (ADR-0023 clause 8 and ADR-0027 clause 9).
+/// certificate again (ADR-0039 clause 8 and ADR-0027 clause 9).
 /// Verifies: ADR-0026
 #[tokio::test]
 async fn a_rejected_request_is_refused_and_closing_the_window_shuts_enrolment() {
@@ -1767,7 +1767,7 @@ async fn a_kept_alive_connection_reaches_the_download_no_further_once_its_certif
 }
 
 /// A certificate renewed before its predecessor was revoked is revoked with it: the register
-/// records the presented certificate as the issued one's predecessor (ADR-0026 clauses 26 and 28 and ADR-0023 clause 9).
+/// records the presented certificate as the issued one's predecessor (ADR-0026 clauses 26 and 28 and ADR-0039 clause 9).
 /// Verifies: ADR-0026
 #[tokio::test]
 async fn a_revocation_reaches_a_certificate_renewed_before_it() {
@@ -2086,7 +2086,7 @@ async fn an_approval_writes_the_host_before_its_first_report() {
             .join("fleet-configs/hosts")
             .join(format!("{host}.json")),
     )
-    .expect("the Host is written, one file per Host (ADR-0023)");
+    .expect("the Host is written, one file per Host (ADR-0039)");
     assert!(written.contains(host), "{written}");
 }
 
@@ -2380,7 +2380,7 @@ async fn a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called() {
 
 /// A CSR descends from the certificate the connection presented, whichever Agent the message
 /// names: a self-asserted `instance_uid` cannot lift a renewal out of its chain, and behind a
-/// Gateway revoking the Gateway reaches what was renewed through it (ADR-0023 clause 9 and ADR-0016 clause 19).
+/// Gateway revoking the Gateway reaches what was renewed through it (ADR-0039 clause 9 and ADR-0016 clause 19).
 /// Verifies: ADR-0026
 #[tokio::test]
 async fn a_csr_for_another_agent_still_descends_from_the_presented_certificate() {
@@ -4359,7 +4359,7 @@ async fn a_download_costs_a_token_of_the_hosts_bucket() {
 
 /// A bootstrap certificate the Server issues carries the subject the operator named into the
 /// enrolment queue, is listed until it is revoked by its serial, and once revoked opens nothing
-/// (ADR-0027 clauses 1 and 3 and ADR-0023 clause 11 and ADR-0026 clause 9).
+/// (ADR-0027 clauses 1 and 3 and ADR-0039 clause 11 and ADR-0026 clause 9).
 /// Verifies: ADR-0027
 #[tokio::test]
 async fn an_issued_bootstrap_certificate_enrols_is_listed_and_revoked_by_its_serial() {
@@ -4634,7 +4634,7 @@ async fn a_bootstrap_password_is_at_least_eight_characters() {
 /// Issued with a password, a bootstrap certificate's key is in no answer: the Server keeps a
 /// PKCS#12 file of it under the password and hands it out as often as asked, each download on the
 /// record, until the certificate is revoked — and the file enrols like the pair. The password is
-/// in no file the Server writes (ADR-0027 clauses 3 and 5 and ADR-0023 clause 11).
+/// in no file the Server writes (ADR-0027 clauses 3 and 5 and ADR-0039 clause 11).
 /// Verifies: ADR-0027
 #[tokio::test]
 async fn a_bootstrap_certificate_issued_with_a_password_is_a_pkcs12_file_until_revoked() {
@@ -5915,7 +5915,7 @@ async fn gateway_presenting(
 /// waits in the queue naming the Gateway's host in place of a peer address, there and in the audit,
 /// becomes no Agent, and its approval mints a host of its own — never the Gateway's — whose
 /// certificate the enrolling host collects in a later reply, addressed to it.
-/// Verifies: ADR-0016, ADR-0023
+/// Verifies: ADR-0016, ADR-0039
 #[tokio::test]
 async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
     let pki = Pki::new();
@@ -5983,7 +5983,7 @@ async fn an_enrolment_through_a_gateway_is_decided_as_any_enrolment() {
         assert_eq!(entry[0]["gateway"], "gw", "{event}");
     }
     // The signature names the request it approves, and the approval the certificate it issued
-    // (ADR-0023 clause 9).
+    // (ADR-0039 clause 9).
     assert_eq!(
         named(&all, "enrolment.approved")[0]["serial"],
         facts.id.serial.as_str()

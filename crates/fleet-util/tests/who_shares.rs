@@ -2,8 +2,9 @@
 //!
 //! `fleet-util` holds what the Client and the operator tool share and the Server does not use;
 //! `fleet-core` holds what the Server shares with either. This test reads the code under `src/` of
-//! the Server, the Client and the tool as a syntax tree, without the items under a `cfg` that
-//! cannot hold without `test`, and decides from the paths each names where every module of the
+//! the Server, the Client and the tool that a crate root reaches through its modules, as a syntax
+//! tree without the items under a `cfg` that cannot hold without `test`, so a module declared
+//! under such a `cfg` is not read, and decides from the paths each names where every module of the
 //! two crates belongs. Comments and literals are no tokens, so they name nothing. It also refuses
 //! a `pub use` of a `fleet_util::` item and an alias of the crate, `self as` in a group included,
 //! so an item has one path in use; a manifest of the Server that names `fleet-util`; and a manifest
@@ -38,13 +39,47 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
-        let path = entry.expect("a directory entry").path();
-        if path.is_dir() {
-            rust_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
+/// Appends the shipped code of the module in `file`, and of every module it declares, whose files
+/// are under `dir`, to `out`, a file once. A module declared under a `cfg` that cannot hold
+/// without `test` is cut before it is reached, so its file is not read.
+fn read_module(file: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, syn::File>) {
+    if out.contains_key(file) {
+        return;
+    }
+    let text = fs::read_to_string(file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+    let code = shipped(&text).unwrap_or_else(|e| panic!("parse {}: {e}", file.display()));
+    let mut declared = Vec::new();
+    module_files(&code.items, file, dir, &mut declared);
+    out.insert(file.to_path_buf(), code);
+    for (child, child_dir) in declared {
+        read_module(&child, &child_dir, out);
+    }
+}
+
+/// The file and the directory of submodules of each out-of-line module that `items` declare,
+/// inline modules followed into their own items, whose modules are under `dir/<name>`.
+fn module_files(items: &[Item], file: &Path, dir: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
+    for item in items {
+        let Item::Mod(module) = item else { continue };
+        // A `#[path]` module would sit where this reader does not look; none does today.
+        assert!(
+            !module.attrs.iter().any(|a| a.path().is_ident("path")),
+            "{}: `#[path]` on `mod {}` is not followed",
+            file.display(),
+            module.ident
+        );
+        let name = module.ident.to_string();
+        let name = name.trim_start_matches("r#");
+        let child = dir.join(name);
+        match &module.content {
+            Some((_, inner)) => module_files(inner, file, &child, out),
+            None => {
+                let path = [dir.join(format!("{name}.rs")), child.join("mod.rs")]
+                    .into_iter()
+                    .find(|path| path.exists())
+                    .unwrap_or_else(|| panic!("no file for `mod {name};` of {}", file.display()));
+                out.push((path, child));
+            }
         }
     }
 }
@@ -465,18 +500,61 @@ impl Workspace {
         self.root.join("crates").join(krate)
     }
 
-    /// The shipped code of every source file under `crates/<krate>/src/`, with its path relative
-    /// to the workspace root.
+    fn manifest(&self, krate: &str) -> toml::Table {
+        let path = self.crate_dir(krate).join("Cargo.toml");
+        fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+            .parse()
+            .expect("the manifest parses")
+    }
+
+    /// The crate roots of `crates/<krate>/`: its library and its binaries, those its manifest
+    /// names and those Cargo finds in `src/main.rs` and under `src/bin/`.
+    fn roots(&self, krate: &str) -> BTreeSet<PathBuf> {
+        let dir = self.crate_dir(krate);
+        let src = dir.join("src");
+        let manifest = self.manifest(krate);
+        let mut roots = BTreeSet::new();
+        let path_of = |target: &toml::Value| target.get("path")?.as_str().map(|p| dir.join(p));
+        roots.extend(manifest.get("lib").and_then(path_of));
+        let bins = manifest.get("bin").and_then(toml::Value::as_array);
+        roots.extend(bins.into_iter().flatten().filter_map(path_of));
+        roots.insert(src.join("lib.rs"));
+        if manifest["package"]
+            .get("autobins")
+            .and_then(toml::Value::as_bool)
+            != Some(false)
+        {
+            roots.insert(src.join("main.rs"));
+            if let Ok(entries) = fs::read_dir(src.join("bin")) {
+                for entry in entries {
+                    let path = entry.expect("a directory entry").path();
+                    roots.insert(if path.is_dir() {
+                        path.join("main.rs")
+                    } else {
+                        path
+                    });
+                }
+            }
+        }
+        roots.retain(|root| root.extension().is_some_and(|e| e == "rs") && root.exists());
+        roots
+    }
+
+    /// The shipped code of every source file a crate root of `crates/<krate>/` reaches through
+    /// its modules, with its path relative to the workspace root.
     fn sources(&self, krate: &str) -> Vec<(String, syn::File)> {
-        let mut files = Vec::new();
-        rust_files(&self.crate_dir(krate).join("src"), &mut files);
-        files.sort();
+        let mut files = BTreeMap::new();
+        for root in self.roots(krate) {
+            let dir = root
+                .parent()
+                .expect("a crate root's directory")
+                .to_path_buf();
+            read_module(&root, &dir, &mut files);
+        }
         files
             .into_iter()
-            .map(|file| {
-                let text = fs::read_to_string(&file).expect("read a source file");
-                let code =
-                    shipped(&text).unwrap_or_else(|e| panic!("parse {}: {e}", file.display()));
+            .map(|(file, code)| {
                 // Named with `/` on every host, so a message reads alike on Windows.
                 let name = file.strip_prefix(&self.root).unwrap_or(&file);
                 let name = name
@@ -516,11 +594,7 @@ impl Workspace {
     /// The package names every dependency table of `crates/<krate>/Cargo.toml` names: normal,
     /// build and development dependencies, for every target.
     fn dependencies_of(&self, krate: &str) -> BTreeSet<String> {
-        let path = self.crate_dir(krate).join("Cargo.toml");
-        let manifest: toml::Table = fs::read_to_string(&path)
-            .expect("read a manifest")
-            .parse()
-            .expect("the manifest parses");
+        let manifest = self.manifest(krate);
         let mut tables = vec![&manifest];
         if let Some(targets) = manifest.get("target").and_then(toml::Value::as_table) {
             tables.extend(targets.values().filter_map(toml::Value::as_table));
@@ -1073,4 +1147,41 @@ fn a_manifest_that_names_the_wrong_crate_fails() {
         fixture.misplaced(),
         ["crates/fleet-util/Cargo.toml: names fleet-agent, a workspace crate but fleet-core"]
     );
+}
+
+/// The file of a module declared under a test-only `cfg` is not read, so a Server fixture that
+/// names a `fleet_util::` module, or re-exports one, counts for nothing; a module that a further
+/// binary root under `src/bin/` declares is read.
+#[test]
+fn the_file_of_a_test_only_module_is_not_read() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "crates/fleet-server/src/main.rs",
+        "fn main() { fleet_core::version::current(); }\nmod fleet;\n#[cfg(test)]\nmod test_support;\n",
+    );
+    fixture.write(
+        "crates/fleet-server/src/fleet.rs",
+        "#[cfg(all(test, unix))]\nmod fixtures;\n",
+    );
+    fixture.write(
+        "crates/fleet-server/src/fleet/fixtures.rs",
+        "pub use fleet_util::tree;\n",
+    );
+    fixture.write(
+        "crates/fleet-server/src/test_support.rs",
+        "pub fn f() { fleet_util::tree::is_kept(); }\n",
+    );
+    assert_eq!(fixture.misplaced(), Vec::<String>::new());
+
+    let fixture = Fixture::new();
+    fixture.write("crates/fleet-agent/src/lib.rs", "");
+    fixture.write(
+        "crates/fleet-agent/src/bin/stub.rs",
+        "mod held;\nfn main() {}\n",
+    );
+    fixture.write(
+        "crates/fleet-agent/src/bin/held.rs",
+        "use fleet_util::tree;\n",
+    );
+    assert_eq!(fixture.misplaced(), Vec::<String>::new());
 }

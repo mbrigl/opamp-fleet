@@ -1,4 +1,4 @@
-//! `server migrate` (ADR-0023 clause 26): moves the state an older Server kept under `config_dir`
+//! `server migrate` (ADR-0039 clause 26): moves the state an older Server kept under `config_dir`
 //! and `packages_dir` into a new `data_dir`, once, while the Server is stopped.
 //!
 //! The Server reads no older layout; this is the one place that knows it, and it knows the layout
@@ -763,7 +763,7 @@ fn assignment(
 }
 
 /// A clock at which nothing has ended: the check forgets no certificate, revocation or Host the
-/// migration has just reported as carried (ADR-0023 clause 26).
+/// migration has just reported as carried (ADR-0039 clause 26).
 struct Beginning;
 
 impl crate::fleet::Clock for Beginning {
@@ -1046,7 +1046,7 @@ mod tests {
     /// the artifacts with their signatures; it drops a referenced entry and lists every
     /// Configuration's old Selector, and a Configuration without an Agent type it lists and does
     /// not carry, leaving its file — and the new data directory opens as the Server opens it.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn migrate_carries_an_old_layout_into_a_data_directory() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1184,7 +1184,7 @@ mod tests {
     }
 
     /// An entry its Deployments held different signatures for is carried unsigned and named.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn differing_signatures_leave_the_entry_unsigned_and_named() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1209,7 +1209,7 @@ mod tests {
 
     /// A Package deleted before the migration but still named in a Deployment is not carried
     /// into that Deployment, and the report names it.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_deployment_naming_a_deleted_package_loses_that_name() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1239,7 +1239,7 @@ mod tests {
     /// A Package whose metadata does not carry leaves every Deployment that named it, and an
     /// Agent's Package assignment through it is dropped with a line — though its directory still
     /// holds a `package.json`.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_package_that_does_not_carry_leaves_its_deployments_and_assignments() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1282,7 +1282,7 @@ mod tests {
 
     /// An artifact whose bytes do not match its own entry's recorded hash is dropped, and the blob
     /// of those bytes stays when another carried entry holds the same bytes.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_mismatching_artifact_leaves_the_blob_another_entry_holds() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1319,7 +1319,7 @@ mod tests {
 
     /// The migration writes into an empty data directory only, and trust data it cannot carry
     /// makes it fail.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn migrate_refuses_a_data_directory_that_is_not_empty_and_fails_on_lost_trust_data() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1350,7 +1350,7 @@ mod tests {
     /// The check opens every store the Server opens at startup, through the constructors it
     /// uses: a migrated data directory whose floor or enrolment file the first start would refuse
     /// fails it, naming the file.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_check_fails_on_a_floor_or_enrolment_file_the_server_would_refuse() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1376,7 +1376,7 @@ mod tests {
     /// The check forgets nothing the migration carried: an issued certificate and a bootstrap
     /// certificate that have ended, and the Host the ended certificate bound, are on disk after it
     /// as the report says, for the first start to forget.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_check_keeps_what_has_ended() {
         let root = tempfile::tempdir().expect("tempdir");

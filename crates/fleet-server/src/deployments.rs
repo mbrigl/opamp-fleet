@@ -170,7 +170,7 @@ pub fn deployment_for<'a>(
     }
 }
 
-/// One change to the members of one Deployment (ADR-0023 clause 2): it names the member it adds
+/// One change to the members of one Deployment (ADR-0039 clause 2): it names the member it adds
 /// or removes, and no other member is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
@@ -273,7 +273,7 @@ impl Member {
     }
 }
 
-/// The Deployment store's port (ADR-0009, ADR-0023 clause 2): where Deployments persist. It speaks
+/// The Deployment store's port (ADR-0009, ADR-0039 clause 2): where Deployments persist. It speaks
 /// in parts: the Selector is written on its own, and a member is added or removed by its name — a
 /// Package by its Agent type, a Configuration by its name — with no other member written. Each
 /// call answers the Deployment as the store holds it afterwards. The filesystem adapter

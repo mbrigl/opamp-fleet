@@ -17,7 +17,7 @@ pub struct FsAuditStore {
 }
 
 impl FsAuditStore {
-    /// Opens the store in the data directory `root`, creating `audit/` owner-only (ADR-0023). The
+    /// Opens the store in the data directory `root`, creating `audit/` owner-only (ADR-0039). The
     /// newest file is continued.
     ///
     /// # Errors

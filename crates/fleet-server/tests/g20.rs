@@ -36,7 +36,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1995,7 +1995,15 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
         let measured = Instant::now();
         let end = measured + Duration::from_secs(secs);
         let failures = Arc::new(Mutex::new(Vec::<String>::new()));
-        let slowest = Arc::new(AtomicU64::new(0));
+        // The slowest act of each kind, in the order of `KINDS`; a kind not performed stays `None`.
+        const KINDS: [&str; 5] = [
+            "labels set",
+            "a Configuration saved",
+            "a rollout",
+            "a revocation",
+            "a page of the Agents",
+        ];
+        let slowest = Arc::new(Mutex::new([None::<Duration>; KINDS.len()]));
         let mut most_unread = 0;
         let mut revoked = HashSet::new();
         let mut draw = Draw::new();
@@ -2013,7 +2021,7 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
                     .churn
                     .store(true, Ordering::SeqCst);
             }
-            let act = |request: reqwest::RequestBuilder, what: String| {
+            let act = |kind: usize, request: reqwest::RequestBuilder, what: String| {
                 let (failures, slowest) = (failures.clone(), slowest.clone());
                 tokio::spawn(async move {
                     let at = Instant::now();
@@ -2028,10 +2036,9 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
                             .expect("failures")
                             .push(format!("{what}: {e}")),
                     }
-                    slowest.fetch_max(
-                        u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        Ordering::SeqCst,
-                    );
+                    let took = Some(at.elapsed());
+                    let mut slowest = slowest.lock().expect("slowest");
+                    slowest[kind] = slowest[kind].max(took);
                 })
             };
             if ticks.is_multiple_of(5) {
@@ -2039,6 +2046,7 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
                     let host = &fleet.hosts[draw.below(hosts)];
                     let uid = host.uids[draw.below(host.uids.len())];
                     acts.push(act(
+                        0,
                         client
                             .put(operator_url(through, &format!("agents/{uid}/labels")))
                             .json(&serde_json::json!({"labels": {"g20.label": ticks.to_string()}})),
@@ -2048,6 +2056,7 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
             }
             if !steady && ticks % 60 == 30 {
                 acts.push(act(
+                    1,
                     client
                         .put(operator_url(through, "configurations/g20"))
                         .json(&serde_json::json!({
@@ -2059,6 +2068,7 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
             }
             if !steady && ticks % 60 == 35 {
                 acts.push(act(
+                    2,
                     client.post(operator_url(through, "deployments/g20/rollout")),
                     "a rollout".to_string(),
                 ));
@@ -2067,6 +2077,7 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
                 let host = draw.below(hosts);
                 revoked.insert(host);
                 acts.push(act(
+                    3,
                     client
                         .post(operator_url(through, "revocations"))
                         .json(&serde_json::json!({
@@ -2080,6 +2091,7 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
             }
             if ticks.is_multiple_of(10) {
                 acts.push(act(
+                    4,
                     client.get(operator_url(through, "agents?limit=100")),
                     "a page of the Agents".to_string(),
                 ));
@@ -2148,19 +2160,24 @@ fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() 
                     .collect::<Vec<_>>()
             })
             .collect();
+        let slowest_of_each: Vec<String> = KINDS
+            .iter()
+            .zip(*slowest.lock().expect("slowest"))
+            .filter_map(|(kind, took)| took.map(|took| format!("{kind} {} ms", took.as_millis())))
+            .collect();
         eprintln!(
             "G-20 load: {agents} Agents, {per_host} per connection, 3 instances, measured for \
              {measured_for:?} after a ramp of {ramp_took:?}; late presence batches {}, failed \
              batches {}, Agents held unseen for {:?} {unseen}; the most of the notification queue \
              unread at a sample {most_unread} millionths, the sentinels' sessions ended \
-             after {:?}; slowest operator act {} ms; {} acts failed; {} hosts refused or \
-             throttled; {still_held} of {expected} Agents held at the end, {} hosts revoked, \
-             {rekeyed_measured} Agents re-keyed as duplicates; {}",
+             after {:?}; the slowest operator act of each kind: {}; {} acts failed; {} hosts \
+             refused or throttled; {still_held} of {expected} Agents held at the end, {} hosts \
+             revoked, {rekeyed_measured} Agents re-keyed as duplicates; {}",
             late.len(),
             failed_batches.len(),
             HEARTBEAT + 2 * PRESENCE_INTERVAL,
             heard.iter().map(|&(_, took)| took).collect::<Vec<_>>(),
-            slowest.load(Ordering::SeqCst),
+            slowest_of_each.join(", "),
             failures.lock().expect("failures").len(),
             refused.len(),
             revoked.len(),

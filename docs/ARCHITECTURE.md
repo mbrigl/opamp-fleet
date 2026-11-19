@@ -88,7 +88,8 @@ Six crates in one workspace
   headers, and HTTP/2's bounds on streams and pings — and `server::pace`, the floor every body
   and WebSocket message it serves is held to. The server side takes a WebSocket over through
   hyper's upgrade and reads its frames with `tokio-tungstenite`, the library the client side
-  uses too.
+  uses too. Both sides take their WebSocket configuration from `websocket`: the receive limit
+  and a read buffer of 4 KiB, sized to an Agent's messages.
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
@@ -153,7 +154,7 @@ no module.
 
 - **Server stores** — one port per domain in the core module it serves, shaped so a database or
   an object store could implement it, and speaking in domain types, never paths
-  ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)):
+  ([ADR-0039](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)):
   `AgentStore` in `agent_store`, which holds each Agent's labels in its record, writes a rollout's
   revisions and assignments as one operation, answers what an assignment pins, and answers a page
   of the list of Agents (`query_page`) and the values the fleet reports (`reported_values`), with
@@ -164,7 +165,7 @@ no module.
   SHA-256) under the `PackageStore` in `packages`, the bytes in `data_dir` or, with
   `[blobs] store = "s3"`, in one bucket of an S3-compatible store through the adapter in `s3`, which
   bridges the synchronous port onto a runtime of its own (`bridge`)
-  ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md));
+  ([ADR-0039](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md));
   `BootstrapStore` under the
   `BootstrapCertificates` in `bootstrap`; `EnrolmentStore` under the `Enrolment` in `enrolment`;
   `FloorStore` under the `PackageFloors` in `floors`, the floor the operator signed per Agent type
@@ -188,7 +189,7 @@ no module.
   are gone, which the exclusive lock, the blob lock, the prune lock and the signer's lock take.
   `postgres::import` is `server migrate-to-postgres`, which copies a `data_dir` into the database
   offline, and `server blobs-to-s3`, which copies the blob files into the bucket
-  ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+  ([ADR-0039](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)).
   `config::read_secret_file` is the one reader of the password, PIN and secret files the PostgreSQL,
   S3 and PKCS#11 adapters name. The core's constructors take the ports — `AppState::with_stores`,
   `PackageStore::with_backend`, `PackageOffering::with_deployments`, `BootstrapCertificates::open`,
@@ -202,7 +203,7 @@ no module.
   filesystem adapter in `fs::floors`, its PostgreSQL adapter in `postgres::floors`, and the one
   `contract` test there that runs on both stores. A new store copies its shape and its test
   ([ADR-0009](adr/0009-ports-and-adapters.md),
-  [ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+  [ADR-0039](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)).
 - **Server instances** — on PostgreSQL every Server is an instance, and several share one
   database and one bucket
   ([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
@@ -317,7 +318,7 @@ no module.
   chains while it holds the prune's advisory lock, recording each `audit.pruned` through the
   instance's writer and waiting for it before it deletes, in rounds of a bounded number of entries,
   every chain of one round in one transaction
-  ([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  ([ADR-0039](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
   clause 12).
   With `[audit.export]`, `audit_export` sends every line a store has accepted, the writer's and
   those a lease's transaction writes, as an OTLP log record to the receiver it names: a queue of
@@ -606,11 +607,11 @@ artifacts, named by SHA-256, unless a bucket keeps them), `agents/` (each Agent'
 inside), `hosts/`,
 `certificates/` (the register), `revocations.json`, `bootstrap/`, `enrolment.json` (the window and
 its queue), `package-floors.json` (the floor of each Agent type) and `audit/`
-([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+([ADR-0039](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)).
 With `[database] store = "postgres"` the records are rows of one PostgreSQL database instead, and
 `data_dir` keeps, with the filesystem blob store, `blobs/` and an archived `audit/`; with the blobs
 in S3 too there is no `data_dir`, and an instance keeps nothing on its disk
-([ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+([ADR-0039](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)).
 On files the Server loads every record at startup and answers from memory; on PostgreSQL an
 instance holds only the Agents connected to it, each read at its first report, and the Operator
 plane reads the fleet from the database.

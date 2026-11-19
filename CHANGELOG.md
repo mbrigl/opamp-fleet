@@ -16,12 +16,64 @@ once its tag exists.
 
 ## [0.8.5]
 
+### Fixed
+
+- **The Hosts view shows an Agent's names as the list does**
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)
+  clauses 1 and 2). The Hosts view looked up an Agent's `service.name` and
+  `service.instance.name` in both attribute sets, the list only in the one each belongs to: the
+  service name in the identifying attributes, the instance name in the non-identifying ones. An
+  Agent that reported either in the other set showed a name in the Hosts view and none in the
+  list. Both now show the list's. **What to do:** nothing; a foreign Agent that reports
+  `service.instance.name` as identifying shows no instance name in the Hosts view either.
+
+### Changed
+
+- **A delete counts what pins it by index**
+  ([ADR-0039](docs/adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
+  clause 22). On PostgreSQL, every delete of a Package, a Deployment or a Configuration counts,
+  under the row lock of what it deletes, the Agents that pin it, or for a Configuration their
+  assignments, and the count read the whole table. Migration 18 adds an index for each of the three
+  counts; it names 0.8.0 as the oldest Server, so the instances of 0.8.4 serve beside it. **What
+  to do:** start the first instance of 0.8.5 while no rollout runs. It builds the indexes at
+  startup and waits for the lock on the Agents at most 5 seconds; a rollout of 0.8.4 that holds
+  them longer fails that start, and a second start succeeds once the rollout is done. The build
+  holds the Agents' writes while it lasts, under a second at 100 000 Agents.
+- **Each WebSocket reads into a 4 KiB buffer**
+  ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md) clause 3). The Server's
+  Agent-plane endpoint, the Client's upstream connection and the Gateway's pool held a read buffer
+  of 128 KiB for every WebSocket, `tungstenite`'s default, allocated when the connection opened and
+  kept while nothing arrived. They now hold 4 KiB, enough for an Agent's routine messages; a larger
+  message still arrives whole, read 4 KiB at a time. The message size limit is unchanged. What
+  this saves an instance's memory was not measured. **What to do:** nothing.
+- **A presence batch is written in pieces of 1 000 Agents**
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md) clause 4). On PostgreSQL, an
+  instance wrote the presence of every Agent it holds in one statement, and each database
+  connection kept its buffers at the size of the largest batch it had written: up to about 4.5 KiB
+  for each Agent of the most the instance had held at once, at the default `pool_size`. The batch
+  is now written in pieces of 1 000 Agents, still in one transaction and in the order of
+  `instance_uid`, so the buffers no longer follow the Agents an instance holds. What that saves an
+  instance's memory was not measured. **What to do:** nothing.
+- **The contract pair has defaults, and the Server names it no more**
+  ([ADR-0039](docs/adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
+  clause 22). On PostgreSQL, migration 19 gives the Deployments' `packages` and `configurations`
+  columns and the Hosts' `instance_uids` arrays a default, which changes no stored row, and no
+  statement 0.8.5 runs while serving names them: a Host's array no longer loses an Agent that is
+  released, nor is it emptied on a Gateway's mark. The migration names 0.8.4 as the oldest Server,
+  so an instance of 0.8.5 refuses to start beside a live lease of 0.8.3 or older, naming both
+  releases. The release after 0.8.5 drops the three columns. **What to do:** update from 0.8.4 by
+  a rolling update; from an older release, scale its instances to zero first. Start the first
+  instance of 0.8.5 at a quiet moment: its `ALTER TABLE`s take an `ACCESS EXCLUSIVE` lock on
+  `deployments` and `hosts` for the moment they change the catalogue, and every read and write of
+  a Deployment or a Host waits for it. They wait for the lock at most 5 seconds, as migration 18
+  does; a start that a longer transaction of 0.8.4 fails succeeds once started again.
+
 ## [0.8.4] - 2026-11-18
 
 ### Fixed
 
 - **A peer that sends no request is hung up on after 30 seconds**
-  ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md) clause 19). On both planes
+  ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md) clause 15). On both planes
   of the Server, a Client's Gateway and a Supervisor Endpoint, a peer that completed the TCP
   connection, or the TLS handshake, and then sent no request held its place under the connection
   cap until it closed or the listener stopped; enough such peers filled the cap, and every new

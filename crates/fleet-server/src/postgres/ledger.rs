@@ -1,4 +1,4 @@
-//! The register, the revocation list and the Hosts in PostgreSQL (ADR-0023 clauses 9 and 10): the
+//! The register, the revocation list and the Hosts in PostgreSQL (ADR-0039 clauses 9 and 10): the
 //! PostgreSQL adapter behind [`LedgerStore`](crate::revocation::LedgerStore) — one row per
 //! certificate the Server signed, one per revocation, one per Host. Every call is one transaction,
 //! committed before the decision it answers is.
@@ -48,7 +48,7 @@ impl PgLedgerStore {
 }
 
 /// Moves the list's version on, inside the caller's transaction, and answers the new one
-/// (ADR-0023 clause 10). A revocation added or widened and a lift move it, the prune's removal of
+/// (ADR-0039 clause 10). A revocation added or widened and a lift move it, the prune's removal of
 /// a revocation among them, and so does every change to the register: what ADR-0026 clause 28
 /// revokes depends on the register too, so an instance that missed an entry's notification finds
 /// the version moved, and never takes its own next write of the list as naming a register it does
@@ -306,8 +306,8 @@ impl LedgerStore for PgLedgerStore {
     /// and one that holds [`MAX_UIDS_PER_HOST`](crate::revocation::MAX_UIDS_PER_HOST) bindings
     /// of other `instance_uid`s none more.
     /// The hold is one that conflicts with itself, so two binders of one Host wait for each other
-    /// rather than both holding a share of the row they then write. The Hosts' arrays are neither
-    /// read nor added to (see `unbind_in`). What it binds or makes is announced after the commit
+    /// rather than both holding a share of the row they then write. The Hosts' arrays are not
+    /// named (see `unbind_in`). What it binds or makes is announced after the commit
     /// ([`follow_commit`]): it widens what the Host speaks for, which every binding decides here
     /// again, so no announcing commit waits for the flush of another's.
     fn bind_seen(&self, instance_uid: &str, host: &str, row: &Host) -> Result<Bound, String> {
@@ -509,8 +509,8 @@ impl LedgerStore for PgLedgerStore {
                         > 0
                         || transaction
                             .execute(
-                                "INSERT INTO hosts (host, gateway, instance_uids, subject) \
-                                 SELECT $1, $2, '{}', $3 \
+                                "INSERT INTO hosts (host, gateway, subject) \
+                                 SELECT $1, $2, $3 \
                                  WHERE EXISTS (SELECT 1 FROM certificates WHERE host = $1 FOR KEY SHARE) \
                                  ON CONFLICT (host) DO UPDATE SET gateway = EXCLUDED.gateway",
                                 &[host, gateway, &subject],
@@ -525,13 +525,6 @@ impl LedgerStore for PgLedgerStore {
                     if *gateway {
                         transaction
                             .execute("DELETE FROM host_bindings WHERE host = $1", &[host])
-                            .await
-                            .map_err(sql)?;
-                        transaction
-                            .execute(
-                                "UPDATE hosts SET instance_uids = '{}' WHERE host = $1",
-                                &[host],
-                            )
                             .await
                             .map_err(sql)?;
                     }
@@ -573,8 +566,8 @@ impl LedgerStore for PgLedgerStore {
     }
 
     /// Writes each Host that changed since the last commit, and removes each one that is gone with
-    /// its bindings. A Host's array only loses the `instance_uid`s the Host no longer speaks for
-    /// (see `unbind_in`); the bindings are read from their table.
+    /// its bindings. A Host's array is not named (see `unbind_in`); the bindings are read from
+    /// their table.
     fn save_hosts(&self, hosts: &BTreeMap<String, Host>) -> Result<(), String> {
         let mut written = self.written_hosts.lock().expect("hosts lock");
         let changed: Vec<(String, Host)> = hosts
@@ -613,37 +606,27 @@ impl LedgerStore for PgLedgerStore {
 }
 
 /// Removes the binding of `instance_uid` inside the caller's transaction: the Host it was bound to,
-/// `None` when it was bound to none. The Hosts' arrays lose it too. This release adds nothing to
-/// them and reads them no more, but a Server of 0.8.0 beside it reads an array for an
-/// `instance_uid` no binding holds, and must not find a released one held there. The release after
-/// this one stops this, and the release after that removes the arrays
-/// (ADR-0023
+/// `None` when it was bound to none. The Hosts' arrays keep it where a release before them
+/// listed it: this release names them in no statement, and a Server of 0.8.4 beside it reads each
+/// array only to discard it. The release after this one removes the arrays
+/// (ADR-0039
 /// clause 22).
 async fn unbind_in(
     client: &impl GenericClient,
     instance_uid: &str,
 ) -> Result<Option<String>, String> {
-    let host = client
+    Ok(client
         .query_opt(
             "DELETE FROM host_bindings WHERE instance_uid = $1 RETURNING host",
             &[&instance_uid],
         )
         .await
         .map_err(sql)?
-        .map(|row| row.get(0));
-    client
-        .execute(
-            "UPDATE hosts SET instance_uids = array_remove(instance_uids, $1) \
-             WHERE $1 = ANY(instance_uids)",
-            &[&instance_uid],
-        )
-        .await
-        .map_err(sql)?;
-    Ok(host)
+        .map(|row| row.get(0)))
 }
 
-/// Makes `host`'s row as `entry` holds it when the store has none, its array empty: what binds the
-/// Host is its rows in `host_bindings`. Answers whether it made the row.
+/// Makes `host`'s row as `entry` holds it when the store has none, its array at its default:
+/// what binds the Host is its rows in `host_bindings`. Answers whether it made the row.
 async fn insert_host_row(
     client: &impl GenericClient,
     host: &str,
@@ -652,9 +635,8 @@ async fn insert_host_row(
     let subject = serde_json::to_value(&entry.subject).expect("subject values serialize");
     let made = client
         .execute(
-            "INSERT INTO hosts (host, gateway, instance_uids, subject, approved_ms, \
-             valid_until_ms) VALUES ($1, $2, '{}', $3, $4, $5) \
-             ON CONFLICT (host) DO NOTHING",
+            "INSERT INTO hosts (host, gateway, subject, approved_ms, valid_until_ms) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (host) DO NOTHING",
             &[
                 &host,
                 &entry.gateway,
@@ -782,33 +764,27 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Ledger, Stri
     let mut hosts = BTreeMap::new();
     for row in client
         .query(
-            "SELECT host, gateway, instance_uids, subject, approved_ms, valid_until_ms FROM hosts",
+            "SELECT host, gateway, subject, approved_ms, valid_until_ms FROM hosts",
             &[],
         )
         .await
         .map_err(sql)?
     {
         let host: String = row.get(0);
-        let subject = serde_json::from_value(row.get(3))
+        let subject = serde_json::from_value(row.get(2))
             .map_err(|e| format!("host {host:?} in the database: subject: {e}"))?;
+        // A Host speaks for the `instance_uid`s bound to it in their own table: its row's array
+        // is not read.
         hosts.insert(
             host,
             Host {
                 gateway: row.get(1),
-                instance_uids: row
-                    .get::<_, Vec<String>>(2)
-                    .into_iter()
-                    .collect::<BTreeSet<_>>(),
+                instance_uids: BTreeSet::new(),
                 subject,
-                approved_ms: row.get::<_, Option<i64>>(4).map(unsigned),
-                valid_until_ms: row.get::<_, Option<i64>>(5).map(unsigned),
+                approved_ms: row.get::<_, Option<i64>>(3).map(unsigned),
+                valid_until_ms: row.get::<_, Option<i64>>(4).map(unsigned),
             },
         );
-    }
-    // A Host speaks for the `instance_uid`s bound to it in their own table, whatever its row's
-    // array says.
-    for entry in hosts.values_mut() {
-        entry.instance_uids.clear();
     }
     for row in client
         .query("SELECT instance_uid, host FROM host_bindings", &[])
@@ -937,10 +913,10 @@ async fn decide_renewal(
 /// Registers `issued`, deciding from what is stored, with the Host an approval mints, `mint`,
 /// written when the store has no row of it and else its valid until moved forward, inside the
 /// caller's transaction, which commits it or not: the register's own transaction, or the one that
-/// decides an approval's request (ADR-0023 clause 9). The table is held against every other
+/// decides an approval's request (ADR-0039 clause 9). The table is held against every other
 /// adder while the bounds are counted, and an approval's bootstrap certificate, `bootstrap`, is
 /// looked up in the list the transaction holds, so a revocation another instance committed first
-/// refuses it. An entry written moves the list's version (ADR-0023 clause 10), which the caller
+/// refuses it. An entry written moves the list's version (ADR-0039 clause 10), which the caller
 /// reads in the transaction to take up. Anything but [`Registered::Registered`] leaves the
 /// transaction to be rolled back.
 ///
@@ -1049,22 +1025,17 @@ pub(crate) async fn write_host(
     host: &str,
     entry: &Host,
 ) -> Result<(), String> {
-    let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
     let subject = serde_json::to_value(&entry.subject).expect("subject values serialize");
-    // The array only loses what `entry` no longer speaks for: see `unbind_in`.
+    // The array is not named: see `unbind_in`.
     client
         .execute(
-            "INSERT INTO hosts (host, gateway, instance_uids, subject, approved_ms, \
-             valid_until_ms) VALUES ($1, $2, '{}', $4, $5, $6) ON CONFLICT (host) DO UPDATE SET \
-             gateway = EXCLUDED.gateway, \
-             instance_uids = ARRAY(SELECT uid FROM unnest(hosts.instance_uids) AS uid \
-             WHERE uid = ANY($3::text[])), \
-             subject = EXCLUDED.subject, approved_ms = EXCLUDED.approved_ms, \
-             valid_until_ms = EXCLUDED.valid_until_ms",
+            "INSERT INTO hosts (host, gateway, subject, approved_ms, valid_until_ms) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (host) DO UPDATE SET \
+             gateway = EXCLUDED.gateway, subject = EXCLUDED.subject, \
+             approved_ms = EXCLUDED.approved_ms, valid_until_ms = EXCLUDED.valid_until_ms",
             &[
                 &host,
                 &entry.gateway,
-                &uids,
                 &subject,
                 &entry.approved_ms.map(signed),
                 &entry.valid_until_ms.map(signed),
@@ -1265,14 +1236,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_ledger_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsLedgerStore::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_ledger_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -2018,8 +1989,8 @@ mod tests {
     /// register entry, in their transactions, and with nothing else; an instance holds the
     /// version its own write left only when no other instance wrote between, and none until it
     /// reads the list again otherwise, so the version it serves never names a list it does not
-    /// hold (ADR-0023 clause 10).
-    /// Verifies: ADR-0023
+    /// hold (ADR-0039 clause 10).
+    /// Verifies: ADR-0039
     #[test]
     fn the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held() {
         let Some(test) = TestDatabase::named() else {
@@ -2109,8 +2080,8 @@ mod tests {
     /// renewal. A holds the same version before it reads the ledger again and after, and its
     /// `ETag`s still differ by the body's hash, so a Gateway that fetched the first is answered in
     /// full by either instance once both hold the renewal
-    /// (ADR-0026 clauses 28 and 34, ADR-0023 clause 10).
-    /// Verifies: ADR-0026, ADR-0023
+    /// (ADR-0026 clauses 28 and 34, ADR-0039 clause 10).
+    /// Verifies: ADR-0026, ADR-0039
     #[test]
     fn one_list_version_never_names_two_gateway_bodies() {
         let Some(test) = TestDatabase::named() else {
@@ -2200,8 +2171,8 @@ mod tests {
 
     /// Every change to the register moves the list's version in its own transaction: an entry
     /// written, and one removed; a removal the store refuses moves nothing. The adapter holds the
-    /// version its own write left (ADR-0023 clause 10).
-    /// Verifies: ADR-0023
+    /// version its own write left (ADR-0039 clause 10).
+    /// Verifies: ADR-0039
     #[test]
     fn a_register_change_moves_the_list_version() {
         let Some(test) = TestDatabase::named() else {
@@ -2254,8 +2225,8 @@ mod tests {
     /// version. A prunes X once it expired, X' expired too and X'' still valid, and X stays, so a
     /// revocation of X still revokes X'', and A holds no version until it reads the ledger again.
     /// Once X'' has expired too, all three go, and A holds the version its removals left
-    /// (ADR-0023 clause 10, ADR-0026 clause 28).
-    /// Verifies: ADR-0023, ADR-0026
+    /// (ADR-0039 clause 10, ADR-0026 clause 28).
+    /// Verifies: ADR-0039, ADR-0026
     #[test]
     fn the_prune_keeps_an_entry_a_valid_renewal_in_the_database_descends_from() {
         let Some(test) = TestDatabase::named() else {
@@ -2689,7 +2660,7 @@ mod tests {
 
     /// A save of the Hosts that fails part-way leaves them as they were, and the next save still
     /// writes what changed: the adapter's memory follows only what committed.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_save_that_fails_part_way_leaves_nothing_of_itself() {
         let Some(test) = TestDatabase::named() else {
@@ -2712,15 +2683,42 @@ mod tests {
         assert_eq!(store.load().expect("load").hosts, after);
     }
 
-    /// This release adds nothing to the Hosts' `instance_uids` arrays and no longer reads them. It
-    /// still takes an `instance_uid` out of them once its binding is released, so a Server of
-    /// 0.8.0 beside it, which reads an array for an `instance_uid` no binding holds, never takes
-    /// a released binding for one that is held
-    /// (ADR-0023
+    /// The load reads no Host's `instance_uids` array, so a column let be `NULL` leaves the load
+    /// of this one standing
+    /// (ADR-0039
     /// clause 22).
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
-    fn the_hosts_arrays_are_added_to_no_more_and_lose_what_is_released() {
+    fn the_load_reads_no_hosts_array() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        store
+            .save_hosts(&BTreeMap::from([("a".to_string(), host(&[], false))]))
+            .expect("save");
+        test.sql(
+            "INSERT INTO host_bindings VALUES ('01', 'a'); \
+             ALTER TABLE hosts ALTER COLUMN instance_uids DROP NOT NULL; \
+             UPDATE hosts SET instance_uids = NULL WHERE host = 'a'",
+        );
+        assert_eq!(
+            store.load().expect("load").hosts,
+            BTreeMap::from([("a".to_string(), host(&["01"], false))])
+        );
+    }
+
+    /// This release names the Hosts' `instance_uids` arrays in no statement. What a release
+    /// before the bindings' table listed there stays as it was through every bind, rekey, release,
+    /// save and Gateway mark, and a new Host's array takes its default. A Server of 0.8.4 beside
+    /// it reads each array only to discard it. With the column dropped, as the release after this
+    /// one drops it, every one of these writes and the load still succeed
+    /// (ADR-0039
+    /// clause 22).
+    /// Verifies: ADR-0039
+    #[test]
+    fn the_hosts_arrays_are_named_no_more() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
@@ -2728,7 +2726,7 @@ mod tests {
         let store = PgLedgerStore::new(database.clone());
         let arrays = || test.rows("SELECT host, instance_uids::text FROM hosts ORDER BY host");
         let row = |host: &str, uids: &str| vec![Some(host.to_string()), Some(uids.to_string())];
-        // As a Server of 0.8.0 leaves a Host: bound, and listed in its array.
+        // A Host bound, and listed in its array as a release before the bindings' table left it.
         store
             .save_hosts(&BTreeMap::from([("a".to_string(), host(&[], false))]))
             .expect("save");
@@ -2736,53 +2734,69 @@ mod tests {
             "INSERT INTO host_bindings VALUES ('01', 'a'), ('02', 'a'); \
              UPDATE hosts SET instance_uids = '{01,02}' WHERE host = 'a'",
         );
+        let writes = |round: &str| {
+            let (a, b) = (format!("a{round}"), format!("b{round}"));
+            let uid = |n: u8| format!("{round}{n}");
+            assert_eq!(
+                store.bind_seen(&uid(1), &a, &host(&[], false)),
+                Ok(Bound::Bound)
+            );
+            assert_eq!(store.bind(&uid(2), &a), Ok(Bound::Bound));
+            assert_eq!(
+                store.rebind(&uid(2), &uid(3)),
+                Ok(Some((a.clone(), Bound::Bound)))
+            );
+            assert_eq!(store.unbind(&uid(1)), Ok(Some(a.clone())));
+            let mut hosts = store.load().expect("load").hosts;
+            hosts.insert(b.clone(), host(&[], false));
+            store.save_hosts(&hosts).expect("save");
+            assert_eq!(
+                store.write_host_act(&HostAct::Seen {
+                    host: format!("c{round}"),
+                    entry: host(&[], false),
+                }),
+                Ok(true)
+            );
+            assert_eq!(
+                store.write_host_act(&HostAct::Gateway {
+                    host: b.clone(),
+                    gateway: true,
+                }),
+                Ok(true)
+            );
+        };
 
-        // Binding, a new Host, a rekey and a save add nothing.
-        assert_eq!(store.bind("03", "a"), Ok(Bound::Bound));
+        writes("1");
+        assert_eq!(store.unbind("01"), Ok(Some("a".to_string())));
         assert_eq!(
-            store.bind_seen("04", "b", &host(&[], false)),
-            Ok(Bound::Bound)
+            store.write_host_act(&HostAct::Gateway {
+                host: "a".to_string(),
+                gateway: true,
+            }),
+            Ok(true)
         );
-        assert_eq!(
-            store.rebind("04", "05"),
-            Ok(Some(("b".to_string(), Bound::Bound)))
-        );
-        store
-            .save_hosts(&BTreeMap::from([
-                ("a".to_string(), host(&["01", "02", "03"], false)),
-                ("b".to_string(), host(&["05"], false)),
-                ("c".to_string(), host(&["06"], false)),
-            ]))
-            .expect("save");
         assert_eq!(
             arrays(),
-            [row("a", "{01,02}"), row("b", "{}"), row("c", "{}")],
-            "nothing added"
+            [
+                row("a", "{01,02}"),
+                row("a1", "{}"),
+                row("b1", "{}"),
+                row("c1", "{}"),
+            ],
+            "what a release before listed stays, and a new Host's is the default"
         );
 
-        // A released binding leaves the array, by an unbind, a rekey, or a save without it.
-        assert_eq!(store.unbind("01"), Ok(Some("a".to_string())));
-        assert_eq!(arrays()[0], row("a", "{02}"), "unbound");
-        test.sql("UPDATE hosts SET instance_uids = '{01,02}' WHERE host = 'a'");
-        test.sql("INSERT INTO host_bindings VALUES ('01', 'a')");
+        // An `instance_uid` only an array lists is not read: it binds where it is seen.
+        assert_eq!(store.bind("02", "a1"), Ok(Bound::Bound));
+
+        test.sql("ALTER TABLE hosts DROP COLUMN instance_uids");
+        writes("2");
+        let hosts = store.load().expect("load").hosts;
         assert_eq!(
-            store.rebind("01", "07"),
-            Ok(Some(("a".to_string(), Bound::Bound)))
+            hosts["a2"].instance_uids,
+            BTreeSet::from(["23".to_string()])
         );
-        assert_eq!(arrays()[0], row("a", "{02}"), "rekeyed");
-        store
-            .save_hosts(&BTreeMap::from([
-                ("a".to_string(), host(&["03", "07"], false)),
-                ("b".to_string(), host(&["05"], false)),
-                ("c".to_string(), host(&["06"], false)),
-            ]))
-            .expect("save");
-        assert_eq!(arrays()[0], row("a", "{}"), "saved without it");
-
-        // An `instance_uid` only an array lists, as no release since the bindings' table leaves
-        // one, is no longer read: it binds where it is seen.
-        test.sql("UPDATE hosts SET instance_uids = '{08}' WHERE host = 'a'");
-        assert_eq!(store.bind("08", "b"), Ok(Bound::Bound));
+        assert!(hosts["b2"].gateway, "{hosts:?}");
     }
 
     /// A Gateway's Host is bound none when the bindings leave the arrays: an `instance_uid` a

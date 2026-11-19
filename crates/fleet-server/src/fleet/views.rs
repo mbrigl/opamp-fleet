@@ -46,6 +46,15 @@ impl AppState {
                     .unwrap_or_default()
                     .to_string()
             };
+            // The names as the list derives them (ADR-0018 clauses 1 and 2), so the two cannot
+            // differ.
+            let (service_name, service_instance_name) = match &record.description {
+                Some(d) => crate::listing::names(
+                    &attr_map(&d.identifying_attributes),
+                    &attr_map(&d.non_identifying_attributes),
+                ),
+                None => (String::new(), String::new()),
+            };
             let entry = hosts.entry(host.clone()).or_default();
             let is_client_agent = record.placement.client_agent == Some(*uid);
             if is_client_agent && record.placement.group == Some(Group::Host(host.clone())) {
@@ -53,8 +62,8 @@ impl AppState {
             }
             entry.agents.push(HostAgentView {
                 instance_uid: uid.to_string(),
-                service_name: reported(attributes::SERVICE_NAME),
-                service_instance_name: reported(attributes::SERVICE_INSTANCE_NAME),
+                service_name,
+                service_instance_name,
                 host_name: reported("host.name"),
                 client: crate::labels::is_client_agent(record.description.as_ref()),
                 client_agent: record
@@ -1497,6 +1506,60 @@ mod tests {
         assert_eq!(view(&state, &second).os, "windows");
         assert_eq!(view(&state, &second).platform, "windows-arm64");
         assert_eq!(view(&state, &second).remote_config_status, "APPLIED");
+    }
+
+    /// The Hosts view shows an Agent's service name and instance name as its listed record does:
+    /// the service name only from the identifying attributes, the instance name only from the
+    /// non-identifying ones (ADR-0018 clauses 1 and 2), so an Agent that reports either in the
+    /// other set shows it in neither view.
+    /// Verifies: ADR-0018, ADR-0029
+    #[test]
+    fn the_hosts_view_shows_an_agents_names_as_its_listed_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = hosted_fleet(dir.path());
+        let pairs = |pairs: &[(&str, &str)]| -> Vec<KeyValue> {
+            pairs
+                .iter()
+                .map(|(key, value)| opamp::attributes::string_attr(key, value))
+                .collect()
+        };
+        let mut placed = record_with(0);
+        placed.host = Some("h1".to_string());
+        placed.description = Some(AgentDescription {
+            identifying_attributes: pairs(&[("service.name", "otelcol")]),
+            non_identifying_attributes: pairs(&[("service.instance.name", "edge-1")]),
+        });
+        let mut swapped = record_with(0);
+        swapped.host = Some("h1".to_string());
+        swapped.description = Some(AgentDescription {
+            identifying_attributes: pairs(&[("service.instance.name", "edge-2")]),
+            non_identifying_attributes: pairs(&[("service.name", "telegraf")]),
+        });
+        let (first, second) = (InstanceUid([0xe1; 16]), InstanceUid([0xe2; 16]));
+        for (uid, record) in [(first, placed), (second, swapped)] {
+            state.fleet.lock().expect("fleet lock").insert(uid, record);
+        }
+        let hosts = state.host_agents().expect("hosts");
+        let shown = |uid: InstanceUid| {
+            let agent = hosts["h1"]
+                .agents
+                .iter()
+                .find(|agent| agent.instance_uid == uid.to_string())
+                .expect("on h1");
+            (
+                agent.service_name.clone(),
+                agent.service_instance_name.clone(),
+            )
+        };
+        for uid in [first, second] {
+            let derived = {
+                let fleet = state.fleet.lock().expect("fleet lock");
+                crate::listing::derive(&fleet[&uid].source(&uid))
+            };
+            assert_eq!(shown(uid).0, derived.service_name);
+        }
+        assert_eq!(shown(first), ("otelcol".to_string(), "edge-1".to_string()));
+        assert_eq!(shown(second), (String::new(), String::new()));
     }
 
     /// On PostgreSQL an Agent's view and a rollout to it read the Agent and the Agents bound to its

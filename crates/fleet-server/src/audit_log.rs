@@ -2090,7 +2090,7 @@ mod tests {
 
     /// A batch is counted against the file it goes into: a file full before the batch ends is
     /// closed there, never filled past its limit by more than the line that reached it.
-    /// Verifies: ADR-0028, ADR-0023
+    /// Verifies: ADR-0028, ADR-0039
     #[test]
     fn a_batch_rotates_where_a_single_line_would() {
         const MAX: u64 = 1_000;

@@ -15,4 +15,8 @@ write does not wait behind the blob check. The old ticket's first criterion cann
 `GET /deployments`: it counts the reach of every Deployment, which concerns every Agent. It blocks
 no stage: the G-20 load test met its target at 100 000 Agents without it.
 
+**Not now.** The human deferred it on 2026-11-19: no criterion asks for it, and the G-20 load test
+meets its target without it. It comes back when the timing of each kind of act
+(`docs/backlog/each-operator-act-is-timed-in-the-g20-test.md`) or another measurement shows it.
+
 **From.** Ticket 03 of `fleet-at-scale-costs`, moved to the backlog by the human (2026-11-15).

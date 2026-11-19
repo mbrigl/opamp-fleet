@@ -69,13 +69,11 @@ read of the whole fleet, as a rollout makes; the environment variable `MALLOC_AR
 another count.
 
 Under a steady fleet an instance's memory levels off at what its Agents and its database pool hold.
-Each of the pool's connections keeps its buffers at the size of the largest presence batch it has
-written, so over the first hours they grow to up to about 4.5 KiB for each Agent of the most the
-instance has held at once, at the default `pool_size` of 16 and in proportion to `pool_size`: about
-70 MiB at 16 700 Agents an instance and 150 MiB at 33 000. They follow that most, not the Agents
-held now, and not time: an instance that carried a larger share of the fleet while another was
-down keeps buffers of that size after the fleet spreads out again, until it restarts. The
-operator's acts keep little beyond their answer:
+Each of the pool's connections keeps its buffers at the size of the largest statement it has
+sent. A presence batch is written in pieces of about 1 000 Agents, so its statements no longer grow
+with the Agents an instance holds, nor with the larger share it carries while another instance is
+down. What the buffers come to at that bound has not been measured yet. The operator's acts keep
+little beyond their answer:
 
 | Act | What an instance keeps |
 |---|---|
@@ -1268,19 +1266,27 @@ start.
   restarted meanwhile: an instance of 0.8.0 checks the schema only at its own start and could take
   its lease just after the newer release checked the leases. Releases after 0.8.0 close that gap
   themselves.
+- **From 0.8.4 to 0.8.5** is a rolling update. The first instance of 0.8.5 gives the Deployments'
+  `packages` and `configurations` columns and the Hosts' `instance_uids` arrays a default, which
+  changes no stored row. Each `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock on `deployments` and
+  `hosts` for the moment it changes the catalogue, so every read and write of a Deployment or a
+  Host waits for that moment; start it at a quiet moment. Its migration names 0.8.4 as the oldest
+  Server, so an instance of 0.8.5 does not start beside a live lease of 0.8.3 or older: from such
+  a release, scale its instances to zero first, as for a skip. The release after 0.8.5 drops the
+  three columns.
 - **From 0.7.1** every Server stops first. An instance that shares the database starts, and
   migrates, only once nothing holds the database alone, as a Server of 0.7.1 does while it runs,
   and as `server migrate-to-postgres` and `server blobs-to-s3` do until they finish.
-- **Beside 0.8.0** four things differ from a fleet of one release. `max_agents` may be passed by
-  the records the two releases create at the same moment, since 0.8.0 counts under a lock the newer
-  release does not take. When both create the record of the same new Agent at the same moment, the
-  database ends one of the two as a deadlock after its `deadlock_timeout` (one second by default);
-  that report is answered `Unavailable`, and the Agent reports again. And a Gateway's mark through
-  an instance of 0.8.0 may be refused for a Host it has not heard of yet, or written for a host the
-  database has forgotten; make marks through an instance of this release. And an instance of 0.8.0
-  reads no rejected key: through it a rejected key waits again, is listed and may be approved, so
-  approve through an instance of this release, which refuses it. All four end
-  with the last instance of 0.8.0.
+- **Beside 0.8.0**, for releases 0.8.1 to 0.8.4, four things differ from a fleet of one release.
+  `max_agents` may be passed by the records the two releases create at the same moment, since
+  0.8.0 counts under a lock the newer release does not take. When both create the record of the
+  same new Agent at the same moment, the database ends one of the two as a deadlock after its
+  `deadlock_timeout` (one second by default); that report is answered `Unavailable`, and the Agent
+  reports again. And a Gateway's mark through an instance of 0.8.0 may be refused for a Host it has
+  not heard of yet, or written for a host the database has forgotten; make marks through an
+  instance of the newer release. And an instance of 0.8.0 reads no rejected key: through it a
+  rejected key waits again, is listed and may be approved, so approve through an instance of the
+  newer release, which refuses it. All four end with the last instance of 0.8.0.
 
 The first start of this release on a database migrates it to the schema of the paged lists: it
 adds columns to the Agents' table and builds three indexes over it, one of them over a digest of

@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{HeaderMap, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{
     client_async_tls_with_config, connect_async_tls_with_config, MaybeTlsStream, WebSocketStream,
@@ -272,7 +272,9 @@ async fn open_each(
             client_async_tls_with_config(
                 request,
                 stream,
-                Some(config(settings.max_message_size)),
+                Some(crate::websocket::websocket_config(
+                    settings.max_message_size,
+                )),
                 settings.connector.clone(),
             )
             .await
@@ -373,7 +375,7 @@ pub async fn connect_from(
     local: Option<IpAddr>,
 ) -> Result<Socket, Connect> {
     let (request, host, port) = target(endpoint, headers)?;
-    let config = config(max_message_size);
+    let config = crate::websocket::websocket_config(max_message_size);
     let Some(local) = local else {
         return connect_async_tls_with_config(request, Some(config), false, connector)
             .await
@@ -420,13 +422,6 @@ fn target(
             80
         });
     Ok((request, host, port))
-}
-
-/// The socket's limits: the receive limit, and the per-frame cap moved with it.
-fn config(max_message_size: usize) -> WebSocketConfig {
-    WebSocketConfig::default()
-        .max_message_size(Some(max_message_size))
-        .max_frame_size(Some(max_message_size))
 }
 
 /// A TCP connection to `host:port` from `local`, trying each address of `host` of `local`'s family.

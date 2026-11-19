@@ -12,7 +12,9 @@
 #      case — the convention every toolchain of the catalogue entry Toolchain shares
 #      (.agents/skills/propose-adr/concepts/toolchain.md), and a heuristic: a
 #      deleted 'manifest.json' is reported too, and the reviewer sees at once that it is none.
-#      A deletion, or a rename to a path that is no longer one, is a finding.
+#      A deletion, or a rename to a path that is no longer one, is a finding. A path under
+#      'docs/plan/' or 'docs/backlog/' is none: the change that lands a ticket or an entry deletes
+#      its file, and a slug that says 'test' or a feature's 'spec.md' names no test.
 #   2. Markers: an added line that carries a skip or focus marker of one of those toolchains,
 #      read only in the files of that toolchain, by extension (MARKERS below): a Rust method
 #      named 'fit(' is no focused JavaScript test. A focus marker ('it.only', 'fdescribe') runs
@@ -76,13 +78,17 @@ fi
 # is_test_path <path> — a segment or the basename contains 'test' or 'spec', in any case.
 is_test_path() { [[ "${1,,}" =~ (^|/)[^/]*(test|spec)[^/]*(/|$) ]]; }
 
+# is_test_file <path> — a test path outside 'docs/plan/' and 'docs/backlog/', whose tickets,
+# specs and entries are no tests.
+is_test_file() { [[ "$1" != docs/plan/* && "$1" != docs/backlog/* ]] && is_test_path "$1"; }
+
 findings=()
 
 # 1. Test files deleted or moved out.
 while IFS=$'\t' read -r status old new; do
   case "$status" in
-    D)  is_test_path "$old" && findings+=("deleted test file: $old") ;;
-    R*) if is_test_path "$old" && ! is_test_path "$new"; then
+    D)  is_test_file "$old" && findings+=("deleted test file: $old") ;;
+    R*) if is_test_file "$old" && ! is_test_file "$new"; then
           findings+=("test file moved out of the tests: $old -> $new")
         fi ;;
   esac

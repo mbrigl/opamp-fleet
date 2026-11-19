@@ -1,4 +1,4 @@
-//! Deployments in PostgreSQL (ADR-0023 clause 6): the PostgreSQL adapter behind
+//! Deployments in PostgreSQL (ADR-0039 clause 6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
 //! (ADR-0025
@@ -53,14 +53,13 @@ impl DeploymentBackend for PgDeploymentBackend {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             // `packages` and `configurations` mirrored the member rows; no release reads them,
-            // so a new row's are empty and nothing writes them after
-            // (ADR-0023
+            // so a new row takes their defaults and nothing names them after
+            // (ADR-0039
             // clause 22).
             transaction
                 .execute(
-                    "INSERT INTO deployments (name, selector, packages, configurations) \
-                     VALUES ($1, $2, '[]', '{}') ON CONFLICT (name) DO UPDATE SET \
-                     selector = EXCLUDED.selector",
+                    "INSERT INTO deployments (name, selector) VALUES ($1, $2) \
+                     ON CONFLICT (name) DO UPDATE SET selector = EXCLUDED.selector",
                     &[&name, &selector],
                 )
                 .await
@@ -433,9 +432,8 @@ pub(crate) async fn write(
     let selector = serde_json::to_value(&deployment.selector).expect("a Selector serializes");
     client
         .execute(
-            "INSERT INTO deployments (name, selector, packages, configurations) \
-             VALUES ($1, $2, '[]', '{}') ON CONFLICT (name) DO UPDATE SET \
-             selector = EXCLUDED.selector",
+            "INSERT INTO deployments (name, selector) VALUES ($1, $2) \
+             ON CONFLICT (name) DO UPDATE SET selector = EXCLUDED.selector",
             &[&deployment.name, &selector],
         )
         .await
@@ -634,14 +632,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_deployment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0039, ADR-0025
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -652,11 +650,11 @@ mod tests {
         contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
     }
 
-    /// A stored Deployment is loaded by the rules it was written by (ADR-0023 clause 6). A
+    /// A stored Deployment is loaded by the rules it was written by (ADR-0039 clause 6). A
     /// Package reference with a field no write puts there is refused. A second Package of one
     /// Agent type is refused in the words the write refuses it with, rather than loaded with the
     /// last one kept. Each refusal names the file.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_stored_deployment_is_held_to_the_write_rules_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -699,7 +697,7 @@ mod tests {
     /// The database cannot hold what the filesystem test plants: a Package of a Deployment is a
     /// row of two columns keyed by its Agent type, so a second of one type is refused by the
     /// database itself, and no field beside the two has a place.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_second_package_of_one_agent_type_cannot_be_stored_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -792,7 +790,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), [before]);
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -806,7 +804,7 @@ mod tests {
 
     /// Each write of `canary`'s row and of its member rows is refused: a replacing Package
     /// removes the old row before its insert is refused, and the whole change is refused with it.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -835,12 +833,13 @@ mod tests {
     }
 
     /// No release reads the Deployments' `packages` and `configurations` columns, which mirror
-    /// the member rows, so this release writes them no more: a new Deployment's are empty, and
-    /// what a Server of 0.8.0 wrote into them stays as it was through every change of the
-    /// members, until the release after this one removes them
-    /// (ADR-0023
+    /// the member rows, and this release names them in no statement: a new Deployment's take
+    /// their defaults, what a release before wrote into them stays as it was through every change
+    /// of the members, and with the columns dropped, as the release after this one drops them,
+    /// every change and the load still succeed
+    /// (ADR-0039
     /// clause 22).
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_mirror_columns_are_written_no_more() {
         let Some(test) = TestDatabase::named() else {
@@ -858,7 +857,7 @@ mod tests {
             [[Some("[]".to_string()), Some("{}".to_string())]],
             "a new Deployment's are empty"
         );
-        // As a Server of 0.8.0 beside this one leaves them.
+        // As a Server of 0.8.0 left them.
         test.sql(
             "UPDATE deployments SET packages = \
              '[{\"agent_type\":\"otelcol\",\"version\":\"1.2.3\"}]', \
@@ -877,6 +876,21 @@ mod tests {
             store.load().expect("load"),
             [deployment("canary", Some("1.2.4"), &["extra", "other"])],
             "the members are the rows'"
+        );
+
+        test.sql("ALTER TABLE deployments DROP COLUMN packages, DROP COLUMN configurations");
+        put(&store, &deployment("stable", Some("1.2.3"), &["base"]));
+        store
+            .drop_member(&Member::Configuration("extra".to_string()))
+            .expect("drop");
+        store
+            .amend("canary", &Change::RemovePackage(id("1.2.4")))
+            .expect("remove");
+        store.remove("canary").expect("remove the Deployment");
+        assert_eq!(
+            store.load().expect("load"),
+            [deployment("stable", Some("1.2.3"), &["base"])],
+            "with the columns dropped"
         );
     }
 
@@ -1027,8 +1041,8 @@ mod tests {
         );
     }
 
-    /// A row that does not decode fails the load naming it (ADR-0023 clause 6).
-    /// Verifies: ADR-0023
+    /// A row that does not decode fails the load naming it (ADR-0039 clause 6).
+    /// Verifies: ADR-0039
     #[test]
     fn a_deployment_row_that_does_not_decode_fails_the_load_naming_it() {
         let Some(test) = TestDatabase::named() else {

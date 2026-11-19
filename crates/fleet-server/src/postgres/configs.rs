@@ -1,4 +1,4 @@
-//! Configurations in PostgreSQL (ADR-0023 clause 5): the PostgreSQL adapter behind
+//! Configurations in PostgreSQL (ADR-0039 clause 5): the PostgreSQL adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one row per Configuration, its retained
 //! revisions in rows of their own, each call one transaction on the rows it names
 //! (ADR-0025
@@ -243,7 +243,7 @@ async fn save(client: &impl GenericClient, name: &str, saved: &Revision) -> Resu
 }
 
 /// Adds each pinned revision to its Configuration by its hash, inside a rollout's transaction
-/// (ADR-0023 clause 21), and deletes none; a revision already retained is left as it is, as its
+/// (ADR-0039 clause 21), and deletes none; a revision already retained is left as it is, as its
 /// hash names its content.
 /// Each Configuration's row is held `FOR KEY SHARE`, in name order, until the transaction ends:
 /// a collection's `FOR UPDATE` waits for it, so no instance collects a revision this transaction
@@ -506,7 +506,7 @@ mod tests {
         });
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_configuration_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -518,7 +518,7 @@ mod tests {
         });
     }
 
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0039, ADR-0025
     #[test]
     fn the_configuration_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -554,7 +554,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), [before]);
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_write_that_fails_leaves_nothing_of_itself_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -569,7 +569,7 @@ mod tests {
 
     /// Run from inside a runtime's own thread, as the Server's handlers call the port: the bridge
     /// never needs the thread that waits for it.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[tokio::test(flavor = "current_thread")]
     async fn a_write_that_fails_leaves_nothing_of_itself_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -723,7 +723,7 @@ mod tests {
     }
 
     /// A row that does not decode fails the load naming it, rather than being skipped.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_configuration_row_that_does_not_decode_fails_the_load_naming_it() {
         let Some(test) = TestDatabase::named() else {

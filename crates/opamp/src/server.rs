@@ -30,7 +30,7 @@ use axum::Router;
 use futures_util::{SinkExt as _, StreamExt as _};
 use prost::Message as _;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tracing::warn;
@@ -344,12 +344,8 @@ async fn upgrade<H: Handler>(
             };
             let stream = pace::FrameMeter::new(hyper_util::rt::TokioIo::new(upgraded));
             // The transport's own guard, so an oversized frame is refused before it is buffered whole;
-            // the loop still checks, because that is what turns the refusal into the 1009 close. The
-            // per-frame cap moves with it: left at its default it would refuse messages *below* the
-            // configured limit, which is the limit's business.
-            let config = WebSocketConfig::default()
-                .max_message_size(Some(limit))
-                .max_frame_size(Some(limit));
+            // the loop still checks, because that is what turns the refusal into the 1009 close.
+            let config = crate::websocket::websocket_config(limit);
             let socket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
             let messages = floor.map(pace::Messages::new);
             serve_socket(socket, endpoint, connection, outbound, messages, sessions).await;

@@ -47,6 +47,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // The system's randomness, with `ring`.
             ("random", Adapter),
             ("tls", Adapter),
+            // The WebSocket configuration both ends share, with `tungstenite`.
+            ("websocket", Adapter),
         ],
     ),
     (

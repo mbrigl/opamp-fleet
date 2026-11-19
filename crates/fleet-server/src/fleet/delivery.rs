@@ -176,7 +176,7 @@ impl AppState {
     }
 
     /// Whether any Agent's assignment references this Package — the gate that makes an assigned
-    /// Package's bytes immutable (ADR-0032 clause 13). The Agent store answers it (ADR-0023
+    /// Package's bytes immutable (ADR-0032 clause 13). The Agent store answers it (ADR-0039
     /// clause 2); the fleet lock keeps a rollout of this Server from pinning it meanwhile. A
     /// store that other Servers write too refuses the write again from the stored assignments, in
     /// the act that writes.
@@ -250,7 +250,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Stores one streamed upload as an entry of a Package (ADR-0033, ADR-0023). Refused while the
+    /// Stores one streamed upload as an entry of a Package (ADR-0033, ADR-0039). Refused while the
     /// Package is assigned to an Agent (ADR-0032 clause 13); no push, because saving never
     /// distributes.
     pub fn put_package_entry(
@@ -783,7 +783,7 @@ mod tests {
 
     /// The deletion of a Package sweeps its blobs once it has let the fleet lock go: while the
     /// sweep waits for the blob store's lock, every other act of the fleet goes on.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -841,7 +841,7 @@ mod tests {
     /// An entry's deletion sweeps once it has let go of every lock of the Package store: while
     /// its sweep waits for the blob store's lock, the deletion of another Package, which takes
     /// the fleet lock and then the store's, goes on, and so does every act behind the fleet lock.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn an_entry_deletion_sweeps_once_it_lets_the_store_go() {
         let dir = tempfile::tempdir().expect("tempdir");

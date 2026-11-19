@@ -237,7 +237,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
     std::process::exit(pki::exit_code(&endings, now));
 }
 
-/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0023 clause 26):
+/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0039 clause 26):
 /// moves the state an older Server kept under `config_dir` and `packages_dir` into a new, empty
 /// `data_dir`, copying, so the old directories stay as the backup. It is run while the Server is
 /// stopped — a Server still writing the old directories would be copied half-way — and that is the
@@ -290,7 +290,7 @@ fn migrate(mut args: impl Iterator<Item = String>) -> ! {
 }
 
 /// `server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]`
-/// (ADR-0023 clause 27): copies the records of `data_dir` into
+/// (ADR-0039 clause 27): copies the records of `data_dir` into
 /// the database the configuration names, leaving the old directory as the backup and its audit
 /// record as the archive the first chain links to. With the filesystem blob store the blobs go into
 /// a new, empty `data_dir`; with S3 there is none, `--data-dir` is refused, and the blobs the
@@ -370,7 +370,7 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
 }
 
 /// `server blobs-to-s3 --data-dir <data_dir> [--config <server.toml>]`
-/// (ADR-0023 clause 19): uploads the artifacts of a Server
+/// (ADR-0039 clause 19): uploads the artifacts of a Server
 /// already on PostgreSQL with the filesystem blob store into the bucket the configuration names,
 /// once, while no instance runs. The configuration is the one the Server will start with: the
 /// database, the bucket, and no `data_dir`. Prints what it uploaded, and exits non-zero when an
@@ -576,7 +576,8 @@ fn bind(address: SocketAddr, plane: &str) -> std::net::TcpListener {
 /// G-20 load test, an instance with 205 MiB in use held 1.3 GiB after 15 minutes, and still grew.
 /// With two arenas it no longer grows with each such read. What still grows under a steady fleet
 /// is memory in use, to a bound: the database connections' buffers, at the size of the largest
-/// presence batch each has written, which follows the most Agents the instance has held at once.
+/// statement each has sent. A presence batch is written in pieces of about 1 000 Agents, so that
+/// bound no longer follows the Agents the instance holds; its size was not measured again.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 const MALLOC_ARENAS: libc::c_int = 2;
 
@@ -671,10 +672,10 @@ async fn serve() {
     } else {
         None
     };
-    // Where the records live (ADR-0023): the data directory, its layout created owner-only and
-    // checked before any store opens (ADR-0023), and with PostgreSQL the database, its lock taken
+    // Where the records live (ADR-0039): the data directory, its layout created owner-only and
+    // checked before any store opens (ADR-0039), and with PostgreSQL the database, its lock taken
     // and its schema applied. Its startup sweep marks what it deletes under the lease the instance
-    // takes next, which another instance's sweep leaves (ADR-0023 clause 14).
+    // takes next, which another instance's sweep leaves (ADR-0039 clause 14).
     let records = match fleet_server::Records::open(&config, instance_id.clone()) {
         Ok(records) => records,
         Err(e) => {
@@ -687,7 +688,7 @@ async fn serve() {
     }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
     // ADR-0026: closed until an operator opens it; the window and its queue survive a restart
-    // (ADR-0023 clause 8).
+    // (ADR-0039 clause 8).
     let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
         fleet_server::enrolment::Enrolment::open_on(clock.clone(), records.enrolment()).map(
@@ -828,7 +829,7 @@ async fn serve() {
     // The package store before the lease, so that a bucket that fails startup leaves no lease
     // and no audit chain behind. Its startup cleanup needs no lease of this instance: it lists the
     // staging keys before it asks which leases are live
-    // (ADR-0023 clause 16).
+    // (ADR-0039 clause 16).
     let packages = config
         .packages
         .verification_key()
@@ -939,7 +940,7 @@ async fn serve() {
     };
     // On the bucket, this instance's uploads are staged under its lease, and whenever it takes over
     // a lapsed lease, the uploads that lease left go
-    // (ADR-0023 clause 16).
+    // (ADR-0039 clause 16).
     if let (Some(staging), Some(lease)) = (staging, &lease) {
         staging.stage_under(lease.held());
         lease.on_each_takeover(move || staging.run());
@@ -1023,7 +1024,7 @@ async fn serve() {
         token.warn_if_software(audit.as_ref());
     }
     // On PostgreSQL the record goes back `[audit] retain_days`: pruned at startup and once a day
-    // after (ADR-0023 clause 12).
+    // after (ADR-0039 clause 12).
     if let (fleet_server::Records::Postgres(database), Some(lease)) = (&records, &lease) {
         let (database, audit, held) = (database.clone(), audit_log.clone(), lease.held());
         fleet_server::postgres::audit_prune::prune_daily(
@@ -1093,7 +1094,7 @@ async fn serve() {
         }
     };
     // On files an approval writes its decision before its register entry: one a write between
-    // the two left decided without its entry waits again (ADR-0023 clause 9).
+    // the two left decided without its entry waits again (ADR-0039 clause 9).
     let read_certificate = |pem: &str| {
         let der = opamp::tls::certificates(pem.as_bytes())?;
         fleet_server::ca::facts(der.first().ok_or("no certificate in the PEM")?.as_ref())

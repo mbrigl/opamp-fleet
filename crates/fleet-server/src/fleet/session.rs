@@ -166,7 +166,7 @@ impl AppState {
     /// so an older state never lands after a newer one, since the Agent's own lock, which every
     /// report of it holds from its start to its answer, is held across the write; and a report is
     /// answered only once its record is written (ADR-0029 clause 4). What a store's write may take
-    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0023 clause 24).
+    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0039 clause 24).
     ///
     /// On a shared store, an Agent this instance was answered no count of takes for, its take not
     /// written or its answer lost, has its record written at every report and no digest kept: a
@@ -2013,7 +2013,7 @@ mod tests {
     /// A record that does not decode, which every read that meets it fails, can still be
     /// forgotten through an instance that does not hold it, and is gone after, with what its
     /// assignment pinned: the Deployment it was released through may be deleted then.
-    /// Verifies: ADR-0023, ADR-0029
+    /// Verifies: ADR-0039, ADR-0029
     #[test]
     fn a_record_that_does_not_decode_can_be_forgotten() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2058,7 +2058,7 @@ mod tests {
 
     /// Forgetting an Agent this instance on PostgreSQL does not hold collects the revision only its
     /// assignment pinned, as forgetting one it holds does.
-    /// Verifies: ADR-0032, ADR-0023
+    /// Verifies: ADR-0032, ADR-0039
     #[test]
     fn forgetting_an_agent_held_nowhere_collects_the_revision_only_it_pinned() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

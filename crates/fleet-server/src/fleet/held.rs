@@ -2607,7 +2607,7 @@ mod tests {
 
     /// An instance on PostgreSQL loads no Agent record when it starts, holds none until one
     /// reports to it, and reads again only the ones it holds when it reads everything again.
-    /// Verifies: ADR-0025, ADR-0023
+    /// Verifies: ADR-0025, ADR-0039
     #[test]
     fn an_instance_on_postgres_loads_no_fleet_and_reads_again_only_what_it_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

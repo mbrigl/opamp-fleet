@@ -2733,7 +2733,7 @@ async fn two_uploads_of_one_entry_at_once_do_not_share_a_staging_file() {
     let answer = String::from_utf8_lossy(&answer);
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
 
-    // The blobs: the second upload's went with the entry the first one replaced (ADR-0023).
+    // The blobs: the second upload's went with the entry the first one replaced (ADR-0039).
     let stored: Vec<_> = std::fs::read_dir(dir.path().join("packages/blobs"))
         .expect("blobs")
         .map(|entry| entry.expect("entry").path())

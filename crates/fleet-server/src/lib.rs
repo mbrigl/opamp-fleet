@@ -84,13 +84,13 @@ fn named(error: String) -> String {
     format!("data_dir: {error}")
 }
 
-/// Where the Server keeps its records (ADR-0023 clause 1): files under `data_dir`, or one
+/// Where the Server keeps its records (ADR-0039 clause 1): files under `data_dir`, or one
 /// PostgreSQL database. The composition root asks it for each port's adapter, so the rest of the
 /// Server names the ports alone.
 pub enum Records {
-    /// One file per record under this `data_dir` (ADR-0023).
+    /// One file per record under this `data_dir` (ADR-0039).
     Files(std::path::PathBuf),
-    /// One PostgreSQL database, shared by the instances on it (ADR-0023).
+    /// One PostgreSQL database, shared by the instances on it (ADR-0039).
     Postgres(Arc<postgres::Database>),
 }
 
@@ -114,7 +114,7 @@ impl Records {
             (None, None) => Err("the filesystem record store needs data_dir".to_string()),
             (Some(database), data_dir) => {
                 // With S3 too the Server keeps nothing on its disk and has no data directory
-                // (ADR-0023 clause 1).
+                // (ADR-0039 clause 1).
                 if let Some(data_dir) = data_dir {
                     fs::open_data_dir_beside_database(data_dir).map_err(named)?;
                 }
@@ -229,7 +229,7 @@ impl Records {
 /// — and never the filesystem behind it.
 impl AppState {
     /// Builds the state on the default storage adapters in the data directory `data_dir`
-    /// (ADR-0023) — one JSON file per Agent, its labels inside, under `agents/`, and one per
+    /// (ADR-0039) — one JSON file per Agent, its labels inside, under `agents/`, and one per
     /// Configuration under `configurations/` — restoring every persisted Configuration and Agent
     /// record. A store that cannot be opened (or holds an unparsable file) fails startup loudly.
     ///
@@ -245,7 +245,7 @@ impl AppState {
         )
     }
 
-    /// Builds the state on the adapters of `records` (ADR-0023), restoring every persisted
+    /// Builds the state on the adapters of `records` (ADR-0039), restoring every persisted
     /// Configuration and Agent record.
     ///
     /// # Errors
@@ -262,7 +262,7 @@ impl AppState {
 /// The default wiring of the package store to its filesystem adapter (ADR-0009).
 impl packages::PackageStore {
     /// Opens the store in the data directory `data_dir`, loading every persisted Package
-    /// (ADR-0033, ADR-0023).
+    /// (ADR-0033, ADR-0039).
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened, or a Package in it cannot be read, does
@@ -276,9 +276,9 @@ impl packages::PackageStore {
     }
 
     /// Opens the store in the data directory `data_dir` with the artifacts in the store `[blobs]`
-    /// chooses (ADR-0023 clause 14): the filesystem as [`open`](Self::open) does, or the bucket of
+    /// chooses (ADR-0039 clause 14): the filesystem as [`open`](Self::open) does, or the bucket of
     /// `[blobs.s3]`. On the bucket, a referenced artifact it lacks and `data_dir/blobs/` holds is
-    /// copied into it first (ADR-0023 clause 19).
+    /// copied into it first (ADR-0039 clause 19).
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened, as [`open`](Self::open) does, when the
@@ -296,9 +296,9 @@ impl packages::PackageStore {
         .map(|(store, _)| store)
     }
 
-    /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0023) and the bytes
+    /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0039) and the bytes
     /// in the store `[blobs]` chooses, the filesystem's under `data_dir`, which is `None` only
-    /// with PostgreSQL and S3 (ADR-0023 clause 1).
+    /// with PostgreSQL and S3 (ADR-0039 clause 1).
     ///
     /// On the bucket the staging objects of every lease that is not live are deleted (clause 16),
     /// with PostgreSQL under the blob store's lock (clause 14) and by every sweep, and the cleanup
@@ -308,7 +308,7 @@ impl packages::PackageStore {
     /// that a bucket that fails leaves no lease behind, and it takes no upload until
     /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease. A sweep
     /// measures the time between the renewal of a mark and its deletion on `elapsed`
-    /// (ADR-0023 clause 14).
+    /// (ADR-0039 clause 14).
     ///
     /// # Errors
     /// As [`open_with`](Self::open_with), and when the filesystem blob store has no `data_dir`.
@@ -371,7 +371,7 @@ impl packages::PackageStore {
 /// The default wiring of the package offering to the Deployments' filesystem adapter (ADR-0009).
 impl PackageOffering {
     /// Arms the **Deployments** beside the package store, from `deployments/` in the data
-    /// directory `data_dir` (ADR-0033, ADR-0023).
+    /// directory `data_dir` (ADR-0033, ADR-0039).
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them cannot be read.
@@ -381,7 +381,7 @@ impl PackageOffering {
         Ok(Self::with_deployments(store, deployments))
     }
 
-    /// Arms the Deployments of `records` beside the package store (ADR-0023).
+    /// Arms the Deployments of `records` beside the package store (ADR-0039).
     ///
     /// # Errors
     /// Returns an error when the Deployments cannot be opened or one of them does not decode.
@@ -391,10 +391,10 @@ impl PackageOffering {
     }
 }
 
-/// The default wiring of the bootstrap record to its filesystem adapter (ADR-0009, ADR-0023).
+/// The default wiring of the bootstrap record to its filesystem adapter (ADR-0009, ADR-0039).
 impl bootstrap::BootstrapCertificates {
     /// Opens the record in the data directory `data_dir`, one file per certificate under
-    /// `bootstrap/` (ADR-0023), forgetting what has ended.
+    /// `bootstrap/` (ADR-0039), forgetting what has ended.
     ///
     /// # Errors
     /// Returns an error when the directory cannot be opened or a file in it cannot be read.
@@ -410,7 +410,7 @@ impl bootstrap::BootstrapCertificates {
         )
     }
 
-    /// Opens the record in `records` (ADR-0023), forgetting what has ended.
+    /// Opens the record in `records` (ADR-0039), forgetting what has ended.
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened or read.
