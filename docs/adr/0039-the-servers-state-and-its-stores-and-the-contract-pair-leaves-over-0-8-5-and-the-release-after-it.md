@@ -1,4 +1,4 @@
-# ADR-draft-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it: The Server's state lives under one data directory or in PostgreSQL and S3, one store per domain, and an approval records its certificate with its decision, and the contract pair leaves over 0.8.5 and the release after it
+# ADR-0039: The Server's state lives under one data directory or in PostgreSQL and S3, one store per domain, and an approval records its certificate with its decision, and the contract pair leaves over 0.8.5 and the release after it
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-19
