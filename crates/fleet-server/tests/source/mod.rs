@@ -1,7 +1,6 @@
 //! The production code of a crate, read as a syntax tree: the reader this crate's structural tests
 //! share. The cut is a copy of the one in `crates/fleet-util/tests/who_shares.rs`: sharing it
 //! across crates would take a crate of its own (DEV-six-crates-tokio-axum).
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +17,8 @@ use syn::{Attribute, Expr, ForeignItem, ImplItem, Item, Meta, Stmt, Token, Trait
 /// whitespace: the modules its `lib.rs` and `main.rs` reach, each without its items under a `cfg`
 /// that cannot hold without `test`. A module declared under such a `cfg` is cut before it is
 /// reached, so its file is not read. Comments are no tokens.
+// Each test binary that includes this module uses only some of these.
+#[allow(dead_code)]
 pub fn production(src: &Path) -> String {
     let mut out = String::new();
     each_production_file(src, &mut |_, code| spaced(code.to_token_stream(), &mut out));
@@ -26,6 +27,8 @@ pub fn production(src: &Path) -> String {
 
 /// The production code of the crate whose sources are under `src`, as `production` reads it, but
 /// one syntax tree per file, with the file's path.
+// Each test binary that includes this module uses only some of these.
+#[allow(dead_code)]
 pub fn production_files(src: &Path) -> Vec<(PathBuf, syn::File)> {
     let mut files = Vec::new();
     each_production_file(src, &mut |file, code| {
@@ -56,6 +59,8 @@ fn read_module(file: &Path, dir: &Path, visit: &mut dyn FnMut(&Path, syn::File))
 
 /// Appends `tokens` to `out`, each token followed by whitespace but a punctuation character that
 /// joins the next, so `::` stays one token; a group's delimiters stand as tokens of their own.
+// Each test binary that includes this module uses only some of these.
+#[allow(dead_code)]
 pub fn spaced(tokens: TokenStream, out: &mut String) {
     for tree in tokens {
         match tree {
@@ -112,6 +117,8 @@ fn read_items(items: &[Item], file: &Path, dir: &Path, visit: &mut dyn FnMut(&Pa
 
 /// The shipped code of a source text: its syntax tree, with every item, statement, field, variant
 /// and arm under a `cfg` attribute that cannot hold without `test` cut.
+// Each test binary that includes this module uses only some of these.
+#[allow(dead_code)]
 pub fn shipped(text: &str) -> syn::Result<syn::File> {
     let mut file = syn::parse_file(text)?;
     CutTestCode.visit_file_mut(&mut file);

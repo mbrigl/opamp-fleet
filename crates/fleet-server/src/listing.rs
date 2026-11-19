@@ -333,7 +333,7 @@ pub fn display_values(
 /// A value that is not a version is returned as it stands. `service.version` is whatever an Agent
 /// puts there, and a Foreign Agent numbers itself however its own project does — trimming a string
 /// this Server does not understand would be inventing a version rather than showing one.
-pub(crate) fn display_version(reported: &str) -> String {
+fn display_version(reported: &str) -> String {
     fleet_core::version::identity(reported)
         .unwrap_or(reported)
         .to_string()
@@ -387,7 +387,7 @@ pub(crate) fn capability_names(mask: u64) -> Vec<String> {
 /// Reported attributes as the API shows them: string values as-is, string arrays (the shape the
 /// conventions give `host.ip` and `host.mac`, CLT-what-an-agent-reports) joined with a comma, other value kinds in
 /// their debug form — the view is for reading, the wire keeps the typed original.
-pub(crate) fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
+fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
     fn text(value: &any_value::Value) -> String {
         match value {
             any_value::Value::StringValue(s) => s.clone(),

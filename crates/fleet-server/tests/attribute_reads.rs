@@ -4,12 +4,15 @@
 //!
 //! The production code is read as a syntax tree by the reader in `tests/source`. Three things are
 //! refused there:
-//! - a path to the key constants `SERVICE_NAME` or `SERVICE_VERSION`;
+//! - a path to the key constants `SERVICE_NAME` or `SERVICE_VERSION`, or a `use` of them;
 //! - the keys spelled as the literals `"service.name"` or `"service.version"`, but where the
 //!   Server writes the key of its own OpenTelemetry resource;
-//! - a call of `string_value` on an `identifying_attributes` set, but in the one path that reads
-//!   the sets the other way round on purpose, the Platform (`Platform::reported`, which reads the
-//!   non-identifying set first, since an Agent reports its platform there).
+//! - any access to a description's `identifying_attributes` field, but in the functions named in
+//!   `READS_THE_SETS_ITSELF`, each with its reason: the walkers that take every attribute, and the
+//!   Platform, which reads the non-identifying set first since an Agent reports its platform there.
+//!
+//! What a macro's body holds is no syntax tree to `syn`, so a read inside `format!` or `matches!`
+//! is not seen; the code reads through no such macro today.
 
 use std::path::{Path, PathBuf};
 
@@ -18,11 +21,23 @@ use syn::visit::{self, Visit};
 mod source;
 use source::production_files;
 
-/// The files where a literal key is a write, not a read: the Server's own resource.
+/// The files, below `src/`, where a literal key is a write, not a read: the Server's own resource.
 const WRITES_A_KEY: [&str; 1] = ["audit_export.rs"];
 
-/// The functions that read the identifying set themselves, each with its reason above.
-const READS_THE_SETS_ITSELF: [(&str, &str); 1] = [("packages.rs", "reported")];
+/// The functions, by file below `src/`, that take a description's identifying set themselves.
+const READS_THE_SETS_ITSELF: [(&str, &str); 7] = [
+    // The Platform reads the non-identifying set first: an Agent reports its platform there.
+    ("packages.rs", "reported"),
+    // Walkers over every attribute, which look up no key: the labels an Agent reported, the
+    // effective description and its merge, the map the view shows, and the list's search text.
+    ("labels.rs", "reported_keys"),
+    ("labels.rs", "adds_nothing"),
+    ("labels.rs", "effective_description"),
+    ("listing.rs", "display_values"),
+    ("listing.rs", "derive"),
+    // The API's copy of the view's map of attributes, not a description's set.
+    ("api.rs", "from"),
+];
 
 /// What `file` reads past the shared lookups, one line per finding.
 fn reads_past_the_lookups(name: &str, file: &syn::File) -> Vec<String> {
@@ -47,19 +62,9 @@ impl Reads<'_> {
     }
 }
 
-/// Whether `expr` names the field `identifying_attributes`, through any reference or `?`.
-fn names_identifying_attributes(expr: &syn::Expr) -> bool {
-    struct Finds(bool);
-    impl<'ast> Visit<'ast> for Finds {
-        fn visit_member(&mut self, member: &'ast syn::Member) {
-            if matches!(member, syn::Member::Named(ident) if ident == "identifying_attributes") {
-                self.0 = true;
-            }
-        }
-    }
-    let mut finds = Finds(false);
-    finds.visit_expr(expr);
-    finds.0
+/// Whether `ident` is one of the two key constants.
+fn is_key_constant(ident: &syn::Ident) -> bool {
+    ident == "SERVICE_NAME" || ident == "SERVICE_VERSION"
 }
 
 impl<'ast> Visit<'ast> for Reads<'_> {
@@ -75,9 +80,23 @@ impl<'ast> Visit<'ast> for Reads<'_> {
         self.functions.pop();
     }
 
+    fn visit_use_name(&mut self, name: &'ast syn::UseName) {
+        if is_key_constant(&name.ident) {
+            self.found
+                .push(format!("{}: uses `{}`", self.name, name.ident));
+        }
+    }
+
+    fn visit_use_rename(&mut self, rename: &'ast syn::UseRename) {
+        if is_key_constant(&rename.ident) {
+            self.found
+                .push(format!("{}: uses `{}`", self.name, rename.ident));
+        }
+    }
+
     fn visit_path(&mut self, path: &'ast syn::Path) {
         if let Some(last) = path.segments.last() {
-            if last.ident == "SERVICE_NAME" || last.ident == "SERVICE_VERSION" {
+            if is_key_constant(&last.ident) {
                 self.found.push(format!(
                     "{} in `{}`: names `{}`",
                     self.name,
@@ -102,31 +121,31 @@ impl<'ast> Visit<'ast> for Reads<'_> {
         }
     }
 
-    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        let calls_string_value = matches!(
-            &*call.func,
-            syn::Expr::Path(path)
-                if path.path.segments.last().is_some_and(|last| last.ident == "string_value")
+    fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+        let identifying = matches!(
+            &field.member,
+            syn::Member::Named(ident) if ident == "identifying_attributes"
         );
         let exempt = READS_THE_SETS_ITSELF.contains(&(self.name, self.within().as_str()));
-        if calls_string_value
-            && !exempt
-            && call.args.first().is_some_and(names_identifying_attributes)
-        {
+        if identifying && !exempt {
             self.found.push(format!(
-                "{} in `{}`: reads the identifying attributes with string_value",
+                "{} in `{}`: reads the identifying attributes",
                 self.name,
                 self.within()
             ));
         }
-        visit::visit_expr_call(self, call);
+        visit::visit_expr_field(self, field);
     }
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default()
+/// `path` below `src`, with `/` on every host.
+fn below(src: &Path, path: &Path) -> String {
+    path.strip_prefix(src)
+        .unwrap_or(path)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 // Verifies: CLT-what-an-agent-reports
@@ -137,12 +156,12 @@ fn the_server_reads_an_agents_type_version_and_keys_through_the_shared_lookups()
     assert!(
         files
             .iter()
-            .any(|(path, _)| file_name(path) == "listing.rs"),
+            .any(|(path, _)| below(&src, path) == "listing.rs"),
         "the reader found no listing.rs under {src:?}"
     );
     let found: Vec<String> = files
         .iter()
-        .flat_map(|(path, code)| reads_past_the_lookups(&file_name(path), code))
+        .flat_map(|(path, code)| reads_past_the_lookups(&below(&src, path), code))
         .collect();
     assert!(
         found.is_empty(),
@@ -164,14 +183,26 @@ fn the_check_names_each_read_past_the_lookups() {
         fn instance(d: &AgentDescription) -> Option<&str> {
             string_value(&d.non_identifying_attributes, SERVICE_INSTANCE_NAME)
         }
+        use opamp::attributes::SERVICE_VERSION as V;
+        fn by_hand(d: &AgentDescription, key: &str) -> bool {
+            let ids = &d.identifying_attributes;
+            ids.iter().any(|kv| kv.key == key)
+        }
         "#,
     )
     .expect("the fixture parses");
     let found = reads_past_the_lookups("configs.rs", &code);
-    assert_eq!(found.len(), 3, "{found:#?}");
-    assert!(found[0].contains("`fits`") && found[0].contains("identifying"));
-    assert!(found[1].contains("`fits`") && found[1].contains("SERVICE_NAME"));
-    assert!(found[2].contains("`version`") && found[2].contains("service.version"));
+    assert_eq!(found.len(), 5, "{found:#?}");
+    let has = |within: &str, what: &str| {
+        found
+            .iter()
+            .any(|finding| finding.contains(within) && finding.contains(what))
+    };
+    assert!(has("`fits`", "identifying"), "{found:#?}");
+    assert!(has("`fits`", "SERVICE_NAME"), "{found:#?}");
+    assert!(has("`version`", "service.version"), "{found:#?}");
+    assert!(has("uses", "SERVICE_VERSION"), "{found:#?}");
+    assert!(has("`by_hand`", "identifying"), "{found:#?}");
 }
 
 #[test]
