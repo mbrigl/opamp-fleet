@@ -316,8 +316,7 @@ every change that concerns a live session by one `NOTIFY`.
     report under the old identity of which the instance holds no record is answered `Unavailable`
     and creates none.
 
-11. **The rule of
-    [SEC-admission-by-client-certificate §32](SEC-admission-by-client-certificate.md)
+11. **[SEC-admission-by-client-certificate §32](SEC-admission-by-client-certificate.md)
     decides it: A
     revocation ends the sessions it concerns, and only those, on every instance.**
 
