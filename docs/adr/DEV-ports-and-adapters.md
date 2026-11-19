@@ -21,7 +21,8 @@ make the shape worth deciding once:
   ([`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done)): the suite is the
   contract the implementation is held to, so the domain has to be verifiable without the
   technology it runs on, and a decision about the shape has to be one a test can decide
-  ([NUC-decisions-cite-tests §3](NUC-decisions-cite-tests.md)); the shape is what entropy erodes first.
+  ([NUC-decisions-cite-tests §3](NUC-decisions-cite-tests.md)); the shape is what entropy erodes
+  first.
 
 The workspace has its toolchain ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)), so the
 structural test that keeps the shape exists beside the code it reads.

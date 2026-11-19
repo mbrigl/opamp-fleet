@@ -118,9 +118,9 @@ The version is `[workspace.package] version` in [`Cargo.toml`](Cargo.toml), so b
 reviewed commit. The `Release` workflow makes the `version/*` tag from it, then builds and publishes
 the Client's archive and native packages per platform, the operator tool, an SBOM beside each,
 `SHA256SUMS`, and the Server's image `ghcr.io/mbrigl/opamp-fleet-server:<version>`, every one
-attested (OPS-cargo-decides-product-version, OPS-releases-attestations-server-image). Started with `dry_run`, the default, it builds everything and
-publishes nothing. How an operator checks a download is in
-[the manual](docs/manual/tools.md#getting-it), and the image in
+attested (OPS-cargo-decides-product-version, OPS-releases-attestations-server-image). Started with
+`dry_run`, the default, it builds everything and publishes nothing. How an operator checks a
+download is in [the manual](docs/manual/tools.md#getting-it), and the image in
 [the Server's manual](docs/manual/server.md#in-a-container).
 
 ### The service smoke test

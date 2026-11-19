@@ -6,8 +6,9 @@ each change lives in the ADR it names ([`docs/adr/`](docs/adr/)); this file says
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). A version is the one
 `[workspace.package] version` in `Cargo.toml` names, which the release pipeline creates the
-`version/*` tag from ([OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md)). A section carries a date
-once its tag exists.
+`version/*` tag from
+([OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md)). A section
+carries a date once its tag exists.
 
 > **Where this file starts.** Entries begin with release 0.1.0. The work before it — package
 > delivery, Selector-targeted packages and Configurations, the Client's own self-update, and the
@@ -42,12 +43,12 @@ once its tag exists.
   them longer fails that start, and a second start succeeds once the rollout is done. The build
   holds the Agents' writes while it lasts, under a second at 100 000 Agents.
 - **Each WebSocket reads into a 4 KiB buffer**
-  ([SEC-tls13-two-planes-bounded-input §3](docs/adr/SEC-tls13-two-planes-bounded-input.md)). The Server's
-  Agent-plane endpoint, the Client's upstream connection and the Gateway's pool held a read buffer
-  of 128 KiB for every WebSocket, `tungstenite`'s default, allocated when the connection opened and
-  kept while nothing arrived. They now hold 4 KiB, enough for an Agent's routine messages; a larger
-  message still arrives whole, read 4 KiB at a time. The message size limit is unchanged. What
-  this saves an instance's memory was not measured. **What to do:** nothing.
+  ([SEC-tls13-two-planes-bounded-input §3](docs/adr/SEC-tls13-two-planes-bounded-input.md)). The
+  Server's Agent-plane endpoint, the Client's upstream connection and the Gateway's pool held a read
+  buffer of 128 KiB for every WebSocket, `tungstenite`'s default, allocated when the connection
+  opened and kept while nothing arrived. They now hold 4 KiB, enough for an Agent's routine
+  messages; a larger message still arrives whole, read 4 KiB at a time. The message size limit is
+  unchanged. What this saves an instance's memory was not measured. **What to do:** nothing.
 - **A presence batch is written in pieces of 1 000 Agents**
   ([SRV-fleet-record-agents-hosts §4](docs/adr/SRV-fleet-record-agents-hosts.md)). On PostgreSQL, an
   instance wrote the presence of every Agent it holds in one statement, and each database
@@ -75,9 +76,9 @@ once its tag exists.
 ### Fixed
 
 - **A peer that sends no request is hung up on after 30 seconds**
-  ([SEC-tls13-two-planes-bounded-input §15](docs/adr/SEC-tls13-two-planes-bounded-input.md)). On both planes
-  of the Server, a Client's Gateway and a Supervisor Endpoint, a peer that completed the TCP
-  connection, or the TLS handshake, and then sent no request held its place under the connection
+  ([SEC-tls13-two-planes-bounded-input §15](docs/adr/SEC-tls13-two-planes-bounded-input.md)). On
+  both planes of the Server, a Client's Gateway and a Supervisor Endpoint, a peer that completed the
+  TCP connection, or the TLS handshake, and then sent no request held its place under the connection
   cap until it closed or the listener stopped; enough such peers filled the cap, and every new
   connection was refused. The 30 seconds a peer has for its request headers now also bound the
   time to its first request, counted from the connection, or from the end of the TLS handshake on
@@ -209,8 +210,8 @@ once its tag exists.
   **What to do:** nothing.
 
 - **`opamp-fleetctl package fetch` names a platform as the Server does**
-  ([PKG-signed-packages-and-delivery §6](docs/adr/PKG-signed-packages-and-delivery.md)). The tool kept a
-  platform table of its own: it passed over an asset named `osx`, `win64` or `x64`, and every
+  ([PKG-signed-packages-and-delivery §6](docs/adr/PKG-signed-packages-and-delivery.md)). The tool
+  kept a platform table of its own: it passed over an asset named `osx`, `win64` or `x64`, and every
   platform it had no name for, such as `linux/s390x`. It now folds an asset's platform through the
   table the Server stores an entry under, and offers a platform the table does not know under its
   own name. `--platform macos/x86_64` now picks the artifact listed as `darwin/amd64`. A 32-bit
@@ -588,14 +589,14 @@ once its tag exists.
   **What to do:** nothing.
 
 - **A Client the Server answered `Unavailable` on a WebSocket comes back after the wait it was
-  told** ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md), its *Context*: the
-  Client closes the connection, waits, and reconnects). It closed the connection, waited the wait
-  the Server named and then drew the delay of a lost connection, up to 30 s more, on top: an Agent
-  told 30 s stayed away 30 to 60 s. It now waits the named wait, or the next backoff step when that
-  is longer, as after a refused upgrade, and nothing on top. `Unavailable`s in a row grow along
-  the backoff, up to a minute, until a connection handles a reply, so a named wait of zero is no
-  reconnect a second. Agents told `Unavailable` at the same moment now come back at the same
-  moment, no longer spread over 30 s. Plain HTTP waited the named wait already.
+  told** ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md), its
+  *Context*: the Client closes the connection, waits, and reconnects). It closed the connection,
+  waited the wait the Server named and then drew the delay of a lost connection, up to 30 s more, on
+  top: an Agent told 30 s stayed away 30 to 60 s. It now waits the named wait, or the next backoff
+  step when that is longer, as after a refused upgrade, and nothing on top. `Unavailable`s in a row
+  grow along the backoff, up to a minute, until a connection handles a reply, so a named wait of
+  zero is no reconnect a second. Agents told `Unavailable` at the same moment now come back at the
+  same moment, no longer spread over 30 s. Plain HTTP waited the named wait already.
   **What to do:** nothing.
 
 - **An Agent that comes back on a new connection of its host keeps its identity**
@@ -786,12 +787,12 @@ once its tag exists.
   the pause, is not covered: such an instance serves on until its next renewal finds its lease
   lapsed, as before.
 - **An Agent is read in one snapshot**
-  ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)). On PostgreSQL an instance
-  read an Agent's Configurations and then its row as two statements, when it read the fleet whole,
-  a few Agents, the assignments at its start, or an Agent it was about to create and found stored.
-  A rollout that committed between them paired its revisions with another rollout's Deployment,
-  and the instance could offer the Agent an assignment no rollout made until its next read. Each
-  of these reads is now one statement, which reads one committed state.
+  ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)). On PostgreSQL an
+  instance read an Agent's Configurations and then its row as two statements, when it read the fleet
+  whole, a few Agents, the assignments at its start, or an Agent it was about to create and found
+  stored. A rollout that committed between them paired its revisions with another rollout's
+  Deployment, and the instance could offer the Agent an assignment no rollout made until its next
+  read. Each of these reads is now one statement, which reads one committed state.
   **What to do:** nothing.
 - **An act whose answer is lost is taken up once it commits**
   ([SRV-instances-share-one-postgresql §8 and §10](docs/adr/SRV-instances-share-one-postgresql.md)).
@@ -1198,14 +1199,15 @@ once its tag exists.
 ### Security
 
 - **`service config` and `service install --interactive` copy only certificates beside the
-  configuration** ([CLT-accounts-service-runs-under §11](docs/adr/CLT-accounts-service-runs-under.md)).
-  The copy `server-ca.pem` is handed to the service's account, which owns the data root and could
-  put a link where the file names its CA: a root-only file behind it was read and handed over. The
-  copy now holds the CA file's certificates, encoded again, and a file that holds none is refused
-  before anything is written. The configuration and the copy are written through the held data
-  root, synced before the rename; a state directory an install creates beneath a root, and the
-  `current` pointer it switches, are reached without following a link. Upgrade: nothing to do; a
-  `server-ca.pem` that is no PEM certificate file fails the next `service config` with its name.
+  configuration**
+  ([CLT-accounts-service-runs-under §11](docs/adr/CLT-accounts-service-runs-under.md)). The copy
+  `server-ca.pem` is handed to the service's account, which owns the data root and could put a link
+  where the file names its CA: a root-only file behind it was read and handed over. The copy now
+  holds the CA file's certificates, encoded again, and a file that holds none is refused before
+  anything is written. The configuration and the copy are written through the held data root, synced
+  before the rename; a state directory an install creates beneath a root, and the `current` pointer
+  it switches, are reached without following a link. Upgrade: nothing to do; a `server-ca.pem` that
+  is no PEM certificate file fails the next `service config` with its name.
 
 - **On Windows a first install runs the Client under its own virtual account, not `LocalSystem`**
   ([CLT-accounts-service-runs-under](docs/adr/CLT-accounts-service-runs-under.md)).
@@ -1378,12 +1380,12 @@ once its tag exists.
   it and restart the Client.
 
 - **A repack carries nothing from outside its tree**
-  ([OPS-operator-program-fleetctl](docs/adr/OPS-operator-program-fleetctl.md)). `opamp-fleetctl package
-  fetch` resolves links inside the upstream tree alone: a link with an absolute target, or one that
-  climbs above the tree's root, fails the repack, naming it, instead of packing files of the
-  operator's host into the signed artifact. A pipe, socket or device in the tree fails it too, the
-  walk stops as soon as the tree passes the 10 000-member cap, a link back to the tree's root is no
-  longer packed as a second copy, and the names it reports are quoted.
+  ([OPS-operator-program-fleetctl](docs/adr/OPS-operator-program-fleetctl.md)).
+  `opamp-fleetctl package fetch` resolves links inside the upstream tree alone: a link with an
+  absolute target, or one that climbs above the tree's root, fails the repack, naming it, instead of
+  packing files of the operator's host into the signed artifact. A pipe, socket or device in the
+  tree fails it too, the walk stops as soon as the tree passes the 10 000-member cap, a link back to
+  the tree's root is no longer packed as a second copy, and the names it reports are quoted.
 
 - **Secrets are wiped from memory when they are dropped**
   ([SEC-secrets-wiped-on-drop](docs/adr/SEC-secrets-wiped-on-drop.md)): private keys,
@@ -1497,9 +1499,9 @@ once its tag exists.
   the database and `data_dir` together.
 
 - **The Server's configuration may come from its environment**
-  ([SRV-configuration-toml-and-environment](docs/adr/SRV-configuration-toml-and-environment.md)). Every
-  key of `server.toml` can be set by a variable `FLEET_SERVER__` followed by the key's path, its
-  segments joined by `__` and upper-cased — `FLEET_SERVER__REST__TLS__CERT_FILE` sets
+  ([SRV-configuration-toml-and-environment](docs/adr/SRV-configuration-toml-and-environment.md)).
+  Every key of `server.toml` can be set by a variable `FLEET_SERVER__` followed by the key's path,
+  its segments joined by `__` and upper-cased — `FLEET_SERVER__REST__TLS__CERT_FILE` sets
   `[rest.tls] cert_file` — and the variable wins over the file. The value is TOML, and what is not
   TOML is a string. The Server logs the name of every key its environment set, never a value.
   Without `--config`, `FLEET_SERVER_CONFIG` names the file, and without either the Server reads
@@ -1809,11 +1811,11 @@ once its tag exists.
   so nothing is loaded from elsewhere and the page's policy is unchanged. Nothing to configure.
 
 - **The UI can present a certificate of its own**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)). An optional
-  `[rest.tls]` with `cert_file` and `key_file` gives the Operator plane — the UI, the REST API and
-  its docs — a certificate of its own, for example from your organization's PKI, so browsers trust
-  it without importing the fleet's server CA. The Agent plane keeps `[tls]`'s, and nothing changes
-  for the Clients. Without the section the Operator plane serves `[tls]`'s as before, so no
+  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)). An
+  optional `[rest.tls]` with `cert_file` and `key_file` gives the Operator plane — the UI, the REST
+  API and its docs — a certificate of its own, for example from your organization's PKI, so browsers
+  trust it without importing the fleet's server CA. The Agent plane keeps `[tls]`'s, and nothing
+  changes for the Clients. Without the section the Operator plane serves `[tls]`'s as before, so no
   `server.toml` has to change. `server pki status` and the expiry warnings include it.
 
 - **The Server checks package signatures, as feedback**
@@ -1824,8 +1826,8 @@ once its tag exists.
   key, `missing` with none). An invalid signature is shown as a warning and kept; each Client's own
   check still decides what is installed. A malformed key fails startup.
 
-- **Hosts, and a Hosts tab** ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)). A
-  Host is what a
+- **Hosts, and a Hosts tab**
+  ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)). A Host is what a
   client certificate of this Server names: the Server writes it when you approve its enrolment, or
   at the first report of a provisioned certificate that names a host id, with the certificate's
   subject values. The new Hosts tab lists each Host — its name (the `host.name` its Client's own
@@ -1917,9 +1919,9 @@ once its tag exists.
   `organizational_unit` in every request.
 
 - **Labels are part of the Agent's record, and forgetting an Agent removes them**
-  ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)). Labels follow an Agent
-  the Server re-keys, and are gone with an Agent you forget; one that comes back starts with only
-  what its Client Agent's labels give it. A label key
+  ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)). Labels follow an
+  Agent the Server re-keys, and are gone with an Agent you forget; one that comes back starts with
+  only what its Client Agent's labels give it. A label key
   starting `fleet.` is refused `400`, and a reported attribute starting `fleet.` is left out of what
   Selectors match and listed in `ignored_attributes` on the Agent. A label that cannot be written
   is answered `500`. **What to do:** nothing beyond `server migrate` (see *All of the Server's
@@ -1954,11 +1956,11 @@ once its tag exists.
   `scripts/seed_test_configs.sh` puts each into a Deployment of that Collector's name.
 
 - **Nothing an Agent's assignment pins can be deleted**
-  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). Deleting a Configuration, a
-  Package or a Deployment that any Agent's assignment pins answers `409`, saying how many Agents
-  pin it, where deleting a Configuration or a Package used to take it out of every assignment.
-  A deleted Configuration or Package leaves every Deployment that held it. **What to do:** roll the
-  Agents out through a Deployment without it — or forget them — and delete it then.
+  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). Deleting
+  a Configuration, a Package or a Deployment that any Agent's assignment pins answers `409`, saying
+  how many Agents pin it, where deleting a Configuration or a Package used to take it out of every
+  assignment. A deleted Configuration or Package leaves every Deployment that held it. **What to
+  do:** roll the Agents out through a Deployment without it — or forget them — and delete it then.
 
 - **Every Configuration names its Agent type**
   ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)).
@@ -2026,24 +2028,24 @@ once its tag exists.
   (see *A Deployment carries Configurations* above); a script that calls the route or sends a
   `selector` has to change the same way.
 
-- **Referenced package entries** ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). An
-  entry is an uploaded artifact and nothing
-  else: `PUT …/entries/{os}/{arch}/source`, its `url`, `sha256` and `headers`, and the Server's
-  probe of the URL are gone (the route answers `404`), and the Packages tab takes files only. The
-  Server sends no request for a package anywhere. **What to do:** before upgrading, upload every
-  referenced artifact as a file to its
+- **Referenced package entries**
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). An entry is an
+  uploaded artifact and nothing else: `PUT …/entries/{os}/{arch}/source`, its `url`, `sha256` and
+  `headers`, and the Server's probe of the URL are gone (the route answers `404`), and the Packages
+  tab takes files only. The Server sends no request for a package anywhere. **What to do:** before
+  upgrading, upload every referenced artifact as a file to its
   entry (`opamp-fleetctl package fetch` does it for the agents it knows) and sign it; `server
   migrate` drops a referenced entry it still finds, naming it — upload that artifact afterwards.
 
 - **`[packages] allowed_sources` in `supervisor.toml`**
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). There is no other
-  download source than the Client's own Server, and a file that still names the key fails the
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). There is no
+  other download source than the Client's own Server, and a file that still names the key fails the
   Client's start, naming it. **What to do:** delete `allowed_sources` from every `supervisor.toml`
   before the Client is upgraded.
 
 - **`advertised_url` in `server.toml`**
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). Every package is offered as a
-  path the Client
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). Every package
+  is offered as a path the Client
   resolves against its own Server, and a Client downloads from no other host, so a URL naming a
   mirror reached no Client. A file that still names the key fails the Server's start, naming it.
   **What to do:** delete `advertised_url` from `server.toml` before the Server is upgraded.
@@ -2056,8 +2058,8 @@ once its tag exists.
   and says when a file holds another certificate than the one served: restart the Server to serve
   it ([OPS-operator-program-fleetctl §21](docs/adr/OPS-operator-program-fleetctl.md)).
 - **An Agent that asks the Server for a new `instance_uid` keeps its labels**
-  ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)). The record moved to the new
-  identity but its
+  ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)). The record moved to
+  the new identity but its
   labels stayed under the old one, so after the next restart the Agent had none and fell out of
   the Deployment its labels put it in. Labels now live in the Agent's record and follow it.
   **What to do:** `server migrate` lists the labels it drops because no Agent record of their
@@ -2164,29 +2166,30 @@ once its tag exists.
   /64): a second sign-in from the same address waits for the first. Behind a proxy every
   operator shares one address, so first sign-ins are checked one after another. **What to do:**
   nothing.
-- **Refused requests cannot crowd out the audit record** (SEC-append-only-audit-record): refusals are counted per
-  peer before they are queued and hold at most half of the queue, so admissions and operator acts
-  are still recorded under a flood. **What to do:** nothing.
-- **A Gateway reads the revocation list within 128 MiB** (CLT-modes-and-gateway, SEC-admission-by-client-certificate). A larger list
-  is refused as unreadable, and a Gateway that holds no list younger than 300 s admits nobody.
-  The bound holds every list the Server names with up to eight client CA subjects and serials of
-  the length RFC 5280 allows. **What to do:** keep `client_ca_file` to eight certificates or
-  fewer, and revoke only serials of real certificates.
+- **Refused requests cannot crowd out the audit record** (SEC-append-only-audit-record): refusals
+  are counted per peer before they are queued and hold at most half of the queue, so admissions and
+  operator acts are still recorded under a flood. **What to do:** nothing.
+- **A Gateway reads the revocation list within 128 MiB** (CLT-modes-and-gateway,
+  SEC-admission-by-client-certificate). A larger list is refused as unreadable, and a Gateway that
+  holds no list younger than 300 s admits nobody. The bound holds every list the Server names with
+  up to eight client CA subjects and serials of the length RFC 5280 allows. **What to do:** keep
+  `client_ca_file` to eight certificates or fewer, and revoke only serials of real certificates.
 - **A Gateway frees what it kept for an Agent once that Agent is gone**: a departed socket's pool
   places and routes, and the route of an exchange that ends without its reply. A plain-HTTP
   Agent's pool place still lasts until its upstream connection drops. **What to do:** nothing.
-- **A delivered Supervisor block is held to more of CLT-supervisor-mode-and-kinds §35's rule.** The clause
-  refuses, whatever `[supervisors] delivered_env` allows, a variable that steers which code a
+- **A delivered Supervisor block is held to more of CLT-supervisor-mode-and-kinds §35's rule.** The
+  clause refuses, whatever `[supervisors] delivered_env` allows, a variable that steers which code a
   program loads and a value pointing where the Server delivers files no one signed. Beyond the names
   and placeholders the clause lists, the Client now applies that rule to `PATHEXT`, `COMSPEC`,
   `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB` and `RUBYLIB`, and to a new or changed value that
   starts with a path under the Supervisors' root. A value the running block already carries still
   passes. **What to do:** an offered set that brings such a variable or value is refused whole;
   write it into the host's `supervisor.toml` by hand instead.
-- **A `.tar.gz` package is decompressed no further than its bound** (PKG-signed-packages-and-delivery): the members'
-  2 GiB plus 64 MiB for the tar's own headers, GNU long names and PAX records. Memory is not bounded
-  per record below that: the tar parser holds a single long-name or PAX record in memory whole, up
-  to the same bound. **What to do:** nothing; a real release stays far below it.
+- **A `.tar.gz` package is decompressed no further than its bound**
+  (PKG-signed-packages-and-delivery): the members' 2 GiB plus 64 MiB for the tar's own headers, GNU
+  long names and PAX records. Memory is not bounded per record below that: the tar parser holds a
+  single long-name or PAX record in memory whole, up to the same bound. **What to do:** nothing; a
+  real release stays far below it.
 
 ## [0.5.3] - 2026-10-13
 
@@ -2306,10 +2309,10 @@ once its tag exists.
   development set made before is replaced by deleting `.dev-pki/` and running the script again.
 
 - **Admitted Agents are rate-limited per host**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)). Every OpAMP message
-  and every package download takes a token from the bucket of the host the certificate names — for
-  a host marked as a Gateway, from the bucket of the Agent the message names and from the
-  Gateway's aggregate. A message past the limit is answered `Unavailable` with `retry_info` of
+  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)). Every
+  OpAMP message and every package download takes a token from the bucket of the host the certificate
+  names — for a host marked as a Gateway, from the bucket of the Agent the message names and from
+  the Gateway's aggregate. A message past the limit is answered `Unavailable` with `retry_info` of
   30 seconds and is not processed; a download past it is answered `429` with `Retry-After: 30`.
   Each refusal is recorded as `agent_rate.throttled`. `[agent_rate_limit]` sets
   `messages_per_sec` (10), `burst` (300), `gateway_messages_per_sec` (500) and `gateway_burst`
@@ -2341,23 +2344,23 @@ once its tag exists.
   delivered earlier may have written some of them; switching it back on lets the first released
   set replace every block.
 - **A Gateway delivers uploaded packages to the Clients behind it**
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). When it relays an offer of an
-  artifact the Server hosts, the Gateway fetches it once with its own certificate, checks its
-  SHA-256 against the offer, and serves it on its own listener at the path the offer names, only to
-  a host whose Agent it relayed that offer to; everything else is answered `404`. It holds the
-  artifacts in `<state_dir>/gateway-packages`, emptied at startup and bounded by `[gateway]
-  package_cache_bytes` (10 GiB; `0` is refused). An artifact larger than that is not delivered
-  through the Gateway. While the Gateway is still fetching, a request is answered `503` with
-  `Retry-After: 30`. Referenced artifacts are fetched from their host directly as before. With
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). When it relays
+  an offer of an artifact the Server hosts, the Gateway fetches it once with its own certificate,
+  checks its SHA-256 against the offer, and serves it on its own listener at the path the offer
+  names, only to a host whose Agent it relayed that offer to; everything else is answered `404`. It
+  holds the artifacts in `<state_dir>/gateway-packages`, emptied at startup and bounded by
+  `[gateway] package_cache_bytes` (10 GiB; `0` is refused). An artifact larger than that is not
+  delivered through the Gateway. While the Gateway is still fetching, a request is answered `503`
+  with `Retry-After: 30`. Referenced artifacts are fetched from their host directly as before. With
   the Server's `advertised_url` set, uploaded artifacts are not delivered behind a Gateway at all.
   **What to do:** mark the Gateway's host as a Gateway on the Server if it is not yet, leave
   `advertised_url` unset in a fleet with Gateways, and give the Gateway's `state_dir` room for the
   cache.
 - **A download waits out `Retry-After` from the Server's own origin**
-  ([PKG-signed-packages-and-delivery §47](docs/adr/PKG-signed-packages-and-delivery.md)). A `429` or `503` with
-  `Retry-After` in seconds — the Server's rate limit, or a Gateway still fetching — is waited out,
-  each wait at most 60 seconds and all waits of one download at most 30 minutes, before the
-  download is reported failed. **What to do:** nothing.
+  ([PKG-signed-packages-and-delivery §47](docs/adr/PKG-signed-packages-and-delivery.md)). A `429` or
+  `503` with `Retry-After` in seconds — the Server's rate limit, or a Gateway still fetching — is
+  waited out, each wait at most 60 seconds and all waits of one download at most 30 minutes, before
+  the download is reported failed. **What to do:** nothing.
 - **Every `Unavailable` names the Agent it answers**
   ([SEC-tls13-two-planes-bounded-input §27](docs/adr/SEC-tls13-two-planes-bounded-input.md)): the
   Agent-record ceiling, a certificate request held back for its audit record, the full enrolment
@@ -2510,16 +2513,16 @@ once its tag exists.
   a Client renews at two thirds of the life. **What to do:** nothing, unless a host is offline
   longer than about 20 days; then set `[client_ca] validity_days` higher.
 - **A Client moves to an offered endpoint only when its own `[tls] ca_file` vouches for it**
-  ([SEC-connection-settings-never-plaintext §5](docs/adr/SEC-connection-settings-never-plaintext.md)). **What
-  to
+  ([SEC-connection-settings-never-plaintext §5](docs/adr/SEC-connection-settings-never-plaintext.md)).
+  **What to
   do:** set `ca_file` on every Client before offering a new endpoint.
 
 - **Every connection off the loopback is TLS 1.3, and plaintext elsewhere is refused at startup**
   ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)).
   `ws://` and `http://` are accepted only to `127.0.0.1` or `::1` — not to `localhost`, not to a
   private address. That covers the Client's `endpoint`, a `[connection_offer] endpoint`
-  ([SEC-connection-settings-never-plaintext](docs/adr/SEC-connection-settings-never-plaintext.md)), a
-  referenced package `url`
+  ([SEC-connection-settings-never-plaintext](docs/adr/SEC-connection-settings-never-plaintext.md)),
+  a referenced package `url`
   ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md))
   and an own-telemetry destination
   ([CLT-what-an-agent-reports](docs/adr/CLT-what-an-agent-reports.md)). A
@@ -2719,8 +2722,8 @@ once its tag exists.
 
 - **A package is now `(Agent type, version)`, and a new object — the **Deployment** — carries the
   aim, the signature and the rollout act**
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). The free-form package name is
-  gone; the Agent type is the identity and the name a package carries on the wire.
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). The free-form
+  package name is gone; the Agent type is the identity and the name a package carries on the wire.
 
   **What you must do before starting the upgraded Server:**
 
@@ -2870,9 +2873,9 @@ once its tag exists.
   the running version, the configuration file, the state directory, the endpoint and the number of
   Supervisors — the version appeared in no log line until now, so a file a self-update left behind
   ([CLT-self-update-signed-package](docs/adr/CLT-self-update-signed-package.md),
-  [CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)) could not be attributed to
-  the version that wrote it — and then the trust and the client certificate actually in force,
-  which is a Server-issued one no `supervisor.toml` mentions when there is one
+  [CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)) could not be
+  attributed to the version that wrote it — and then the trust and the client certificate actually
+  in force, which is a Server-issued one no `supervisor.toml` mentions when there is one
   ([SEC-admission-by-client-certificate](docs/adr/SEC-admission-by-client-certificate.md)).
   A
   configuration file that is not there is now said out loud as well, because a mistyped `--config`
@@ -2881,8 +2884,8 @@ once its tag exists.
 
 - **More is visible at `debug` when an install or a Managed Process misbehaves.** A tree member left
   unpacked because it sits outside the program's own directory
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)) is now named, not only counted;
-  the Collector
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)) is now named,
+  not only counted; the Collector
   Supervisor states which config-map entries it hands the Collector on every (re)start; and the
   `command` Supervisor states the fully expanded invocation of its Foreign Agent
   ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)) — its
@@ -2896,13 +2899,13 @@ once its tag exists.
 - **`opamp-package-fetch` can fetch the Client itself** — `--agent supervisor` reads this project's
   own releases, verifies each `.tar.gz` against the `SHA256SUMS` the release publishes, and uploads
   the five platforms into one Set named and typed `supervisor`
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md) is what made this
-  possible: the Client's release is now an ordinary fleet package). It replaces the download,
-  checksum and `curl` loop from the release notes, and it is the same tool and the same questions as
-  for every other agent — with one difference at the end, since nothing supervises a Client: it
-  prints the `[self_update] package = "supervisor"` consent rather than a `[[supervisor]]` block,
-  and uploads no default configuration, because a Client's own configuration is its host's.
-  **What to do:** nothing. The manual procedure still works.
+  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md) is
+  what made this possible: the Client's release is now an ordinary fleet package). It replaces the
+  download, checksum and `curl` loop from the release notes, and it is the same tool and the same
+  questions as for every other agent — with one difference at the end, since nothing supervises a
+  Client: it prints the `[self_update] package = "supervisor"` consent rather than a
+  `[[supervisor]]` block, and uploads no default configuration, because a Client's own configuration
+  is its host's. **What to do:** nothing. The manual procedure still works.
 
 ### Changed
 
@@ -2941,8 +2944,8 @@ once its tag exists.
 
 - **The version an Agent reports *running* now decides which packages reach it, and the version its
   package status claims is no longer read beside it**
-  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). A Set had to be greater than the lower of
-  the
+  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). A Set
+  had to be greater than the lower of the
   two versions an Agent reports *and* never lower than the one its package status claimed. That
   second guard stranded hosts whose record was simply wrong: a Client whose `installed-package.json`
   named `supervisor 0.4.2` after a self-update that staged and did not take, while its program
@@ -2992,19 +2995,19 @@ once its tag exists.
   same name. `.tar.gz` is what every other agent's package already ships as — the only container
   that carries the executable bit, unpacked the same way on every platform — and `supervisor` is the
   name of the Set these files become since
-  [CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md). The documented upload
-  procedure was building its Set at `.../packages/opamp-fleet-client/opamp-fleet-client/...`, whose
-  second field is the Agent type: since CLT-installed-service-and-state no Client reports that type, so the Set fitted
-  nobody and the release was publishing a package the fleet could not install.
-  **What to do:** three things, and the second is the one that bites.
+  [CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md). The documented
+  upload procedure was building its Set at `.../packages/opamp-fleet-client/opamp-fleet-client/...`,
+  whose second field is the Agent type: since CLT-installed-service-and-state no Client reports that
+  type, so the Set fitted nobody and the release was publishing a package the fleet could not
+  install. **What to do:** three things, and the second is the one that bites.
   1. Scripts that fetch release assets by name need the new name and extension. There is no
      transition window — the old name published a package that no longer installs.
   2. **A Client already in the field will refuse the renamed package** until its `client.toml`
-     agrees. The self-update gate is the package name, so a host configured before CLT-installed-service-and-state reports
-     *"this Agent installs only the package "opamp-fleet-client"; the Server offered "supervisor""*
-     and stays on its version — loud, harmless, and stuck. Fix it on the host before rolling out:
-     set `package = "supervisor"` under `[self_update]`, or delete the section and take the default,
-     which is now that same string.
+     agrees. The self-update gate is the package name, so a host configured before
+     CLT-installed-service-and-state reports *"this Agent installs only the package
+     "opamp-fleet-client"; the Server offered "supervisor""* and stays on its version — loud,
+     harmless, and stuck. Fix it on the host before rolling out: set `package = "supervisor"` under
+     `[self_update]`, or delete the section and take the default, which is now that same string.
   3. Nothing else moved. The binary, the service and its display name, the install layout, the dpkg
      and rpm package identity and the MSI's ProductName are all still `opamp-fleet-client`, so an
      `apt`, `dnf` or MSI upgrade across this release is an ordinary upgrade and not a second package
@@ -3012,15 +3015,15 @@ once its tag exists.
 - **A package Set now reaches an Agent only as an upgrade**
   ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md), amending
   [PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md) and
-  [SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). What an Agent reports installed for a
-  package is now part of matching, beside its type, its platform and the Selector: a Set reaches it
-  only if the Set's version is **greater**, compared as SemVer. Equal does not count, and a
-  reported version that cannot be ordered is refused rather than guessed at. Agents that report no
-  package status at all are unaffected — they have nothing installed to be held against.
-  **What to do:** stop using an older Set's rollout as the fleet-wide undo — it now answers
-  `{"assigned_agents": 0}`, and the per-Agent act answers `409`. A bad version is taken back on the
-  host (the health gate and `retain_previous_secs`, unchanged), or by publishing the old content as
-  a new, greater version. Scripts reading `GET /api/v1/packages` get one new field beside
+  [SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). What an
+  Agent reports installed for a package is now part of matching, beside its type, its platform and
+  the Selector: a Set reaches it only if the Set's version is **greater**, compared as SemVer. Equal
+  does not count, and a reported version that cannot be ordered is refused rather than guessed at.
+  Agents that report no package status at all are unaffected — they have nothing installed to be
+  held against. **What to do:** stop using an older Set's rollout as the fleet-wide undo — it now
+  answers `{"assigned_agents": 0}`, and the per-Agent act answers `409`. A bad version is taken back
+  on the host (the health gate and `retain_previous_secs`, unchanged), or by publishing the old
+  content as a new, greater version. Scripts reading `GET /api/v1/packages` get one new field beside
   `targeted_agents`: `matching_agents`, whom the Set aims at regardless of version.
   `targeted_agents` keeps its name and now counts only the Agents an act would actually upgrade —
   a `0` there with a non-zero `matching_agents` means the fleet is already up to date, not that
@@ -3031,8 +3034,8 @@ once its tag exists.
   (`supervisor-prod` for a named instance) on systemd, launchd and the SCM, the version directories
   are `supervisor-<version>-<hash>`, the `PATH` symlink is `/usr/bin/supervisor`, the log file is
   `supervisor.<date>.log`, and `client.toml` is **`supervisor.toml`**
-  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md) on the two names). It completes
-  what CLT-installed-service-and-state began: one word from the
+  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md) on the two names).
+  It completes what CLT-installed-service-and-state began: one word from the
   Agent type in the fleet view down to the unit you restart. The top-level `name` default follows
   it; a host that set one of its own keeps it.
 
@@ -3040,7 +3043,8 @@ once its tag exists.
   own program from an artifact *by name*, so a host on any earlier release asks for
   `opamp-fleet-client`, does not find it, and stays exactly where it is — loud, and harmless. There
   is no compatibility
-  name: carrying both would re-create the two-names-for-one-file problem CLT-installed-service-and-state removed.
+  name: carrying both would re-create the two-names-for-one-file problem
+  CLT-installed-service-and-state removed.
 
   **What to do on every host**, in this order:
 
@@ -3067,8 +3071,8 @@ once its tag exists.
 
 - **The Client's own Agent now reports the type `supervisor`, and takes its own updates under that
   name** — it used to report and consent to `opamp-fleet-client`
-  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md), changing one value of
-  [CLT-what-an-agent-reports](docs/adr/CLT-what-an-agent-reports.md)). Two strings
+  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md), changing one
+  value of [CLT-what-an-agent-reports](docs/adr/CLT-what-an-agent-reports.md)). Two strings
   change, and they are the same string: the `service.name` every Client reports, and the default
   `[self_update] package` it consents to. The program, its service and its configuration file take
   the same name in this release — see *The program, the service and the configuration file are now
@@ -3127,12 +3131,12 @@ once its tag exists.
   nothing; files already on disk are untouched, and the fix only affects newly written ones. If you
   hit this, move the uncommented key above the first `[section]`.
 - **Both of the Server's listeners now hang up on a connection that never finishes its request**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)). A peer gets 30 seconds for
-  its request line and headers and 10 seconds for the TLS handshake; until now it got forever,
-  because hyper's own 30-second default is silently discarded while no timer is installed and
-  neither axum nor axum-server installs one. The bound is on connection *setup* only: an established
-  WebSocket session, a package download, and a package upload are all unaffected, whatever they
-  take.
+  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)). A peer
+  gets 30 seconds for its request line and headers and 10 seconds for the TLS handshake; until now
+  it got forever, because hyper's own 30-second default is silently discarded while no timer is
+  installed and neither axum nor axum-server installs one. The bound is on connection *setup* only:
+  an established WebSocket session, a package download, and a package upload are all unaffected,
+  whatever they take.
   Shutdown also drains both planes within ten seconds instead of dropping them (TLS) or waiting on
   every open Agent connection (plain). **What to do:** nothing — no configuration key changed. Only
   a client that needs more than 30 seconds to send its *headers* would notice, and none exists here.
@@ -3143,11 +3147,11 @@ once its tag exists.
   rollback. The Collector uses its own `--version`; the `command` kind uses
   `version_args`, the arguments an operator has already declared safe to invoke the program with,
   and without that key it keeps no preflight at all. The health gate and rollback of
-  [PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md) are unchanged behind
-  it. **What to do:** nothing, unless a program you supervise cannot answer the arguments you gave
-  it — a Collector that does not respond to `--version` within five seconds, or a `command` whose
-  `version_args` exit non-zero, now has its *packages* refused as well as reporting no version.
-  Nothing that already runs is touched either way.
+  [PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md) are unchanged
+  behind it. **What to do:** nothing, unless a program you supervise cannot answer the arguments you
+  gave it — a Collector that does not respond to `--version` within five seconds, or a `command`
+  whose `version_args` exit non-zero, now has its *packages* refused as well as reporting no
+  version. Nothing that already runs is touched either way.
 - **`opamp-package-fetch` names the systems each agent is published for**, in the agent menu
   itself, so a choice is no longer made blind — the Collectors by operating system (their
   architectures come from the release). **What to do:** nothing.
@@ -3176,8 +3180,8 @@ once its tag exists.
   The bodies are the ones in `config/examples/`, compiled into the tool.
   **What to do:** nothing. A Configuration the Server already holds is asked for first and **left
   untouched**, edits included, so a second upload changes nothing; and saving still distributes
-  nothing ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)) — read the default over and
-  roll it out yourself, since it carries example values.
+  nothing ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)) —
+  read the default over and roll it out yourself, since it carries example values.
 
 - **The install path lost two levels, and `--instance` is gone.** The Client installed under
   `<base>/opamp-fleet/client/<instance>` — a product level, a component level asserting `client`
@@ -3185,8 +3189,8 @@ once its tag exists.
   every host anyone ever installed. It now installs under `<base>/<product>` alone:
   `/opt/opamp-fleet` and `/var/lib/opamp-fleet` on Linux, `%ProgramData%\opamp-fleet` on Windows,
   `/Library/Application Support/opamp-fleet` on macOS
-  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)). The product's name is
-  fixed at build time (`OPAMP_FLEET_PRODUCT_NAME`, default `opamp-fleet`), and a second
+  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)). The product's
+  name is fixed at build time (`OPAMP_FLEET_PRODUCT_NAME`, default `opamp-fleet`), and a second
   installation on one host is a **second build** rather than a runtime flag — the flag was
   reachable from no delivery path we ship, was read by nothing at runtime, and could not be
   recovered by anything once typed.
@@ -3231,17 +3235,17 @@ once its tag exists.
 
 - **A package behind an authenticated mirror could not be downloaded.** The Server has always passed
   a referenced Set entry's headers to the Agent verbatim — the credential an operator configures for
-  a private source ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)) — and the Client
-  dropped them, so the fetch came back `401` and the rollout failed with an opaque transport error.
-  The headers now ride the `GET`, as the protocol asks. Because such a header is a credential given
-  for *one* host, a download that carries any now follows its redirect chain itself and re-attaches
-  them only while scheme, host and port are unchanged: HTTP clients strip only `Authorization`,
-  `Cookie` and `Proxy-Authorization` across origins, so a custom token would otherwise have been
-  handed to wherever a mirror redirected. Values are never logged, and a header that is not a valid
-  HTTP header now fails the download naming its key.
-  **What to do:** nothing, unless a referenced entry's download was failing — upgrade the Client and
-  retry the rollout. Ordinary uploaded packages are unaffected; a CDN mirror that redirects to
-  signed
+  a private source
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)) — and the
+  Client dropped them, so the fetch came back `401` and the rollout failed with an opaque transport
+  error. The headers now ride the `GET`, as the protocol asks. Because such a header is a credential
+  given for *one* host, a download that carries any now follows its redirect chain itself and
+  re-attaches them only while scheme, host and port are unchanged: HTTP clients strip only
+  `Authorization`, `Cookie` and `Proxy-Authorization` across origins, so a custom token would
+  otherwise have been handed to wherever a mirror redirected. Values are never logged, and a header
+  that is not a valid HTTP header now fails the download naming its key. **What to do:** nothing,
+  unless a referenced entry's download was failing — upgrade the Client and retry the rollout.
+  Ordinary uploaded packages are unaffected; a CDN mirror that redirects to signed
   storage keeps working, since a download with no headers follows redirects exactly as before.
 
 - **Own telemetry crashed its exporter thread instead of exporting.** The first export panicked with
@@ -3280,8 +3284,8 @@ once its tag exists.
   and acknowledged, without a verification connection and without a reconnect — the protocol names
   three classes of destination with deliberately different sequences, and scopes its
   verify-by-connecting requirement to the OpAMP settings alone
-  ([SEC-connection-settings-never-plaintext](docs/adr/SEC-connection-settings-never-plaintext.md)). A telemetry
-  endpoint change no longer disconnects the fleet either.
+  ([SEC-connection-settings-never-plaintext](docs/adr/SEC-connection-settings-never-plaintext.md)).
+  A telemetry endpoint change no longer disconnects the fleet either.
   **What to do:** `[telemetry_offer]` alone is now enough; a `[connection_offer]` added only to work
   around this can be removed. A Server that can offer anything at all — settings, telemetry, or a
   `[client_ca]` — now declares `OffersConnectionSettings`, where before it declared the bit only for
@@ -3292,14 +3296,14 @@ once its tag exists.
   status went to Servers without `AcceptsPackagesStatus`, connection-settings status to Servers
   without `OffersConnectionSettings`. Both are now gated by one stated rule — optimistic until the
   Server has declared anything, binding once it has
-  ([SEC-connection-settings-never-plaintext](docs/adr/SEC-connection-settings-never-plaintext.md)). A Server that
-  has actually *sent* an offer still gets its acknowledgement whatever its bitmask says, because
-  withholding it would leave that Server re-offering for ever. `remote_config_status` is
-  deliberately never gated; the reasons are recorded at the code and in the conformance matrix so
+  ([SEC-connection-settings-never-plaintext](docs/adr/SEC-connection-settings-never-plaintext.md)).
+  A Server that has actually *sent* an offer still gets its acknowledgement whatever its bitmask
+  says, because withholding it would leave that Server re-offering for ever. `remote_config_status`
+  is deliberately never gated; the reasons are recorded at the code and in the conformance matrix so
   the non-gate is not mistaken for an omission.
   **What to do:** nothing against this project's Server, which declares what it exercises. This
-  matters for third-party Servers (API-protocol-pinned-interop-checked): one implementing only the two mandatory bits now sees
-  a Client that respects that.
+  matters for third-party Servers (API-protocol-pinned-interop-checked): one implementing only the
+  two mandatory bits now sees a Client that respects that.
 
 - **A refused own-telemetry destination was acknowledged as applied.** A destination the Client
   would
@@ -3342,12 +3346,12 @@ once its tag exists.
   reinstalled on top of the state directory — was held back for good: the fleet view showed
   `pkg: supervisor 0.4.1` on an agent reporting 0.4.0, and neither the rollout act nor the waiting
   list would offer it anything. A Set is now held against **both** versions an Agent reports
-  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)): it must be greater than the
-  lower of the two, and never lower than the version the package status claims — so what a program
-  says it is running can admit a package, and can never propose moving one backwards. The Client
-  side matches: an offer for its own package is settled by the version this process runs rather than
-  by a hash in its record, and a self-update is only reported as installed by the version that
-  actually came up.
+  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)): it must
+  be greater than the lower of the two, and never lower than the version the package status claims —
+  so what a program says it is running can admit a package, and can never propose moving one
+  backwards. The Client side matches: an offer for its own package is settled by the version this
+  process runs rather than by a hash in its record, and a self-update is only reported as installed
+  by the version that actually came up.
   **What to do:** upgrade the Server — this reaches the agents already out there without touching
   them. Expect an agent whose program numbers itself below its package (a Collector calling itself
   `0.98.0` under an `otelcol` Set at `2.0.0`) to appear as waiting for that Set; rolling it out
@@ -3357,11 +3361,11 @@ once its tag exists.
   Clients that were already running its version, and a Client running a newer development build was
   offered the older release — a downgrade of the program that manages the host. Both came from the
   same gap: since
-  [SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md) a Set reaches an Agent only
-  as an upgrade over what that Agent reports *installed*, and a Client that arrived by `.deb`,
-  `.rpm`, MSI or by hand had installed no package, so it reported nothing and there was nothing to
-  hold the Set against. A Client now reports the version it runs under the name `[self_update]`
-  consents to, from its first report, whatever put the binary there.
+  [SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md) a Set
+  reaches an Agent only as an upgrade over what that Agent reports *installed*, and a Client that
+  arrived by `.deb`, `.rpm`, MSI or by hand had installed no package, so it reported nothing and
+  there was nothing to hold the Set against. A Client now reports the version it runs under the name
+  `[self_update]` consents to, from its first report, whatever put the binary there.
   **What to do:** nothing — the fleet view simply gains a package line for every Client, reading
   `Installed` at the version that host runs. One behaviour changes with it: a hand-installed Client
   is no longer taken over by a package published at the version it already is; it comes under
@@ -3372,10 +3376,10 @@ once its tag exists.
   because the code that would report it is the code it does not have. So the Server now measures
   such an Agent by the version it reports *running*, its `service.version`
   ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md),
-  amending [SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md) point 2). A
-  version reported for the package itself still wins over it, and one nothing can order — a GLPI
-  Agent's `1.19`, an appliance's `24.04.1` — says nothing rather than blocking, so no Agent becomes
-  unreachable by numbering itself its own way.
+  amending [SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)
+  point 2). A version reported for the package itself still wins over it, and one nothing can order
+  — a GLPI Agent's `1.19`, an appliance's `24.04.1` — says nothing rather than blocking, so no Agent
+  becomes unreachable by numbering itself its own way.
   **What to do:** upgrade the Server and your existing fleet stops being proposed what it already
   runs. One door closes: a program that reports its version cannot be replaced by the fleet's
   package of that *same* version — publish the artifact under the next version to adopt it. Taking
@@ -3393,29 +3397,29 @@ once its tag exists.
   `/api/v1/…`, the OpenAPI document, `/api/v1/docs`, and the UI at `/`. A request without a matching
   credential is answered `401` with a `WWW-Authenticate: Basic` challenge, which is what makes a
   browser ask for the password, so the bundled UI needs no login page and no session. Absent, the
-  plane stays open exactly as before — the loopback default of SEC-tls13-two-planes-bounded-input is what protects it then.
-  **What to do:** nothing, unless you publish that plane. If you do, add the section — and pair it
-  with `[tls]` or a TLS-terminating proxy, since Basic sends the password on every request; the
-  Server warns at startup if you have not. Existing tooling needs no new flag: the credential rides
-  the URL (`curl -u user:pass …`, `--server http://user:pass@host:4321`). Two limits, stated
-  plainly: everyone listed can do everything (authentication, not authorization), and passwords sit
-  in `server.toml` verbatim, as `[auth]`'s already do. The Agent plane is untouched — Agents and
-  package downloads carry no operator credential and never will.
+  plane stays open exactly as before — the loopback default of SEC-tls13-two-planes-bounded-input is
+  what protects it then. **What to do:** nothing, unless you publish that plane. If you do, add the
+  section — and pair it with `[tls]` or a TLS-terminating proxy, since Basic sends the password on
+  every request; the Server warns at startup if you have not. Existing tooling needs no new flag:
+  the credential rides the URL (`curl -u user:pass …`, `--server http://user:pass@host:4321`). Two
+  limits, stated plainly: everyone listed can do everything (authentication, not authorization), and
+  passwords sit in `server.toml` verbatim, as `[auth]`'s already do. The Agent plane is untouched —
+  Agents and package downloads carry no operator credential and never will.
 
 ### Changed
 
 - **The REST API and the UI moved to their own port, on loopback**
   ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md),
   superseding the single-listener decision of
-  [DEV-six-crates-tokio-axum](docs/adr/DEV-six-crates-tokio-axum.md)). The Server now serves two planes,
-  split by audience. The **Agent plane** keeps `listen` (`0.0.0.0:4320`): the OpAMP endpoint and the
-  package download an offer's `download_url` points at. The **Operator plane** is new — `[rest]
-  listen`, `127.0.0.1:4321` by default — and carries the REST API, the API docs, and the bundled UI.
-  Nothing authenticates that plane yet ([`[auth]`](config/server.toml) guards the OpAMP endpoint and
-  nothing else), so its reachability is its only protection, and it carries the authority to
-  reconfigure and re-package the whole fleet: hence loopback. Authenticating it is now a decision
-  about one listener instead of a per-path exemption on a shared one — which is the point of the
-  move.
+  [DEV-six-crates-tokio-axum](docs/adr/DEV-six-crates-tokio-axum.md)). The Server now serves two
+  planes, split by audience. The **Agent plane** keeps `listen` (`0.0.0.0:4320`): the OpAMP endpoint
+  and the package download an offer's `download_url` points at. The **Operator plane** is new —
+  `[rest] listen`, `127.0.0.1:4321` by default — and carries the REST API, the API docs, and the
+  bundled UI. Nothing authenticates that plane yet ([`[auth]`](config/server.toml) guards the OpAMP
+  endpoint and nothing else), so its reachability is its only protection, and it carries the
+  authority to reconfigure and re-package the whole fleet: hence loopback. Authenticating it is now
+  a decision about one listener instead of a per-path exemption on a shared one — which is the point
+  of the move.
   **What to do:** change the address in every operator tool, script, and bookmark from
   `:4320/api/v1/…` to `:4321/api/v1/…`, and open the UI at `http://<server>:4321/`. To reach it from
   another host, either tunnel (`ssh -L 4321:127.0.0.1:4321 <server-host>`) or put
@@ -3428,25 +3432,25 @@ once its tag exists.
 - **`opamp-package-fetch` says why an upload was refused, instead of "cannot reach".** The Server
   decides some uploads before it reads a byte of the artifact — an identity nobody created, a Set
   already rolled out and therefore immutable
-  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)), a package store at its ceiling
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). With hundreds of megabytes
-  already in flight that answer races the upload, the connection resets, and what the tool could
-  report was a transport error naming the one thing that was *not* the problem: the Server had
-  answered, and said why. It now asks a second time with an empty artifact — refused in its own
-  right, so the probe can store nothing — and reports the Server's status and message. Transport
-  errors that are genuine read better too: the cause beneath `reqwest`'s own layer is printed
-  rather than swallowed, on downloads as well as uploads.
-  **What to do:** nothing. An upload that has been failing with `cannot reach …` will name its
-  reason on the next run.
+  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)), a
+  package store at its ceiling
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). With hundreds
+  of megabytes already in flight that answer races the upload, the connection resets, and what the
+  tool could report was a transport error naming the one thing that was *not* the problem: the
+  Server had answered, and said why. It now asks a second time with an empty artifact — refused in
+  its own right, so the probe can store nothing — and reports the Server's status and message.
+  Transport errors that are genuine read better too: the cause beneath `reqwest`'s own layer is
+  printed rather than swallowed, on downloads as well as uploads. **What to do:** nothing. An upload
+  that has been failing with `cannot reach …` will name its reason on the next run.
 
 ## [0.3.0] - 2026-08-15
 
 ### Changed
 
 - **Publication is gone; a rollout is an explicit act, per Agent or per resource**
-  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). Saving a Configuration or a
-  package Set never distributes anything, and there is no draft/published state any more: what an
-  Agent runs is its **assignment**, written only by a rollout act — `POST
+  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). Saving a
+  Configuration or a package Set never distributes anything, and there is no draft/published state
+  any more: what an Agent runs is its **assignment**, written only by a rollout act — `POST
   /api/v1/configurations/{name}/rollout` or `POST /api/v1/packages/{name}/{type}/{version}/rollout`
   for every currently matching Agent, or `POST /api/v1/agents/{uid}/rollout` for one. An act pins
   the content as of that press; later saves wait, visible per Agent in the fleet view
@@ -3495,11 +3499,11 @@ once its tag exists.
   **What to do:** nothing; it is a new tool beside `opamp-package-sign`, which still builds an
   artifact out of any program you have.
 - **A `command` Supervisor can reload instead of restart**
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)). A `[[supervisor]]` block of
-  `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also accepted,
-  with or without a `SIG` prefix): a configuration change is then applied by sending that signal,
-  and the process keeps running with its in-flight state. If the signal cannot be delivered or
-  the process dies on it, the Supervisor falls back to the restart, so the apply still lands.
+  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)). A `[[supervisor]]`
+  block of `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also
+  accepted, with or without a `SIG` prefix): a configuration change is then applied by sending that
+  signal, and the process keeps running with its in-flight state. If the signal cannot be delivered
+  or the process dies on it, the Supervisor falls back to the restart, so the apply still lands.
   Linux/macOS only — on Windows a set key is refused at startup.
   **What to do:** nothing; the key is opt-in. Set it only for a program that genuinely re-reads
   its configuration on the signal.
@@ -3507,8 +3511,8 @@ once its tag exists.
 ### Changed
 
 - **Removing a Supervisor now deletes its directory**
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)). When an applied Supervisor set
-  removes a Supervisor, the Client stops it as before and then deletes
+  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)). When an applied
+  Supervisor set removes a Supervisor, the Client stops it as before and then deletes
   `<supervisor_dir>/<name>/` whole — the Client-owned program, staged packages, written
   configuration entries, and the `instance-uid`. Re-adding the same name later starts a genuinely
   fresh Agent with a new identity; the Server keeps the old Agent's record as disconnected. A
@@ -3532,11 +3536,11 @@ once its tag exists.
 ### Fixed
 
 - **The Client stops its Managed Processes cleanly when it updates itself.** The self-update
-  restart path exited without running the graceful shutdown CLT-self-update-signed-package specifies, so the Managed
-  Processes were left to the service manager. On systemd the unit's cgroup reaped them; on a manager
-  that does not (launchd, the Windows SCM, a foreground or non-cgroup container run) they were
-  orphaned, and the restarted Client spawned duplicates that fought over their ports. The
-  self-update
+  restart path exited without running the graceful shutdown CLT-self-update-signed-package
+  specifies, so the Managed Processes were left to the service manager. On systemd the unit's cgroup
+  reaped them; on a manager that does not (launchd, the Windows SCM, a foreground or non-cgroup
+  container run) they were orphaned, and the restarted Client spawned duplicates that fought over
+  their ports. The self-update
   exit now stops the Managed Processes and sends the goodbyes first, on both transports, exactly as
   an ordinary shutdown does.
   **What to do:** nothing.
@@ -3544,8 +3548,8 @@ once its tag exists.
 ### Changed
 
 - **A Managed Process's package updates no longer loop, and keep a fallback**
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). Three changes to
-  how a Supervisor applies a package (PKG-signed-packages-and-delivery):
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). Three changes
+  to how a Supervisor applies a package (PKG-signed-packages-and-delivery):
   - A **first** install that will not start is no longer discarded — the verified program is kept in
     place and reported `InstallFailed`. Previously it was removed, which emptied `program/` and set
     the Server re-offering the same artifact in a download-crash-rollback loop.
@@ -3576,27 +3580,27 @@ once its tag exists.
 
 - **A Server-delivered `[[supervisor]]` block may name only a program the Client owns**
   ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)).
-  A Configuration typed `opamp-fleet-client` that pushes a Supervisor set (CLT-supervisor-mode-and-kinds) is now refused
-  (`FAILED`, nothing stopped or written) if any block names its program by an **absolute path** —
-  that would let the Server spawn a machine binary that never passed through package signing. A
-  bare file name — the Client-owned, package-updatable case — is unaffected, as is an absolute-path
-  Supervisor an operator writes in `client.toml` by hand.
+  A Configuration typed `opamp-fleet-client` that pushes a Supervisor set
+  (CLT-supervisor-mode-and-kinds) is now refused (`FAILED`, nothing stopped or written) if any block
+  names its program by an **absolute path** — that would let the Server spawn a machine binary that
+  never passed through package signing. A bare file name — the Client-owned, package-updatable case
+  — is unaffected, as is an absolute-path Supervisor an operator writes in `client.toml` by hand.
   **What to do:** if you deliver a Supervisor set over the wire, name each program with a bare file
   name (delivered by package); machine binaries stay in the host's local `client.toml`.
 
 - **The Server bounds how many Agent records it holds** — a new `max_agents` in `server.toml`
   (default 100 000). A report bearing a *new* `instance_uid` past the ceiling is answered
   `Unavailable` (retry later) instead of admitted, so a peer minting fresh self-asserted UIDs
-  (SEC-admission-by-client-certificate) cannot exhaust memory and disk; Agents already known keep reporting.
-  **What to do:** nothing for a normal fleet. A very large deployment can raise `max_agents`; the
-  real defence against an anonymous flood is `[auth]` (SEC-admission-by-client-certificate), and this is the backstop while it
-  is off.
+  (SEC-admission-by-client-certificate) cannot exhaust memory and disk; Agents already known keep
+  reporting. **What to do:** nothing for a normal fleet. A very large deployment can raise
+  `max_agents`; the real defence against an anonymous flood is `[auth]`
+  (SEC-admission-by-client-certificate), and this is the backstop while it is off.
 
 - **The Server warns at startup when a credential-bearing offer runs without `[auth]`.** A
-  `[connection_offer]` credential (SEC-connection-settings-never-plaintext) or `[telemetry_offer]` headers (CLT-what-an-agent-reports) are handed
-  to any Agent that connects; with the OpAMP endpoint open (no `[auth]`), that means any anonymous
-  peer. The offer still works — this is a loud log line, not a refusal, so zero-config operation is
-  unchanged.
+  `[connection_offer]` credential (SEC-connection-settings-never-plaintext) or `[telemetry_offer]`
+  headers (CLT-what-an-agent-reports) are handed to any Agent that connects; with the OpAMP endpoint
+  open (no `[auth]`), that means any anonymous peer. The offer still works — this is a loud log
+  line, not a refusal, so zero-config operation is unchanged.
   **What to do:** set `[auth]` to gate credential delivery, or accept the exposure knowingly.
 
 - **Hardening, no operator action.** A Server-offered package whose name could escape the staging
@@ -3632,19 +3636,20 @@ once its tag exists.
   endpoint, credentials, and state directory can never arrive over the wire. Previously the
   Client's Agent stored any offered configuration and reported `APPLIED` without doing anything.
   **What to do:** state whom your Configurations are for
-  (`service_name`, [SRV-configurations-compose-one-map](docs/adr/SRV-configurations-compose-one-map.md)). An
-  *untyped* Configuration with a Selector the Client matches now reaches its Agent too, and a
-  body that is not TOML `[[supervisor]]` blocks is reported `FAILED` instead of a hollow
-  `APPLIED` — the fleet view shows the reason. Nothing changes for the Supervisors' own
-  configurations, and a fleet that never publishes a `opamp-fleet-client`-typed Configuration
-  keeps running its locally written blocks.
+  (`service_name`,
+  [SRV-configurations-compose-one-map](docs/adr/SRV-configurations-compose-one-map.md)). An
+  *untyped* Configuration with a Selector the Client matches now reaches its Agent too, and a body
+  that is not TOML `[[supervisor]]` blocks is reported `FAILED` instead of a hollow `APPLIED` — the
+  fleet view shows the reason. Nothing changes for the Supervisors' own configurations, and a fleet
+  that never publishes a `opamp-fleet-client`-typed Configuration keeps running its locally written
+  blocks.
 
 ### Added
 
 - **A Configuration can state the Agent type it is for**
-  ([SRV-configurations-compose-one-map](docs/adr/SRV-configurations-compose-one-map.md)). The optional
-  `service_name` field is compared raw against the `service.name` an Agent reports, before the
-  Selector; unset keeps today's meaning, every type. The bundled UI offers the types the fleet
+  ([SRV-configurations-compose-one-map](docs/adr/SRV-configurations-compose-one-map.md)). The
+  optional `service_name` field is compared raw against the `service.name` an Agent reports, before
+  the Selector; unset keeps today's meaning, every type. The bundled UI offers the types the fleet
   currently reports as suggestions.
   **What to do:** nothing — existing Configurations are untyped and match as before. Prefer the
   field over a `service.name` Selector pair when creating new ones.
@@ -3669,12 +3674,13 @@ once its tag exists.
   instead of under `/var/lib`, where SELinux-enforcing hosts (Fedora, RHEL, SUSE 16) never let
   systemd start it (`status=203/EXEC`); `client.toml` and `state/` stay at
   `/var/lib/opamp-fleet/client/<instance>`, and `--root` still puts everything under the one
-  directory it names ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)).
-  **What to do:** nothing on a packaged (`.deb`/`.rpm`) host — the upgrade re-registers the unit
-  against `/opt`, restarts the service if it was running, moves no data, and cleans the orphaned
-  binaries out of `/var/lib`. A *manual* Linux system install (`.7z`, no `--root`) should re-run
-  `opamp-fleet-client service install` once after the update, then delete the leftover
-  `versions/` and `current` under `/var/lib/opamp-fleet/client/<instance>`.
+  directory it names
+  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)). **What to do:**
+  nothing on a packaged (`.deb`/`.rpm`) host — the upgrade re-registers the unit against `/opt`,
+  restarts the service if it was running, moves no data, and cleans the orphaned binaries out of
+  `/var/lib`. A *manual* Linux system install (`.7z`, no `--root`) should re-run
+  `opamp-fleet-client service install` once after the update, then delete the leftover `versions/`
+  and `current` under `/var/lib/opamp-fleet/client/<instance>`.
 
 ## [0.2.3] - 2026-08-12
 
@@ -3699,18 +3705,18 @@ once its tag exists.
   a Selector, holds one entry per platform (an upload, or a source URL + sha256, optionally
   signed), and **saving never distributes**: every Set is a draft until
   `PUT …/publication` releases it, and a published Set's entries are immutable
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). Among Sets of one name the most
-  specific Selector wins and, at equal specificity, the greater version — so a canary ring is one
-  Selector edit, and a rollback is retracting the newest version (the hidden one-step history of
-  PKG-signed-packages-and-delivery is gone; old `previous` artifacts migrate to unpublished Sets of their version). The
-  routes moved to `/api/v1/packages/{name}/{agent_type}/{version}` with `…/entries/{os}/{arch}`
-  beneath; `…/type` and `…/rollback` are gone. The Packages tab is now a master–detail view: a
-  table of Sets, a detail form for the selected one (Create/OK/Cancel/Delete, publish as its own
-  button), hidden while nothing is selected.
-  **What to do:** rewrite any script against the old package routes (see `config/server.toml` and
-  the release notes for the new upload loop). The store migrates itself at first start — one Set
-  per stored variant version — **except** a package that never got an Agent type: the Server
-  refuses to start and names the file; delete it or re-create it as a Set.
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). Among Sets of
+  one name the most specific Selector wins and, at equal specificity, the greater version — so a
+  canary ring is one Selector edit, and a rollback is retracting the newest version (the hidden
+  one-step history of PKG-signed-packages-and-delivery is gone; old `previous` artifacts migrate to
+  unpublished Sets of their version). The routes moved to
+  `/api/v1/packages/{name}/{agent_type}/{version}` with `…/entries/{os}/{arch}` beneath; `…/type`
+  and `…/rollback` are gone. The Packages tab is now a master–detail view: a table of Sets, a detail
+  form for the selected one (Create/OK/Cancel/Delete, publish as its own button), hidden while
+  nothing is selected. **What to do:** rewrite any script against the old package routes (see
+  `config/server.toml` and the release notes for the new upload loop). The store migrates itself at
+  first start — one Set per stored variant version — **except** a package that never got an Agent
+  type: the Server refuses to start and names the file; delete it or re-create it as a Set.
 
 - **The web UI is three tabs, and an Agent's details unfold on selection.** Agents, Packages, and
   Configurations each manage from their own tab; the active tab lives in the URL hash
@@ -3719,9 +3725,9 @@ once its tag exists.
   Operating System, Network, Configuration, Matched configs, Effective config, Seq, Last seen,
   Status); pressing a row makes that Agent the current one and unfolds its attribute chips,
   capabilities, and per-Agent actions beneath it. A Disconnected Agent now reads soft red instead
-  of gray, and its badge carries a ✕ that forgets the Agent in place (SRV-fleet-record-agents-hosts) — the forget chip
-  in the details stays, since an Agent behind a Gateway reads Connected however dead its host is.
-  No operator action required.
+  of gray, and its badge carries a ✕ that forgets the Agent in place (SRV-fleet-record-agents-hosts)
+  — the forget chip in the details stays, since an Agent behind a Gateway reads Connected however
+  dead its host is. No operator action required.
 
 ## [0.2.2] - 2026-08-11
 
@@ -3754,10 +3760,10 @@ once its tag exists.
 
 - **The MSI's endpoint page comes prefilled with the development default**
   (`http://localhost:4320/v1/opamp`) instead of empty, so a local evaluation install is a
-  click-through (CLT-installed-service-and-state). Interactive installs only: clearing the field still means "configure
-  later", a value passed as `ENDPOINT=` on the `msiexec` command line still wins, and a silent
-  install (`/qn`) without one still writes no configuration — unattended deployments are
-  unaffected.
+  click-through (CLT-installed-service-and-state). Interactive installs only: clearing the field
+  still means "configure later", a value passed as `ENDPOINT=` on the `msiexec` command line still
+  wins, and a silent install (`/qn`) without one still writes no configuration — unattended
+  deployments are unaffected.
 
 ### Fixed
 
@@ -3779,9 +3785,9 @@ once its tag exists.
   (`169.254.169.254`) or other internal services and the answer reflected back. The probe now
   refuses a URL that resolves to a link-local, shared/CGNAT, or other never-routable address, and it
   no longer follows redirects (which could bounce a public URL onto such an address). Loopback and
-  RFC 1918 / unique-local addresses stay reachable on purpose — an operator's mirror (PKG-signed-packages-and-delivery)
-  legitimately lives on an internal network. No operator action required unless a source URL
-  deliberately used a link-local or CGNAT host.
+  RFC 1918 / unique-local addresses stay reachable on purpose — an operator's mirror
+  (PKG-signed-packages-and-delivery) legitimately lives on an internal network. No operator action
+  required unless a source URL deliberately used a link-local or CGNAT host.
 
 - **The body-less state-changing `POST` routes reject cross-site browser requests (CSRF).**
   `POST …/restart` and `POST …/rollback` are CORS "simple requests" a cross-origin page could fire
@@ -3816,30 +3822,31 @@ once its tag exists.
   warning saying so.
 
 - **A Server-offered self-update version can no longer escape the install layout.** The offered
-  version string becomes a directory name under `versions/` (CLT-installed-service-and-state); a crafted value carrying
-  `..` or a path separator (e.g. `1.0.0+../../../…`) could place the staged binary outside the
-  layout
+  version string becomes a directory name under `versions/` (CLT-installed-service-and-state); a
+  crafted value carrying `..` or a path separator (e.g. `1.0.0+../../../…`) could place the staged
+  binary outside the layout
   and repoint `current` at it — an escape the package hash and signature never covered, because they
   sign the bytes, not the destination. The version is now validated before it names a path, and the
   staged directory is asserted to stay directly under `versions/`. No operator action required.
 
 - **The Server-rotated connection credential is no longer left world-readable.** The
   `connection-settings.pb` in the state directory holds the `Authorization` value the Server rotates
-  in (SEC-connection-settings-never-plaintext), which outranks the one in `client.toml`. It was written at the umask default
-  (typically `0644`), so on a multi-user host any local user could read the live fleet credential.
-  It is now written `0600` and its state directory `0700`. No operator action required.
+  in (SEC-connection-settings-never-plaintext), which outranks the one in `client.toml`. It was
+  written at the umask default (typically `0644`), so on a multi-user host any local user could read
+  the live fleet credential. It is now written `0600` and its state directory `0700`. No operator
+  action required.
 
-- **The enrolment private key is written owner-only from the start.** `client-key.pem` (SEC-admission-by-client-certificate)
-  was created at the umask default and narrowed to `0600` only afterwards, leaving a brief window in
-  which another local user could read it. The mode is now set in the open call, closing the window.
-  No operator action required.
+- **The enrolment private key is written owner-only from the start.** `client-key.pem`
+  (SEC-admission-by-client-certificate) was created at the umask default and narrowed to `0600` only
+  afterwards, leaving a brief window in which another local user could read it. The mode is now set
+  in the open call, closing the window. No operator action required.
 
 - **A referenced package's private-source token is stored owner-only on the Server.** A referenced
-  source (PKG-signed-packages-and-delivery) can carry headers — a bearer token for a private artifact host — that were
-  persisted in the package store at the umask default, readable by other local users on the Server
-  host. The store directory is now `0700` and its metadata files `0600`. The token remains, by
-  design, cleartext at rest and delivered to every targeted Agent; the API and store docs now say
-  so.
+  source (PKG-signed-packages-and-delivery) can carry headers — a bearer token for a private
+  artifact host — that were persisted in the package store at the umask default, readable by other
+  local users on the Server host. The store directory is now `0700` and its metadata files `0600`.
+  The token remains, by design, cleartext at rest and delivered to every targeted Agent; the API and
+  store docs now say so.
   **What to do:** prefer a narrowly-scoped, rotatable token for a private source.
 
 - **The Client's OpAMP endpoint no longer follows HTTP redirects; artifact downloads follow a
@@ -3848,16 +3855,18 @@ once its tag exists.
   connection-settings probe now refuse redirects — a redirect there could only bounce an
   authenticated session elsewhere. Artifact downloads still follow redirects (a mirror is often a
   CDN
-  that bounces to signed storage, PKG-signed-packages-and-delivery) but are now bounded to a short chain; integrity still
-  rests on the content hash and signature, never on where the bytes came from. No operator action
-  required unless an OpAMP endpoint was, unusually, served behind an HTTP redirect.
+  that bounces to signed storage, PKG-signed-packages-and-delivery) but are now bounded to a short
+  chain; integrity still rests on the content hash and signature, never on where the bytes came
+  from. No operator action required unless an OpAMP endpoint was, unusually, served behind an HTTP
+  redirect.
 
 - **The Agent's state and configuration directories are kept owner-only.** The persisted state
   directory and the `config/` directory the Managed Process reads from were created at the umask
-  default, and a config-map entry read by path (a `${file:...}` reference, SRV-configurations-compose-one-map) can be a
-  certificate or a key — so on a multi-user host that material was world-readable. The directories
-  are now `0700` and the stored configuration protobuf and each entry file `0600`; the Managed
-  Process runs as the same user and still reads its own config. No operator action required.
+  default, and a config-map entry read by path (a `${file:...}` reference,
+  SRV-configurations-compose-one-map) can be a certificate or a key — so on a multi-user host that
+  material was world-readable. The directories are now `0700` and the stored configuration protobuf
+  and each entry file `0600`; the Managed Process runs as the same user and still reads its own
+  config. No operator action required.
 
 - **The artifact staging directory is kept owner-only.** A downloaded artifact is verified and then
   re-opened by the installer; the staging directory was created at the umask default, so on a
@@ -3866,13 +3875,13 @@ once its tag exists.
   or supervisor directory) is now `0700`. No operator action required.
 
 - **A Client that installs packages without a verification key now says so at startup.** Package
-  signing is opt-in (PKG-signed-packages-and-delivery): with no `[packages] verification_key`, an offered package or
-  self-update is accepted on the Server-supplied content hash alone, with no signature binding the
-  bytes to a key the operator holds. That is unchanged — but a Client that accepts packages (a
-  managed process's, or its own self-update) without a key now logs a warning at startup, so the
-  weaker posture is a knowing choice rather than a silent default. **What to do:** to require an
-  Ed25519 signature, set `[packages] verification_key` (see `opamp-package-sign`); otherwise
-  nothing.
+  signing is opt-in (PKG-signed-packages-and-delivery): with no `[packages] verification_key`, an
+  offered package or self-update is accepted on the Server-supplied content hash alone, with no
+  signature binding the bytes to a key the operator holds. That is unchanged — but a Client that
+  accepts packages (a managed process's, or its own self-update) without a key now logs a warning at
+  startup, so the weaker posture is a knowing choice rather than a silent default. **What to do:**
+  to require an Ed25519 signature, set `[packages] verification_key` (see `opamp-package-sign`);
+  otherwise nothing.
 
 - **A package or self-update download now has a size ceiling.** The artifact was streamed to disk
   with no bound, so a malicious or compromised Server could answer the download with an endless body
@@ -3910,8 +3919,8 @@ once its tag exists.
 ### Added
 
 - **A release now ships native installers: `.deb`, `.rpm` and `.msi`**
-  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)). They sit *beside* the five
-  `.7z`
+  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)). They sit
+  *beside* the five `.7z`
   archives, which are unchanged and are still the artifact a Server offers for a Client self-update
   —
   the Client cannot open a `.deb`. Which to take: the installer to put the Client on a host, the
@@ -3972,8 +3981,8 @@ once its tag exists.
   running to completion first.
 
   Both endpoints now read one implementation of the rule
-  ([DEV-six-crates-tokio-axum](docs/adr/DEV-six-crates-tokio-axum.md)). Nothing to change on any host — an
-  affected Agent works through a Gateway as soon as it runs this version.
+  ([DEV-six-crates-tokio-axum](docs/adr/DEV-six-crates-tokio-axum.md)). Nothing to change on any
+  host — an affected Agent works through a Gateway as soon as it runs this version.
 
 - **`server --version` now names the build it is, not the release it is heading for.** It printed
   the
@@ -3982,8 +3991,9 @@ once its tag exists.
   to, and named no commit; two binaries of one workspace disagreed about their own version.
 
   Both ends now read the same helper, `opamp::version::current()`, which
-  [OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md) always required and the Server had
-  opted out of ([OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md)). A
+  [OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md) always required
+  and the Server had opted out of
+  ([OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md)). A
   development build reports `0.2.0-dev+<commit>` and a released one `0.2.0+<commit>`.
 
   **Anything matching the Server's `--version` output exactly has to be relaxed** — a check for
@@ -4022,7 +4032,8 @@ once its tag exists.
 ### Removed
 
 - **The ↩ Roll back button is gone from the package form.** The store still remembers the version
-  each artifact replaced ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)) and
+  each artifact replaced
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)) and
   `POST /api/v1/packages/{name}/rollback?os=…&arch=…` still puts it back — only the button is
   removed. The package list still shows `0.157.0 ← 0.156.0`, so what "back" would be is still on
   screen; asking for it is now a request rather than a press.
@@ -4060,9 +4071,9 @@ once its tag exists.
 ### Changed
 
 - **A package is published before it is offered — uploading only stages it**
-  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). A newly created
-  package is a **draft**: its artifact is stored, its type and Selector can be set, and it reaches
-  no Agent until it is released.
+  ([SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)). A newly
+  created package is a **draft**: its artifact is stored, its type and Selector can be set, and it
+  reaches no Agent until it is released.
 
   ```console
   $ curl -X PUT -H 'Content-Type: application/json' -d '{"published": true}' \
@@ -4077,7 +4088,8 @@ once its tag exists.
   `{"published": false}` **retracts** it: the offer stops for Agents that have not taken the
   package,
   and **nothing is uninstalled** — an Agent keeps running what it installed, exactly as when a
-  Selector stops matching it (PKG-signed-packages-and-delivery). The protocol has no revert; this is not a recall.
+  Selector stops matching it (PKG-signed-packages-and-delivery). The protocol has no revert; this is
+  not a recall.
 
   **Nothing that is already running stops.** A package stored before this state existed loads as
   published, so an upgrade withdraws no rollout in flight. And **replacing the artifact of a
@@ -4091,9 +4103,9 @@ once its tag exists.
   package that button reads *Retract*, and the package list marks a draft.
 
 - **The package form in the UI is one intent per button, and every one of them states the Agent
-  type.** A package with no type is stored, looks uploaded, and is offered to nobody (PKG-signed-packages-and-delivery) —
-  the form used to make that the easiest state to produce by hand, with the type one
-  optional-looking
+  type.** A package with no type is stored, looks uploaded, and is offered to nobody
+  (PKG-signed-packages-and-delivery) — the form used to make that the easiest state to produce by
+  hand, with the type one optional-looking
   field among several and a separate button to remember afterwards.
 
   Three actions replace *Upload & offer*, *Use source url*, *Set selector* and *Set agent type*:
@@ -4113,16 +4125,18 @@ once its tag exists.
   button standing among the ones that write.
 
   The **Agent type** field now offers the types the fleet actually reports, with how many Agents
-  report each. The comparison is raw and has no canonical set to fall back on (PKG-signed-packages-and-delivery), so a typo
-  is a rollout that silently never starts — picking from the list is the spelling that matches. A
-  type no Agent has reported yet can still be typed in.
+  report each. The comparison is raw and has no canonical set to fall back on
+  (PKG-signed-packages-and-delivery), so a typo is a rollout that silently never starts — picking
+  from the list is the spelling that matches. A type no Agent has reported yet can still be typed
+  in.
 
   The **name** now stands alone on the first line, and is filled in rather than asked for: from the
-  chosen artifact's file name, which states the package it belongs to (CLT-installed-service-and-state), else a
-  source url's last segment, else the Agent type folded into the CLT-installed-service-and-state name grammar. It is
-  derived again when a request is actually sent, so an artifact chosen and uploaded in one motion is
-  named after itself. A name typed by hand outranks all three, and one that names a package that
-  exists is not renamed by a correction to that package's type.
+  chosen artifact's file name, which states the package it belongs to
+  (CLT-installed-service-and-state), else a source url's last segment, else the Agent type folded
+  into the CLT-installed-service-and-state name grammar. It is derived again when a request is
+  actually sent, so an artifact chosen and uploaded in one motion is named after itself. A name
+  typed by hand outranks all three, and one that names a package that exists is not renamed by a
+  correction to that package's type.
 
   Nothing about the API changed: the artifact, the source, the type and the Selector are still four
   requests over four sub-resources, and a package uploaded by script is still untyped until
@@ -4148,8 +4162,8 @@ once its tag exists.
   again, and **the host is updated back to the published version.** That is the point — the Server
   decides what the fleet runs. To keep a host on an older Client, retract the package first
   (`PUT /api/v1/packages/{name}/publication` with `{"published": false}`,
-  [SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md)); retracting uninstalls
-  nothing, so the host stays where it is.
+  [SRV-deployments-and-pinned-rollouts](docs/adr/SRV-deployments-and-pinned-rollouts.md));
+  retracting uninstalls nothing, so the host stays where it is.
 
   This is the Client's own package only. A Managed Process's package record is unchanged: only the
   program itself knows its version there, and it is reported by the version probe.
@@ -4170,9 +4184,9 @@ once its tag exists.
 
   Running the Client in the foreground writes no file; stderr is already in front of you.
 
-  It is not a replacement for `ReportsOwnLogs` (CLT-what-an-agent-reports): that ships to a destination the Server
-  offers, over a connection that must already work, and the failures most worth reading are the ones
-  where it does not.
+  It is not a replacement for `ReportsOwnLogs` (CLT-what-an-agent-reports): that ships to a
+  destination the Server offers, over a connection that must already work, and the failures most
+  worth reading are the ones where it does not.
 
   The new `[logging]` section moves the directory, changes the retention, or switches it off:
 
@@ -4190,11 +4204,11 @@ once its tag exists.
 - **A package says how many Agents it reaches.** `GET /api/v1/packages` gains `targeted_agents`,
   and the package list in the UI shows `⚠ reaches no agent` when it is zero.
 
-  This closes a silent failure the follow-ups of PKG-signed-packages-and-delivery and CLT-what-an-agent-reports both named: a
-  package can target nobody — through an Agent type that is unset or misspelled, artifacts for
-  platforms nobody runs, or a Selector that matches no one — and none of those is an upload error.
-  The package stored fine and reached no one, and nothing said so until somebody noticed the version
-  had not moved.
+  This closes a silent failure the follow-ups of PKG-signed-packages-and-delivery and
+  CLT-what-an-agent-reports both named: a package can target nobody — through an Agent type that is
+  unset or misspelled, artifacts for platforms nobody runs, or a Selector that matches no one — and
+  none of those is an upload error. The package stored fine and reached no one, and nothing said so
+  until somebody noticed the version had not moved.
 
   The count is the Server's own resolution of the offer, not a second calculation beside it, so it
   cannot claim a reach the fleet does not get. It counts the fleet **as reported so far**: a package
@@ -4205,7 +4219,8 @@ once its tag exists.
 
 ### Added
 
-- **An Agent can be forgotten** ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)).
+- **An Agent can be forgotten**
+  ([SRV-fleet-record-agents-hosts](docs/adr/SRV-fleet-record-agents-hosts.md)).
   `DELETE /api/v1/agents/{instance_uid}` drops what the Server knows about one Agent, and the
   bundled UI has a `✕ forget` action on every fleet row. A decommissioned host no longer occupies a
   row forever.
@@ -4295,8 +4310,9 @@ once its tag exists.
   the Agent's identifying attributes, so one host's several Agents stay apart at the receiving end.
 
   **What it does not send:** a Collector's *internal* telemetry. This Client must not touch a
-  Managed Process's configuration (CLT-supervisor-mode-and-kinds), so what it reports is what it observes from the
-  outside. Configure the Collector for its own internals as you would without OpAMP.
+  Managed Process's configuration (CLT-supervisor-mode-and-kinds), so what it reports is what it
+  observes from the outside. Configure the Collector for its own internals as you would without
+  OpAMP.
 
   **A cleartext destination is refused, not warned about.** `http://` beyond the loopback interface
   is rejected and reported back to the Server, because the stream carries identifying attributes and
@@ -4367,15 +4383,16 @@ once its tag exists.
   `opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux and macOS on `x86_64` and `aarch64`, and
   Windows
   on `x86_64`, together with `SHA256SUMS`
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)). Until now there was
-  nothing to install but a build of your own.
+  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)).
+  Until now there was nothing to install but a build of your own.
 
   **The version is `[workspace.package] version` in `Cargo.toml`**, and the pipeline creates the
-  `version/*` tag from it ([OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md)) — so a release is
-  "merge the bump, run the workflow", and no tag is typed by hand. It refuses rather than guesses:
-  a version that already has a tag or a release is spent, and the run says so before it builds
-  anything — including a dry run, which is the run meant to catch a forgotten bump — and a binary
-  that does not report the version its artifacts are named after fails the run.
+  `version/*` tag from it
+  ([OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md)) — so a
+  release is "merge the bump, run the workflow", and no tag is typed by hand. It refuses rather than
+  guesses: a version that already has a tag or a release is spent, and the run says so before it
+  builds anything — including a dry run, which is the run meant to catch a forgotten bump — and a
+  binary that does not report the version its artifacts are named after fails the run.
 
   **Each archive is also a package artifact**: it holds the Client under the name the install layout
   gives it, so the file is uploaded exactly as downloaded and the published SHA-256 is the one an
@@ -4407,8 +4424,8 @@ once its tag exists.
 - **`opamp-package-sign pack`** builds a package artifact from a single-file program and prints its
   SHA-256, and **`opamp-package-sign sha256`** hashes an existing one — the value
   `PUT /api/v1/packages/{name}/source` needs for an artifact the Server will not hold
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). Until now the project could open
-  the
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). Until now the
+  project could open the
   two container formats but gave an operator no supported way to produce one, and an encrypted
   `.7z` in particular had no answer at all.
 
@@ -4429,8 +4446,8 @@ once its tag exists.
   and configures a Foreign Agent entirely from the Server.
 
 - **`program_path` in a `[[supervisor]]` block delivers an agent that is more than one file**
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). An executable plus the shared
-  objects it
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). An executable
+  plus the shared objects it
   loads — Fluent Bit is the case — could not be a package before, because exactly one archive
   member was installed. Naming where the program sits inside the package unpacks the whole archive
   instead:
@@ -4504,8 +4521,8 @@ once its tag exists.
   can target a distribution release, or pin one machine by its host name.
 
   **`host.name` in particular was promised and missing.**
-  [PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md) offers "a Selector matching that
-  host's
+  [PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md) offers "a
+  Selector matching that host's
   `host.name`" as *the* way to hold one host to one artifact; no Agent reported it, so such a
   Selector silently matched nothing. It works now.
 
@@ -4533,10 +4550,10 @@ once its tag exists.
 
 - **What a Client reports as its version now names the release it is heading *for*, not the one it
   descends *from*.** The base comes from `Cargo.toml` and git decides only the rest
-  ([OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md)): a build with no release tag on its commit
-  reports `0.1.0-dev+<hash>` where it used to report `0.0.0-dev+<hash>`. Nothing to do — but the
-  fleet view, `opamp-fleet-client --version`, and the name of the versioned install directory all
-  shift with it,
+  ([OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md)): a build with
+  no release tag on its commit reports `0.1.0-dev+<hash>` where it used to report
+  `0.0.0-dev+<hash>`. Nothing to do — but the fleet view, `opamp-fleet-client --version`, and the
+  name of the versioned install directory all shift with it,
   so a host that has not changed will still look different after an upgrade. A commit carrying a
   `version/*` tag that names a *different* version than `Cargo.toml` no longer builds at all, rather
   than producing a binary that disagrees with its own tag.
@@ -4572,11 +4589,12 @@ once its tag exists.
 
 - **On macOS, a Client installed as a service could never update itself** — every offer was refused
   with "this Client does not run from a versioned install layout", and a torn `current` pointer was
-  never repaired either. The service is registered against `<root>/current/client` (CLT-installed-service-and-state), and
-  asking the operating system what is running answers with that path on macOS and with the version
-  directory behind it on Linux; only the second shape says where in the layout the binary sits. The
-  path is now resolved before the layout is looked for, so both platforms answer the same. Nothing
-  to change on a host: an affected Client picks its updates up as soon as it runs this version.
+  never repaired either. The service is registered against `<root>/current/client`
+  (CLT-installed-service-and-state), and asking the operating system what is running answers with
+  that path on macOS and with the version directory behind it on Linux; only the second shape says
+  where in the layout the binary sits. The path is now resolved before the layout is looked for, so
+  both platforms answer the same. Nothing to change on a host: an affected Client picks its updates
+  up as soon as it runs this version.
 
 - **A Client that had just updated itself reported the update as failed, and then downloaded the
   artifact again — over and over.** After the restart the Server keeps offering the package until
@@ -4592,15 +4610,15 @@ once its tag exists.
 - **The fleet view now shows why an Agent refused a package offer**, in the new `package_error`
   field of `GET /api/v1/agents`. An offer refused outright has no package status to carry the
   reason — which is exactly what happens when the Client's own Agent is offered a package
-  `[self_update]` did not name (CLT-self-update-signed-package) — so the reason was reported by the Client, stored by the
-  Server, and shown nowhere. It is now also logged.
+  `[self_update]` did not name (CLT-self-update-signed-package) — so the reason was reported by the
+  Client, stored by the Server, and shown nowhere. It is now also logged.
 
 ### Changed — breaking
 
 - **A package now states the Agent type it is built for, and reaches no Agent of another**
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). PKG-signed-packages-and-delivery made the
-  Server refuse to send an artifact to a machine it cannot run on; this does the same for an Agent
-  it
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)).
+  PKG-signed-packages-and-delivery made the Server refuse to send an artifact to a machine it cannot
+  run on; this does the same for an Agent it
   was not built for. A Promtail artifact can no longer be swapped over a Collector because someone
   forgot the Selector.
 
@@ -4620,8 +4638,9 @@ once its tag exists.
   before typing it. It belongs to the package name, not to an artifact, so it is set once for all
   platforms.
 
-  An Agent that reports no `service.name` at all is now offered no package, the same rule PKG-signed-packages-and-delivery
-  applies to a missing platform. Every Client this project ships reports one.
+  An Agent that reports no `service.name` at all is now offered no package, the same rule
+  PKG-signed-packages-and-delivery applies to a missing platform. Every Client this project ships
+  reports one.
 
   **New route** `PUT /api/v1/packages/{name}/type`; `PackageView` gains `service_name`.
 
@@ -4664,8 +4683,8 @@ once its tag exists.
   `service_instance_name` and fall back to `service_name`, which is what the bundled UI now does.
 
 - **A package now holds one artifact per platform, and `os`/`arch` are required**
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). An Agent is offered only the
-  artifact
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)). An Agent is
+  offered only the artifact
   built for the operating system and architecture it reported, and never another — so uploading a
   Windows build no longer installs it over every Linux host in the fleet.
 
@@ -4707,11 +4726,13 @@ once its tag exists.
 - **Release artifacts are named `<name>_<version>_<os>_<arch>.7z`** —
   `opamp-fleet-client_1.2.3_linux_amd64.7z`, `opamp-fleet-client_1.2.3_darwin_arm64.7z`. Both halves
   of that changed: the platform tokens, which used to say `macos` and `x86_64`
-  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)), and the separator between the
-  four
+  ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)), and the
+  separator between the four
   fields, which used to be `-`
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)) — both
-  as [OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md) names them now.
+  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)) —
+  both as
+  [OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md) names
+  them now.
 
   **Anything scripted against the old names breaks**, including a glob like `*-linux-amd64.7z`;
   releases already published keep the names they have, and nothing is renamed.
@@ -4736,8 +4757,8 @@ once its tag exists.
   `service uninstall` with the *old* binary, then `service install` with the new one. The install
   layout and the state directory are untouched by either.
 
-  On Windows the services list now shows **OpAMP Fleet Client** — the readable name CLT-installed-service-and-state
-  promised and never actually set.
+  On Windows the services list now shows **OpAMP Fleet Client** — the readable name
+  CLT-installed-service-and-state promised and never actually set.
 
 - **A version is compared and shown without its build metadata**
   ([OPS-cargo-decides-product-version](docs/adr/OPS-cargo-decides-product-version.md)). Two
@@ -4762,8 +4783,8 @@ once its tag exists.
   `opamp-fleet-client-<version>-<os>-<arch>.7z`, the file it installs is `opamp-fleet-client`
   (`.exe` on Windows), and the version directory beside it is
   `versions/opamp-fleet-client-<version>-<commit>/`
-  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)). One name from the download
-  to the process in `ps` to the Agent in the fleet view.
+  ([CLT-installed-service-and-state](docs/adr/CLT-installed-service-and-state.md)). One name from
+  the download to the process in `ps` to the Agent in the fleet view.
 
   **Nothing in a fleet has to be migrated, because nothing has been released yet** — this is the one
   moment the change is free. A *development* service installed under the old layout does have to be

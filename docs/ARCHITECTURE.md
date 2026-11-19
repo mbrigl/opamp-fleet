@@ -43,8 +43,8 @@ than anywhere else, and none beats one that has stopped being true.
 - **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — admitted by the client
   certificate in the TLS 1.3 handshake alone
   ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md),
-  SEC-admission-by-client-certificate). A Client in Gateway Mode carries other Clients' Agents over its own upstream
-  connections and refuses what the Server revoked
+  SEC-admission-by-client-certificate). A Client in Gateway Mode carries other Clients' Agents over
+  its own upstream connections and refuses what the Server revoked
   ([CLT-modes-and-gateway](adr/CLT-modes-and-gateway.md)).
 - **Managed Processes** run on the Client's host under a Supervisor each; a Collector reports
   through its own `opampextension` to the Supervisor Endpoint, which admits only the process its
@@ -107,10 +107,11 @@ Six crates in one workspace
   and key file, by the Server's two CAs and the operator tool alike, in the adapter `x509::issue`;
   the first certificate of a CA file is read by `opamp::tls::first_certificate` — and the
   bootstrap certificate's PKCS#12 file, whose rule is core and whose reading and writing with
-  `p12-keystore` is the adapter `pkcs12::file` (SEC-bootstrap-certificates-and-enrolment) — and, behind the feature `pkcs11` that
-  only the Server and the operator tool turn on, what both do alike on a PKCS#11 token with
-  `cryptoki` in the adapter `pkcs11`: the module's one context per process, the slot of a token by
-  its label, the login, the curve P-256, a key's point and the DER of a token's signature
+  `p12-keystore` is the adapter `pkcs12::file` (SEC-bootstrap-certificates-and-enrolment) — and,
+  behind the feature `pkcs11` that only the Server and the operator tool turn on, what both do alike
+  on a PKCS#11 token with `cryptoki` in the adapter `pkcs11`: the module's one context per process,
+  the slot of a token by its label, the login, the curve P-256, a key's point and the DER of a
+  token's signature
   ([SEC-admission-by-client-certificate](adr/SEC-admission-by-client-certificate.md)).
 - **`fleet-util`** — what the Client and the operator tool share and the Server does not use
   ([DEV-six-crates-tokio-axum](adr/DEV-six-crates-tokio-axum.md)):
@@ -134,17 +135,17 @@ Six crates in one workspace
   PKG-signed-packages-and-delivery)
   — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
-  of a PKCS#12 file (OPS-operator-program-fleetctl). `gpgv` verifies an upstream's OpenPGP signature (OPS-operator-program-fleetctl §29);
-  no command calls it yet. It depends on neither end: what it shares with the Client — the 7z
-  Unix-mode convention (`archive::unix_mode_attributes`; its tests also use the unpacker), the
-  links a tree package keeps (`tree::KeptLink`, `tree::is_kept`), the PKCS#12 reader
-  (`identity::pkcs12::open`), and the reads of an administrator's file
+  of a PKCS#12 file (OPS-operator-program-fleetctl). `gpgv` verifies an upstream's OpenPGP signature
+  (OPS-operator-program-fleetctl §29); no command calls it yet. It depends on neither end: what it
+  shares with the Client — the 7z Unix-mode convention (`archive::unix_mode_attributes`; its tests
+  also use the unpacker), the links a tree package keeps (`tree::KeptLink`, `tree::is_kept`), the
+  PKCS#12 reader (`identity::pkcs12::open`), and the reads of an administrator's file
   (`nofollow::read_privileged` with `nofollow::Named`, `password::read_password_file`) — it takes
   from `fleet-util`.
 
 Inside the Server and the Client the code is ports and adapters
-([DEV-ports-and-adapters](adr/DEV-ports-and-adapters.md)): a **core** that holds the domain and owns its
-**ports**, **adapters** that bind a port to a technology, and a **composition root** — `lib.rs`,
+([DEV-ports-and-adapters](adr/DEV-ports-and-adapters.md)): a **core** that holds the domain and owns
+its **ports**, **adapters** that bind a port to a technology, and a **composition root** — `lib.rs`,
 `main.rs`, and on the Client `supervisor`, `service::runtime` and `service::enrol` — that wires the
 two. Every
 module's role is listed in
@@ -248,36 +249,38 @@ no module.
   — are the core module `fleet::views`, behind the same `AppState` entry points.
   Packages in the fleet — the Package Sets, their entries and signatures, the upload limit, the
   offer of a Package to an Agent and of an artifact to a Host, and the Packages a Deployment holds
-  ([PKG-signed-packages-and-delivery](adr/PKG-signed-packages-and-delivery.md)) — are the core module
-  `fleet::delivery`, behind the same `AppState` entry points.
+  ([PKG-signed-packages-and-delivery](adr/PKG-signed-packages-and-delivery.md)) — are the core
+  module `fleet::delivery`, behind the same `AppState` entry points.
   Configurations, Deployments and rollouts — the catalogue of Configurations, what a Deployment
   releases, the rollout acts that assign it, what waits for an Agent's next press, labels, and the
-  restart an operator requests ([SRV-deployments-and-pinned-rollouts](adr/SRV-deployments-and-pinned-rollouts.md)) — are the core
-  module `fleet::rollout`, behind the same `AppState` entry points.
-  Enrolment and certificates — the approval of an enrolment and its take-back, the answer an
-  enrolling Agent is given, the issuing and renewal of a host certificate with the records of what
-  was issued and signed, and the mark of a host as a Gateway, which places every Agent again
-  ([SEC-bootstrap-certificates-and-enrolment](adr/SEC-bootstrap-certificates-and-enrolment.md))
-  — are the core module `fleet::approval`, behind the same `AppState` entry points.
-  The round of an Agent's report — a report processed under the Agent's lock, its record created,
-  taken or settled, the reply and the connection settings it is offered, the persist path, a
-  goodbye and a forget, and the answers a refused report gets — is the core module
-  `fleet::session`, behind the same `AppState` entry points. The module root of `fleet` keeps the
-  state, its construction and limits, the lease, the reads of the fleet, the audit helpers, the
-  capabilities the Server declares, the staleness rule, and the types the contexts share, with the
-  tests of staleness, of the host a register derives, and of label inheritance. The test helpers
-  the contexts share are the test-only `fleet::fixtures`. Each context imports by name what it
-  takes from the root, from its siblings and from the crate; `clippy::wildcard_imports`, denied in
-  `fleet`, refuses a glob import in its production code.
+  restart an operator requests
+  ([SRV-deployments-and-pinned-rollouts](adr/SRV-deployments-and-pinned-rollouts.md)) — are the core
+  module `fleet::rollout`, behind the same `AppState` entry points. Enrolment and certificates — the
+  approval of an enrolment and its take-back, the answer an enrolling Agent is given, the issuing
+  and renewal of a host certificate with the records of what was issued and signed, and the mark of
+  a host as a Gateway, which places every Agent again
+  ([SEC-bootstrap-certificates-and-enrolment](adr/SEC-bootstrap-certificates-and-enrolment.md)) —
+  are the core module `fleet::approval`, behind the same `AppState` entry points. The round of an
+  Agent's report — a report processed under the Agent's lock, its record created, taken or settled,
+  the reply and the connection settings it is offered, the persist path, a goodbye and a forget, and
+  the answers a refused report gets — is the core module `fleet::session`, behind the same
+  `AppState` entry points. The module root of `fleet` keeps the state, its construction and limits,
+  the lease, the reads of the fleet, the audit helpers, the capabilities the Server declares, the
+  staleness rule, and the types the contexts share, with the tests of staleness, of the host a
+  register derives, and of label inheritance. The test helpers the contexts share are the test-only
+  `fleet::fixtures`. Each context imports by name what it takes from the root, from its siblings and
+  from the crate; `clippy::wildcard_imports`, denied in `fleet`, refuses a glob import in its
+  production code.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
   section is present
-  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)) — and tells a member's certificate
-  from a bootstrap one by its
+  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)) — and tells a
+  member's certificate from a bootstrap one by its
   issuer. `listen` serves both planes on one handle with one drain and a connection cap each
-  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)). `pki` is `server pki status`
-  and the running Server's warnings before a certificate it depends on ends (OPS-operator-program-fleetctl).
+  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)). `pki` is
+  `server pki status` and the running Server's warnings before a certificate it depends on ends
+  (OPS-operator-program-fleetctl).
 - **Server admission** — `transport::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Behind
@@ -337,10 +340,10 @@ no module.
   `server audit-verify --audit-key` runs over either store
   ([SEC-append-only-audit-record](adr/SEC-append-only-audit-record.md)).
 - **Server ports beyond storage** — `fleet` owns `CertificateSigner`, which the local CA in `ca`
-  implements for the CSR flow and the renewal proof (SEC-admission-by-client-certificate), and the `UseCase` each signature
-  names. A CA key in `ca` is a key file or a key on the PKCS#11 token of `pkcs11`, which signs
-  through `rcgen`'s `SigningKey` from a pool of four sessions, one `cryptoki` context per module in
-  the process, and holds a place in the audit record before it signs
+  implements for the CSR flow and the renewal proof (SEC-admission-by-client-certificate), and the
+  `UseCase` each signature names. A CA key in `ca` is a key file or a key on the PKCS#11 token of
+  `pkcs11`, which signs through `rcgen`'s `SigningKey` from a pool of four sessions, one `cryptoki`
+  context per module in the process, and holds a place in the audit record before it signs
   (SEC-admission-by-client-certificate);
   `opamp-fleetctl`'s `token` makes the keys on it. `fleet` also owns
   `Clock`, which `clock::SystemClock` implements. It owns `Elapsed` too, the time that has passed
@@ -356,10 +359,10 @@ no module.
   `FLEET_SERVER__…` variables of the process, and `main.rs` hands them in
   ([SRV-configuration-toml-and-environment](adr/SRV-configuration-toml-and-environment.md)).
 - **REST views** — what the REST API reads and returns is shaped in `api`, which derives its
-  OpenAPI schema ([SRV-configurations-compose-one-map](adr/SRV-configurations-compose-one-map.md)); the core's types —
-  among them the fleet view `AgentView` — carry no schema, and `api` converts them. `api::paging`
-  reads `limit` and `cursor`, encodes the opaque cursor, and writes `X-Total-Count` and the `Link`
-  of the four lists that page.
+  OpenAPI schema ([SRV-configurations-compose-one-map](adr/SRV-configurations-compose-one-map.md));
+  the core's types — among them the fleet view `AgentView` — carry no schema, and `api` converts
+  them. `api::paging` reads `limit` and `cursor`, encodes the opaque cursor, and writes
+  `X-Total-Count` and the `Link` of the four lists that page.
 - **Client supervision** — `supervisor::ports` is the Port a Plugin implements
   ([CLT-supervisor-mode-and-kinds](adr/CLT-supervisor-mode-and-kinds.md)),
   and `shutdown` the handle every task stops on; the Plugins and the process runner are its
@@ -408,10 +411,10 @@ no module.
   root through the adapter `nofollow`: a directory held open without following a link at its name,
   read from and written to by name, each file written whole and renamed into place, because a
   privileged install works in directories the service's account owns
-  ([CLT-accounts-service-runs-under](adr/CLT-accounts-service-runs-under.md)). `nofollow` reads every file one
-  way: a regular file within a bound the caller names, into a buffer sized before it reads and
-  wiped when dropped ([SEC-secrets-wiped-on-drop](adr/SEC-secrets-wiped-on-drop.md)). A path a
-  privileged step did not choose itself is resolved by `nofollow::read_privileged`, described
+  ([CLT-accounts-service-runs-under](adr/CLT-accounts-service-runs-under.md)). `nofollow` reads
+  every file one way: a regular file within a bound the caller names, into a buffer sized before it
+  reads and wiped when dropped ([SEC-secrets-wiped-on-drop](adr/SEC-secrets-wiped-on-drop.md)). A
+  path a privileged step did not choose itself is resolved by `nofollow::read_privileged`, described
   below. The test
   `privileged_steps_follow_no_link` holds `main.rs`, `config_init`, `config_file`, `service/`,
   `csr`, `connection` and `tls` to that, with the path-based calls that change or read a file left
@@ -543,8 +546,8 @@ Supervisor swaps the program, keeps the previous one for its grace period and ro
 new one does not stay up. Before anything is downloaded, an offer below the floor the operator
 signed for its Agent type is refused: the Client fetches the floors from its endpoint as they fall
 due and keeps the highest that verifies
-([PKG-versions-high-water-mark-floor](adr/PKG-versions-high-water-mark-floor.md)). The Client's own package goes
-through `update` instead: a version
+([PKG-versions-high-water-mark-floor](adr/PKG-versions-high-water-mark-floor.md)). The Client's own
+package goes through `update` instead: a version
 directory beside the running one, a self-check, the `current` pointer moved, and a restart on
 probation that commits or rolls back.
 

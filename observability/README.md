@@ -1,8 +1,8 @@
 # Development observability stack
 
-OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry (CLT-what-an-agent-reports), stored
-in one place — twice: in ClickHouse and, side by side, in Apache Doris. It is a Compose project of
-its own ([`compose.yaml`](compose.yaml)) that runs on the
+OTLP in, Grafana out — logs, metrics, and traces from the Agents' own telemetry
+(CLT-what-an-agent-reports), stored in one place — twice: in ClickHouse and, side by side, in Apache
+Doris. It is a Compose project of its own ([`compose.yaml`](compose.yaml)) that runs on the
 host, apart from the Dev Container: start it when you want to look, leave it off when you do not.
 This is a **development tool**: nothing shipped depends on it, it holds no credentials worth having,
 and it retains 24 h of data on a local volume.
@@ -88,8 +88,9 @@ container engine and its network mode, so check with the `curl` under
 
 ### Reaching it from the Dev Container
 
-The Dev Container has no Docker socket ([NUC-container-hides-host-daemon §2](../docs/adr/NUC-container-hides-host-daemon.md)) and
-needs none for this: it reaches the Collector **through the host**, over the ports published above.
+The Dev Container has no Docker socket
+([NUC-container-hides-host-daemon §2](../docs/adr/NUC-container-hides-host-daemon.md)) and needs
+none for this: it reaches the Collector **through the host**, over the ports published above.
 
 The Client sends own telemetry in plaintext to a loopback IP literal and nowhere else
 ([CLT-what-an-agent-reports](../docs/adr/CLT-what-an-agent-reports.md)), so

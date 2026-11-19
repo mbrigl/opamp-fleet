@@ -9,14 +9,14 @@
 
 The Client runs as a system service. Every program its Supervisors start runs under the account
 that starts it, and so does every command their configuration language can name: an exec input,
-a check command, a deploy task ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). The Server sends
-those configurations. The account that starts a program is therefore the most a compromised or
-misconfigured Server reaches on a host. A Managed Process is code the Supervisor does not vouch for
-([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)). Under the Client's own account it can read
-everything the Client can: the whole `state_dir` with the Client's private key `client-key.pem`, the
-`config/` of every other Supervisor, and the Client's environment through `/proc`. It can rewrite
-its own `program/` and so outlast the next package, and with the Client's key it can present itself
-to the Server for any `instance_uid` of its host
+a check command, a deploy task ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)).
+The Server sends those configurations. The account that starts a program is therefore the most a
+compromised or misconfigured Server reaches on a host. A Managed Process is code the Supervisor does
+not vouch for ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)). Under the Client's own
+account it can read everything the Client can: the whole `state_dir` with the Client's private key
+`client-key.pem`, the `config/` of every other Supervisor, and the Client's environment through
+`/proc`. It can rewrite its own `program/` and so outlast the next package, and with the Client's
+key it can present itself to the Server for any `instance_uid` of its host
 ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)).
 
 The specification places a Managed Process and its account below the Client's account on its
@@ -119,8 +119,8 @@ Four runs enrol, and they differ in what the administrator said:
   CA comes from beside the program
   ([SEC-bootstrap-certificates-and-enrolment §17](SEC-bootstrap-certificates-and-enrolment.md)).
 - **`service install --endpoint` over an existing file:** the file is kept as it is
-  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), so the service runs with its
-  endpoint, not the one named. The MSI's custom action runs this way on an upgrade that is given
+  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), so the service runs with
+  its endpoint, not the one named. The MSI's custom action runs this way on an upgrade that is given
   an endpoint; the Linux packages' `postinst` only prints the command for the administrator.
 - **`service install` without either, over an existing file:** nothing is answered; an upgrade
   with a bootstrap identity beside the program enrols with what the file says.
@@ -287,9 +287,9 @@ run answered.
    ```
 
    - **Directory name.** It is the bare base and the commit short-hash of the version
-     [OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md) resolves, never the pre-release. The release `1.2.3`
-     and a development build heading for it are told apart by their commit, and the manifest's
-     full string answers release-or-dev.
+     [OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md) resolves, never the
+     pre-release. The release `1.2.3` and a development build heading for it are told apart by their
+     commit, and the manifest's full string answers release-or-dev.
    - **The program.** The service's program is `<layout root>/current/supervisor`, so a version
      switch never re-registers anything.
    - **The switch.** On Unix the pointer is switched atomically: a temporary symlink is `rename`d
@@ -299,8 +299,9 @@ run answered.
    - **Restaging.** Staging a version already present replaces its contents and rewrites its
      manifest. It skips the write when the staged binary already holds the same bytes, because an
      install arriving through the `PATH` symlink runs from that file.
-   - **The state directory** is the one [CLT-installed-service-and-state](CLT-installed-service-and-state.md)
-     decides in its order of the state directory.
+   - **The state directory** is the one
+     [CLT-installed-service-and-state](CLT-installed-service-and-state.md) decides in its order of
+     the state directory.
    - **Absolute paths.** Every path is absolute at install time, and the registered command line
      is `run --service --config <abs> --state-dir <abs>`, followed, where a process account is
      registered, by `--agents-socket <abs> --process-uid <uid>` (clause 17), on Windows by
@@ -312,14 +313,15 @@ run answered.
    `service-manager` still writes the file (mode `0644`), enables it, which reloads the manager's
    configuration, and uninstalls it. The unit holds:
    - `[Unit]`: `Description=<PRODUCT_NAME>`. The display name stays where
-     [CLT-installed-service-and-state](CLT-installed-service-and-state.md) puts prose. Where a process account
-     is registered, also `Wants=<PRODUCT_NAME>-agents.service` and
+     [CLT-installed-service-and-state](CLT-installed-service-and-state.md) puts prose. Where a
+     process account is registered, also `Wants=<PRODUCT_NAME>-agents.service` and
      `After=<PRODUCT_NAME>-agents.service` (clause 17).
    - `[Service]`: `ExecStart=` with the program and every argument in double quotes. A `\` and a
      `"` are escaped, a `%` is written `%%` and a `$` is written `$$`, so any absolute path reaches
      the program as it was given. Then `Restart=on-failure`, `RestartSec=` set to the restart
-     delay the SCM's recovery actions use ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)),
-     `User=` set to the account of clause 1, and the directives of clause 8.
+     delay the SCM's recovery actions use
+     ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), `User=` set to the
+     account of clause 1, and the directives of clause 8.
    - `[Install]`: `WantedBy=multi-user.target`.
 
    The user scope and the launchd plist stay as `service-manager` renders them. `service install`
@@ -345,11 +347,11 @@ run answered.
    `NT SERVICE\<PRODUCT_NAME>-agents` or the account clause 16 names, set without a password. Its
    command line is `run --agents \\.\pipe\<PRODUCT_NAME>-agents --client-sid <SID>`, the Client
    account's SID, and it starts automatically. As the Client's own entry, it carries the recovery
-   actions of [CLT-installed-service-and-state](CLT-installed-service-and-state.md): one restart after the
-   restart delay, repeated for every failure, and run on a reported failure too. It carries its
-   display name and a Description. Its required privileges are `SeChangeNotifyPrivilege` alone
-   (SERVICE_REQUIRED_PRIVILEGES_INFO): the SCM removes every other privilege from its token, and
-   so from every program it starts, so no Managed Process holds `SeImpersonatePrivilege`. A stop
+   actions of [CLT-installed-service-and-state](CLT-installed-service-and-state.md): one restart
+   after the restart delay, repeated for every failure, and run on a reported failure too. It
+   carries its display name and a Description. Its required privileges are `SeChangeNotifyPrivilege`
+   alone (SERVICE_REQUIRED_PRIVILEGES_INFO): the SCM removes every other privilege from its token,
+   and so from every program it starts, so no Managed Process holds `SeImpersonatePrivilege`. A stop
    waits until the service has reported itself stopped and its process has ended, up to 60
    seconds.
 
@@ -471,8 +473,8 @@ run answered.
 
     `INSTALLFOLDER` is **one directory the operator configures**, holding only the delivered
     payload. The layout and the state directory go to `%ProgramData%\<PRODUCT_NAME>` and no root
-    reaches the command line ([CLT-installed-service-and-state](CLT-installed-service-and-state.md), where
-    program and data split), so an uninstall empties the folder and the configuration survives
+    reaches the command line ([CLT-installed-service-and-state](CLT-installed-service-and-state.md),
+    where program and data split), so an uninstall empties the folder and the configuration survives
     where Windows expects data to. All names are upper-case and listed `Secure`: Windows Installer
     resets private properties between the UI and execute sequences, and `Secure` lets the same
     MSI run unattended:
@@ -529,8 +531,8 @@ run answered.
     directly in a root, the default `<data root>/state`, that path is the root's own, which
     clause 13 settles. For one deeper beneath a root, the components between the root and its
     parent are those the check of what lies beneath a root
-    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)) inspects before the install writes
-    anything.
+    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)) inspects before the
+    install writes anything.
 
 13. **On Windows, a data root or layout root that is a reparse point is refused, and the data root
     is held.** The account holds delete on the roots themselves, so their names are not the
@@ -538,7 +540,8 @@ run answered.
     `FILE_SHARE_DELETE` from their first write to their last. On Linux and macOS a root's name
     lies in a directory only root writes, and it is followed. This refusal is a check of its own
     beside the check of what lies beneath a root
-    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), which does not inspect the roots.
+    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), which does not inspect
+    the roots.
 
 14. **A file with a second hard link is skipped and named.** Another name for it may stand
     anywhere, and re-owning it would re-own that file too. The hand-over and `service config` each
@@ -613,11 +616,11 @@ run answered.
       goes back to a program that ran. A delivered Configuration is written as usual, and its
       acknowledgement is given by the first start of an apply or of the retry that reaches the
       second service and survives the apply grace; a restart command's start acknowledges nothing
-      and swaps nothing in ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md), the closed
-      lifecycle vocabulary), and the retry follows it at once. A Supervisor held after a package
-      that failed leaves no Configuration waiting: it is reported `FAILED`. Until then the package
-      stays `Installing` and the Configuration `APPLYING`, each naming the second service as the
-      reason. A newer offer or Configuration replaces the waiting one, and a Client that stops
+      and swaps nothing in ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md), the
+      closed lifecycle vocabulary), and the retry follows it at once. A Supervisor held after a
+      package that failed leaves no Configuration waiting: it is reported `FAILED`. Until then the
+      package stays `Installing` and the Configuration `APPLYING`, each naming the second service as
+      the reason. A newer offer or Configuration replaces the waiting one, and a Client that stops
       while one waits leaves its files as the record names them.
     - **A self-update restarts whichever end is behind.** The self-update switches `current` and
       restarts the Client. A second service that meets a Client of another build while `current`
@@ -785,8 +788,8 @@ run answered.
 
     An install grants and withdraws the process account's rights in the data root, the layout
     root and the state directory alone: a Supervisors' root outside them is the operator's
-    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), left as it is and named in a
-    warning.
+    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), left as it is and named
+    in a warning.
 
 22. **A program inherits nothing of the Client's.** Its environment is the second service's own,
     then the block's `env` laid over it, then the Supervisor Endpoint's token, last
@@ -830,8 +833,8 @@ run answered.
     keeps there itself (`instance-uid`, `config`, `packages`, `logs`, `gateway-packages`,
     `supervisors`), and `supervisor_dir` never is, or holds, `state_dir` otherwise: a block that
     would is refused at startup, and an offered set that carries one fails as a whole
-    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md), the validation of an offered set). This
-    holds on every host, with a process account or without one, because a purge of such a
+    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md), the validation of an offered
+    set). This holds on every host, with a process account or without one, because a purge of such a
     Supervisor would delete the Client's own entry and its share would expose it to the process
     account's group. The changelog names the rename this asks of a host that has such a
     Supervisor.
@@ -938,16 +941,17 @@ run answered.
 - macOS sandboxing, and an account of the macOS Client's own: its first registration stays root,
   since macOS has no virtual account and an account there would have to be created by a package.
 - Account creation by the binary; a `sysusers.d` entry; directives for user-scope units; a
-  confined SELinux policy module ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)).
+  confined SELinux policy module
+  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)).
 - Moving a host that runs as root or `LocalSystem` to the unprivileged account automatically; an
   operator does that with `--run-as`. The MSI's command lines, which name no account and so take
   the default of clause 1.
 - The trust boundary an administrator crosses when running the account-owned binary through the
   `PATH` symlink (see *Consequences*).
 - Which directory is the state directory, and whether `supervisor.toml` may name it
-  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)); the `[tls]` files and the CA an
-  operator names, read where their paths point; `[logging] dir`, which only the service's own run
-  uses.
+  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)); the `[tls]` files and the
+  CA an operator names, read where their paths point; `[logging] dir`, which only the service's own
+  run uses.
 - An account per Supervisor; making a process account the default where none is named; job
   objects for a host without a process account, the Client's own Managed Processes among them;
   what the Managed Processes can read of one another, which they share by this decision; a

@@ -39,10 +39,10 @@ The forces:
   loopback Operator plane to be reachable through a tunnel. A tool that knows these rules writes
   them once; a manual can only list them.
 - **`openssl` is a system dependency of the setup, though not of the build.** The build keeps
-  system libraries out (SEC-bootstrap-certificates-and-enrolment, on the crates issuance adds), and the operator's machine should
-  not need one either. Its command-line behaviour differs between OpenSSL 1.1, 3.x and LibreSSL.
-  OpenSSL 1.1 cannot read the PBES2/AES `bootstrap.p12` the Server hands out at all, and
-  OpenSSL 3 needs the right options to open it.
+  system libraries out (SEC-bootstrap-certificates-and-enrolment, on the crates issuance adds), and
+  the operator's machine should not need one either. Its command-line behaviour differs between
+  OpenSSL 1.1, 3.x and LibreSSL. OpenSSL 1.1 cannot read the PBES2/AES `bootstrap.p12` the Server
+  hands out at all, and OpenSSL 3 needs the right options to open it.
 - **Not every key belongs on the Server, and not every key off it.** Whoever holds the server CA's
   key can stand up a Server or a Gateway anywhere that every host trusts, so it stays on the
   operator's machine. The client CA's key has to be on the Server, because it signs renewals
@@ -185,9 +185,9 @@ upstream that signs with OpenPGP.
    [SEC-bootstrap-certificates-and-enrolment §13](SEC-bootstrap-certificates-and-enrolment.md)
    states for issuance, and `time`. `p12-extract` also reads through
    `fleet_util::identity::pkcs12::open`, the reader the Client's install uses, and so through
-   `fleet_core::pkcs12::file` and `p12-keystore` (SEC-bootstrap-certificates-and-enrolment). `pki token-init` and `pki bootstrap-ca
-   --pkcs11-module` reach a PKCS#11 token through `cryptoki`, the wrapper the Server uses for the
-   same token
+   `fleet_core::pkcs12::file` and `p12-keystore` (SEC-bootstrap-certificates-and-enrolment).
+   `pki token-init` and `pki bootstrap-ca --pkcs11-module` reach a PKCS#11 token through `cryptoki`,
+   the wrapper the Server uses for the same token
    ([SEC-admission-by-client-certificate §35](SEC-admission-by-client-certificate.md)).
    Every key is ECDSA P-256. A key written to a file is PKCS#8 PEM, the form
    `[client_ca]` loads; a key made on a token stays on it. Every certificate is PEM. Every serial is
@@ -380,8 +380,8 @@ upstream that signs with OpenPGP.
 
 26. **What `p12-extract` writes.** It writes `<dir>/bootstrap.pem` (the certificate) and
     `<dir>/bootstrap-key.pem` (the key as unencrypted PKCS#8). These are the names of the pair the
-    Client's install finds ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)). On Unix the
-    key is written `0600`. It creates `<dir>` when it is missing and overwrites nothing
+    Client's install finds ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)).
+    On Unix the key is written `0600`. It creates `<dir>` when it is missing and overwrites nothing
     (clause 15): if either file exists, it writes neither and names the one in the way. It prints
     the certificate's subject, serial and `notAfter`, and never the key or the password.
 
@@ -422,8 +422,8 @@ upstream that signs with OpenPGP.
 
 28. **A later repack of one upstream version is a pre-release of the next patch.** The first
     repack of a version is the Package that version names
-    ([PKG-versions-high-water-mark-floor §6](PKG-versions-high-water-mark-floor.md)). A later repack of
-    the same version, one that takes newer files from its sources or is packed by a changed rule,
+    ([PKG-versions-high-water-mark-floor §6](PKG-versions-high-water-mark-floor.md)). A later repack
+    of the same version, one that takes newer files from its sources or is packed by a changed rule,
     is named by `opamp-fleetctl package fetch --repack <n>`, `n` from 2, and uploaded as Package
     `<major>.<minor>.<patch+1>-0.r.<n>`: the second repack of `2.14.3` is `2.14.4-0.r.2`.
     - **It orders between the version and the next release.** In SemVer precedence it lies above
@@ -433,10 +433,11 @@ upstream that signs with OpenPGP.
       below any pre-release upstream names for the next patch.
     - **The program keeps the version it is.** Its program keeps reporting the upstream version,
       so the Server holds the Package against the version of the Package the host's Supervisor
-      installed ([SRV-deployments-and-pinned-rollouts §14 and §25](SRV-deployments-and-pinned-rollouts.md)):
-      a host on an earlier repack is offered the later one, a host on the later one is
-      offered it no more, and upstream's next release still replaces it. Build metadata
-      (`2.14.3+r2`) is not the form: two versions that differ only in it compare equal
+      installed
+      ([SRV-deployments-and-pinned-rollouts §14 and §25](SRV-deployments-and-pinned-rollouts.md)): a
+      host on an earlier repack is offered the later one, a host on the later one is offered it no
+      more, and upstream's next release still replaces it. Build metadata (`2.14.3+r2`) is not the
+      form: two versions that differ only in it compare equal
       ([PKG-versions-high-water-mark-floor §2](PKG-versions-high-water-mark-floor.md)).
     - **Refused:** `--repack 0`; a later repack of a version that is not three numbers; and a later
       repack of an agent whose artifact the tool uploads as upstream publishes it, which has one
@@ -474,34 +475,34 @@ upstream that signs with OpenPGP.
 
 **Out of scope:** the names of the command trees of `opamp-fleetctl`, which commands each holds, and
 the absence of any other program name for them, which
-[PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md) states; issuing a host certificate by
-any route other than enrolment, which the specification rules out; how the Server issues, records,
-hands out and revokes bootstrap certificates, and what of their subject a host certificate carries
-([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md));
-customers as a resource of the Server; attributes other than O, OU and CN in what `pki init`,
+[PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md) states; issuing a host
+certificate by any route other than enrolment, which the specification rules out; how the Server
+issues, records, hands out and revokes bootstrap certificates, and what of their subject a host
+certificate carries
+([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)); customers
+as a resource of the Server; attributes other than O, OU and CN in what `pki init`,
 `pki token-init`, `pki server-cert` and `pki bootstrap-ca` write; encrypting key files at rest, or a
 passphrase prompt; a token for the server CA's key or the package signing key, which stay offline
 with the operator; replacing the server CA, which every host's configuration follows; replacing the
 client CA, which every host's enrolment follows, but for the move of a fleet onto a token, whose new
 client CA `pki token-init` makes and which
-[SEC-admission-by-client-certificate §40](SEC-admission-by-client-certificate.md)
-rolls out; and holding two bootstrap CAs at once while one replaces the other; enforcing a
-CA's end in the handshake, or limiting the running Server's signatures to its CA's end; certificate
-revocation lists or OCSP; ACME and certificates from a public CA, which the Server reads as they
-are; a `pki` command on the Client binary; the Server's `pki status` on Windows or macOS, where the
-Server does not run; the operator tool on Windows; native packages, Homebrew, `npm` or any other
-installer; provenance of the release's assets
-([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)); commands that drive the running
-fleet through the Operator plane beyond the upload `package fetch` makes; writing the extracted key
-encrypted, extracting files other than the bootstrap form, and making a PKCS#12 file with the tool;
-how the Client applies a tar's modes, which
-[CLT-accounts-service-runs-under §23](CLT-accounts-service-runs-under.md)
-states; a kind's own removal, before packing, of links it knows upstream leaves behind (as
-an AppImage's repack removes `.DirIcon`), which each kind states where it is decided; hard links,
-which are files of the tree; the trust in the extracted tree's origin, which the hash of what was
-downloaded settles; following an upstream's key at run time, a new key reaching the tool in a new
-carried keyring with a release of the tool; and a revocation the carried keyring does not state,
-which `gpgv` cannot know of.
+[SEC-admission-by-client-certificate §40](SEC-admission-by-client-certificate.md) rolls out; and
+holding two bootstrap CAs at once while one replaces the other; enforcing a CA's end in the
+handshake, or limiting the running Server's signatures to its CA's end; certificate revocation lists
+or OCSP; ACME and certificates from a public CA, which the Server reads as they are; a `pki` command
+on the Client binary; the Server's `pki status` on Windows or macOS, where the Server does not run;
+the operator tool on Windows; native packages, Homebrew, `npm` or any other installer; provenance of
+the release's assets
+([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)); commands that
+drive the running fleet through the Operator plane beyond the upload `package fetch` makes; writing
+the extracted key encrypted, extracting files other than the bootstrap form, and making a PKCS#12
+file with the tool; how the Client applies a tar's modes, which
+[CLT-accounts-service-runs-under §23](CLT-accounts-service-runs-under.md) states; a kind's own
+removal, before packing, of links it knows upstream leaves behind (as an AppImage's repack removes
+`.DirIcon`), which each kind states where it is decided; hard links, which are files of the tree;
+the trust in the extracted tree's origin, which the hash of what was downloaded settles; following
+an upstream's key at run time, a new key reaching the tool in a new carried keyring with a release
+of the tool; and a revocation the carried keyring does not state, which `gpgv` cannot know of.
 
 ## Alternatives considered
 
@@ -592,8 +593,8 @@ which `gpgv` cannot know of.
 - **Name it `opamp-operator` or `opamp-fleet`.** The first says who uses it, but a name ending in
   `-ctl` says it is the command-line tool of a system, which is what an operator looks for. The
   second is the build-time product name the Client's service is registered under
-  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), so a program of that name reads as
-  the Client.
+  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), so a program of that name
+  reads as the Client.
 - **All five targets, Windows included.** Windows would need its own way to keep a key readable by
   its owner alone, a piece of work this decision does not take on.
 - **Linux only.** Simpler by two builds, but an operator on macOS — a likely operator machine —
@@ -602,8 +603,8 @@ which `gpgv` cannot know of.
   cannot install a single signed package without a Rust toolchain on someone's machine.
 - **`p12-extract` writes the key encrypted (PKCS#8 `ENCRYPTED PRIVATE KEY`).** The key stays
   protected at rest. But the Client's install reads the pair in the clear
-  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), and neither `rustls` nor `rcgen`
-  reads an encrypted key. Owner-only permissions are what every other key is given
+  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), and neither `rustls` nor
+  `rcgen` reads an encrypted key. Owner-only permissions are what every other key is given
   ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)).
 - **`p12-extract` writes the certificate only.** The key never leaves the file. Not chosen: the
   operator asked for the key, and the PEM pair is a form the Client takes.
@@ -726,13 +727,14 @@ which `gpgv` cannot know of.
   on admission, the client CA and how the Server signs;
   [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)
   on the bootstrap CA, the crates issuance adds, the `bootstrap.p12` file and its reader;
-  [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) on the planes; `docs/SPECIFICATION.md` on
-  how an Agent obtains its certificate;
+  [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) on the planes;
+  `docs/SPECIFICATION.md` on how an Agent obtains its certificate;
   [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md) on why
   a package is signed by a key the operator holds and what a tree package may carry;
-  [CLT-installed-service-and-state](CLT-installed-service-and-state.md) on the member a package artifact carries;
-  [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md) on the release, its naming and its
-  assets.
+  [CLT-installed-service-and-state](CLT-installed-service-and-state.md) on the member a package
+  artifact carries;
+  [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md) on the
+  release, its naming and its assets.
 
 ## Consequences
 

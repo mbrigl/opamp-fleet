@@ -16,10 +16,11 @@ restart and roll back on failure (G-11).
 The machinery around a self-update is decided elsewhere: the versioned side-by-side layout with
 its `current` pointer, per-version `manifest.toml` and restart-on-failure registration
 ([CLT-installed-service-and-state](CLT-installed-service-and-state.md),
-[CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), the verified download and the archive
-handling of package delivery ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), and the
-per-Agent offer ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). Four problems are specific to
-replacing the program that does the replacing.
+[CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), the verified download and
+the archive handling of package delivery
+([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), and the per-Agent offer
+([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). Four problems are
+specific to replacing the program that does the replacing.
 
 - **Something on the wire has to represent the Client.** A Supervisor Agent cannot carry the
   Client's package beside its own: the Baseline knows *"normally only one top-level package, which
@@ -43,9 +44,9 @@ splits it over two questions, yet the second answer has no effect without the fi
 no key updates nothing, and with a key a "yes" is what the default already says. **Only one
 package name can carry this Client**, the Agent type its Client Agent reports, because a Server
 offers a package under the Agent type it is built for
-([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). Any other name points at another
-program's package or at none, so a configurable name is a way to misconfigure the narrowing and
-nothing else. **It belongs beside what it depends on.** The key that decides whether it takes
+([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). Any other name points at
+another program's package or at none, so a configurable name is a way to misconfigure the narrowing
+and nothing else. **It belongs beside what it depends on.** The key that decides whether it takes
 effect sits in `[packages]`; a consent in a section of its own makes a reader of the file join two
 sections to learn whether this Client updates itself.
 
@@ -62,9 +63,10 @@ service manager perform the restart.
 
 1. **The Client always presents a Client Agent.** It exists *alongside* the Supervisor Agents, not
    only when there are none, with its own `instance_uid`, health and `service.version` (the baked
-   version, [OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)) and the Agent type `supervisor`
-   ([CLT-installed-service-and-state §4](CLT-installed-service-and-state.md)). A Client that supervises
-   something is visible in its own fleet, and nobody has to ask which Client version a host runs.
+   version, [OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)) and the Agent
+   type `supervisor` ([CLT-installed-service-and-state §4](CLT-installed-service-and-state.md)). A
+   Client that supervises something is visible in its own fleet, and nobody has to ask which Client
+   version a host runs.
 
 2. **The consent is `[packages] self_update`, it stands by default, and the one package it admits
    is the Client's own Agent type.** The key sits beside `verification_key`, which decides whether
@@ -118,9 +120,9 @@ service manager perform the restart.
    signature covers the artifact's bytes and carries no ordering, so an old release stays validly
    signed forever and is how a compromised Server would push a known-vulnerable build back. An
    offer of the release already running is not a failure and installs nothing
-   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md), on an offer of the running release). A Client
-   that does not run from a versioned layout (a `cargo run` build, a loose binary) refuses with a
-   message naming `supervisor service install`.
+   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md), on an offer of
+   the running release). A Client that does not run from a versioned layout (a `cargo run` build, a
+   loose binary) refuses with a message naming `supervisor service install`.
 
 5. **An install is a staged version, never an overwrite, of a signed artifact.** The artifact is
    verified like any other package: its SHA-256 must equal the offered content hash, and **its
@@ -137,10 +139,10 @@ service manager perform the restart.
    `supervisor self-check ok version=<version>`. It must exit successfully, print that line, and
    report the offered release, compared without build metadata but with the pre-release, so a
    `-dev` build is never accepted as the release it heads for
-   ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)). A binary that cannot exec (wrong architecture,
-   truncated artifact, missing loader) is the one failure no post-restart mechanism can catch, and
-   a program that runs but answers differently is not this Client. A failed probe fails the install
-   with the previous version still current and running.
+   ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)). A binary that cannot
+   exec (wrong architecture, truncated artifact, missing loader) is the one failure no post-restart
+   mechanism can catch, and a program that runs but answers differently is not this Client. A failed
+   probe fails the install with the previous version still current and running.
 
 7. **A marker is written before the pointer moves.** `update-marker.json` in the state directory,
    outside `versions/` so that it survives the switch, records the previous version directory, the
@@ -164,9 +166,9 @@ service manager perform the restart.
    On Windows all three are required: the `sc.exe` backend of `service-manager` registers no
    recovery actions, the SCM ignores a clean non-zero stop unless the non-crash flag is set, and a
    status of `Win32(0)` is a clean stop whatever happened. The registration that sets them is
-   [CLT-installed-service-and-state](CLT-installed-service-and-state.md)'s (clause 17). **Crashing on purpose is
-   never the mechanism**: it throws away the graceful shutdown and the `agent_disconnect`, and
-   makes every self-update look like a fault.
+   [CLT-installed-service-and-state](CLT-installed-service-and-state.md)'s (clause 17). **Crashing
+   on purpose is never the mechanism**: it throws away the graceful shutdown and the
+   `agent_disconnect`, and makes every self-update look like a fault.
 
 9. **The new version commits itself, or the host rolls back.** Before anything else runs, a
    starting Client resolves the marker:
@@ -194,9 +196,9 @@ service manager perform the restart.
 
 **Out of scope:** rolling back on post-update health rather than on "did it come back"; a
 Server-driven downgrade, which the Client refuses (clause 4) and the Server never offers
-([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)); a privileged updater helper for a low-privileged
-service account; closing the non-atomic Windows pointer switch, which would need a different
-Windows layout.
+([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)); a privileged
+updater helper for a low-privileged service account; closing the non-atomic Windows pointer switch,
+which would need a different Windows layout.
 
 ## Alternatives considered
 
@@ -223,8 +225,8 @@ Windows layout.
   legitimately carry this Client is its Agent type; any other names another program's package or
   none, so the freedom could only misconfigure the narrowing.
 - **The name from the product name.** Every variant build would need a Package of its own, where
-  one serves them all; [CLT-installed-service-and-state §3](CLT-installed-service-and-state.md) keeps the
-  product name off the Agent type for that reason.
+  one serves them all; [CLT-installed-service-and-state §3](CLT-installed-service-and-state.md)
+  keeps the product name off the Agent type for that reason.
 - **The name from the running file's name.** Renaming or linking the binary would redirect the
   self-update to another package.
 - **Ask for the consent in the questionnaire.** The question comes after the verification key and
@@ -299,8 +301,9 @@ Windows layout.
   aimed at "every Agent" grow by one row per host.
 - Negative / trade-offs: an operator who never chose is in the larger position. The package name,
   the signature and the explicit act that releases a package
-  ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) bound it, but a compromised Server reaches further
-  than with the consent off: it can roll a consenting host forward to any signed release.
+  ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) bound it, but a
+  compromised Server reaches further than with the consent off: it can roll a consenting host
+  forward to any signed release.
 - Negative / trade-offs: a host with the consent but no verification key does not update itself
   until the key is set; the startup notice is the only sign of it on the host, and the Server sees
   a Client Agent that takes no packages.

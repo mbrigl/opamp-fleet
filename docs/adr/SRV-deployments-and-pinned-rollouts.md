@@ -36,10 +36,10 @@ Deployment, and an Agent in no Deployment is offered nothing. The human settled 
 - **One deletion rule:** a resource that an assignment pins cannot be deleted.
 
 *Which.* A Package fits an Agent by type and Platform and is aimed at it by a Deployment
-([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). Fit and aim alone would count Agents that
-already run the version, propose it to Agents that need nothing, and let the act aim backwards
-under the same label as a forward one — the shape in which a compromised Server pushes a
-known-vulnerable build, and one the Client's own install already refuses, because an Ed25519
+([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). Fit and aim alone would
+count Agents that already run the version, propose it to Agents that need nothing, and let the act
+aim backwards under the same label as a forward one — the shape in which a compromised Server pushes
+a known-vulnerable build, and one the Client's own install already refuses, because an Ed25519
 signature carries no version ordering and an old release stays validly signed forever.
 
 An Agent reports up to three versions, and they can contradict each other.
@@ -97,8 +97,9 @@ Configuration, Package or Deployment that an assignment pins.
      [SRV-fleet-record-agents-hosts §18](SRV-fleet-record-agents-hosts.md) states.
    - An array-valued attribute (`host.ip`) is displayed but never matched.
    - There are no set-based operators. They would extend the same field compatibly.
-   - A Deployment's Selector is never empty ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)),
-     so no Selector reaches every Agent by default.
+   - A Deployment's Selector is never empty
+     ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), so no Selector
+     reaches every Agent by default.
 
 4. **The type is fitted inside the Deployment.**
    - A Configuration reaches only the Agents of its Deployment whose reported `service.name`
@@ -127,8 +128,8 @@ Configuration, Package or Deployment that an assignment pins.
      content, fails startup naming it. Saving distributes nothing.
 
 6. **The assignment is per Agent, persisted, and pins one release.**
-   - Each Agent's record ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) stores what
-     its last rollout released to it:
+   - Each Agent's record ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) stores
+     what its last rollout released to it:
      - the Deployment it was released through;
      - the Package pinned, if any;
      - for every Configuration released, its name and the content hash of the revision released.
@@ -161,8 +162,8 @@ Configuration, Package or Deployment that an assignment pins.
      another Deployment, or an Agent in no Deployment or in conflict, is `409`.
    - A rollout **replaces** the Agent's assignment. It pins two things as of the press: the
      Package the Deployment holds for the Agent's type, if it is a candidate by
-     [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md) and clauses 14–17; and every
-     Configuration of the Deployment that fits the Agent's type, at its saved revision. A
+     [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md) and clauses 14–17;
+     and every Configuration of the Deployment that fits the Agent's type, at its saved revision. A
      Configuration no longer in the Deployment leaves the Agent's map. The hash gates send only
      what changed.
    - Where the Deployment holds a Package for the Agent's type that is no candidate — the Agent
@@ -177,8 +178,8 @@ Configuration, Package or Deployment that an assignment pins.
    - Two cases are refused (`409`) for every act, and nothing is released:
      - a Deployment holding no Package and no Configuration;
      - a Deployment in which an entry of a Package it holds carries no signature
-       ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The message names each such
-       Package by its display name and the platforms it is unsigned for.
+       ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The message names
+       each such Package by its display name and the platforms it is unsigned for.
    - `POST /api/v1/configurations/{name}/rollout` does not exist (`404`). A bare Package or
      Configuration cannot be named in an act.
 
@@ -189,8 +190,8 @@ Configuration, Package or Deployment that an assignment pins.
 
 11. **A Deployment freezes nothing that a standing offer travels with.**
     - An assignment pins the Package and the revisions, and the signature is the entry's
-      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). So the Selector, the Packages and
-      the Configurations of a Deployment stay editable in every state.
+      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). So the Selector,
+      the Packages and the Configurations of a Deployment stay editable in every state.
     - Swapping the version a Deployment holds, or the revision of a Configuration, shows as
       waiting for the Agents already released, and the next press moves them.
     - Deleting the Deployment itself is clause 12's rule.
@@ -213,12 +214,12 @@ Configuration, Package or Deployment that an assignment pins.
 
 14. **What the Agent runs decides, in both directions.** The version an Agent runs is the
     version of the Package its Supervisor installed, where the Agent reports one that parses as a
-    version ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)) under `supervisor.package.version` (clause
-    25), and otherwise the `service.version` among its identifying attributes, where it parses.
-    The Package's version must be **strictly greater** than the version the Agent runs by SemVer
-    precedence, build metadata ignored. Equal does not match: a Package the Agent already runs
-    would reach it with nothing. Where the Agent reports a `supervisor.package.version`, its
-    `service.version` is not consulted.
+    version ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)) under
+    `supervisor.package.version` (clause 25), and otherwise the `service.version` among its
+    identifying attributes, where it parses. The Package's version must be **strictly greater** than
+    the version the Agent runs by SemVer precedence, build metadata ignored. Equal does not match: a
+    Package the Agent already runs would reach it with nothing. Where the Agent reports a
+    `supervisor.package.version`, its `service.version` is not consulted.
 
 15. **The claim is not consulted where the running version is.** A non-empty
     `agent_has_version` neither admits a Package the running version refuses nor refuses one it
@@ -259,9 +260,9 @@ Configuration, Package or Deployment that an assignment pins.
 
 21. **Rollback is not a rollout.** No act moves an Agent to an older version than it runs. An
     operator who wants an Agent back on its predecessor has the Agent's retention window
-    ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)) and, for the Client itself, the
-    pointer move of [CLT-self-update-signed-package](CLT-self-update-signed-package.md); a bad
-    version is otherwise taken back by publishing the old content as a new, greater version. A
+    ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)) and, for the Client
+    itself, the pointer move of [CLT-self-update-signed-package](CLT-self-update-signed-package.md);
+    a bad version is otherwise taken back by publishing the old content as a new, greater version. A
     deliberate Server-driven downgrade is left undecided: it is a separate act with its own
     authorisation question, and it must never be the same press as a rollout.
 
@@ -304,7 +305,8 @@ Configuration, Package or Deployment that an assignment pins.
       ([CLT-what-an-agent-reports §5](CLT-what-an-agent-reports.md)):
       the version of the Package whose program its Supervisor installed and starts,
       from the record of the last install that survived its apply grace
-      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), restored when the Client starts.
+      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), restored when the
+      Client starts.
     - It reports none before its first install, and none once that record is dropped
       ([PKG-versions-high-water-mark-floor §10](PKG-versions-high-water-mark-floor.md)). A failed
       install and a rollback leave the record of the predecessor, which is what then runs.
@@ -329,10 +331,11 @@ Configuration, Package or Deployment that an assignment pins.
 Deployment's Configurations or only its Packages; parameters and blocks in a Configuration (G-18, a
 decision of its own); where Deployments, Configurations and assignments are stored
 ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
-what a Package and its entries are ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)); an opt-in
-convergence policy for Agents that appear later; a batched or paused progressive walk; an audit
-trail of who rolled out what (the operator plane has no per-operator identity); an operator override
-to re-install a version the test holds back; a Server-driven downgrade.
+what a Package and its entries are
+([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)); an opt-in convergence
+policy for Agents that appear later; a batched or paused progressive walk; an audit trail of who
+rolled out what (the operator plane has no per-operator identity); an operator override to
+re-install a version the test holds back; a Server-driven downgrade.
 
 ## Alternatives considered
 
@@ -369,8 +372,9 @@ to re-install a version the test holds back; a Server-driven downgrade.
 - **A rollout option that releases only the Configurations or only the Packages.** The hash gates
   already send only what changed. The option can be added to the act without changing the model.
 - **A fleet-wide base Configuration, as an empty Selector or an implicit "everyone".** It brings
-  back the ranking between Deployments that [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)
-  removes. The human chose to solve such a need differently.
+  back the ranking between Deployments that
+  [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md) removes. The human chose
+  to solve such a need differently.
 - **Cascading deletion of Configurations and Packages through the assignments.** It is cheaper
   to use, but a deletion silently changes what running Agents receive. The protection a
   Deployment has applies to all three.
@@ -500,10 +504,10 @@ to re-install a version the test holds back; a Server-driven downgrade.
   Collector reporting `0.98.0` while its status claims `2.0.0` matches a Package at `1.5.0`. What
   limits it is that nothing moves on its own. Conversely, a program self-reporting a number above
   its Package is unreachable by that Package's number until the Package is re-created at the
-  program's number ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)). Both arise
-  only before a Supervisor's first install, while no `supervisor.package.version` is reported, and
-  for the Client Agent. Before it, for a program that reports no `service.version` that can be
-  ordered, the claim decides.
+  program's number ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)).
+  Both arise only before a Supervisor's first install, while no `supervisor.package.version` is
+  reported, and for the Client Agent. Before it, for a program that reports no `service.version`
+  that can be ordered, the claim decides.
 - Positive: a later repack of a version moves a host forward once. Once installed, the host
   reports the repack's version and is no candidate for it again.
 - Negative / trade-offs: the installed Package's version comes from a record, as the claim does.

@@ -130,7 +130,8 @@ The OpAMP API both ends share, and the lists of the REST API.
 
 #### SEC
 
-Security: TLS and bounded input, connection settings, secrets, admission, enrolment, and the audit record.
+Security: TLS and bounded input, connection settings, secrets, admission, enrolment, and the audit
+record.
 
 | ADR | Title | Applies to | Status |
 |-----|-------|------------|--------|

@@ -58,8 +58,8 @@ Forces:
   Client, could name any tree (another service's data, a user's profile, a system directory), and
   the next upgrade would hand that tree to it: a privilege escalation from the service's account to
   arbitrary file access on every platform. A Server cannot write those keys, since it delivers
-  `[[supervisor]]` blocks only ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)); a compromised
-  service account can. The registration (`/etc/systemd/system/<PRODUCT_NAME>.service`,
+  `[[supervisor]]` blocks only ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md));
+  a compromised service account can. The registration (`/etc/systemd/system/<PRODUCT_NAME>.service`,
   `/Library/LaunchDaemons/<PRODUCT_NAME>.plist`, or the SCM's entry) is what the Client wrote as
   root, and only an administrator can change it.
 - **A Supervisors' root is relocatable**, on purpose: programs off a `noexec` or undersized `/var`.
@@ -76,10 +76,10 @@ modified and the next `apt upgrade` silently reverts. The releases that carry th
 
 And one force on the name. The Baseline reserves `service.name` for the Agent *type* and recommends
 a reverse FQDN, a recommendation this project does not enforce
-([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)), and which opamp-spec issue 131 records as
-an overload of that key. Among Collectors, Foreign Agents and the process that supervises them, the
-useful type for the last is the role it plays. What the fleet offers the thing is named after what
-the thing is, and so is the thing itself.
+([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)), and which opamp-spec issue 131 records
+as an overload of that key. Among Collectors, Foreign Agents and the process that supervises them,
+the useful type for the last is the role it plays. What the fleet offers the thing is named after
+what the thing is, and so is the thing itself.
 
 ## Decision
 
@@ -97,13 +97,14 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    and the default when no subcommand is given) and `service install | config | uninstall | start
    | stop | status`. The global flags are `--config` (default `supervisor.toml`) and `--state-dir`;
    every service verb takes `--user`. There is no environment-variable configuration: the Client is
-   file-configured ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)) and a registered service
-   carries the configuration's *path*, never its content. clap's `version` is wired to
-   `opamp::version::current()` ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)). The daemon code lives
-   in `crates/fleet-agent/src/service/` (`runtime`, `layout`, `manager`, `run_as`, `enrol`, and
-   the Windows-only `windows`, `windows_config`, `windows_rights`, `withdrawal`), behind the narrow
-   `ServiceControl` seam (`start`, `stop`, `state`) that the self-update depends on. Errors are
-   `Result<_, String>`.
+   file-configured ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)) and a registered
+   service carries the configuration's *path*, never its content. clap's `version` is wired to
+   `opamp::version::current()`
+   ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)). The daemon code
+   lives in `crates/fleet-agent/src/service/` (`runtime`, `layout`, `manager`, `run_as`, `enrol`,
+   and the Windows-only `windows`, `windows_config`, `windows_rights`, `withdrawal`), behind the
+   narrow `ServiceControl` seam (`start`, `stop`, `state`) that the self-update depends on. Errors
+   are `Result<_, String>`.
 
 2. **`PRODUCT_NAME` is a build-time constant.** Default **`opamp-fleet`**, overridable with
    `OPAMP_PRODUCT_NAME` for a variant build. `crates/fleet-agent/build.rs` validates it against the
@@ -139,10 +140,11 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    package named after the Agent type
    ([CLT-self-update-signed-package §2](CLT-self-update-signed-package.md)), and a Server
    offers a package under the Agent type it is built for
-   ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), so the release a fleet uploads for its
-   Clients is a Package for Agent type `supervisor`, and no per-host setting is needed. A
-   Configuration carrying the Client's `[[supervisor]]` blocks
-   ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)) is typed `supervisor` as well.
+   ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), so the release a fleet
+   uploads for its Clients is a Package for Agent type `supervisor`, and no per-host setting is
+   needed. A Configuration carrying the Client's `[[supervisor]]` blocks
+   ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)) is typed `supervisor` as
+   well.
 
 6. **The program is `supervisor`.** `supervisor.exe` on Windows: the binary Cargo builds
    (`[[bin]] name = "supervisor"` in the package `fleet-agent`), the file in every version
@@ -151,8 +153,8 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    CLI's own name. The configuration file is **`supervisor.toml`**, and the `--config` default with
    it. What names an *installation* (the install path, the service, the dpkg/rpm package, the
    `PATH` symlink) is the product's name, not the program's (clauses 2 and 3, and the service name
-   of [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). The program's name is not derived
-   from the product's, so one published Package serves every variant build: the member a
+   of [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). The program's name is
+   not derived from the product's, so one published Package serves every variant build: the member a
    self-update extracts is the same in all of them. Two names deliberately stay where they are: the
    Cargo package `fleet-agent`, a build-time identifier that never leaves the repository, and the
    OTLP instrumentation scope `opamp-fleet-client`, which names the library a signal came from;
@@ -160,9 +162,10 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 7. **The instance name is a separate attribute, and its default is `Supervisor Agent`.** The
    top-level `name` is the operator's name for *this* Client, reported as `service.instance.name`
-   ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)). Its default is a display name (spaces
-   and capitals) and deliberately not `supervisor`: a default equal to the type would print the
-   same word in both columns of the fleet view. Nothing resolves a path or a service from this key.
+   ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)). Its default is a display name
+   (spaces and capitals) and deliberately not `supervisor`: a default equal to the type would print
+   the same word in both columns of the fleet view. Nothing resolves a path or a service from this
+   key.
 
 8. **One name per thing, with no alias.** No artifact carries the program twice, no version
    directory holds a compatibility link, and the loader reads no configuration file but the one it
@@ -218,13 +221,13 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
       and then runs the same `service install` the command line would, which builds the layout and
       the data under `%ProgramData%\<PRODUCT_NAME>`. The layout is not put in `Program Files`: the
       service's own account must be able to write it
-      ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), and granting a low-privileged
-      account modify rights on a `TrustedInstaller`-owned tree it executes from is a
+      ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), and granting a
+      low-privileged account modify rights on a `TrustedInstaller`-owned tree it executes from is a
       privilege-escalation surface. The line is the one the Linux packages draw between the
       package-owned `/usr/libexec/<PRODUCT_NAME>/` payload and the program-owned `/opt` layout
-      ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). The MSI passes no root flag, so no
-      directory property reaches a command line, and an MSI host and an archive host put the same
-      things in the same places.
+      ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). The MSI passes no
+      root flag, so no directory property reaches a command line, and an MSI host and an archive
+      host put the same things in the same places.
     - **Two flags.** `--root` names the layout root; given **alone** it collapses layout and data
       into that one directory, whose labelling and permissions are then the operator's business.
       `--data-root` names the data root; alone, it moves only the data. A packaged install passes
@@ -240,8 +243,9 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
       registration has it (clause 14).
     - A re-registration rewrites the program path (`ExecStart`) and the rest of the unit or plist
       from the version that runs it, the systemd unit's directives included
-      ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). The account stays the one the
-      registration names ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)).
+      ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). The account stays the
+      one the registration names
+      ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)).
     - The instance's configuration, identity and state never move.
     - A change that would move the data root or the state directory of an installed host must bring
       its own migration and carries the full weight of this rule. An administrator who names
@@ -284,9 +288,10 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 16. **A Supervisors' root outside the roots is the operator's.** A `supervisor_dir` outside the
     data root, the layout root and the state directory stays as relocatable as the Supervisors'
-    directories are made ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). A system-scope
-    install on Windows never creates, restricts or hands over such a root. It leaves it as it is
-    and names it in a warning. On Linux and macOS an install never touches a Supervisors' root.
+    directories are made ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). A
+    system-scope install on Windows never creates, restricts or hands over such a root. It leaves it
+    as it is and names it in a warning. On Linux and macOS an install never touches a Supervisors'
+    root.
 
 ### The service
 
@@ -396,11 +401,11 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 29. **Three classes of asset, and only one is a package artifact.** The Client's archive is opened
     by the Client on a self-update and parsed by the fleet view; the operator tool's archives
-    ([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)) are downloaded to an operator's
-    machine and are no package of the fleet; the `.deb`, `.rpm` and `.msi` are opened by `dpkg`,
-    `rpm` and Windows Installer and by nothing in the fleet path. The installers are **additive
-    operator artifacts**: they never replace the archive, which is the only format the fleet can
-    install.
+    ([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)) are downloaded to an
+    operator's machine and are no package of the fleet; the `.deb`, `.rpm` and `.msi` are opened by
+    `dpkg`, `rpm` and Windows Installer and by nothing in the fleet path. The installers are
+    **additive operator artifacts**: they never replace the archive, which is the only format the
+    fleet can install.
 
 30. **The endpoint dialog is prefilled with the development Server, interactively only.** A
     `SetProperty` in the UI sequence, conditioned on `ENDPOINT` unset and the product not
@@ -411,9 +416,9 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
     the Agent plane always serves TLS, so a development Server answers no plaintext request, and
     `localhost` is a host name, which is never the loopback (only the IP literals `127.0.0.1` and
     `::1` are), so the Client would refuse the value at startup. The scheme selects the transport
-    ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), so the click-through install runs
-    WebSocket, as an unconfigured Client would. Like every value an installer writes, the prefill
-    passes the rule the Client applies at startup
+    ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), so the
+    click-through install runs WebSocket, as an unconfigured Client would. Like every value an
+    installer writes, the prefill passes the rule the Client applies at startup
     ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md),
     on what an installer writes).
 
@@ -431,29 +436,31 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
     `[package.metadata.generate-rpm]`, reading the workspace's version, licence and description;
     `cargo-deb` derives `Depends` from what the binary links (`$auto`). The RPM `Release` is `1`
     and stays `1`, and no epoch or `~` mangling is needed, because a version is released once and
-    is always `MAJOR.MINOR.PATCH` ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)). The maintainer
+    is always `MAJOR.MINOR.PATCH`
+    ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)). The maintainer
     scripts live in `packaging/linux/`, the WiX sources in `packaging/windows/`.
 
 **Out of scope:** the versioned layout and its `current` pointer, the service's name, the account
 it runs under, what the Linux packages deliver and remove, and the MSI's dialogs and actions
-([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)); staging, verifying, rolling back and
-pruning versions, and the self-update consent
+([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)); staging, verifying, rolling
+back and pruning versions, and the self-update consent
 ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)); the questions of the first
 configuration, `service install --endpoint` and what lies beside the program
 ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md));
 that no installer starts the service it registers
-([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)); whether variant builds are ever
-published, and where their `UpgradeCode`s are recorded; how an operator discovers what is installed
-on a host; a confined SELinux policy module; configuration reload on `SIGHUP`; `Type=notify`
-integration; the startup rules themselves and the Server's enrolment window and approval, which the
-installer only applies and names
+([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)); whether variant builds are
+ever published, and where their `UpgradeCode`s are recorded; how an operator discovers what is
+installed on a host; a confined SELinux policy module; configuration reload on `SIGHUP`;
+`Type=notify` integration; the startup rules themselves and the Server's enrolment window and
+approval, which the installer only applies and names
 ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md));
 hosting apt and yum
 repositories; preseeding the endpoint on Linux; a macOS `.pkg`, which needs a Developer ID and
 notarization; the files an enrolment writes as root into the state directory, which no privileged
-step writes through a link ([CLT-accounts-service-runs-under §11](CLT-accounts-service-runs-under.md)); the
-`[tls]` files an enrolment reads as root; `[logging] dir`, which only the service's own run uses;
-the releases and the Server's image
+step writes through a link
+([CLT-accounts-service-runs-under §11](CLT-accounts-service-runs-under.md)); the `[tls]` files an
+enrolment reads as root; `[logging] dir`, which only the service's own run uses; the releases and
+the Server's image
 ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)).
 
 ## Alternatives considered
@@ -526,8 +533,8 @@ the releases and the Server's image
 - **The Windows Event Log**: an event source registered at install time, a message resource, and a
   code path only one platform exercises. **A file only on Windows**: makes "where are the logs"
   platform-dependent and leaves containers without one. **Rely on the OTLP own-logs bridge**
-  ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)): needs a reachable Server, so it cannot
-  explain the failures that prevent one. **Size-based rotation**: `tracing-appender` does not
+  ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)): needs a reachable Server, so it
+  cannot explain the failures that prevent one. **Size-based rotation**: `tracing-appender` does not
   offer it. **`keep = 0` as unlimited**: the setting that fills a disk. **Remotely configurable
   logging**: the Client's own configuration stays on the machine. **The log in the version
   directory**: a self-update would scatter it and a rollback take it away.

@@ -19,10 +19,10 @@ a Plugin translates into OpAMP (G-7).
 The specification asks for a hexagonal core: the supervision domain written against two Ports, the
 Server-facing side speaking OpAMP and the Managed-Process side (lifecycle, configuration, health),
 with Plugins as adapters, so that a new process type is a new Plugin (G-8).
-[DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md) keeps such seams as modules until a need makes
-them crates and requires a typo in the hand-edited TOML to fail loudly at startup. serde cannot
-combine `#[serde(flatten)]` with `deny_unknown_fields` (serde-rs/serde#1547), so a block whose
-kind-specific keys sit beside the common ones cannot be one strict struct.
+[DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md) keeps such seams as modules until a need
+makes them crates and requires a typo in the hand-edited TOML to fail loudly at startup. serde
+cannot combine `#[serde(flatten)]` with `deny_unknown_fields` (serde-rs/serde#1547), so a block
+whose kind-specific keys sit beside the common ones cannot be one strict struct.
 
 The reference `opampsupervisor` runs a local OpAMP server on
 `ws://127.0.0.1:{{port}}/v1/opamp` (WebSocket only), passes configuration to the Collector via
@@ -30,10 +30,10 @@ The reference `opampsupervisor` runs a local OpAMP server on
 timeout, and watchdog-restarts it with exponential backoff. It configures its agent generically,
 an absolute `agent.executable` plus `args`, because it supervises a binary somebody else
 installed. This Client is in the opposite position: it installs every program it supervises into a
-directory it owns ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md) lays the directory
-out), from an artifact this project packs (clause 23). It is the one end that can know an agent's
-layout, and `opamp-fleetctl package fetch` already carries per-agent knowledge (service name,
-release source, default Configuration names). Writing that knowledge into every host's TOML by
+directory it owns ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md) lays the
+directory out), from an artifact this project packs (clause 23). It is the one end that can know an
+agent's layout, and `opamp-fleetctl package fetch` already carries per-agent knowledge (service
+name, release source, default Configuration names). Writing that knowledge into every host's TOML by
 hand, one block per platform for an agent whose invocation differs by platform and one key per
 layout path for an agent that has to be relocated, is a transcription that goes stale when an
 artifact moves.
@@ -50,8 +50,8 @@ update that finds this out after the swap has already stopped what ran. Not ever
 its version as Semantic Versioning.
 
 A package update swaps files: the running program is renamed aside, the artifact is written beside
-it and renamed into place ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). All of that
-needs write permission on the **directory**. A program in a system directory such as
+it and renamed into place ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)).
+All of that needs write permission on the **directory**. A program in a system directory such as
 `/usr/local/bin` cannot be updated by a Client that does not run as root, and the failure would
 appear at rollout time on every matched host rather than at startup on one. A Client that also
 supervised programs installed by someone else would have two kinds of Managed Process, one it can
@@ -68,10 +68,10 @@ path written there drifts silently when the Supervisor's directory moves or the 
 renamed: the process starts happily on a file nobody writes to.
 
 What the fleet needs to manage on a Client is which Supervisors it runs. Everything else in
-`supervisor.toml` ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), the Server endpoint,
-the credential, the state directory and the instance name, is host-local trust and wiring; a
-Server that could rewrite it could cut a Client off with one bad push. The specification allows an
-Agent's effective configuration to merge in local configuration, and bounds a remote
+`supervisor.toml` ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), the
+Server endpoint, the credential, the state directory and the instance name, is host-local trust and
+wiring; a Server that could rewrite it could cut a Client off with one bad push. The specification
+allows an Agent's effective configuration to merge in local configuration, and bounds a remote
 configuration to its Supervisor and the Client's list of Supervisors (Q-5). The program a
 Supervisor spawns is itself a trust anchor: a Server, or someone who has compromised it without
 the package-signing key, that could name any program on the host would have fleet-wide code
@@ -82,9 +82,9 @@ package, prevents that. It is not enough on its own: a block's `env` and `args` 
 program unchecked, with placeholders expanded in both (clause 25). A Server that delivers a shared
 object as a configuration entry and then a block with `LD_PRELOAD` pointing at it has the loader
 run that object as the account the Managed Process runs under
-([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), and any signed program that loads a
-plugin or a script named in its arguments reaches as far. A kind setting that names a file the
-Supervisor reads reaches as far as the host's files: a kind that reads such a file and sends its
+([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), and any signed program that
+loads a plugin or a script named in its arguments reaches as far. A kind setting that names a file
+the Supervisor reads reaches as far as the host's files: a kind that reads such a file and sends its
 content to a peer the block names sends whatever file a delivered block points it at, to whatever
 peer that block names. [`HARDENING.md`](../HARDENING.md) lists the bound on both under *What
 already holds*. The specification puts security before convenience; what a compromised Server can
@@ -101,14 +101,14 @@ write any files into a Supervisor's own `config/` directory and restart its proc
 agent's configuration language allows, a command a configuration names, a Collector receiver
 bound to any port, it allows as the process's account. Package delivery on the
 same channel stops at a signature the operator's key makes
-([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)); a remote configuration has no such stop.
-An operator may run an agent whose configuration is too sensitive to take from a compromised
-Server, or which another system already configures. A switch per Supervisor binds a name, not an
-agent, while the Server manages the set: the Server can remove a listed Supervisor and deliver the
-same agent under another name, which is not listed. Through the set the Server adds, changes,
-restarts and purges Supervisors on the host. The Protocol Baseline allows remote configuration to
-be switched off: *"Remote configuration capability can be disabled if necessary"* (OpAMP
-specification, *Configuration*).
+([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)); a remote configuration
+has no such stop. An operator may run an agent whose configuration is too sensitive to take from a
+compromised Server, or which another system already configures. A switch per Supervisor binds a
+name, not an agent, while the Server manages the set: the Server can remove a listed Supervisor and
+deliver the same agent under another name, which is not listed. Through the set the Server adds,
+changes, restarts and purges Supervisors on the host. The Protocol Baseline allows remote
+configuration to be switched off: *"Remote configuration capability can be disabled if necessary"*
+(OpAMP specification, *Configuration*).
 
 What the Server may change on a host is bounded by what the host takes, not by what the Server
 sends. The Server manages the set of `[[supervisor]]` blocks through the Client Agent, and every
@@ -136,8 +136,9 @@ once the Supervisor-set apply succeeded: `remote-config.pb` and one copy of each
 `config/`, both in `state_dir`. Nothing runs on those files, since the set they carry is already
 in `supervisor.toml` (clause 30). Restoring them at start reports `RemoteConfigStatus` `APPLIED`
 with the stored hash, which tells the Server the Client runs that set, and the Server offers a set
-only while the reported hash differs ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the
-offer of a remote configuration).
+only while the reported hash differs
+([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the offer of a remote
+configuration).
 
 The Server offers a remote configuration only to an Agent declaring `AcceptsRemoteConfig`
 ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), `offer` in
@@ -151,8 +152,9 @@ therefore offered no remote configuration, with no change on the Server.
 What a Supervisor runs without a remote configuration follows from how each kind finds its
 configuration. Every kind reads it from the Supervisor's own `config/` directory,
 `<supervisor_dir>/<name>/config/`, where `store_remote_config` writes one file per entry and
-records roles in `.supplementary` ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), how a
-received configuration is stored):
+records roles in `.supplementary`
+([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), how a received
+configuration is stored):
 
 - `collector` passes every unroled file in `config/` as its own `--config`, then the block's
   `args`; with no such file it does not start and reports *awaiting configuration*
@@ -242,12 +244,12 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 
 3. **A block is parsed in two stages.** The core takes the common keys, `type`, `name`,
    `service_name` ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)), `endpoint_port`,
-   `program_path` ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), `stop_timeout_secs`,
-   `apply_grace_secs` and `retain_previous_secs`, and the program key the kind names (`binary`
-   for `collector`, `command` for `command`), which clause 21 resolves. Everything else is the
-   kind's, parsed with `deny_unknown_fields`. `name` follows the instance-name grammar of
-   [CLT-installed-service-and-state](CLT-installed-service-and-state.md), because it is a directory name, and is
-   unique across blocks.
+   `program_path` ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)),
+   `stop_timeout_secs`, `apply_grace_secs` and `retain_previous_secs`, and the program key the kind
+   names (`binary` for `collector`, `command` for `command`), which clause 21 resolves. Everything
+   else is the kind's, parsed with `deny_unknown_fields`. `name` follows the instance-name grammar
+   of [CLT-installed-service-and-state](CLT-installed-service-and-state.md), because it is a
+   directory name, and is unique across blocks.
 
 4. **Each Supervisor is one Agent; the pool is one connection.** Every Supervisor has its own
    persisted `instance_uid`, `sequence_num` and capability set, and all of them ride the Client's
@@ -269,10 +271,11 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
    SIGTERM, a wait of up to the stop timeout, then a kill on Unix, signalling the process group
    where the kind leads one (clause 53), and `Child::kill` on Windows. On Client shutdown the
    Managed Processes stop first, then each Agent's `agent_disconnect` goes out, within the service
-   managers' stop budgets ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)). The Collector
-   Supervisor passes each written configuration entry as its own `--config` (never a supplementary
-   entry, [SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)), appends its extra `args`, does not
-   start before a configuration exists, and manipulates no YAML.
+   managers' stop budgets ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)).
+   The Collector Supervisor passes each written configuration entry as its own `--config` (never a
+   supplementary entry,
+   [SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)), appends its extra
+   `args`, does not start before a configuration exists, and manipulates no YAML.
 
 7. **Configuration status is health-gated.** `RemoteConfigStatus` is `APPLYING` on receipt,
    `APPLIED` only once the Managed Process has been (re)started on the new files and survived the
@@ -298,16 +301,16 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 
 10. **Install and update run behind the Plugin, in one contract.** `ApplyPackage` hands the
     adapter a verified artifact and expects a health-gated outcome with rollback on failure
-    ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The swap on `InstallTarget` (one file
-    or a tree) is the shared default; a kind whose installation is not a file swap implements the
-    step itself inside the same contract. Resolving the program and declaring `AcceptsPackages`
-    stay in the core (clauses 21 and 22), because a capability the Server acts on must derive from
-    what the core reads, never from per-kind behaviour.
+    ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The swap on
+    `InstallTarget` (one file or a tree) is the shared default; a kind whose installation is not a
+    file swap implements the step itself inside the same contract. Resolving the program and
+    declaring `AcceptsPackages` stay in the core (clauses 21 and 22), because a capability the
+    Server acts on must derive from what the core reads, never from per-kind behaviour.
 
 11. **Uninstall undoes what installing did, and the core purges.** A Supervisor removed from the
     set receives `Uninstall` before its directory is purged (the purge of a removed Supervisor,
-    [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)): the adapter stops its
-    process, undoes whatever its installs left outside the Supervisor's directory, answers
+    [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)): the adapter stops
+    its process, undoes whatever its installs left outside the Supervisor's directory, answers
     `Uninstalled` and exits. The generic uninstall is exactly the bounded graceful stop. An `Err`
     outcome is logged with what could not be undone; it does not hold up the removal. A Supervisor
     that is only changed is stopped, never uninstalled.
@@ -373,10 +376,11 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 
 17. **Timing is a fleet policy, then a kind's correction, never a host's.** `[supervisors]` holds
     `stop_timeout_secs` (default 10) and `apply_grace_secs` (default 3); `[updates]` holds
-    `retain_previous_secs` (default one day, [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)).
-    A wrapped kind may correct any of the three where its agent demands it (an agent whose shutdown
-    drains for up to a minute), and its blocks may state none of them. Only `collector` and
-    `command` blocks may override them, because there no kind exists to hold the value.
+    `retain_previous_secs` (default one day,
+    [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). A wrapped kind may
+    correct any of the three where its agent demands it (an agent whose shutdown drains for up to a
+    minute), and its blocks may state none of them. Only `collector` and `command` blocks may
+    override them, because there no kind exists to hold the value.
 
 18. **A Client reports which kinds it carries.** Its Client Agent reports one non-identifying
     attribute per compiled-in kind, `supervisor.kind.<kind> = "true"`, so a Selector can aim a
@@ -386,8 +390,8 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     ([CLT-what-an-agent-reports §10](CLT-what-an-agent-reports.md)).
     `AvailableComponents` is
     not used for this: the message is *Development* in the pinned Baseline
-    ([API-protocol-pinned-interop-checked](API-protocol-pinned-interop-checked.md)) and Selectors do not
-    match it.
+    ([API-protocol-pinned-interop-checked](API-protocol-pinned-interop-checked.md)) and Selectors do
+    not match it.
 
 19. **A kind binds itself to one artifact's shape.** The derived paths are those of the artifact
     `opamp-fleetctl package fetch` builds. A tree packed differently does not fit, and the answer
@@ -427,8 +431,8 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 
 23. **A vendor agent is brought in by repacking.** An agent installed by the machine's package
     manager is not supervised here; it is repacked as a relocatable artifact and delivered as a
-    package ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The manual documents the
-    fleet-delivered route for every agent it describes.
+    package ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The manual
+    documents the fleet-delivered route for every agent it describes.
 
 24. **The Client's own consent stays explicit.** `[self_update]` names the package it takes
     ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)); nothing about it is
@@ -438,19 +442,21 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 25. **Placeholders name a Supervisor's own directories.** In the `args` and `env` values of
     `collector` and `command` blocks, `${supervisor_dir}` expands to `<supervisor_dir>/<name>` and
     `${config_dir}` to `<supervisor_dir>/<name>/config`, where the received configuration's
-    entries are written ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)), so
+    entries are written
+    ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)), so
     `args = ["-c", "${config_dir}/fluent-bit-conf"]` cannot drift. They are expanded when the
     Supervisor starts, and **never** in the program key, whose written shape is what the operator
-    reads. An unrecognised `${…}` is passed through verbatim, neither refused nor emptied, because
-    a Foreign Agent's own configuration language may use the same syntax (Fluent Bit's does).
+    reads. An unrecognised `${…}` is passed through verbatim, neither refused nor emptied, because a
+    Foreign Agent's own configuration language may use the same syntax (Fluent Bit's does).
 
 26. **The Server manages the set through the Client Agent, and only the blocks are read.** A
     remote configuration offered to the Client Agent, a Configuration stated for the Agent type
-    `supervisor` ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)), is parsed entry by entry
-    as TOML. The union of the entries' `[[supervisor]]` blocks, in entry-name order, is the
-    offered set; every other top-level key is ignored. The boundary is enforced by what the Client
-    takes, not by policing what the Server sends. A duplicate `name` within or across entries, an
-    entry that is not TOML, or a block the startup parser would refuse fails the offer.
+    `supervisor` ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)), is
+    parsed entry by entry as TOML. The union of the entries' `[[supervisor]]` blocks, in entry-name
+    order, is the offered set; every other top-level key is ignored. The boundary is enforced by
+    what the Client takes, not by policing what the Server sends. A duplicate `name` within or
+    across entries, an entry that is not TOML, or a block the startup parser would refuse fails the
+    offer.
 
 27. **An offered set is validated as startup would read it, before anything stops.** The merge is
     the running file's globals with the offered blocks. Each block passes the same checks startup
@@ -544,11 +550,11 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 
 38. **The key `server_manages_set`.** `[supervisors] server_manages_set` is a boolean and defaults
     to `true`, the behaviour clauses 26 to 37 describe, with the purge of a removed Supervisor
-    ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)) and the orphaned directories
-    of [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md). It is read when the configuration
-    is loaded, like every key of the file, and is never taken from the Server, since the
-    Supervisor-set apply replaces only the `[[supervisor]]` array (clauses 26 and 30). A change
-    takes effect at the next start of the Client.
+    ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)) and the orphaned
+    directories of [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md). It is read
+    when the configuration is loaded, like every key of the file, and is never taken from the
+    Server, since the Supervisor-set apply replaces only the `[[supervisor]]` array (clauses 26 and
+    30). A change takes effect at the next start of the Client.
 
 39. **With `server_manages_set` false, the Client Agent declares neither remote-configuration
     capability.** It is built without `AcceptsRemoteConfig` and without `ReportsRemoteConfig`.
@@ -558,7 +564,8 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     enabled, and `AcceptsPackages` with `ReportsPackageStatuses` where `[self_update]` consents and
     a verification key is configured. Self-update is a separate consent (clause 24) and is not
     touched. The Server then offers the Client no set
-    ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the offer of a remote configuration).
+    ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the offer of a
+    remote configuration).
 
 40. **A set that arrives anyway is ignored.** It is not stored, not applied, and no
     `RemoteConfigStatus` is reported: no Supervisor stops or starts and `supervisor.toml` is not
@@ -603,9 +610,9 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     A command a configuration can run (a check or exec entry an agent's configuration names, the
     configuration a `command` kind's program reads) runs as the account its Managed Process runs
     under. Where a process account is registered, that is the process account, which cannot write
-    `supervisor.toml` ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). Where none is,
-    it is the Client's account, and what the key holds against the Server holds only while every
-    Supervisor whose configuration language can run commands is named in
+    `supervisor.toml` ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). Where
+    none is, it is the Client's account, and what the key holds against the Server holds only while
+    every Supervisor whose configuration language can run commands is named in
     `remote_config_disabled`. Otherwise the Server can configure such a Supervisor to rewrite
     `supervisor.toml`, and the key flips at the next start. A signed Client build can also still
     replace the Client's own program where `[self_update]` consents
@@ -615,9 +622,10 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 44. **Switching `server_manages_set` back on hands the set to the Server again.** When the key
     returns to `true`, the next start declares both capabilities, reports no hash, unless that
     earlier start warned that it could not remove `remote-config.pb` itself, and is offered
-    whatever set is released to the Client Agent ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). The
-    first applied offer replaces the `[[supervisor]]` array, the operator's blocks included, and
-    purges each Supervisor it removes (clause 32 and the purge of a removed Supervisor,
+    whatever set is released to the Client Agent
+    ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). The first
+    applied offer replaces the `[[supervisor]]` array, the operator's blocks included, and purges
+    each Supervisor it removes (clause 32 and the purge of a removed Supervisor,
     [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)).
 
 45. **The key `remote_config_disabled`.** `[supervisors] remote_config_disabled` is a list of
@@ -638,7 +646,8 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     without `AcceptsRemoteConfig` and without `ReportsRemoteConfig`. Every other capability stays
     as it is: `ReportsEffectiveConfig`, `AcceptsRestartCommand`, and `AcceptsPackages` with
     `ReportsPackageStatuses` where a verification key is configured. The Server then offers it no
-    remote configuration ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the offer of a
+    remote configuration
+    ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the offer of a
     remote configuration), and nothing on the Server changes.
 
 48. **A remote configuration that arrives anyway is ignored.** It is not stored, no entry file is
@@ -716,8 +725,9 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 
 52. **Switching it back on hands `config/` to the Server again.** When a name leaves the list, the
     next start declares both capabilities, reports no hash, and is offered whatever is released to
-    that Agent ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). The first stored offer replaces
-    every file in `config/` ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), how a received
+    that Agent ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). The
+    first stored offer replaces every file in `config/`
+    ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), how a received
     configuration is stored), the operator's included.
 
 53. **A kind may lead its own process group, and is then stopped as a group.** A kind whose agent
@@ -726,19 +736,20 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     to `SIGKILL` cannot leave the worker behind. Leading a group is opt-in per kind; kinds with one
     process keep signalling the pid. On Windows a program the second service starts runs in a job
     of its own, and a stop ends the job with everything in it
-    ([CLT-accounts-service-runs-under §19 and §20](CLT-accounts-service-runs-under.md)). A program the
-    Client starts itself on Windows has no group, and its stop ends the pid alone.
+    ([CLT-accounts-service-runs-under §19 and §20](CLT-accounts-service-runs-under.md)). A program
+    the Client starts itself on Windows has no group, and its stop ends the pid alone.
 
 54. **A package is proved to run before it is installed.** For every kind, after an artifact is
-    unpacked to its staged name ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), the staged
-    name of an unpacked artifact) and before the swap, the Runner runs the staged program once
-    with a preflight its kind supplies. A failure answers `PackageApplied{Err}` carrying the
-    dynamic linker's own message (*"version `GLIBC_2.39' not found"*, *"cannot open shared object
-    file"*), and nothing is swapped, so a running Managed Process is never stopped for a package
-    that could not run. A kind's preflight is its version arguments, with whatever environment its
-    ADR adds; `command` uses its `version_args`, so a `command` block without them has no
-    preflight. The health gate and rollback of [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)
-    remain the second line.
+    unpacked to its staged name
+    ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), the staged name of an
+    unpacked artifact) and before the swap, the Runner runs the staged program once with a preflight
+    its kind supplies. A failure answers `PackageApplied{Err}` carrying the dynamic linker's own
+    message (*"version `GLIBC_2.39' not found"*, *"cannot open shared object file"*), and nothing
+    is swapped, so a running Managed Process is never stopped for a package that could not run. A
+    kind's preflight is its version arguments, with whatever environment its ADR adds; `command`
+    uses its `version_args`, so a `command` block without them has no preflight. The health gate
+    and rollback of [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md) remain
+    the second line.
 
 55. **A version probe may bring its own parser.** `VersionProbe` takes an optional parse function,
     strict Semantic Versioning by default. A kind whose program prints its version in another form
@@ -753,8 +764,8 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     Client twice is the normal case, not a fault. An offer of another hash is taken as before,
     after the one applying. A hash whose apply `FAILED` is applied again when offered again, so a
     host repaired after the failure takes the offer once more. A deliberate restart stays the
-    `Restart` command. [PKG-signed-packages-and-delivery §49](PKG-signed-packages-and-delivery.md) treats a
-    package hash already installed or in flight the same way.
+    `Restart` command. [PKG-signed-packages-and-delivery §49](PKG-signed-packages-and-delivery.md)
+    treats a package hash already installed or in flight the same way.
 
 57. **The version probe and the preflight ask the program as its start runs it.** `VersionProbe`
     and `Preflight` each take an optional working directory, inherited when none is named. A kind
@@ -777,14 +788,14 @@ one (Gateway Mode, [CLT-modes-and-gateway](CLT-modes-and-gateway.md)); reporting
 locally edited `[[supervisor]]` set against the last applied offer at startup; an opt-in reaping of
 orphaned directories; migrating a Supervisor tree when its root moves; a supervise-only mode for
 programs this Client does not install, which would need its own decision and capability model; how
-a multi-file tree is unpacked and swapped ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md));
-keeping some blocks from the Server while it manages the others; how the fleet view or the REST
-API shows that a host keeps its set, beyond the capability set the Server already lists; any
-change on the Server, the REST API or the bundled UI for either switch; the restart command and
-package delivery to a listed Supervisor, which stay as they are; what a listed Supervisor reports
-as its effective configuration when its process reports none (the empty map, as for any
-Supervisor before its first remote configuration); a group stop through a job object for a
-program the Client starts itself on Windows.
+a multi-file tree is unpacked and swapped
+([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)); keeping some blocks from
+the Server while it manages the others; how the fleet view or the REST API shows that a host keeps
+its set, beyond the capability set the Server already lists; any change on the Server, the REST API
+or the bundled UI for either switch; the restart command and package delivery to a listed
+Supervisor, which stay as they are; what a listed Supervisor reports as its effective configuration
+when its process reports none (the empty map, as for any Supervisor before its first remote
+configuration); a group stop through a job object for a program the Client starts itself on Windows.
 
 ## Alternatives considered
 
@@ -865,8 +876,8 @@ program the Client starts itself on Windows.
   for a capability the fleet path does not need. Warning and applying anyway is not a control.
 - **A separate `bin_dir`, or a `supervisor_dir` per block.** Two knobs for a separation nobody has
   asked for; one root per Client, laid out by
-  [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md), matches how the Client's own root is
-  treated.
+  [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md), matches how the Client's
+  own root is treated.
 - **Keeping a bare name as a `$PATH` lookup and requiring `./` for the owned meaning.** A fourth
   case, noise in TOML, to keep behaviour fragile under a service manager's minimal `PATH`.
 - **A `versions/` + `current` layout for Managed Processes.** A Managed Process is stopped before
@@ -892,12 +903,12 @@ program the Client starts itself on Windows.
   it aside.** A re-added Supervisor would resurrect a disconnected Agent's identity and stale
   configuration; a split directory is unreasoned; retention exists to roll back a living
   Supervisor, which a removed one is not; a renamed copy is a slower leak. The purge
-  [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md) decides removes the directory
-  whole.
+  [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md) decides removes the
+  directory whole.
 - **Reaping orphaned directories at startup.** Startup cannot tell a leftover from a deliberate
   hand edit, and the destructive reading deletes an identity that was not meant to go; the
-  orphaned directories are reported as [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)
-  decides.
+  orphaned directories are reported as
+  [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md) decides.
 - **Default `false` for `server_manages_set`.** Every existing Client would stop following the
   Server's set at upgrade, including hosts that took one, and G-1's loop would no longer close for
   Supervisor sets until each host's file says so. The switch is an operator's narrowing of what
@@ -940,9 +951,9 @@ program the Client starts itself on Windows.
 - **Wiping the whole `config/` directory at start.** It would delete the files an operator placed
   there before the restart that put the switch in force.
 - **Moving the Server's stored files aside instead of deleting them.** They can carry secret
-  material ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), how a received configuration is
-  stored), and nothing needs them back: switching back on reports no hash, so the Server offers
-  again what is released.
+  material ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), how a
+  received configuration is stored), and nothing needs them back: switching back on reports no hash,
+  so the Server offers again what is released.
 - **A separate host path for a listed Supervisor's local configuration.** It would be a second
   place each kind reads from, and a block key the Server could rewrite. `config/` is already where
   every kind looks.

@@ -27,8 +27,9 @@ TLS is part of the transport. G-17 requires every connection a Client opens to t
 TLS 1.3, with a client certificate in its handshake. The Strategy *Security before convenience*
 widens that to every connection that leaves the host, and accepts plaintext on the loopback alone.
 Q-1 adds that a configuration breaking this is refused at startup, naming the setting, and never
-warned about. The Dev Container ([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)) has neither OpenSSL
-headers nor cmake, which `aws-lc-rs`-backed rustls needs.
+warned about. The Dev Container
+([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)) has neither OpenSSL headers
+nor cmake, which `aws-lc-rs`-backed rustls needs.
 
 In this ADR, **LOOPBACK** means the IP literals `127.0.0.1` and `::1`. A host name is never
 LOOPBACK, `localhost` included: what it resolves to is a resolver's answer, not the
@@ -49,9 +50,9 @@ endpoint. Where the route is served, and what protects the artifact, is
 [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)'s.
 
 The Agent plane's certificate is made by `opamp-fleetctl pki` from the fleet's own server CA
-([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)). The Clients trust that CA because
-their `[tls] ca_file` names it. A browser does not, unless the operator imports the server CA
-into every browser that opens the UI. In an organization with its own PKI, the UI is expected to
+([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)). The Clients trust that CA
+because their `[tls] ca_file` names it. A browser does not, unless the operator imports the server
+CA into every browser that opens the UI. In an organization with its own PKI, the UI is expected to
 present a certificate from that PKI, which every managed browser already trusts. The Agent plane
 cannot take that certificate instead, because every Client trusts the fleet's server CA and
 nothing else. One certificate for both planes also puts the key every Client's trust rests on
@@ -96,15 +97,15 @@ bounds how many messages an admitted peer sends:
 - the connection cap (clause 19) bounds sockets;
 - the message size limit (clause 3) bounds each message;
 - the pace floor (clause 18) bounds how slowly a message may arrive;
-- the throttle of failed admissions in SEC-admission-by-client-certificate counts failures per peer address, and a member
-  never fails.
+- the throttle of failed admissions in SEC-admission-by-client-certificate counts failures per peer
+  address, and a member never fails.
 
 None of them bounds how often. One WebSocket session can send a full report as fast as the Server
 decodes it. Each report takes the fleet lock, may write the Agent's record to disk
-([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)), may compose an offer, and may ask for a
-certificate to be signed. A plain-HTTP poller can do the same with one request per message. The
-package download route is the Agent plane's other member route, and it costs more: each request
-scans the fleet under its lock to find an Agent the artifact is offered to
+([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)), may compose an offer, and may
+ask for a certificate to be signed. A plain-HTTP poller can do the same with one request per
+message. The package download route is the Agent plane's other member route, and it costs more: each
+request scans the fleet under its lock to find an Agent the artifact is offered to
 ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)).
 
 The specification holds that no vulnerability can be ruled out (Strategy *Security before
@@ -115,18 +116,20 @@ input be bounded, and an admitted peer's message is still input from the network
 Forces that shape the rate limit:
 
 - **The host is the unit admission knows.** A certificate names the host it was issued to as
-  `urn:opamp-fleet:host:<id>` (SEC-admission-by-client-certificate, the host a certificate names). `instance_uid` is
-  self-asserted (SEC-admission-by-client-certificate), so a limit keyed on it alone binds nothing: a peer chooses a new uid
-  for each message. A certificate an operator provisioned outside the CSR flow names no host until
-  it is first renewed. It is still one certificate, told apart by its issuer and serial (`CertId` in
+  `urn:opamp-fleet:host:<id>` (SEC-admission-by-client-certificate, the host a certificate names).
+  `instance_uid` is self-asserted (SEC-admission-by-client-certificate), so a limit keyed on it
+  alone binds nothing: a peer chooses a new uid for each message. A certificate an operator
+  provisioned outside the CSR flow names no host until it is first renewed. It is still one
+  certificate, told apart by its issuer and serial (`CertId` in
   [`revocation.rs`](../../crates/fleet-server/src/revocation.rs)).
 - **A Gateway carries other hosts' Agents.** Behind a marked Gateway every Agent arrives under the
-  Gateway's certificate (SEC-admission-by-client-certificate, [CLT-modes-and-gateway](CLT-modes-and-gateway.md)). A per-host
-  limit there would put a whole site under one host's budget. A per-uid limit alone bounds nothing,
-  because a downstream peer can cycle uids. The Gateway's `max_carried_agents` does not stop that
-  either: it bounds one downstream connection, and a plain-HTTP downstream exchange is a connection
-  of its own ([`gateway/mod.rs`](../../crates/fleet-agent/src/gateway/mod.rs) creates a
-  `Downstream` per exchange).
+  Gateway's certificate (SEC-admission-by-client-certificate,
+  [CLT-modes-and-gateway](CLT-modes-and-gateway.md)). A per-host limit there would put a whole site
+  under one host's budget. A per-uid limit alone bounds nothing, because a downstream peer can cycle
+  uids. The Gateway's `max_carried_agents` does not stop that either: it bounds one downstream
+  connection, and a plain-HTTP downstream exchange is a connection of its own
+  ([`gateway/mod.rs`](../../crates/fleet-agent/src/gateway/mod.rs) creates a `Downstream` per
+  exchange).
 - **The protocol has one retryable refusal.** `ServerErrorResponseType` has three types. Only
   `UNAVAILABLE` tells the Agent to retry, and `RetryInfo.retry_after_nanoseconds` says when.
   - On a WebSocket, the Baseline's *Throttling* section says a Server that cannot process an
@@ -139,8 +142,8 @@ Forces that shape the rate limit:
   - This Server answers `Unavailable` with `retry_info` of 30 s (`RETRY_AFTER` in
     [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs)) in four places
     besides the rate limit: at the Agent-record ceiling, when the enrolment queue is full, when
-    no enrolment window is open (SEC-admission-by-client-certificate), and when the audit record holds back a CSR
-    ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)).
+    no enrolment window is open (SEC-admission-by-client-certificate), and when the audit record
+    holds back a CSR ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)).
 - **The Client honours `Unavailable` on both transports.**
   [`opamp::client::protocol`](../../crates/opamp/src/client/protocol.rs) turns it into a wait,
   `retry_info` or 30 s without one.
@@ -157,9 +160,9 @@ Forces that shape the rate limit:
   too ([CLT-modes-and-gateway](CLT-modes-and-gateway.md),
   [`pool.rs`](../../crates/fleet-agent/src/gateway/pool.rs)). An `Unavailable` reply built
   without an `instance_uid` reaches no Agent, and the Client never waits as told.
-- **A host speaks for at most 256 Agents** (SEC-admission-by-client-certificate), and after a reconnect the Client sends one
-  full report for each of them. At the Baseline's 30 s heartbeat or poll, 256 Agents send about 8.5
-  messages a second.
+- **A host speaks for at most 256 Agents** (SEC-admission-by-client-certificate), and after a
+  reconnect the Client sends one full report for each of them. At the Baseline's 30 s heartbeat or
+  poll, 256 Agents send about 8.5 messages a second.
 - **Refusals already have a bounded record.**
   [SEC-append-only-audit-record](SEC-append-only-audit-record.md)
   writes at most ten refusals of one event per peer address and second, and counts the rest. It
@@ -228,8 +231,8 @@ Agent plane with token buckets.
    provider with the three TLS 1.3 suites and nothing else: `TLS13_AES_256_GCM_SHA384`,
    `TLS13_AES_128_GCM_SHA256` and `TLS13_CHACHA20_POLY1305_SHA256`. Every rustls configuration of
    both ends is built from it with the protocol versions pinned to TLS 1.3
-   ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). Each binary installs it process-wide at
-   startup, and every `reqwest` client is built with a minimum of TLS 1.3. This covers every
+   ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). Each binary installs it process-wide
+   at startup, and every `reqwest` client is built with a minimum of TLS 1.3. This covers every
    connection: OpAMP, the REST API, downloads, mirrors, own telemetry and the Server's connections
    to its stores. `axum-server` (`tls-rustls-no-provider`) terminates TLS on the Server,
    `tokio-tungstenite` (`rustls-tls-webpki-roots`) carries `wss://`, and `reqwest`
@@ -293,8 +296,8 @@ Agent plane with token buckets.
 
 13. **`[rest.tls] cert_file` is a certificate the Server depends on.** `server pki status` lists
     it, and the running Server warns before it ends, at startup and daily, under the expiry rule
-    of [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md). A file named in both `[tls]` and
-    `[rest.tls]` is listed once.
+    of [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md). A file named in both
+    `[tls]` and `[rest.tls]` is listed once.
 
 14. **Two listeners always; addresses that cannot both be bound fail at startup.** There is no
     single-port mode. The same port on the same address, or on an address that covers every
@@ -303,9 +306,9 @@ Agent plane with token buckets.
 
 15. **Every plane's server is built in one place, and 30 seconds bound the time to a
     connection's first request and to each HTTP/1 header read.** `listen::plane` serves both planes
-    on `opamp::server::listen` ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)), which serves
-    plain and TLS through `axum_server`. Its `bounded` sets `HEADER_READ_TIMEOUT`, 30 seconds and
-    hyper's own default, in two places on every listener:
+    on `opamp::server::listen` ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)), which
+    serves plain and TLS through `axum_server`. Its `bounded` sets `HEADER_READ_TIMEOUT`, 30 seconds
+    and hyper's own default, in two places on every listener:
     - as the HTTP/1 `header_read_timeout`, with `hyper_util::rt::TokioTimer` installed on the
       HTTP/1 builder;
     - as `axum_server`'s `first_request_timeout`, which bounds the time to a connection's first
@@ -367,9 +370,9 @@ Agent plane with token buckets.
     purposes, the S3 store and the PostgreSQL store
     ([SRV-state-stores-approval-certificate §17 and §24](SRV-state-stores-approval-certificate.md)).
     The Server sends no request for a package anywhere
-    ([PKG-signed-packages-and-delivery §4](PKG-signed-packages-and-delivery.md)). This clause and clause 5
-    bind the Server's own code. A library the operator has the Server load opens what its own
-    configuration names, over its own stack, and the ADR that has the Server load it decides
+    ([PKG-signed-packages-and-delivery §4](PKG-signed-packages-and-delivery.md)). This clause and
+    clause 5 bind the Server's own code. A library the operator has the Server load opens what its
+    own configuration names, over its own stack, and the ADR that has the Server load it decides
     whether it may.
 
 22. **`[agent_rate_limit]` in `server.toml`.** The rate limit covers an admitted peer's
@@ -479,11 +482,12 @@ Agent plane with token buckets.
     - `bucket`: `agent`, `host` or `gateway`, naming the bucket that was empty;
     - `route`: `opamp` with the `transport`, or `download`.
 
-    The entries are aggregated under SEC-append-only-audit-record's bound on refusals, by event and peer address. A
-    host that floods costs at most ten entries and one `agent_rate.throttled.aggregated` count per
-    address and second. The refusal never waits for its entry. A refusal that finds the audit
-    channel full is counted in the next entry's `unrecorded_before` (SEC-append-only-audit-record). A message or
-    download the limit lets through is recorded by nothing new.
+    The entries are aggregated under SEC-append-only-audit-record's bound on refusals, by event and
+    peer address. A host that floods costs at most ten entries and one
+    `agent_rate.throttled.aggregated` count per address and second. The refusal never waits for its
+    entry. A refusal that finds the audit channel full is counted in the next entry's
+    `unrecorded_before` (SEC-append-only-audit-record). A message or download the limit lets through
+    is recorded by nothing new.
 
 **Out of scope:**
 
@@ -491,8 +495,8 @@ Agent plane with token buckets.
   Agent plane's handshake requires it
   ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)).
 - Where the package download route is served and what it requires
-  ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), and which hosts a Client downloads from
-  (PKG-signed-packages-and-delivery).
+  ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), and which hosts a
+  Client downloads from (PKG-signed-packages-and-delivery).
 - Connection settings and the heartbeat offer
   ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)).
 - Which bucket a message or a download is counted in
@@ -603,8 +607,9 @@ Agent plane with token buckets.
 - **A rate-limit bucket per peer address.** Hosts behind one NAT, or every Agent behind a Gateway,
   would share one budget, and one busy neighbour would throttle the rest. The certificate names
   the host exactly, and admission has already proved it.
-- **A bucket per `instance_uid` for every peer.** The uid is self-asserted (SEC-admission-by-client-certificate), so a peer
-  that wants more messages names a fresh uid for each one, and the limit binds nothing.
+- **A bucket per `instance_uid` for every peer.** The uid is self-asserted
+  (SEC-admission-by-client-certificate), so a peer that wants more messages names a fresh uid for
+  each one, and the limit binds nothing.
 - **Behind a Gateway, per-uid buckets alone.** A downstream peer that cycles uids gets a fresh,
   full bucket each time. `max_carried_agents` does not bound that, because each plain-HTTP
   exchange is a downstream connection of its own. The aggregate is what bounds the Gateway.
@@ -644,8 +649,8 @@ Agent plane with token buckets.
   rely on (Q-1). A fleet that needs more raises the numbers.
 - **Probe a package source over `https://`, with `http://` on the loopback alone.** It sets rules
   for an outbound request the Server does not make: the Server sends no request for a package
-  anywhere ([PKG-signed-packages-and-delivery §4](PKG-signed-packages-and-delivery.md)), and its outbound
-  connections are those clause 21 names.
+  anywhere ([PKG-signed-packages-and-delivery §4](PKG-signed-packages-and-delivery.md)), and its
+  outbound connections are those clause 21 names.
 - **The first reconnect after a lost connection on the backoff's first step, one second with equal
   jitter, and no bound on the Server's new connections.** After a restart every Agent of a fleet
   would come back within the same half second, the floor of that jitter, and the Server would have
@@ -839,8 +844,8 @@ Agent plane with token buckets.
   answers one host or Gateway over its rate while the Server has time to spare. The Agent sees no
   difference, and the protocol has no other retryable answer.
 - Negative / trade-offs: an aggregate audit entry names the peer address, not the host, because
-  SEC-append-only-audit-record aggregates by address. Behind a NAT or a Gateway only the first ten entries of each
-  second name the host or the Agent.
+  SEC-append-only-audit-record aggregates by address. Behind a NAT or a Gateway only the first ten
+  entries of each second name the host or the Agent.
 - Follow-ups:
   - a connection cap on the Client's Gateway endpoint;
   - measuring the HTTP/2 bounds against a real fleet;
@@ -849,8 +854,8 @@ Agent plane with token buckets.
   - the Client's downloader honouring `Retry-After`;
   - the running Server's daily expiry check reads the file, not the certificate it serves, so a
     file replaced without a restart silences the warning while the old certificate is still
-    served; this holds for `[tls]` and `[rest.tls]` alike, and is a fix within OPS-operator-program-fleetctl's expiry
-    rule;
+    served; this holds for `[tls]` and `[rest.tls]` alike, and is a fix within
+    OPS-operator-program-fleetctl's expiry rule;
   - whether to reload certificates without a restart;
   - whether operators should present client certificates on the Operator plane.
 
@@ -980,7 +985,8 @@ Tests of the rate limit, each marked `Verifies: SEC-tls13-two-planes-bounded-inp
 - `crates/fleet-server/tests/packages.rs`:
   `a_download_past_the_limit_is_answered_429_after_thirty_seconds`. A member over its rate gets
   `429` with `Retry-After: 30`, its next download is admitted once the bucket refills, and the
-  refusal counts no failure toward the failed-admission throttle of SEC-admission-by-client-certificate §24, §26.
+  refusal counts no failure toward the failed-admission throttle of
+  SEC-admission-by-client-certificate §24, §26.
 - `crates/fleet-server/tests/mutual_tls.rs`:
   - `a_throttled_message_leaves_an_aggregated_refusal_naming_the_host`: beyond ten a second, the
     entries are counted in `agent_rate.throttled.aggregated` (clause 29);
@@ -1000,9 +1006,9 @@ Tests of the rate limit, each marked `Verifies: SEC-tls13-two-planes-bounded-inp
   (clauses 25, 27, and the bucket rule of CLT-modes-and-gateway).
 
 These tests verify the bucket a message is counted in, which
-[CLT-modes-and-gateway](CLT-modes-and-gateway.md) decides, and so carry `Verifies: CLT-modes-and-gateway`; they
-pin what clause 24 counts as well: in `crates/fleet-server/src/agent_rate.rs`,
-`a_host_is_one_bucket_whatever_its_agents_report`,
+[CLT-modes-and-gateway](CLT-modes-and-gateway.md) decides, and so carry
+`Verifies: CLT-modes-and-gateway`; they pin what clause 24 counts as well: in
+`crates/fleet-server/src/agent_rate.rs`, `a_host_is_one_bucket_whatever_its_agents_report`,
 `a_member_certificate_without_a_host_is_counted_by_issuer_and_serial`,
 `an_enrolment_connection_is_counted_by_its_peer_address`,
 `marking_a_gateway_takes_effect_at_the_next_message`,

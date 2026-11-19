@@ -29,9 +29,10 @@ find that class of defect.
 
 The build has constraints of its own. The wire contract must be reproducible and reviewable,
 builds must work offline, the Dev Container ships no `protoc`
-([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)), and plain `prost-build` shells out to one. Upstream
-has moved its proto files between directories (`proto/` to `proto/opamp/v1/`) without changing the
-package `opamp.proto.v1`, so the path to the schema must live in exactly one place.
+([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)), and plain `prost-build`
+shells out to one. Upstream has moved its proto files between directories (`proto/` to
+`proto/opamp/v1/`) without changing the package `opamp.proto.v1`, so the path to the schema must
+live in exactly one place.
 
 The oracle meets three further facts:
 

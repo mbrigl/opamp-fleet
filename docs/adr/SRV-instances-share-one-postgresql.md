@@ -19,9 +19,9 @@ that asked for it. On the filesystem, `connected` is what one process knows abou
 connections and is not persisted; on PostgreSQL it is persisted with the id of the instance that
 holds the connection ([SRV-fleet-record-agents-hosts §3 and §6](SRV-fleet-record-agents-hosts.md)).
 The rate limits and the admission throttle are tables in memory
-([SEC-tls13-two-planes-bounded-input §28](SEC-tls13-two-planes-bounded-input.md), SEC-admission-by-client-certificate §19). Duplicate
-detection tells two connections of one `instance_uid` apart by a connection id that only this
-process hands out.
+([SEC-tls13-two-planes-bounded-input §28](SEC-tls13-two-planes-bounded-input.md),
+SEC-admission-by-client-certificate §19). Duplicate detection tells two connections of one
+`instance_uid` apart by a connection id that only this process hands out.
 
 One process alone is one point of failure and one machine's worth of connections. The
 specification's goal G-20 asks that a fleet of up to about 100 000 Agents be served on when one of
@@ -93,24 +93,25 @@ every change that concerns a live session by one `NOTIFY`.
 3. **The lease.** Each instance renews its lease every `[database] lease_renew_secs` (default 10)
    and it lapses `[database] lease_secs` (default 30, at least three renewals) after the last
    renewal. These two keys and `[database] presence_interval_secs`
-   ([SRV-fleet-record-agents-hosts §4](SRV-fleet-record-agents-hosts.md)) apply to `store = "postgres"`
-   alone; with `store = "fs"` each fails startup, naming it. An instance measures its own lease from
-   the moment it sent the last renewal the database confirmed, which is no later than the database's
-   own time of that renewal, so it deems its lease lapsed no later than the database and every other
-   instance do. It measures on a clock that counts the time its host was suspended, on Linux
-   `CLOCK_BOOTTIME`, so a suspend lapses its lease for it as it does for the database. It reads that
-   clock at least every 100 milliseconds, and before it answers each request on either plane and
-   each message of an Agent: while its lease is lapsed by that clock it answers `503` and nothing
-   else, and an instance that runs again after a suspend serves nothing until it holds a new lease.
-   A virtual machine that its hypervisor pauses without the guest's clocks counting the pause is
-   outside this: it serves on until its next renewal, at most `lease_renew_secs` later, finds its
-   lease lapsed. An instance that cannot renew before its own lease lapses ends every session it
-   carries and closes both listeners. Once the database answers again it takes a new lease, under a
-   new instance id, and opens them again. It never serves on a lease it cannot prove, because it
-   could not learn of a revocation. A closed listener is what a load balancer's or an orchestrator's
-   probe sees: the image's probe is a TCP connection to `4320` for liveness and readiness
-   ([OPS-releases-attestations-server-image §17](OPS-releases-attestations-server-image.md)), and an instance
-   without a lease is then neither, so no Agent is sent to it.
+   ([SRV-fleet-record-agents-hosts §4](SRV-fleet-record-agents-hosts.md)) apply to
+   `store = "postgres"` alone; with `store = "fs"` each fails startup, naming it. An instance
+   measures its own lease from the moment it sent the last renewal the database confirmed, which is
+   no later than the database's own time of that renewal, so it deems its lease lapsed no later than
+   the database and every other instance do. It measures on a clock that counts the time its host
+   was suspended, on Linux `CLOCK_BOOTTIME`, so a suspend lapses its lease for it as it does for the
+   database. It reads that clock at least every 100 milliseconds, and before it answers each request
+   on either plane and each message of an Agent: while its lease is lapsed by that clock it answers
+   `503` and nothing else, and an instance that runs again after a suspend serves nothing until it
+   holds a new lease. A virtual machine that its hypervisor pauses without the guest's clocks
+   counting the pause is outside this: it serves on until its next renewal, at most
+   `lease_renew_secs` later, finds its lease lapsed. An instance that cannot renew before its own
+   lease lapses ends every session it carries and closes both listeners. Once the database answers
+   again it takes a new lease, under a new instance id, and opens them again. It never serves on a
+   lease it cannot prove, because it could not learn of a revocation. A closed listener is what a
+   load balancer's or an orchestrator's probe sees: the image's probe is a TCP connection to `4320`
+   for liveness and readiness
+   ([OPS-releases-attestations-server-image §17](OPS-releases-attestations-server-image.md)), and an
+   instance without a lease is then neither, so no Agent is sent to it.
 
    An orderly shutdown, on `SIGTERM` among others, drains the instance. It closes both listeners at
    once, so no new connection reaches it, and answers the requests already in flight on either
@@ -123,8 +124,8 @@ every change that concerns a live session by one `NOTIFY`.
    period of 30 seconds for those writes. `drain_secs` applies on the filesystem store as well,
    where the one Server drains the same way.
 
-4. **[SRV-fleet-record-agents-hosts §3](SRV-fleet-record-agents-hosts.md) decides it: What a report or
-   an operator decided persists; so does where an Agent is connected.**
+4. **[SRV-fleet-record-agents-hosts §3](SRV-fleet-record-agents-hosts.md) decides it: What a report
+   or an operator decided persists; so does where an Agent is connected.**
 
 5. **[SRV-fleet-record-agents-hosts §4](SRV-fleet-record-agents-hosts.md)
    decides it: The write discipline lives above the port,
@@ -162,10 +163,10 @@ every change that concerns a live session by one `NOTIFY`.
    take counted since its own. A take whose answer was lost leaves the instance with no count for
    the Agent, but for the shutdown flush: that keeps the count the instance was answered before the
    take, or 0 where it created the record, and writes the record under it
-   ([SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md)). An Agent with neither is not
-   flushed; its row keeps what was last written of it, and the next instance to carry it finds a gap
-   in its sequence numbers and asks for a full report. A report takes nothing. A shutdown flush on
-   PostgreSQL writes no record whose stored sequence number is higher than the one it writes,
+   ([SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md)). An Agent with neither is
+   not flushed; its row keeps what was last written of it, and the next instance to carry it finds a
+   gap in its sequence numbers and asks for a full report. A report takes nothing. A shutdown flush
+   on PostgreSQL writes no record whose stored sequence number is higher than the one it writes,
    whichever holder the row names: a newer report another instance wrote meanwhile stays, also where
    the flushing instance still holds the row while it stops, its lease live, or the record was
    forgotten and created again with a count that started over. An Agent that started again counts
@@ -180,8 +181,8 @@ every change that concerns a live session by one `NOTIFY`.
    live instances, the other of which holds the row, every report of it keeps writing. A flush
    refused for a higher stored sequence number leaves its own Agent's newer sequence number
    unwritten, and the next report to the instance that carries it, or the full report a gap asks
-   for, writes it. The port of [SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md) has
-   `write_report_unless_held_elsewhere` write, on a shared store, only a record whose stored
+   for, writes it. The port of [SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md)
+   has `write_report_unless_held_elsewhere` write, on a shared store, only a record whose stored
    sequence number is not higher than the record's; a store whose one Server is its only writer
    writes as `write_report` does. Before it writes the disconnect of an Agent whose take lost its
    answer it reads the row's holder and count of takes through the port's `takes(uids)`, under a
@@ -200,8 +201,8 @@ every change that concerns a live session by one `NOTIFY`.
    peer, so two Agents of one `instance_uid` on one host, a clone with the host's certificate, share
    one record. An Agent whose holder changes more than ten times in a minute is logged as a likely
    duplicate. An Agent's labels stay in its record
-   ([SRV-fleet-record-agents-hosts §21](SRV-fleet-record-agents-hosts.md)), and there is no other copy.
-   A label change, a rollout's assignments and a restart request made through any instance are
+   ([SRV-fleet-record-agents-hosts §21](SRV-fleet-record-agents-hosts.md)), and there is no other
+   copy. A label change, a rollout's assignments and a restart request made through any instance are
    written to their own columns of the record in the database and announced (clause 9). The instance
    that delivers a queued restart clears it before the send, and puts it back when the command was
    not sent: a WebSocket frame the connection does not take, or a plain-HTTP answer past the size
@@ -229,14 +230,14 @@ every change that concerns a live session by one `NOTIFY`.
    poll whose answer is lost is not seen either, and the Operator requests the restart again. A
    command that reached the Agent although its send failed is sent again and restarts the Managed
    Process twice, and the manual says so. The instance that carries the Agent writes only what a
-   report decides ([SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md)), so its next
-   write keeps them whether or not the notification has reached it, and it takes them into the
-   record it holds when the notification arrives. Where an effective description (SRV-fleet-record-agents-hosts §18)
-   needs the labels of a Client Agent this instance does not carry, or a Host's subject values,
-   the instance reads them from the database. It finds that Client Agent among the Agents the host
-   register binds to the Host. The register binds none to a Gateway's Host, so behind a Gateway the
-   instance finds it by a read of the Agents that arrived over that Host, through the port's
-   `query_page` filtered on that Host
+   report decides ([SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md)), so its
+   next write keeps them whether or not the notification has reached it, and it takes them into the
+   record it holds when the notification arrives. Where an effective description
+   (SRV-fleet-record-agents-hosts §18) needs the labels of a Client Agent this instance does not
+   carry, or a Host's subject values, the instance reads them from the database. It finds that
+   Client Agent among the Agents the host register binds to the Host. The register binds none to a
+   Gateway's Host, so behind a Gateway the instance finds it by a read of the Agents that arrived
+   over that Host, through the port's `query_page` filtered on that Host
    ([API-lists-paged-by-cursor §9](API-lists-paged-by-cursor.md)),
    so an Agent behind a Gateway inherits the labels of a Client Agent another instance
    carries in the memory of its own instance too. An instance places such a group when it places one
@@ -447,8 +448,8 @@ every change that concerns a live session by one `NOTIFY`.
     - An act that decides its write from what is stored reads it in the same transaction, under
       `SELECT … FOR UPDATE` on the row, and decides from what the database holds. A package floor
       is set only when its version is not below the stored one
-      ([PKG-versions-high-water-mark-floor §15](PKG-versions-high-water-mark-floor.md)), compared in the
-      Server by SemVer precedence, as SQL does not order SemVer. A Configuration's revisions, a
+      ([PKG-versions-high-water-mark-floor §15](PKG-versions-high-water-mark-floor.md)), compared in
+      the Server by SemVer precedence, as SQL does not order SemVer. A Configuration's revisions, a
       Package's entries and a Deployment's members are rows of their own: an act adds or removes
       the ones it names, and the revisions a Configuration keeps are reckoned in the transaction
       from the rows and from the assignments that pin them
@@ -479,9 +480,9 @@ every change that concerns a live session by one `NOTIFY`.
 
 20. **A fleet that loses an instance comes back spread out.** The Agents of a lost instance — its
     connections cut, closed as it drains, or ended by a lapsed lease — reconnect as
-    [SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md) says: the first attempt drawn
-    over `[0, 30 s)`, and each instance bounded to `max_new_connections_per_sec` new connections a
-    second.
+    [SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md) says: the first
+    attempt drawn over `[0, 30 s)`, and each instance bounded to `max_new_connections_per_sec` new
+    connections a second.
     - Thirty seconds is a third of G-20's 90 seconds, a lease time and two heartbeat intervals at
       the defaults, which leaves the rest for a lapsed lease and two heartbeats.
     - Of a fleet of 100 000 on three instances, the 33 000 Agents of a lost instance then arrive at
@@ -507,8 +508,8 @@ every change that concerns a live session by one `NOTIFY`.
       connection or on one the pool opens for it, and is taken over there once (clause 8), so the
       Agents behind a Gateway reach another instance spread over one heartbeat interval, as they
       report. The pool opens a replacement connection when a report needs one; the Gateway's own
-      Client connection reconnects as [SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md)
-      says.
+      Client connection reconnects as
+      [SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md) says.
     - Meanwhile the Gateway serves on what it holds: its revocation list, refreshed every 30
       seconds from whichever instance its fetch reaches and trusted for 300 seconds
       ([CLT-modes-and-gateway §14](CLT-modes-and-gateway.md)), and its floors, fetched hourly
@@ -522,7 +523,8 @@ every change that concerns a live session by one `NOTIFY`.
       ([SEC-admission-by-client-certificate §19](SEC-admission-by-client-certificate.md)),
       and a
       Gateway's own certificate does not fail; the rate limits key on its host and on each
-      `instance_uid` ([SEC-tls13-two-planes-bounded-input §28](SEC-tls13-two-planes-bounded-input.md)); the bound
+      `instance_uid`
+      ([SEC-tls13-two-planes-bounded-input §28](SEC-tls13-two-planes-bounded-input.md)); the bound
       on new connections a second counts every connection alike, and a pool of at most
       `upstream_connections` (default 10) is a handful within it. A pool connection refused under
       that bound waits its `Retry-After` as any Client does.
@@ -634,15 +636,15 @@ database cluster, which the operator runs.
   of the Agent plane (clause 15).
 - Positive: a floor set from a stale view cannot lower the stored one (clause 19), and a floor
   stored too low would still not lower a Client: each Client keeps the highest floor it verified
-  ([PKG-versions-high-water-mark-floor §17](PKG-versions-high-water-mark-floor.md)), so the harm of a
-  floor served late is bounded by the Clients that never saw the higher one.
+  ([PKG-versions-high-water-mark-floor §17](PKG-versions-high-water-mark-floor.md)), so the harm of
+  a floor served late is bounded by the Clients that never saw the higher one.
 - Follow-ups: the operator manual's pages on replication, load balancing and rolling updates; CA
   keys every instance can reach.
 
 ## Enforcement
 
-Tests that carry `Verifies: SRV-instances-share-one-postgresql` run against the PostgreSQL that the `FLEET_TEST_POSTGRES_*`
-variables name
+Tests that carry `Verifies: SRV-instances-share-one-postgresql` run against the PostgreSQL that the
+`FLEET_TEST_POSTGRES_*` variables name
 ([SRV-state-stores-approval-certificate §25](SRV-state-stores-approval-certificate.md)),
 with two instances in one test process, or three where a bullet says so. They decide:
 

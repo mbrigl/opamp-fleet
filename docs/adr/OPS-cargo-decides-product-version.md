@@ -8,14 +8,14 @@
 ## Context
 
 The version resolution and its helper do not belong in the publishable `opamp` crate
-([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)), which carries the protocol and nothing of this
-project's own.
+([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)), which carries the protocol and nothing
+of this project's own.
 
 The version a binary carries is load-bearing in several places at once: the OpAMP
 `service.version` identifying attribute tells the Server which build it is talking to, both CLIs
 print it, the Client's install layout names its version directories after it
-([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), and the self-update compares an offered
-version against what a staged binary reports
+([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), and the self-update
+compares an offered version against what a staged binary reports
 ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
 
 Forces:
@@ -48,9 +48,9 @@ tag from the file, and treat the build metadata as provenance that is recorded e
 compared nowhere.
 
 1. **`Cargo.toml` decides the number.** The base is `[workspace.package] version`, the product's
-   release number, which the `opamp` crate does not carry (DEV-six-crates-tokio-axum §2), and Cargo hands it
-   to the build script as `CARGO_PKG_VERSION`. Bumping it is an ordinary reviewed commit. The
-   grammar is strict semantic versioning: exactly three non-negative integers without leading
+   release number, which the `opamp` crate does not carry (DEV-six-crates-tokio-axum §2), and Cargo
+   hands it to the build script as `CARGO_PKG_VERSION`. Bumping it is an ordinary reviewed commit.
+   The grammar is strict semantic versioning: exactly three non-negative integers without leading
    zeros, no pre-release, no build metadata; a value that breaks it fails the build. The
    environment variable `OPAMP_PRODUCT_VERSION` overrides the base, held to the same grammar.
 
@@ -113,9 +113,9 @@ compared nowhere.
    (clause 10), `same_release`, and `precedence`, SemVer ordering with build metadata ignored,
    which the self-update's downgrade refusal
    ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)) and the rollout
-   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) order by. It lives in `fleet-core` because the
-   Client writes these strings and the Server displays them, and it is this project's grammar, not
-   OpAMP's.
+   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) order by. It
+   lives in `fleet-core` because the Client writes these strings and the Server displays them, and
+   it is this project's grammar, not OpAMP's.
 
 10. **A version's identity is its base and its pre-release; the build metadata is compared
     nowhere.** The self-update probe compares identities: `0.1.1` offered and `0.1.1+799e36a`
@@ -143,10 +143,10 @@ compared nowhere.
 
 **Out of scope:** what a release builds and publishes (targets and artifacts,
 [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md); installers,
-[CLT-installed-service-and-state](CLT-installed-service-and-state.md)); whether a Managed Process's package
-version, free-form and an upstream project's own numbering, is parsed beyond what ordering needs;
-release-candidate tags (`version/1.2.3-rc.1`), refused by the grammar until a release-candidate
-flow is wanted.
+[CLT-installed-service-and-state](CLT-installed-service-and-state.md)); whether a Managed Process's
+package version, free-form and an upstream project's own numbering, is parsed beyond what ordering
+needs; release-candidate tags (`version/1.2.3-rc.1`), refused by the grammar until a
+release-candidate flow is wanted.
 
 ## Alternatives considered
 
@@ -191,14 +191,15 @@ flow is wanted.
 - **Leave `service_version` holding the full string and add a base field beside it.** Leaves a
   field called `service_version` holding something nobody would call a version.
 - **Name the variables for this project (`OPAMP_FLEET_VERSION`, `OPAMP_BUILD_VERSION`).** A variant
-  build (the `PRODUCT_NAME` clause of [CLT-installed-service-and-state](CLT-installed-service-and-state.md)) would
-  set a variable that names a product it is not, and a *build* version beside a *fleet* version does
-  not say which is the input and which the result. `OPAMP_PRODUCT_VERSION` and
-  `OPAMP_PRODUCT_RELEASE` read as one pair.
+  build (the `PRODUCT_NAME` clause of
+  [CLT-installed-service-and-state](CLT-installed-service-and-state.md)) would set a variable that
+  names a product it is not, and a *build* version beside a *fleet* version does not say which is
+  the input and which the result. `OPAMP_PRODUCT_VERSION` and `OPAMP_PRODUCT_RELEASE` read as one
+  pair.
 - **No prefix (`PRODUCT_VERSION`).** Common in other toolchains, so an ambient value would set the
   version. `OPAMP_` is the prefix the build uses for `OPAMP_BASELINE`
-  ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)) and names the protocol, not the product, so
-  it holds in every variant.
+  ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)) and names the protocol, not the
+  product, so it holds in every variant.
 
 ## Sources / Prior art
 

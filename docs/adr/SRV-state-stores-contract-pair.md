@@ -20,13 +20,13 @@ Clause 22 changes in three places:
 - The schedule of the contract pair: release 0.8.5 gives the pair defaults and stops naming it,
   and the release after 0.8.5 drops it.
 
-SRV-state-stores-approval-certificate's schedule did not hold. It had the release after 0.8.0 write the Deployments' mirror
-columns no more and the release after that remove them. Release 0.8.1 stopped writing values into
-them and adding to the Hosts' arrays, yet it and every release up to 0.8.4 still name the columns
-in their `INSERT`s. The columns are `NOT NULL` without a default, so none of them could be dropped
-or let be `NULL` while such a Server served beside the release that did. A Server of 0.8.4 also
-decodes each Host's array as a list that is never `NULL`, and fails on a `NULL`. Releases 0.8.2
-to 0.8.4 removed nothing.
+SRV-state-stores-approval-certificate's schedule did not hold. It had the release after 0.8.0 write
+the Deployments' mirror columns no more and the release after that remove them. Release 0.8.1
+stopped writing values into them and adding to the Hosts' arrays, yet it and every release up to
+0.8.4 still name the columns in their `INSERT`s. The columns are `NOT NULL` without a default, so
+none of them could be dropped or let be `NULL` while such a Server served beside the release that
+did. A Server of 0.8.4 also decodes each Host's array as a list that is never `NULL`, and fails on a
+`NULL`. Releases 0.8.2 to 0.8.4 removed nothing.
 [SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)
 allows that: what N+1 stops using is removed by N+2 "at the earliest". The record still
 named a step that no release took, and a reader would take the next release's change for a
@@ -48,8 +48,8 @@ either way, through the Server, and the fleet never reaching a store itself. G-2
 to report each connected Agent's state through its REST API, and what it reports must outlast a
 restart.
 
-Each store is a port with adapters ([DEV-ports-and-adapters](DEV-ports-and-adapters.md)). A port speaks in
-domain types; what must hold together is one call; integrity rules — whether a Package is
+Each store is a port with adapters ([DEV-ports-and-adapters](DEV-ports-and-adapters.md)). A port
+speaks in domain types; what must hold together is one call; integrity rules — whether a Package is
 assigned, whether a Deployment pins a Package, which revisions are still referenced — are port
 queries, so a database adapter can enforce them without in-memory scans. A rollout writes
 revisions and assignments that must hold together.
@@ -59,8 +59,8 @@ What a port stores is secret-bearing whatever the backend
 bootstrap PKCS#12 files, the certificate register. Q-1 forbids sending a credential or a package
 unencrypted beyond the loopback, which holds for the Server's traffic to its database and its object
 store as much as for an Agent's. Q-3 bounds what a new dependency may bring:
-[SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) keeps the TLS stack on rustls with *ring*,
-without `aws-lc-rs` and without OpenSSL, and TLS 1.3 alone.
+[SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) keeps the TLS stack on
+rustls with *ring*, without `aws-lc-rs` and without OpenSSL, and TLS 1.3 alone.
 
 The artifacts are the largest part of the state: one entry of 1 GiB is allowed
 (`max_package_size_bytes`), and the fleet's software multiplies that. On the Server's host they
@@ -194,7 +194,8 @@ that decides its request, and move an old layout by an offline command.
    loaded at startup; `DELETE` removes the file, and a file that does not parse fails startup
    naming it. With PostgreSQL each is a row, with its revisions in rows of their own, and
    `DELETE` removes them in one transaction. What the record holds besides the saved fields — the
-   revisions a rollout pins — is [SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)'s.
+   revisions a rollout pins — is
+   [SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)'s.
 
 6. **The Package store's layout is fixed, and no other is read.** With the filesystem store a
    Package is `packages/<agent_type>@<version>.json`, holding its identity and every entry's
@@ -421,8 +422,8 @@ that decides its request, and move an old layout by an offline command.
       act let go. On PostgreSQL whether an entry references a blob is read from the stored
       entries, under the lock of clause 14, and not from what the instance holds, so a blob that
       an entry written through another instance names is kept.
-    - The size limits of a Package entry ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md))
-      count the blobs.
+    - The size limits of a Package entry
+      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)) count the blobs.
     - A Package's metadata names a blob by its hash only.
 
 14. **One blob store, chosen in `server.toml`.** `[blobs] store` is `"fs"`, the default, or
@@ -538,9 +539,10 @@ that decides its request, and move an old layout by an offline command.
       uses, and `object_store` is built without its `aws-lc-rs` feature. `[blobs.s3] ca_file`
       adds one PEM root for a store whose certificate no public root signs.
     - Endpoint, region, bucket, prefix and every TLS or HTTP option come from the Server's own
-      configuration ([SRV-configuration-toml-and-environment](SRV-configuration-toml-and-environment.md)) and from nothing else. The
-      Server reads no `AWS_*` variable that would change them, such as `AWS_ENDPOINT` or
-      `AWS_ALLOW_HTTP`.
+      configuration
+      ([SRV-configuration-toml-and-environment](SRV-configuration-toml-and-environment.md)) and from
+      nothing else. The Server reads no `AWS_*` variable that would change them, such as
+      `AWS_ENDPOINT` or `AWS_ALLOW_HTTP`.
     - Every request is bounded: its connection, and the silence before its answer begins and
       between two pieces of it, with a bounded number of retries in a bounded time. A store that
       stops answering fails the call that needs it, and no request to the store runs while the
@@ -587,9 +589,10 @@ that decides its request, and move an old layout by an offline command.
     object store and creates nothing in one but the objects of clause 16. In production the
     bucket, its credentials, its policies, its retention and its backups are the operator's.
     - For development, rustfs runs as a service of `observability/compose.yaml`, the Compose project
-      on the host beside the Dev Container ([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)). The Dev
-      Container forwards its port onto its own loopback, as it forwards the Collector's, so a
-      development Server reaches it at an `http://127.0.0.1` endpoint that clause 17 allows, through
+      on the host beside the Dev Container
+      ([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)). The Dev Container
+      forwards its port onto its own loopback, as it forwards the Collector's, so a development
+      Server reaches it at an `http://127.0.0.1` endpoint that clause 17 allows, through
       `[blobs.s3]` like any other store.
     - The S3 adapter's tests run against the store that `FLEET_TEST_S3_ENDPOINT`,
       `FLEET_TEST_S3_BUCKET` and the credentials of clause 18 name. CI runs them in a job with a
@@ -722,8 +725,9 @@ that decides its request, and move an old layout by an offline command.
 25. **The database is external; the adapter only connects to it.** In production the database,
     its role, its replication and its backups are the operator's.
     - For development, PostgreSQL runs as a service of `observability/compose.yaml`, the Compose
-      project on the host beside the Dev Container ([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)). The
-      Dev Container forwards its port onto its own loopback, so a development Server reaches it at
+      project on the host beside the Dev Container
+      ([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)). The Dev Container
+      forwards its port onto its own loopback, so a development Server reaches it at
       `127.0.0.1:5432`, with `tls = false` as clause 24 allows on the loopback.
     - The PostgreSQL adapter's tests run against the database that `FLEET_TEST_POSTGRES_HOST`,
       `FLEET_TEST_POSTGRES_PORT`, `FLEET_TEST_POSTGRES_DBNAME`, `FLEET_TEST_POSTGRES_USER` and
@@ -748,10 +752,11 @@ that decides its request, and move an old layout by an offline command.
       - **Agents:** records are carried over, with each Agent's labels moved into its record.
       - **Configurations and Deployments:** they keep their content. A Configuration loses its
         Selector, and the migration lists every Configuration with the Selector it had, for the
-        operator to place in a Deployment ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). A
+        operator to place in a Deployment
+        ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). A
         Configuration without an Agent type is not carried, because the Server would refuse it at
-        startup; the migration names it, and its file stays in the old directory for the operator
-        to save again with a type.
+        startup; the migration names it, and its file stays in the old directory for the operator to
+        save again with a type.
     - The migration prints what it carried, dropped and listed, and exits non-zero when it could
       not carry trust data.
     - A Server started on an empty `data_dir` while `server.toml` still names `config_dir` or
@@ -829,8 +834,8 @@ monitors a production store or database.
 - **`rust-s3`.** Small, but it lacks web identity and container credentials, so it misses the
   workload identity this decision asks for. Rejected.
 - **`object_store` with its default `aws` feature.** It pulls `aws-lc-rs`, a C build with cmake,
-  against [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md). The `aws-base`, `ring` and
-  `reqwest` features build the same client on *ring*.
+  against [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md). The
+  `aws-base`, `ring` and `reqwest` features build the same client on *ring*.
 - **Hash every object again at startup.** That downloads the whole store at every start, which
   for a fleet's software costs minutes and egress. The signature and the Client's own hash check
   already refuse altered bytes. Rejected.
@@ -915,16 +920,17 @@ monitors a production store or database.
   naming them, so the removal would move out by one more release, with no gain in safety: a
   default changes no stored row.
 - **0.8.1 as the oldest Server.** It is the technical minimum: a Server of 0.8.0 still reads an
-  array for an `instance_uid` that no binding holds. SRV-instances-share-one-postgresql §16 lets only N and N+1
-  serve side by side, so the rule's own reading for 0.8.5 is 0.8.4. A rolling update from any of
-  0.8.1 to 0.8.3 straight to 0.8.5 is refused; such a skip scales the old instances to zero
-  first, as the manual already asks.
+  array for an `instance_uid` that no binding holds. SRV-instances-share-one-postgresql §16 lets
+  only N and N+1 serve side by side, so the rule's own reading for 0.8.5 is 0.8.4. A rolling update
+  from any of 0.8.1 to 0.8.3 straight to 0.8.5 is refused; such a skip scales the old instances to
+  zero first, as the manual already asks.
 - **Only the rule, the schedule in the backlog.** Clause 22 would keep the rule and leave the
   steps to backlog entries. Then no further delay would need a supersession. But the record would
   name no plan for the columns, and the tests that hold the steps would cite no clause.
-- **Clause 22 split into an ADR of its own.** Two drafts would supersede SRV-state-stores-approval-certificate: one with every
-  other clause, one with the schema. The cut is cleaner, but it moves every reference to
-  SRV-state-stores-approval-certificate now, for a change to one clause.
+- **Clause 22 split into an ADR of its own.** Two drafts would supersede
+  SRV-state-stores-approval-certificate: one with every other clause, one with the schema. The cut
+  is cleaner, but it moves every reference to SRV-state-stores-approval-certificate now, for a
+  change to one clause.
 
 ## Sources / Prior art
 

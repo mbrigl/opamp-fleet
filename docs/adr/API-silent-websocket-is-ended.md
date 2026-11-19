@@ -9,13 +9,13 @@
 
 An Agent learns that its Server is gone when its connection closes. A Server killed by its kernel
 resets its connections, and its Agents reconnect as
-[SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md) says. A Server whose host loses
-power, whose process is frozen, or which a partition cuts off sends nothing and closes nothing. The
-Agent's heartbeats go into its socket's send buffer and are retransmitted until the kernel gives
-up: at Linux's default `tcp_retries2` of 15, about fifteen minutes. A frozen process is worse:
-its kernel keeps acknowledging what arrives until the receive buffer is full, so TCP sees nothing
-wrong at all. G-20 asks that every Agent of a lost instance be connected to another within its
-lease time and two heartbeat intervals, 90 seconds at the defaults.
+[SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md) says. A Server whose
+host loses power, whose process is frozen, or which a partition cuts off sends nothing and closes
+nothing. The Agent's heartbeats go into its socket's send buffer and are retransmitted until the
+kernel gives up: at Linux's default `tcp_retries2` of 15, about fifteen minutes. A frozen process is
+worse: its kernel keeps acknowledging what arrives until the receive buffer is full, so TCP sees
+nothing wrong at all. G-20 asks that every Agent of a lost instance be connected to another within
+its lease time and two heartbeat intervals, 90 seconds at the defaults.
 
 The WebSocket driver of `crates/opamp` sends a routine report per Agent every heartbeat interval
 and waits for nothing. The Gateway's upstream pool forwards what its Agents send and waits for
@@ -28,17 +28,17 @@ A WebSocket ping is answered by every conforming peer: RFC 6455 says an endpoint
 Ping must send a Pong. It needs nothing of OpAMP, so it holds against any Server the `opamp`
 crate talks to, with heartbeats or without, and on a Gateway's pool connection, which carries other
 Agents' reports and has no heartbeat of its own. The Server's rate limit counts messages handed to
-its handler (SEC-tls13-two-planes-bounded-input §24), and its pace floor judges data frames (clause 18); a ping is
-neither.
+its handler (SEC-tls13-two-planes-bounded-input §24), and its pace floor judges data frames (clause
+18); a ping is neither.
 
 The heartbeat interval is the operator's measure of how often an Agent is heard from, and G-20 is
 stated in it. A bound that follows it keeps the failover inside G-20 whatever the operator sets,
 and costs one ping per connection per interval at most, since anything that arrives counts.
 
 The `opamp` crate is versioned by the Baseline
-([DEV-six-crates-tokio-axum §2](DEV-six-crates-tokio-axum.md)): a new field on its public settings would
-break its interface and wait for the next Baseline. The heartbeat is already a field of the driver's
-settings.
+([DEV-six-crates-tokio-axum §2](DEV-six-crates-tokio-axum.md)): a new field on its public settings
+would break its interface and wait for the next Baseline. The heartbeat is already a field of the
+driver's settings.
 
 ## Decision
 
@@ -65,8 +65,9 @@ ping while it handles a message.
    probe of an offered endpoint. An attempt that reaches no address fails with the last address's
    failure and is retried with the next backoff step.
 4. **An ended connection is a lost one.** The driver logs that nothing arrived, with the bound,
-   and reconnects after the delay SEC-tls13-two-planes-bounded-input §4 draws over `[0, 30 s)`. The Gateway's pool
-   marks the connection gone, and its Agents are placed anew at their next report (CLT-modes-and-gateway §9).
+   and reconnects after the delay SEC-tls13-two-planes-bounded-input §4 draws over `[0, 30 s)`. The
+   Gateway's pool marks the connection gone, and its Agents are placed anew at their next report
+   (CLT-modes-and-gateway §9).
 5. **Nothing at the TCP level.** No TCP keepalive and no TCP user timeout are set.
 6. **No existing interface changes.** No public function or setting of `crates/opamp` changes;
    the bounds come from the heartbeat already in the settings. `ws::Silence` is public, so that
@@ -102,7 +103,8 @@ says.
   from G-20 when the operator changes the interval. Following the heartbeat gives the same values
   at the defaults and keeps the failover inside G-20 at any interval.
 - **A key of its own in the Client's configuration.** A knob is added when a deployment needs a
-  value other than the heartbeat's, not before, as SEC-tls13-two-planes-bounded-input §18 does for its bounds.
+  value other than the heartbeat's, not before, as SEC-tls13-two-planes-bounded-input §18 does for
+  its bounds.
 - **TCP keepalive, or `TCP_USER_TIMEOUT`.** Neither notices a frozen process, whose kernel keeps
   acknowledging. Keepalive's interval needs `socket2`, a dependency this would add for nothing the
   ping does not do; the user timeout is Linux's alone; and the connect path of

@@ -15,16 +15,16 @@ either bucket empty is answered `Unavailable` with `RetryInfo`
 ([SEC-tls13-two-planes-bounded-input §25](SEC-tls13-two-planes-bounded-input.md)).
 
 The aggregate is shared by every host behind the Gateway, and the Server cannot tell them apart. A
-single host may speak for up to `max_carried_agents` `instance_uid`s (CLT-modes-and-gateway §15). Each
-of them has its own per-Agent bucket at the Server, so together they can drain the aggregate.
+single host may speak for up to `max_carried_agents` `instance_uid`s (CLT-modes-and-gateway §15).
+Each of them has its own per-Agent bucket at the Server, so together they can drain the aggregate.
 From then on every other host behind that Gateway is answered `Unavailable` until the aggregate
 refills. The same host can do the same with downloads, which the Server counts in the aggregate
-alone, and an enrolling peer with its one request. CLT-modes-and-gateway leaves a rate at the Gateway out of
-its own scope.
+alone, and an enrolling peer with its one request. CLT-modes-and-gateway leaves a rate at the
+Gateway out of its own scope.
 
 The Gateway knows each downstream host. It binds every `instance_uid` to the host of the
-certificate that reported it (CLT-modes-and-gateway §15). So it is the one place where a host behind it can
-be held to a budget of its own before its messages reach the shared one.
+certificate that reported it (CLT-modes-and-gateway §15). So it is the one place where a host behind
+it can be held to a budget of its own before its messages reach the shared one.
 
 The specification's quality goal Q-1 asks that the Fleet be secure by default, and G-15 that a
 Gateway scale connections, not identities.
@@ -36,41 +36,41 @@ bucket of the host that sent it, sized as the Server sizes a host's bucket, and 
 as the Server does, without forwarding it.
 
 1. **Each downstream host has one bucket.** The key is the host the downstream certificate names,
-   or for a certificate that names none, the host derived from its issuer and serial (CLT-modes-and-gateway §15).
-   A peer with a bootstrap certificate on its one enrolment request is keyed by its
-   address, an IPv6 one by its /64, as the Server keys it (CLT-modes-and-gateway §26), since a bootstrap
-   certificate may be one for the whole fleet. A new connection, a new `instance_uid` or a renewed
-   certificate of the same host takes from the same bucket.
+   or for a certificate that names none, the host derived from its issuer and serial
+   (CLT-modes-and-gateway §15). A peer with a bootstrap certificate on its one enrolment request is
+   keyed by its address, an IPv6 one by its /64, as the Server keys it (CLT-modes-and-gateway §26),
+   since a bootstrap certificate may be one for the whole fleet. A new connection, a new
+   `instance_uid` or a renewed certificate of the same host takes from the same bucket.
 
 2. **What is counted.** Every `AgentToServer` message on the downstream `/v1/opamp`, over a
    WebSocket and over plain HTTP, a message there that cannot be decoded, every request on the
    downstream package download route, and an enrolling peer's request, as the Server counts them
-   (SEC-tls13-two-planes-bounded-input §24). Each takes one token once the downstream handshake and the revocation
-   verdict have admitted it, and before the Gateway does anything else with it: before it reads a
-   CSR, binds an `instance_uid`, touches the package cache or forwards anything upstream. The
-   Gateway's own Supervisors and its upstream connection are not counted.
+   (SEC-tls13-two-planes-bounded-input §24). Each takes one token once the downstream handshake and
+   the revocation verdict have admitted it, and before the Gateway does anything else with it:
+   before it reads a CSR, binds an `instance_uid`, touches the package cache or forwards anything
+   upstream. The Gateway's own Supervisors and its upstream connection are not counted.
 
 3. **The bucket is set in `[gateway.rate_limit]`.** `messages_per_sec` (default `10`) is the
    tokens added per second, continuously, and `burst` (default `300`) the bucket's capacity, the
-   values the Server gives a host (SEC-tls13-two-planes-bounded-input §22). A new bucket starts full. `0` for either
-   key is refused at startup, naming the key. No value turns the limit off. Any other key of the
-   section is refused, as in every section.
+   values the Server gives a host (SEC-tls13-two-planes-bounded-input §22). A new bucket starts
+   full. `0` for either key is refused at startup, naming the key. No value turns the limit off. Any
+   other key of the section is refused, as in every section.
 
 4. **What a message past the limit gets is what the Server would answer.** A report or an
    enrolment request that finds no whole token is not forwarded and binds nothing. It is answered
    with a `ServerToAgent` that carries the message's own `instance_uid`, `error_response` of type
    `Unavailable` with an `error_message` saying that too many messages arrive, and `RetryInfo` of
-   30 seconds, the Server's own (SEC-tls13-two-planes-bounded-input §25 and §27); a message that cannot be decoded is
-   answered so without an `instance_uid`. The reply names no capabilities, since the Gateway does
-   not speak for the Server, and a Client reads none from it. The WebSocket stays open. A download
-   past the limit is answered `429` with `Retry-After: 30`, and the artifact is not read
-   (SEC-tls13-two-planes-bounded-input §26). What is refused is logged once per host per minute, with the host and how many
-   were refused.
+   30 seconds, the Server's own (SEC-tls13-two-planes-bounded-input §25 and §27); a message that
+   cannot be decoded is answered so without an `instance_uid`. The reply names no capabilities,
+   since the Gateway does not speak for the Server, and a Client reads none from it. The WebSocket
+   stays open. A download past the limit is answered `429` with `Retry-After: 30`, and the artifact
+   is not read (SEC-tls13-two-planes-bounded-input §26). What is refused is logged once per host per
+   minute, with the host and how many were refused.
 
 5. **The buckets are bounded.** They live in memory, and nothing persists them. They hold at most
-   1 000 000 entries, the Gateway's total of bindings (CLT-modes-and-gateway §15). When the table is full,
-   a new key evicts the bucket used least recently, which only grants tokens, never withholds them
-   (SEC-tls13-two-planes-bounded-input §28).
+   1 000 000 entries, the Gateway's total of bindings (CLT-modes-and-gateway §15). When the table is
+   full, a new key evicts the bucket used least recently, which only grants tokens, never withholds
+   them (SEC-tls13-two-planes-bounded-input §28).
 
 **Out of scope:** a bucket per `instance_uid` at the Gateway, which the Server keeps; a rate the
 Server tells the Gateway; a limit on the downstream fetch of the package floors; changing the
@@ -89,15 +89,17 @@ Server's aggregate.
 - **Closing the connection, or `429`, past the limit.** Only a WebSocket Agent with a backoff
   would behave well, and the protocol's one retryable answer would go unused. Rejected.
 - **Counting at the Server by a header the Gateway sets.** The Server would have to trust the
-  Gateway's word about which host sent what, which CLT-modes-and-gateway rejected for the bindings. Rejected.
+  Gateway's word about which host sent what, which CLT-modes-and-gateway rejected for the bindings.
+  Rejected.
 
 ## Sources / Prior art
 
-- This repository: [SEC-tls13-two-planes-bounded-input §22 and §24–§28](SEC-tls13-two-planes-bounded-input.md)
-  (the Server's buckets, their answers and their bound),
+- This repository:
+  [SEC-tls13-two-planes-bounded-input §22 and §24–§28](SEC-tls13-two-planes-bounded-input.md) (the
+  Server's buckets, their answers and their bound),
   [CLT-modes-and-gateway §26](CLT-modes-and-gateway.md) (their keys), clause 15 (the host a
-  downstream certificate names, and the total of bindings) and clauses 20 to 25 (enrolment
-  through a Gateway), `crates/fleet-server/src/agent_rate.rs`, `docs/HARDENING.md`.
+  downstream certificate names, and the total of bindings) and clauses 20 to 25 (enrolment through a
+  Gateway), `crates/fleet-server/src/agent_rate.rs`, `docs/HARDENING.md`.
 - The OpAMP specification, *Throttling*: a Server answers `UNAVAILABLE` with `RetryInfo`, and an
   Agent retries no sooner than it says. Recalled, not re-read for this record; the answer the
   Gateway gives is SEC-tls13-two-planes-bounded-input's, which was.

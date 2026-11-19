@@ -11,7 +11,8 @@ now (see *Not now* below).
 1. **The wire shape of the views.** The view types in `crates/fleet-server/src/fleet/views.rs`
    (`AgentView`, `PendingConfigurationView`, `PendingPackageView`, `PackageStatusView`, near lines
    384 to 593) derive `Serialize`, while `api.rs` mirrors each with a response type and a
-   field-by-field `From`, the doc comments copied. The core's `Serialize` looks unused (SRV-configurations-compose-one-map).
+   field-by-field `From`, the doc comments copied. The core's `Serialize` looks unused
+   (SRV-configurations-compose-one-map).
 2. **The REST API by resource.** Every route, view and conversion of about ten resources lives in
    `crates/fleet-server/src/api.rs` (4 581 lines on `main`); only the cursor paging is in
    `api/paging.rs` (API-lists-paged-by-cursor).

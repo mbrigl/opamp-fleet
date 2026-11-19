@@ -26,12 +26,12 @@ Client's host then speaks to the Client as its Server. Any local account can ope
 can send Supervisor sets and configurations whose language runs commands, such as an entry that
 runs a program, or whatever the configuration a `command` kind's program reads makes it run, and
 these run with the rights of the account the Client's service runs under
-([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). A Server needs to send only one such
-offer, whether it is compromised or misconfigured. The real Server cannot undo the move, because
-the Client never connects to it again, and the persisted endpoint outranks `supervisor.toml`.
-Plaintext on the loopback exists for development and tests, where an operator writes the endpoint
-into `supervisor.toml` and the Client connects to a Server on the same host. No offer is needed
-for that.
+([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). A Server needs to send only
+one such offer, whether it is compromised or misconfigured. The real Server cannot undo the move,
+because the Client never connects to it again, and the persisted endpoint outranks
+`supervisor.toml`. Plaintext on the loopback exists for development and tests, where an operator
+writes the endpoint into `supervisor.toml` and the Client connects to a Server on the same host. No
+offer is needed for that.
 
 An endpoint, a heartbeat interval or a client certificate that could only be changed by editing
 every host's configuration file would bring back the fleet-wide chore this project exists to
@@ -61,9 +61,9 @@ for `ReportsHeartbeat`.
 Capability negotiation is symmetrical: *"after the Agent learns about the capabilities of the
 Server the Agent MUST stop using the capabilities that the Server does not support."* With
 `opamp-go` as the behavioural oracle
-([API-protocol-pinned-interop-checked](API-protocol-pinned-interop-checked.md)), a third-party Server may
-implement only the required bits, and this Client has to notice. Applied literally, field by
-field, the rule deadlocks: a Server that sends an offer without declaring
+([API-protocol-pinned-interop-checked](API-protocol-pinned-interop-checked.md)), a third-party
+Server may implement only the required bits, and this Client has to notice. Applied literally, field
+by field, the rule deadlocks: a Server that sends an offer without declaring
 `OffersConnectionSettings` and receives no acknowledgement re-offers forever. And one plausible
 gate, `remote_config_status` behind `OffersRemoteConfig`, would be actively harmful. What needs
 deciding is the rule that produces the gates, including when not to gate.
@@ -94,8 +94,8 @@ message would be an error.
    message, and includes it whenever an Agent's reported `last_connection_settings_hash` differs.
    The OpAMP half goes only to Agents declaring `AcceptsOpAMPConnectionSettings`; each telemetry
    destination only to an Agent declaring the matching signal
-   ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)). With only telemetry to offer, that is
-   the whole offer, with no `opamp` block. A certificate issued in answer to a CSR
+   ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)). With only telemetry to offer, that
+   is the whole offer, with no `opamp` block. A certificate issued in answer to a CSR
    ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md))
    travels as the standing
    OpAMP settings plus that certificate, under a hash of its own.
@@ -136,8 +136,8 @@ message would be an error.
    [CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)), and a refusal is reported, not
    swallowed. A telemetry-only offer is applied in place; its acknowledgement rides the reports
    already owed, and the transport loop carries on. The headers of a telemetry destination are an
-   OTLP receiver's, not admission: they stay as CLT-what-an-agent-reports has them, still offered only on member
-   connections
+   OTLP receiver's, not admission: they stay as CLT-what-an-agent-reports has them, still offered
+   only on member connections
    ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)),
    and clause 8
    does not reach them.

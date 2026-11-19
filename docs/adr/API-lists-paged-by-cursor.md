@@ -31,13 +31,14 @@ repeats entries; a cursor that names the last entry read does not, and costs the
 page.
 
 The REST API is the fleet's stable contract (G-5), versioned by path
-([SRV-configurations-compose-one-map §7](SRV-configurations-compose-one-map.md)). Scripts and external UIs read these
-arrays. Whatever pages them must not change what such a client receives while the list is
-small enough to send whole, and must not cut a list short without the client noticing.
+([SRV-configurations-compose-one-map §7](SRV-configurations-compose-one-map.md)). Scripts and
+external UIs read these arrays. Whatever pages them must not change what such a client receives
+while the list is small enough to send whole, and must not cut a list short without the client
+noticing.
 
-This ADR adds to [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md) and changes none of its
-clauses: its clause 1 says what an Agent's entry is and not how many a response holds, and its port
-gains two reads beside those of its clause 2 (clause 9 here).
+This ADR adds to [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md) and changes none
+of its clauses: its clause 1 says what an Agent's entry is and not how many a response holds, and
+its port gains two reads beside those of its clause 2 (clause 9 here).
 
 ## Decision
 
@@ -47,9 +48,9 @@ answered with the whole array up to a bound.
 
 1. **A page holds the entries the whole list holds, in the same shape.** `GET /api/v1/agents`
    answers the records as `AgentView`s, as
-   [SRV-fleet-record-agents-hosts §1](SRV-fleet-record-agents-hosts.md) decides, and the other three lists
-   answer the entries they answer whole. Paging changes how many entries a response holds, never
-   what an entry is.
+   [SRV-fleet-record-agents-hosts §1](SRV-fleet-record-agents-hosts.md) decides, and the other three
+   lists answer the entries they answer whole. Paging changes how many entries a response holds,
+   never what an entry is.
 
 2. **Four lists page; the others do not.** `GET /api/v1/agents`, `GET /api/v1/hosts`,
    `GET /api/v1/certificates` and `GET /api/v1/revocations` take the parameters of clauses 3 to 6.
@@ -93,12 +94,12 @@ answered with the whole array up to a bound.
      field searches, except the Configurations a rollout would release to the Agent, which follow
      from the Deployments and not from its record; `selector`, `key=value` pairs separated by commas
      that an Agent matches as a Deployment's Selector matches it
-     ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)): against its effective description, the Host's
-     subject values, what it reported, its own labels and its Client Agent's labels, as
-     [SRV-fleet-record-agents-hosts §18](SRV-fleet-record-agents-hosts.md) builds it from the Agent's
-     record; `connected` and `stale`, `true` or `false`; `service_name`; and on PostgreSQL `holder`,
-     an instance id, or `none` for the Agents no instance with a live lease holds
-     ([SRV-instances-share-one-postgresql §13](SRV-instances-share-one-postgresql.md)).
+     ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)): against its
+     effective description, the Host's subject values, what it reported, its own labels and its
+     Client Agent's labels, as [SRV-fleet-record-agents-hosts §18](SRV-fleet-record-agents-hosts.md)
+     builds it from the Agent's record; `connected` and `stale`, `true` or `false`; `service_name`;
+     and on PostgreSQL `holder`, an instance id, or `none` for the Agents no instance with a live
+     lease holds ([SRV-instances-share-one-postgresql §13](SRV-instances-share-one-postgresql.md)).
      On the filesystem store there is no holder, and `holder` is answered `400`.
    - Hosts take `q` over the host id and its subject values, and `gateway`, `true` or `false`.
      Certificates and revocations take `q` over subject, serial and host.
@@ -142,10 +143,10 @@ answered with the whole array up to a bound.
    - `GET /api/v1/agents/attributes` reads the distinct pairs and types from those columns.
 
 9. **The port of the fleet record gains two reads, `query_page` and `reported_values`.** Beside the
-   operations of [SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md), which it leaves
-   as they are, `AgentStore` answers `query_page(filter, sort, cursor, limit)`: the records that
-   match `filter`, with their presence, in the order of clause 5 after the position `cursor` names,
-   at most `limit` of them, and the number that match.
+   operations of [SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md), which it
+   leaves as they are, `AgentStore` answers `query_page(filter, sort, cursor, limit)`: the records
+   that match `filter`, with their presence, in the order of clause 5 after the position `cursor`
+   names, at most `limit` of them, and the number that match.
    - `filter` holds the filters of clause 6, and one the Server uses for its own reads and the
      REST API does not offer: the Host an Agent last arrived over (that ADR's clause 1). Through it
      an instance reads the Agents behind a Gateway, among them the Client Agent whose labels an
@@ -172,9 +173,9 @@ an export of the whole fleet; the audit record, which the REST API does not serv
 - **A paged envelope on the same route** (`{"items": […], "next_cursor": …}`), as Google's API
   guidelines shape it. It is the clearest shape, but every client that reads the array breaks
   on the next release, at any fleet size. Rejected.
-- **A new path, `/api/v2`, for the paged lists.** It follows the path versioning of SRV-configurations-compose-one-map §7,
-  but doubles the routes and the document for four lists whose entries do not change,
-  and leaves `/api/v1` unbounded. Rejected.
+- **A new path, `/api/v2`, for the paged lists.** It follows the path versioning of
+  SRV-configurations-compose-one-map §7, but doubles the routes and the document for four lists
+  whose entries do not change, and leaves `/api/v1` unbounded. Rejected.
 - **Always page, with a default `limit`.** A script that reads the array would silently get
   its first page only. Rejected; a bounded whole answer, refused beyond the bound, says so instead.
 - **Offset and limit.** Page numbers are easy to show, but an Agent that connects or changes while

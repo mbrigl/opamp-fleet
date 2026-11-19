@@ -16,8 +16,8 @@ Forces:
 
 - The bundled UI is static assets embedded in the Server binary, plain HTML, CSS and JS, with
   **no frontend toolchain**, neither in the Dev Container nor in CI
-  ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). Redoc is vendored as one pre-built file
-  and named in `NOTICE`; that is the precedent.
+  ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). Redoc is vendored as one pre-built
+  file and named in `NOTICE`; that is the precedent.
 - The Operator plane's CSP is `script-src 'self'` plus the hashes of the inline scripts, and no
   `'wasm-unsafe-eval'`. TextMate grammars are written for the Oniguruma regex engine, which
   usually runs as WebAssembly. Allowing WebAssembly would weaken the policy (Q-1).

@@ -12,11 +12,12 @@ throttle, an enrolment request and its approval, a certificate issued or renewed
 the sessions it ended
 ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md),
 [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
-a rollout ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) and a package outcome an Agent reports
-([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). Without a record of their own these leave
-log lines at best, mixed with everything else, kept as long as whatever collects the log keeps it,
-and changeable by whoever can write the log. None of them is demonstrable afterwards: an
-investigation cannot say who was admitted when, who approved a host, or whether a record was
+a rollout ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) and a
+package outcome an Agent reports
+([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). Without a record of their
+own these leave log lines at best, mixed with everything else, kept as long as whatever collects the
+log keeps it, and changeable by whoever can write the log. None of them is demonstrable afterwards:
+an investigation cannot say who was admitted when, who approved a host, or whether a record was
 removed. An investigation needs exactly one record per decision, refusals included, and the refusals
 are the half that is easy to omit.
 
@@ -413,8 +414,8 @@ token.
 
 15. **The audit record may be exported, off by default.** `[audit.export]` names an OTLP/HTTP
     endpoint. The Server sends every entry to it as an OTLP log record. The export is an outbound
-    connection of [SEC-tls13-two-planes-bounded-input §21](SEC-tls13-two-planes-bounded-input.md). The
-    configuration names it, and this clause decides its purpose. It runs over TLS 1.3 by the
+    connection of [SEC-tls13-two-planes-bounded-input §21](SEC-tls13-two-planes-bounded-input.md).
+    The configuration names it, and this clause decides its purpose. It runs over TLS 1.3 by the
     provider of that ADR's clause 5, and in plaintext only to a loopback endpoint. The section has
     two keys:
     - `endpoint` is `https://`, or `http://` to a loopback IP literal alone.

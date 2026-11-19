@@ -32,14 +32,15 @@ deployables: one Server (Linux only, API-first, with a rudimentary bundled UI, G
 binary covering every Client Mode ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)). Everything
 is async I/O: the Server holds many long-lived connections, the Client a Connection Pool and
 supervised processes. The Server serves protobuf bodies and WebSocket upgrades on one route set.
-The Dev Container is lean ([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)), so a choice that needs
-OpenSSL headers, cmake or node carries a real cost, and the UI is explicitly not the product.
+The Dev Container is lean ([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)),
+so a choice that needs OpenSSL headers, cmake or node carries a real cost, and the UI is explicitly
+not the product.
 
 The floor on the pace of every request body and every WebSocket message
-([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md), its pace floor) has to see a message's
-data frames. Judged by the bytes a connection reads, a message that has begun stays open for ever
-while its peer sends a Ping between its fragments, which RFC 6455 allows, and every Ping looks like
-progress. axum's WebSocket hands over whole messages only.
+([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md), its pace floor) has to
+see a message's data frames. Judged by the bytes a connection reads, a message that has begun stays
+open for ever while its peer sends a Ping between its fragments, which RFC 6455 allows, and every
+Ping looks like progress. axum's WebSocket hands over whole messages only.
 
 The OpAMP communication is one publishable crate with a `client` and a `server` feature, one
 endpoint around a handler for every server surface, and one state machine and two drivers around a
@@ -47,13 +48,14 @@ session for an Agent. That is one decision, and every change to the crate touche
 
 Three surfaces speak OpAMP as a server (the Server's planes, the Gateway's downstream endpoint and
 the Supervisor Endpoint), and three paths connect as a client (the drivers, the probe that proves
-offered connection settings, [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md),
-and the Gateway's upstream pool). If each built its own rustls configuration, `Authorization`
-header, TLS connector and listener bounds, the same mechanism would be written several times and
-could differ between surfaces. Which CA to trust, which certificate to present and which
-credential to send is this project's policy. Turning those bytes into a rustls configuration,
-refusing redirects, marking the header sensitive and bounding a listener is mechanism, and it is
-the same for every OpAMP implementation.
+offered connection settings,
+[SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md), and the
+Gateway's upstream pool). If each built its own rustls configuration, `Authorization` header, TLS
+connector and listener bounds, the same mechanism would be written several times and could differ
+between surfaces. Which CA to trust, which certificate to present and which credential to send is
+this project's policy. Turning those bytes into a rustls configuration, refusing redirects, marking
+the header sensitive and bounding a listener is mechanism, and it is the same for every OpAMP
+implementation.
 
 The order of the Client's flows after a reply matters: with the certificate first, a request
 queued there rides the next connection after the offer that answered it, and is signed a second
@@ -113,15 +115,16 @@ parse.
    features.
 
 4. **`opamp::tls` is the TLS both sides share,** compiled with either feature. It installs the
-   ring provider, never a system library ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)).
-   It reads certificates and a private key from PEM bytes, and an empty result is an error. It
-   carries an `Identity`, a certificate chain and its key as PEM. It opens no file. Every rustls
-   configuration either side builds speaks TLS 1.3 alone, with the three TLS 1.3 suites of the ring
-   provider. The process-wide provider carries those suites and no other, so a TLS stack that
-   builds its own configuration, such as `reqwest`'s, cannot negotiate TLS 1.2 either. The
-   `wss://` connector is always built here, never left to the WebSocket library, so TLS 1.3 holds
-   even in an application that never installed the provider. This is the specification's floor
-   (Q-3), not a setting the application can lower.
+   ring provider, never a system library
+   ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)). It reads
+   certificates and a private key from PEM bytes, and an empty result is an error. It carries an
+   `Identity`, a certificate chain and its key as PEM. It opens no file. Every rustls configuration
+   either side builds speaks TLS 1.3 alone, with the three TLS 1.3 suites of the ring provider. The
+   process-wide provider carries those suites and no other, so a TLS stack that builds its own
+   configuration, such as `reqwest`'s, cannot negotiate TLS 1.2 either. The `wss://` connector is
+   always built here, never left to the WebSocket library, so TLS 1.3 holds even in an application
+   that never installed the provider. This is the specification's floor (Q-3), not a setting the
+   application can lower.
 
 5. **The server endpoint.** `opamp::server` serves both transports on one path, with the media
    type, gzip, the limit in both directions, framing, the 1009 close and the per-connection loop.
@@ -136,14 +139,14 @@ parse.
 
 6. **The server listener.** `opamp::server::listen` builds the rustls `ServerConfig` from a
    certificate, a key and a client-certificate rule: none, optional or required against a CA. It
-   sets the ALPN protocols. `serve` runs a router on a bound listener with the bounds of SEC-tls13-two-planes-bounded-input:
-   a 30-second header read with the timer it needs, and a 10-second TLS handshake. It puts the
-   verified peer certificate and the peer address into every request, on every listener it serves.
-   A handle shuts listeners down, and one handle may drain several. How long a drain may take is
-   the application's to state. `serve` refuses to listen without TLS on any address but the
-   loopback literals `127.0.0.1` and `::1` (Q-1). Every OpAMP listener of this project serves
-   through it. Those are the Server's two planes, the Gateway's downstream endpoint and the
-   Supervisor Endpoint.
+   sets the ALPN protocols. `serve` runs a router on a bound listener with the bounds of
+   SEC-tls13-two-planes-bounded-input: a 30-second header read with the timer it needs, and a
+   10-second TLS handshake. It puts the verified peer certificate and the peer address into every
+   request, on every listener it serves. A handle shuts listeners down, and one handle may drain
+   several. How long a drain may take is the application's to state. `serve` refuses to listen
+   without TLS on any address but the loopback literals `127.0.0.1` and `::1` (Q-1). Every OpAMP
+   listener of this project serves through it. Those are the Server's two planes, the Gateway's
+   downstream endpoint and the Supervisor Endpoint.
 
 7. **The client state machine and its session.** `opamp::client::protocol` decides which fields a
    report carries and what a reply means, and depends on nothing but `opamp` and the standard
@@ -161,17 +164,17 @@ parse.
    any host but the loopback literals `127.0.0.1` and `::1`, before it connects (Q-1). A host name
    is never loopback, not even `localhost`, because a name can be made to resolve anywhere. The
    same description drives the connection, the one-shot probe that proves offered settings
-   (SEC-connection-settings-never-plaintext), and a single WebSocket for a caller that drives its own socket, such as the
-   Gateway's upstream pool.
+   (SEC-connection-settings-never-plaintext), and a single WebSocket for a caller that drives its
+   own socket, such as the Gateway's upstream pool.
 
 9. **What stays with the application is the policy and its sources.** The application decides
    which files hold the material, which identity is in force, which credential is sent and when it
    rotates. It parses `server.toml` and `supervisor.toml`. It persists and merges connection
-   settings (SEC-connection-settings-never-plaintext). It runs the CSR flow and the CA, and it decides admission
-   ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)).
-   Its `AgentState` keeps the
-   Client's decisions over one protocol state machine. Its flows after a reply run in one order:
-   connection settings, certificate, packages, the self-update restart, the Supervisor set
+   settings (SEC-connection-settings-never-plaintext). It runs the CSR flow and the CA, and it
+   decides admission
+   ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)). Its `AgentState`
+   keeps the Client's decisions over one protocol state machine. Its flows after a reply run in one
+   order: connection settings, certificate, packages, the self-update restart, the Supervisor set
    ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)). Connection settings come
    before the certificate because an offer may carry the certificate a request asked for, and a
    request queued before it is taken in would ride the next connection and be signed again.
@@ -249,16 +252,16 @@ parse.
       protocol state machine and connection, and `tls` with the PEM readers `certificates` and
       `private_key`. Their path-based wrappers and error wording stay in each end, where what the
       file means is known.
-    - `fleet-core`: `version`, the version helper ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md));
-      `platform`, the platform alias table
-      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md));
-      `package`, the statements a package signature and a floor signature cover, which the operator
-      tool signs and the Client verifies
-      ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)); `ending`, the rule that says
-      when a certificate is ending, as plain date arithmetic without a dependency, and `naming`,
-      what a certificate is called, which the Server and the operator tool apply alike
-      ([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md));
-      `pkcs12`, the bootstrap
+    - `fleet-core`: `version`, the version helper
+      ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)); `platform`, the
+      platform alias table
+      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)); `package`, the
+      statements a package signature and a floor signature cover, which the operator tool signs and
+      the Client verifies
+      ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)); `ending`, the
+      rule that says when a certificate is ending, as plain date arithmetic without a dependency,
+      and `naming`, what a certificate is called, which the Server and the operator tool apply alike
+      ([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)); `pkcs12`, the bootstrap
       certificate's file
       ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md));
       `host`, `x509`, `csr`, `renewal` and `bootstrap_proof`, what a client certificate is known by
@@ -328,13 +331,15 @@ parse.
     an error naming it. The same holds for files a binary reads at startup to restore its state:
     one that does not parse fails startup rather than being skipped or silently defaulted.
 
-**Out of scope:** the CSR flow and the Server's CA, which stay in the application with SEC-admission-by-client-certificate;
-finer features, such as one per transport; a release routine for the crate; where the PEM material
-comes from on disk; how each binary finds its configuration file and whether its environment adds
-to it ([SRV-configuration-toml-and-environment](SRV-configuration-toml-and-environment.md)); where an installed service looks for its
-configuration file on each OS ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)); the
-listener layout ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)); whether a release ships
-the operator tools.
+**Out of scope:** the CSR flow and the Server's CA, which stay in the application with
+SEC-admission-by-client-certificate; finer features, such as one per transport; a release routine
+for the crate; where the PEM material comes from on disk; how each binary finds its configuration
+file and whether its environment adds to it
+([SRV-configuration-toml-and-environment](SRV-configuration-toml-and-environment.md)); where an
+installed service looks for its configuration file on each OS
+([CLT-installed-service-and-state](CLT-installed-service-and-state.md)); the listener layout
+([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)); whether a release
+ships the operator tools.
 
 ## Alternatives considered
 
@@ -427,7 +432,8 @@ the operator tools.
   `tls_certs_only`, `identity` and `tls_backend_preconfigured`, with the stability warning on the
   last. Read 2026-10-03 in the vendored 0.13.5 source.
 - [`axum-server`](https://docs.rs/axum-server/0.9) `RustlsAcceptor::handshake_timeout` and
-  [`hyper-util`](https://docs.rs/hyper-util/0.1) `TokioTimer`, as SEC-tls13-two-planes-bounded-input cites them.
+  [`hyper-util`](https://docs.rs/hyper-util/0.1) `TokioTimer`, as SEC-tls13-two-planes-bounded-input
+  cites them.
 - [`rustls-pki-types`](https://docs.rs/rustls-pki-types) `PemObject`, the PEM reader rustls
   itself uses.
 - hyper and tonic features, the sans-IO pattern, `quinn` over `quinn-proto`, and the Cargo book on

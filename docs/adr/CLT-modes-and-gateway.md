@@ -103,8 +103,8 @@ proves the certificate it rests on, which the Server decides as any enrolment.
    it is in.
 
 2. **Every Supervisor exposes a Supervisor Endpoint, unconditionally.** It binds `127.0.0.1` on
-   the block's `endpoint_port` ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)) before the
-   Managed Process starts, so a taken port fails startup. It is WebSocket-only, declares
+   the block's `endpoint_port` ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md))
+   before the Managed Process starts, so a taken port fails startup. It is WebSocket-only, declares
    `AcceptsStatus` and `AcceptsEffectiveConfig`, and folds what the process reports into the
    owning Agent, whose `instance_uid` stays the Supervisor's. For a Managed Process that speaks no
    OpAMP nothing ever connects, and that is the whole of the handling. The Supervisor Endpoint is
@@ -128,10 +128,11 @@ proves the certificate it rests on, which the Server decides as any enrolment.
    connection cannot carry the Server's pushes to the Agents behind the Gateway.
 
 5. **The downstream endpoint serves both transports.** A downstream Client picks its transport by
-   the scheme of its endpoint ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), so the
-   Gateway serves a WebSocket upgrade and a plain-HTTP POST on `/v1/opamp`, with the Baseline's
-   message size limit, protobuf media type and gzip rules enforced per hop through the shared
-   `opamp::endpoint` helpers ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
+   the scheme of its endpoint
+   ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), so the Gateway
+   serves a WebSocket upgrade and a plain-HTTP POST on `/v1/opamp`, with the Baseline's message size
+   limit, protobuf media type and gzip rules enforced per hop through the shared `opamp::endpoint`
+   helpers ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
 
 6. **axum serves it, as an ordinary dependency of the Client crate behind no Cargo feature.** The
    mode lives in `crates/fleet-agent/src/gateway/` (`mod.rs` the endpoint, `pool.rs` the upstream
@@ -188,13 +189,15 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       an enrolling peer nothing but what clause 24 allows. And it passes on an uploaded artifact
       from its package cache only to a host whose Agent it relayed the Server's offer of that
       artifact to, and answers every other download request `404` (clause 15). What a host may
-      receive is the Server's own bound ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md),
-      what a host's Agents inherit from it), applied to what the Server sent through this Gateway.
+      receive is the Server's own bound
+      ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md), what a host's Agents
+      inherit from it), applied to what the Server sent through this Gateway.
     - Four parts of these refusals are the Gateway's own: it binds an `instance_uid` to the host
       of the first report for it, it refuses a report under a binding that is another host's, it
       answers `404` for an artifact too large for its cache or whose fetch failed, and it answers
-      `503` while a fetch runs ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), the
-      Gateway's package cache; clause 15).
+      `503` while a fetch runs
+      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), the Gateway's
+      package cache; clause 15).
     - The client CA, the bootstrap CA and the list are the Server's, so the Gateway applies the
       Server's admission policy and holds no admission policy of its own
       ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md),
@@ -221,8 +224,8 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       answered `403`, with a message saying that the `instance_uid` is not this host's to report
       for. Either way it is logged as every refusal of the Gateway is: the first five per host and
       minute one by one, the rest counted into one line
-      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), the Gateway's log of what it
-      refuses).
+      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), the Gateway's log of
+      what it refuses).
     - A report of an enrolling peer binds nothing. It is forwarded as clause 24 says, and its
       exchange is its route for its one reply, gone when the reply is sent or the exchange ends.
     - Upward a forwarded report goes out on its Agent's connection. Downward the Gateway looks up,
@@ -262,16 +265,16 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       and the binding is kept across the Gateway's restarts (clause 16) until it ends (clause 17).
       The host is the one the certificate names (`urn:opamp-fleet:host:<id>`). A certificate that
       names none is a host of its own: the host the Server derives from its issuer and serial
-      when it first renews it (SEC-bootstrap-certificates-and-enrolment), computed the same way. So it neither shares a binding
-      with another certificate nor takes one over, and the certificate its renewal brings names
-      the same host. The derived host binds for routing only: offers and downloads are recorded
-      and served only for a host a certificate names (*Offers*, *Requests*). A host holds at most
-      `max_carried_agents` bindings, the number clause 4 bounds a connection by. Past that its
-      report for a new `instance_uid` takes the place of that host's own least recently reported
-      binding whose `instance_uid` has neither a downstream route nor a current offer, so a host
-      whose Agents come and go is never shut out by its own past; when it has none, the report
-      binds nothing, and that is logged. The Gateway holds at most 1 000 000 bindings in all;
-      past that a new binding takes the place of the reporting host's own binding as above, and
+      when it first renews it (SEC-bootstrap-certificates-and-enrolment), computed the same way. So
+      it neither shares a binding with another certificate nor takes one over, and the certificate
+      its renewal brings names the same host. The derived host binds for routing only: offers and
+      downloads are recorded and served only for a host a certificate names (*Offers*, *Requests*).
+      A host holds at most `max_carried_agents` bindings, the number clause 4 bounds a connection
+      by. Past that its report for a new `instance_uid` takes the place of that host's own least
+      recently reported binding whose `instance_uid` has neither a downstream route nor a current
+      offer, so a host whose Agents come and go is never shut out by its own past; when it has none,
+      the report binds nothing, and that is logged. The Gateway holds at most 1 000 000 bindings in
+      all; past that a new binding takes the place of the reporting host's own binding as above, and
       never another host's: when the reporting host has none to give, it binds nothing, and that
       is logged. Each report refreshes when its binding was last reported. What a report that
       binds nothing does is clause 13's.
@@ -280,10 +283,10 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       bound to; any other is not recorded, and that is logged. An Agent's current offer is the
       files of the last recorded `packages_available` relayed to it: a later one replaces it, one
       that names no Server-hosted file removes it, a message without `packages_available` leaves
-      it standing ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), what an offer is), and a
-      downstream disconnect does not end it. The offers held are bounded by the offers the Server
-      makes through the Gateway. The offers are kept in memory only, indexed by host; a restart
-      ends them.
+      it standing ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), what an
+      offer is), and a downstream disconnect does not end it. The offers held are bounded by the
+      offers the Server makes through the Gateway. The offers are kept in memory only, indexed by
+      host; a restart ends them.
     - **Requests.** A request is served only when the Gateway holds the artifact and a current
       offer of it (the same path and query, byte for byte) to an `instance_uid` bound to the host
       the request's certificate names. A certificate that names no host receives nothing. While
@@ -300,9 +303,9 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       knows.
 
     The bound on what a host receives is the Server's
-    ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)), applied to what the Server sent
-    through the Gateway. The binding, the `404` for an artifact too large or not fetched, and the
-    `503` while a fetch runs are the Gateway's own. Together they are the download refusal of
+    ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)), applied to what the Server
+    sent through the Gateway. The binding, the `404` for an artifact too large or not fetched, and
+    the `503` while a fetch runs are the Gateway's own. Together they are the download refusal of
     clause 11.
 
 16. **The bindings are kept in `<state_dir>/gateway-packages/bindings`, written before they are
@@ -327,9 +330,10 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       and rewrites it whole from what it holds when it starts and when it has grown to twice as
       many lines as it holds live bindings and hosts, as a new file synced and renamed over the
       old. A store is at most 512 MiB. It is written as the Client writes into its state
-      directory, without following a link ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)),
-      readable and writable by the Client's account alone: `0600` on Unix, under the restricted ACL
-      the install gives the state directory on Windows.
+      directory, without following a link
+      ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), readable and writable
+      by the Client's account alone: `0600` on Unix, under the restricted ACL the install gives the
+      state directory on Windows.
     - **An unreadable store refuses every downstream Agent.** At start the Gateway reads the store
       without following a link. Where it is not a regular file — on Unix one the Client's account
       owns with mode `0600`, on Windows one that is not a reparse point — is larger than its
@@ -535,7 +539,8 @@ proves the certificate it rests on, which the Server decides as any enrolment.
 - moving a binding to the identity the Server gives an Agent through `AgentIdentification`, whose
   old `instance_uid` stays bound to its host until that host gives it up or its certificate ends;
 - keeping the offers across a restart, which the Server does not offer again while the Agent's
-  `all_packages_hash` stands ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md));
+  `all_packages_hash` stands
+  ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md));
 - bindings shared between Gateways, so a host that reports through two keeps an end at each;
 - the rate a Gateway holds each downstream host to
   ([CLT-gateway-rate-limits-hosts](CLT-gateway-rate-limits-hosts.md));

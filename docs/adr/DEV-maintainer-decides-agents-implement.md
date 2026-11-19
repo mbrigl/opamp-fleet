@@ -94,7 +94,8 @@ which a ticket is claimed, which matter only once work runs unattended.
 - **No required approval at all.** The checks alone guard `main`, and the review is a habit. Not
   taken: a pull request of anyone but the maintainer would merge without a code owner's review.
 - **A process-owning framework that brings agents, artifacts and pipeline in one piece.** Declined
-  by [NUC-procedures-are-skills](NUC-procedures-are-skills.md) and [NUC-large-work-is-planned](NUC-large-work-is-planned.md).
+  by [NUC-procedures-are-skills](NUC-procedures-are-skills.md) and
+  [NUC-large-work-is-planned](NUC-large-work-is-planned.md).
 - **A gate in one agent's own configuration as the enforcement of a rule.** A gate one agent
   honours and the next does not looks like a rule and is not one
   ([`AGENTS.md` §6](../../AGENTS.md#6-project-rules)).

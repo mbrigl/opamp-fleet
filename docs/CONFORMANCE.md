@@ -217,17 +217,18 @@ and on sending the Server carries a MUST where the Client carries a SHOULD. What
 | Client sends | SHOULD limit; if exceeded MUST NOT send, SHOULD record | A report past the limit is dropped with a log line; on plain HTTP the request is never made. |
 
 The limit defaults to **64 MiB**, the value upstream recommends, and is configurable on both ends
-through `max_message_size_bytes` (SEC-tls13-two-planes-bounded-input). Zero is rejected at startup: the Baseline knows no
-"unlimited", so a limit that could carry nothing is a configuration error, not a way to switch the
-rule off. The Supervisor Endpoint enforces the same limit as the Server it stands in for.
+through `max_message_size_bytes` (SEC-tls13-two-planes-bounded-input). Zero is rejected at startup:
+the Baseline knows no "unlimited", so a limit that could carry nothing is a configuration error, not
+a way to switch the rule off. The Supervisor Endpoint enforces the same limit as the Server it
+stands in for.
 
 ### Mutual TLS and the two fields still refused
 
 Goal 17 asks for three things: TLS on both ends, mutual TLS, and a Server that accepts only
-authenticated Agent identities. **All three hold** — rustls on both transports (SEC-tls13-two-planes-bounded-input), and
-client certificates the Server itself issues and requires in every handshake (SEC-admission-by-client-certificate). What is
-left is smaller and deliberate, and this is where it is written down, because none of it is a
-capability bit.
+authenticated Agent identities. **All three hold** — rustls on both transports
+(SEC-tls13-two-planes-bounded-input), and client certificates the Server itself issues and requires
+in every handshake (SEC-admission-by-client-certificate). What is left is smaller and deliberate,
+and this is where it is written down, because none of it is a capability bit.
 
 - **Three offer fields are not honoured.** `TLSConnectionSettings` and `ProxyConnectionSettings`,
   both `[Development]`, and the OpAMP settings' `headers` are dropped from an offer. The refusal is
@@ -235,12 +236,12 @@ capability bit.
   ways to weaken verification, and a Server able to command them could switch off the check that
   proves it is the Server — trust here is an operator's file, not a Server's instruction. There is
   nothing on the Client for `proxy` to configure. Offered `headers` are refused on merit
-  (SEC-connection-settings-never-plaintext §8): the Agent plane reads no `Authorization`, so a header the Server plants would
-  be persisted, sent on every connection with nothing to read it, and carried to whatever endpoint a
-  later offer names. The Client applies every field it does honour and then reports `FAILED` with an
-  `error_message` naming what it dropped — headers by their keys, never their values — so a Server
-  offering any of them learns that it did not take. The hash is echoed either way, so this does not
-  put the Server into a re-offer loop.
+  (SEC-connection-settings-never-plaintext §8): the Agent plane reads no `Authorization`, so a
+  header the Server plants would be persisted, sent on every connection with nothing to read it, and
+  carried to whatever endpoint a later offer names. The Client applies every field it does honour
+  and then reports `FAILED` with an `error_message` naming what it dropped — headers by their keys,
+  never their values — so a Server offering any of them learns that it did not take. The hash is
+  echoed either way, so this does not put the Server into a re-offer loop.
 - **A certificate proves membership, not identity.** The Server does not require a peer
   certificate's subject to match the Agent's `instance_uid` or anything else it reports. Binding
   them would mean a certificate dies whenever the Server re-keys an Agent through
@@ -260,19 +261,19 @@ capability bit.
   a list of revoked certificates, by issuing CA and serial and extended along every renewal it
   signed; it
   refuses them at admission and closes every WebSocket session they admitted with `1008`
-  (SEC-admission-by-client-certificate). There is no credential to revoke. There is no CRL and no OCSP. Behind a Gateway the
-  Server sees the Gateway's certificate, so it hands its Gateways the revoked certificates on a
-  route of their own and the Gateway refuses them (CLT-modes-and-gateway) — no message of the protocol is
-  involved.
+  (SEC-admission-by-client-certificate). There is no credential to revoke. There is no CRL and no
+  OCSP. Behind a Gateway the Server sees the Gateway's certificate, so it hands its Gateways the
+  revoked certificates on a route of their own and the Gateway refuses them (CLT-modes-and-gateway)
+  — no message of the protocol is involved.
 
 - **A CSR that names an `instance_uid` is checked against its sender.** The Baseline: *"When the
   Server receives a CSR containing the instance_uid in CSR fields the Server MUST verify that the
   instance_uid field in AgentToServer message matches the instance_uid in the CSR fields"*. Every
   canonical UUID text in a CSR's subject or requested SANs is read as such a claim, and a CSR with a
   claim other than the sender's `instance_uid` is answered `BadRequest` before it is signed or
-  queued (SEC-admission-by-client-certificate). This is a different question from the bullet above: the *issued* certificate
-  is still not bound to an `instance_uid`. This project's own Client claims nothing, so its
-  requests are signed as before.
+  queued (SEC-admission-by-client-certificate). This is a different question from the bullet above:
+  the *issued* certificate is still not bound to an `instance_uid`. This project's own Client claims
+  nothing, so its requests are signed as before.
 
 ## Interoperability
 
@@ -319,23 +320,23 @@ The base control loop is implemented on both ends and on both transports
 status reporting, remote configuration gated
 by the config hash, effective-configuration
 and health reporting, identity handling (UUID v7, reassignment, server-generated identity), state
-recovery via `ReportFullState`, disconnect handling, and TLS. Supervisor Mode (CLT-supervisor-mode-and-kinds) puts real
-processes behind that loop: each configured Supervisor is its own Agent multiplexed over the
-Client's one connection, a received configuration restarts the Managed Process on the written
-files and is acknowledged `APPLYING` → `APPLIED` only once the process survived the apply grace
-(`apply_grace_secs`, default 3 s) — exiting within it reports `FAILED` — and every Supervisor serves
-a loopback WebSocket Supervisor Endpoint that folds a Collector `opampextension`'s description,
-health, and effective configuration into its Agent. Configuration targeting (SRV-deployments-and-pinned-rollouts) composes
-each Agent's Remote configuration from the named Configurations its Deployment released to it —
-the Deployment's Selector aims, a Configuration's Agent type fits — delivered as named
-`AgentConfigMap` entries, hash-gated per Agent, with the whole model exposed through the
-OpenAPI-described REST API v1. On top of that loop sit the
-server-initiated restart command, periodic heartbeats on both transports, available-components
-relaying from the Managed Process, and duplicate-`instance_uid` handling with per-connection
-disconnect scoping. The Server moves the fleet's heartbeat interval and
+recovery via `ReportFullState`, disconnect handling, and TLS. Supervisor Mode
+(CLT-supervisor-mode-and-kinds) puts real processes behind that loop: each configured Supervisor is
+its own Agent multiplexed over the Client's one connection, a received configuration restarts the
+Managed Process on the written files and is acknowledged `APPLYING` → `APPLIED` only once the
+process survived the apply grace (`apply_grace_secs`, default 3 s) — exiting within it reports
+`FAILED` — and every Supervisor serves a loopback WebSocket Supervisor Endpoint that folds a
+Collector `opampextension`'s description, health, and effective configuration into its Agent.
+Configuration targeting (SRV-deployments-and-pinned-rollouts) composes each Agent's Remote
+configuration from the named Configurations its Deployment released to it — the Deployment's
+Selector aims, a Configuration's Agent type fits — delivered as named `AgentConfigMap` entries,
+hash-gated per Agent, with the whole model exposed through the OpenAPI-described REST API v1. On top
+of that loop sit the server-initiated restart command, periodic heartbeats on both transports,
+available-components relaying from the Managed Process, and duplicate-`instance_uid` handling with
+per-connection disconnect scoping. The Server moves the fleet's heartbeat interval and
 endpoint through hash-gated connection-settings offers the Client verifies by actually
-connecting, persists, and acknowledges (SEC-connection-settings-never-plaintext). Software distribution to Managed
-Processes is in place
+connecting, persists, and acknowledges (SEC-connection-settings-never-plaintext). Software
+distribution to Managed Processes is in place
 (PKG-signed-packages-and-delivery):
 the Server stores and offers packages, and each Supervisor
 downloads the artifact, verifies it (content hash always, Ed25519 signature when a key is
@@ -344,11 +345,11 @@ rolls back a binary that will not stay up, reporting `Downloading` with its prog
 artifact is still on the wire. With the move to Baseline `v0.19.0` both ends also
 enforce the protocol's new message size limits in both directions, on both transports and at the
 Supervisor Endpoint. The Client also updates **itself** over the same package delivery (goal 11,
-CLT-self-update-signed-package): it is always its own Agent now, whether or not it supervises anything, and a named
-package is staged beside the running version, proved by running it, and switched into by an exit
-the service manager answers with a restart — with a marker carrying the outcome across that
-restart and rolling back a version that will not stay up. Mutual TLS closes goal 17 (SEC-admission-by-client-certificate): the
-Server verifies client
+CLT-self-update-signed-package): it is always its own Agent now, whether or not it supervises
+anything, and a named package is staged beside the running version, proved by running it, and
+switched into by an exit the service manager answers with a restart — with a marker carrying the
+outcome across that restart and rolling back a version that will not stay up. Mutual TLS closes goal
+17 (SEC-admission-by-client-certificate): the Server verifies client
 certificates against a configured CA and admits by that certificate alone, the Client presents one
 on both transports, and the Server issues them itself through
 the Baseline's CSR flow — the Agent keeps its private key, sends a signing request, and receives the

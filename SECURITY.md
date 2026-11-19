@@ -121,7 +121,8 @@ partition's next rollout, and the fleet view shows such an Agent waiting before 
 **What this means for operators:** treat one fleet (one Server, one shared admission) as a single
 trust domain, mark only real Gateways as such (`PUT /api/v1/hosts/{host}/gateway`), and do not
 place mutually distrusting Agents behind one Gateway or in one fleet; isolate them by separate
-Server instance or network segment. The alternatives that were weighed are in SEC-admission-by-client-certificate.
+Server instance or network segment. The alternatives that were weighed are in
+SEC-admission-by-client-certificate.
 
 ## Supported versions
 

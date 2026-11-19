@@ -14,8 +14,8 @@ without an abstraction over its language (Non-Goal "Replacing an agent's configu
 
 A Configuration is a named piece of an agent's own configuration language, written for one Agent
 type; it reaches Agents through the Deployments that hold it, which aim it and release it
-([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). What this ADR fixes is how the Configurations
-released to an Agent travel to it and what the Client does with them.
+([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). What this ADR fixes
+is how the Configurations released to an Agent travel to it and what the Client does with them.
 
 OpAMP's `AgentConfigMap` is a map of named entries whose `config_hash` covers the whole map, so
 composing an Agent's configuration out of several named parts is the protocol's own mechanism. A
@@ -38,10 +38,10 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
 `utoipa`, the Server's contract.
 
 1. **The name follows the instance-name grammar** of
-   [CLT-installed-service-and-state](CLT-installed-service-and-state.md) — 1–32 characters of lowercase
-   letters, digits, and `-`, not starting or ending with `-`, not a Windows device name — because
-   it becomes a file name on the Server, a config-map key on the wire, and an entry file on every
-   Client.
+   [CLT-installed-service-and-state](CLT-installed-service-and-state.md) — 1–32 characters of
+   lowercase letters, digits, and `-`, not starting or ending with `-`, not a Windows device name —
+   because it becomes a file name on the Server, a config-map key on the wire, and an entry file on
+   every Client.
 
 2. **An Agent's Remote configuration is one `AgentConfigMap` whose entries are
    Configurations.** Each entry is keyed by the Configuration's name, entries are in name order,
@@ -57,8 +57,9 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
 
 4. **Nothing released, nothing offered.** An Agent's map is composed from the Configurations an
    operator's rollout act released to it, never from matching alone
-   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)); matching computes the candidates. An Agent
-   with nothing released to it is offered nothing and keeps running what it runs.
+   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)); matching
+   computes the candidates. An Agent with nothing released to it is offered nothing and keeps
+   running what it runs.
 
 5. **The role travels verbatim; the Server owns no vocabulary.** The `role` of a Configuration
    goes unchanged into `AgentConfigObject.role` of its entry, so an Agent that interprets roles
@@ -82,15 +83,16 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
    under `/api/v1`. The OpenAPI document is generated code-first with `utoipa` and `utoipa-axum`:
    handlers and schemas are annotated where they live and routes registered once, so document and
    behaviour cannot drift. It is served at `/api/v1/openapi.json`. The API is served on the Operator
-   plane ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), behind its authentication
-   ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)),
+   plane ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), behind its
+   authentication ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)),
    beside the rendered docs
    page ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
 
 **Out of scope:** what a Configuration holds, how it is aimed and released, its routes, and what
-deleting one does ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)); where Configurations are stored
-([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
-the meaning of a kind's own role values (each kind's own ADR); configuration history and audit.
+deleting one does ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md));
+where Configurations are stored
+([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)); the meaning of
+a kind's own role values (each kind's own ADR); configuration history and audit.
 
 ## Alternatives considered
 

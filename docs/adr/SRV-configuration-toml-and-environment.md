@@ -9,8 +9,8 @@
 
 Both binaries read a TOML file: the Server `server.toml`, the Client `supervisor.toml`, each
 parsed with the `toml` crate into `serde` structs that refuse unknown keys
-([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). A file is what an installer lays down and an
-operator diffs, and TOML carries comments and the Client's per-Supervisor structure.
+([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). A file is what an installer lays down
+and an operator diffs, and TOML carries comments and the Client's per-Supervisor structure.
 
 The Server runs in a container. A container is configured by its orchestrator, and the
 orchestrator's natural channel is the environment: a variable per setting, changed per deployment
@@ -105,9 +105,10 @@ environment carry paths to secrets but never a secret itself.
 8. **No other variable configures the Server.** The `AWS_*` variables are read as
    [SRV-state-stores-approval-certificate §17 and §18](SRV-state-stores-approval-certificate.md)
    say: for credentials only, never for an endpoint or an option. `FLEET_TEST_*`
-   variables are read by tests alone. Where SRV-state-stores-approval-certificate says the S3 connection is configured in
-   `server.toml` alone, the environment of this ADR counts as `server.toml`:
-   `FLEET_SERVER__BLOBS__S3__ENDPOINT` sets the endpoint, and `AWS_ENDPOINT` still does not.
+   variables are read by tests alone. Where SRV-state-stores-approval-certificate says the S3
+   connection is configured in `server.toml` alone, the environment of this ADR counts as
+   `server.toml`: `FLEET_SERVER__BLOBS__S3__ENDPOINT` sets the endpoint, and `AWS_ENDPOINT` still
+   does not.
 
 9. **The merge is the Server's own.** `config.rs` builds a `toml::Table` from the file, overlays a
    table built from the environment, and deserializes the result once. No dependency is added.
@@ -133,8 +134,8 @@ since only secrets need one and every secret is already a file.
   that `toml` already does. Rejected.
 - **The `config` crate.** Layered sources and environment overrides, but a larger surface —
   several formats, its own value type, a builder — and it loses `serde`'s field names in some error
-  messages, which the loud validation of [DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md) relies
-  on. Rejected.
+  messages, which the loud validation of [DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)
+  relies on. Rejected.
 - **A fixed list of documented variables.** Each needs code and documentation, and a key added
   later is out of reach of a container until someone adds its variable. Rejected.
 - **Secrets as plain variables beside their `…_file` keys** (`…_PASSWORD` as well as

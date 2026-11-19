@@ -8,25 +8,26 @@
 ## Context
 
 A package signature covers the Agent type, the version and the artifact's SHA-256
-(`fleet_core::package::statement`, [PKG-signed-packages-and-delivery §52](PKG-signed-packages-and-delivery.md)).
-It binds an artifact to its own version, but it says nothing about how that version orders against
-another, and it never expires. A build the operator signed once stays validly signed forever,
-including a build with a flaw that became known later. Whatever stops a downgrade must therefore be
-a rule about versions, and it must hold against the Server, because the attack comes from the
-Server. The specification puts security before convenience; **Q-1** asks that no package installs
-without a valid signature, and **Q-6** that no Client installs a Package below the highest version
-it has installed for that Agent type, or below the highest floor the operator signed for it.
-**G-10** and **G-11** ask that the Server update an agent's software and the Client's own, verified
-before it is applied. The threat model trusts the Server to manage the fleet but not with what a
-host must verify itself: a compromised Server must not get a host to run an older signed build.
+(`fleet_core::package::statement`,
+[PKG-signed-packages-and-delivery §52](PKG-signed-packages-and-delivery.md)). It binds an artifact
+to its own version, but it says nothing about how that version orders against another, and it never
+expires. A build the operator signed once stays validly signed forever, including a build with a
+flaw that became known later. Whatever stops a downgrade must therefore be a rule about versions,
+and it must hold against the Server, because the attack comes from the Server. The specification
+puts security before convenience; **Q-1** asks that no package installs without a valid signature,
+and **Q-6** that no Client installs a Package below the highest version it has installed for that
+Agent type, or below the highest floor the operator signed for it. **G-10** and **G-11** ask that
+the Server update an agent's software and the Client's own, verified before it is applied. The
+threat model trusts the Server to manage the fleet but not with what a host must verify itself: a
+compromised Server must not get a host to run an older signed build.
 
 The forces:
 
 - **The Server manages the Supervisor set.** A Supervisor removed from the set is purged, its
   directory deleted, installed-package record included
-  ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). A floor kept in the Supervisor's directory
-  is one a compromised Server can reset by sending a set without the Supervisor and then one that
-  adds it back, under the same name or another.
+  ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). A floor kept in the
+  Supervisor's directory is one a compromised Server can reset by sending a set without the
+  Supervisor and then one that adds it back, under the same name or another.
 - **A version that does not compare cannot be refused by order.** `precedence` in
   `crates/fleet-core/src/version.rs` returns `None` for any value that is not SemVer. If an
   operator ever signed a build under a version such as `1.19`, which some upstream agents' releases
@@ -36,8 +37,8 @@ The forces:
   ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
 - **An honest Server does not move an Agent backwards.** A rollout reaches an Agent only when it
   moves the Agent forward, rollback is not a rollout, and a deliberate Server-driven downgrade is
-  left undecided ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). That rule binds an honest Server;
-  the refusal that counts is the Client's.
+  left undecided ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)).
+  That rule binds an honest Server; the refusal that counts is the Client's.
 - **The one move to an older version takes no offer.** When an apply fails within the apply grace,
   the Supervisor renames the predecessor back over the live program
   ([PKG-signed-packages-and-delivery §59](PKG-signed-packages-and-delivery.md)).
@@ -64,42 +65,45 @@ highest floor the operator signed for that type.
    version and says a Package version is SemVer, for example `1.19.0` for upstream's `1.19`. A
    Package that the store already holds under a version that is a token but not SemVer is read as
    clause 3 says; it does not fail the store's opening
-   ([PKG-signed-packages-and-delivery §8](PKG-signed-packages-and-delivery.md)). A Package has no name of its
-   own, no Selector and no kind. Its entries carry their signatures
-   ([PKG-signed-packages-and-delivery §18](PKG-signed-packages-and-delivery.md)). Creating a Package that exists
-   is the same request arriving twice.
+   ([PKG-signed-packages-and-delivery §8](PKG-signed-packages-and-delivery.md)). A Package has no
+   name of its own, no Selector and no kind. Its entries carry their signatures
+   ([PKG-signed-packages-and-delivery §18](PKG-signed-packages-and-delivery.md)). Creating a Package
+   that exists is the same request arriving twice.
 
 2. **One predicate decides what is SemVer, in the internal crate.** A version is SemVer when
-   `fleet_core::version::parse` accepts it ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)) and no
-   numeric pre-release identifier has a leading zero. The Server, `opamp-fleetctl` and the Client
-   all call this predicate, and none of them has a second copy. Two versions are ordered by
-   `precedence`, build metadata ignored. Two builds of one release compare equal.
+   `fleet_core::version::parse` accepts it
+   ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)) and no numeric
+   pre-release identifier has a leading zero. The Server, `opamp-fleetctl` and the Client all call
+   this predicate, and none of them has a second copy. Two versions are ordered by `precedence`,
+   build metadata ignored. Two builds of one release compare equal.
 
 3. **A Package with a non-SemVer version that the store holds is kept, and nothing new is done with
    it.** At startup the store reads it, and the Server logs one warning per such Package, naming it
    and the SemVer rule. Such a Package is never a candidate (clause 5). Every write to it is
    answered `400` with the same text as clause 1: an entry, a signature, and adding it to a
    Deployment. It may be deleted like any other Package once nothing pins it
-   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md), deleting what an assignment pins). An assignment
-   that already pins it stays in force, and its offer still goes out
-   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md), the pin of what an Agent installed). The Client
-   refuses that offer (clause 7), and the fleet view shows the reason the Agent reports.
-   `server migrate` carries such a Package over as it reads it. The operator republishes the
-   content under a SemVer version, signs it again, and rolls that out.
+   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md), deleting what an
+   assignment pins). An assignment that already pins it stays in force, and its offer still goes out
+   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md), the pin of what
+   an Agent installed). The Client refuses that offer (clause 7), and the fleet view shows the
+   reason the Agent reports. `server migrate` carries such a Package over as it reads it. The
+   operator republishes the content under a SemVer version, signs it again, and rolls that out.
 
 4. **`opamp-fleetctl package sign` signs only a SemVer version.** It refuses a `--version`, and a
-   signing-file entry ([PKG-signed-packages-and-delivery §20](PKG-signed-packages-and-delivery.md)), whose
-   version is not SemVer. It does so before it reads the key, and names the version. The
+   signing-file entry ([PKG-signed-packages-and-delivery §20](PKG-signed-packages-and-delivery.md)),
+   whose version is not SemVer. It does so before it reads the key, and names the version. The
    operator's key therefore never signs a version that a Client would refuse.
 
 5. **A Package becomes a candidate when its version is SemVer, it fits, it is aimed at the Agent,
    and it moves the Agent forward.** A Package whose version is not SemVer (clause 3) is nobody's
    candidate, whatever the Agent reports. Fit is
-   [PKG-signed-packages-and-delivery §14](PKG-signed-packages-and-delivery.md)'s, mandatory, and comes first
-   after that. The version test ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) runs *with* the fit:
-   a Package it holds back is nobody's candidate and appears in no count and no proposal. A
+   [PKG-signed-packages-and-delivery §14](PKG-signed-packages-and-delivery.md)'s, mandatory, and
+   comes first after that. The version test
+   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) runs *with* the
+   fit: a Package it holds back is nobody's candidate and appears in no count and no proposal. A
    per-Agent refusal of a non-SemVer Package names the version and the SemVer rule, as the version
-   reasoning of a refused per-Agent act does ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)).
+   reasoning of a refused per-Agent act does
+   ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)).
 
 6. **A Package is numbered in the space its program numbers itself, written as SemVer.** For a
    program that self-reports an orderable version (the Client and any OpAMP-aware Managed
@@ -134,11 +138,11 @@ highest floor the operator signed for that type.
    Supervisor under another one. Every Supervisor of one type on this Client shares the type's
    mark. The file sits outside `supervisor_dir`, and its name contains a `.`, which no Supervisor
    name can contain (the instance-name grammar of
-   [CLT-installed-service-and-state](CLT-installed-service-and-state.md)), so no purge can delete it, even where
-   an operator places `supervisor_dir` at `state_dir` itself. The mark rises when a Supervisor
-   reports a package `Installed`, that is, once its program has survived the apply grace
-   ([PKG-signed-packages-and-delivery §58](PKG-signed-packages-and-delivery.md)). It never falls. It does not
-   move on `InstallFailed`, and it does not move on the rollback of
+   [CLT-installed-service-and-state](CLT-installed-service-and-state.md)), so no purge can delete
+   it, even where an operator places `supervisor_dir` at `state_dir` itself. The mark rises when a
+   Supervisor reports a package `Installed`, that is, once its program has survived the apply grace
+   ([PKG-signed-packages-and-delivery §58](PKG-signed-packages-and-delivery.md)). It never falls. It
+   does not move on `InstallFailed`, and it does not move on the rollback of
    [PKG-signed-packages-and-delivery §59](PKG-signed-packages-and-delivery.md).
 
 9. **The mark is seeded at every start from what is installed.** At startup, each Supervisor's
@@ -235,8 +239,9 @@ highest floor the operator signed for that type.
     runs below the floor, naming both versions, and takes the next offer at or above the floor. The
     Client's own Agent reports no such health: its version is the running build's, and its next
     update at or above the floor replaces it. The rollback of
-    [PKG-signed-packages-and-delivery §59](PKG-signed-packages-and-delivery.md) puts back the installed
-    predecessor whatever the floor says, since it takes no offer, and the health then says so too.
+    [PKG-signed-packages-and-delivery §59](PKG-signed-packages-and-delivery.md) puts back the
+    installed predecessor whatever the floor says, since it takes no offer, and the health then says
+    so too.
 
 20. **Only the host lowers a floor.** No Server route, no offer, no delivered Supervisor block and
     no key of `supervisor.toml` lowers what `package-floors.json` holds. An operator who wants a
@@ -257,10 +262,10 @@ highest floor the operator signed for that type.
 22. **One program, two command trees.** `opamp-fleetctl package` holds `fetch`, `pack`, `sha256`,
     `sign`, `keygen` and `public-key`, each with the options and output it has, and `floor` as
     clause 14 states it. `opamp-fleetctl pki` holds `init`, `server-cert`, `bootstrap-ca`, `status`
-    and `p12-extract` as [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md) states them.
-    `opamp-fleetctl --version` prints the version every binary of this project prints
-    ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)). No other program name exists for any of these
-    commands: no alias, no wrapper, no symlink.
+    and `p12-extract` as [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md) states
+    them. `opamp-fleetctl --version` prints the version every binary of this project prints
+    ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)). No other program
+    name exists for any of these commands: no alias, no wrapper, no symlink.
 
 23. **The layout of `data_dir` is fixed, and no other is read.** With `store = "fs"`, under
     `data_dir`:
@@ -296,14 +301,15 @@ highest floor the operator signed for that type.
     the one before the write.
 
 **Out of scope:** a deliberate downgrade driven by the Server, which
-[SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md) leaves undecided; a list of withdrawn builds by hash;
-an expiry or a signing time in the package statement; rotating the package key; a floor per Platform
-or per Deployment; the floors in the bundled UI, beyond what the REST API serves; a Server that
-withholds a floor, which delays it until the Client reaches one that serves it; raising the mark
-from a version that a Managed Process reports about itself, as opposed to one this Client installed;
-an operator command that lowers a mark; reporting the mark to the Server; the Gateway refusing to
-cache a non-SemVer offer, which the Client's refusal decides, as the Client's signature check
-decides the rest ([PKG-signed-packages-and-delivery §19](PKG-signed-packages-and-delivery.md)).
+[SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md) leaves undecided; a
+list of withdrawn builds by hash; an expiry or a signing time in the package statement; rotating the
+package key; a floor per Platform or per Deployment; the floors in the bundled UI, beyond what the
+REST API serves; a Server that withholds a floor, which delays it until the Client reaches one that
+serves it; raising the mark from a version that a Managed Process reports about itself, as opposed
+to one this Client installed; an operator command that lowers a mark; reporting the mark to the
+Server; the Gateway refusing to cache a non-SemVer offer, which the Client's refusal decides, as the
+Client's signature check decides the rest
+([PKG-signed-packages-and-delivery §19](PKG-signed-packages-and-delivery.md)).
 
 ## Alternatives considered
 
@@ -351,8 +357,8 @@ decides the rest ([PKG-signed-packages-and-delivery §19](PKG-signed-packages-an
   it, known or not. Not taken; it stays possible beside a floor.
 - **A signing time in every package statement and a signed cut-off date.** It would also catch
   builds whose version nobody remembers, but it changes the package statement
-  ([PKG-signed-packages-and-delivery §52](PKG-signed-packages-and-delivery.md)), and every signature the fleet
-  holds would have to be made again. Rejected.
+  ([PKG-signed-packages-and-delivery §52](PKG-signed-packages-and-delivery.md)), and every signature
+  the fleet holds would have to be made again. Rejected.
 - **Rotating the package key.** It removes every old signature at once, and with it every good one.
   It is a fleet-wide operation with no counterpart in the Client. Rejected as the way to withdraw
   one build.
@@ -432,8 +438,8 @@ decides the rest ([PKG-signed-packages-and-delivery §19](PKG-signed-packages-an
   - **Two Supervisors of one type share a floor.** On one Client, a new Supervisor of a type cannot
     be started on an older version than another Supervisor of that type has had.
   - **The mark and the floors outlive a reinstall.** `service uninstall` keeps `state_dir`
-    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), so reinstalling the Client keeps
-    them. Removing `state_dir` removes them, together with the Client's identity.
+    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), so reinstalling the
+    Client keeps them. Removing `state_dir` removes them, together with the Client's identity.
   - **A floor can be withheld.** It takes effect on a host only once a Server or Gateway that
     serves it has been reached, and behind a Gateway only after the Gateway's next fetch.
   - One more signed statement, store, route and state file. Every Client asks for the floors once

@@ -72,9 +72,9 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    (`sequence_num`, capabilities, description, health, effective configuration, remote-config,
    connection-settings, and package statuses, available components), the transport of the last
    report, `last_seen_ms`, a queued restart (`restart_pending`), the assignments rollout acts
-   wrote ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)), its labels and the Host it last arrived
-   over (clauses 16 and 21), and the runtime facts `connected` and the owning connection.
-   `GET /api/v1/agents` returns the records as `AgentView`s.
+   wrote ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)), its labels
+   and the Host it last arrived over (clauses 16 and 21), and the runtime facts `connected` and the
+   owning connection. `GET /api/v1/agents` returns the records as `AgentView`s.
 
 2. **Records persist behind a port.** The trait `AgentStore: Send + Sync` is the only thing the
    fleet logic knows about persistence, and its surface is the access pattern:
@@ -94,9 +94,9 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    - `create_within(uid, &PersistedAgent, max_records)` — create the record of an Agent first heard
      of unless the store holds `max_records` already, counted where the records are stored in the
      step that creates it, so the Agent-record ceiling `max_agents`, which
-     [SEC-tls13-two-planes-bounded-input §19](SEC-tls13-two-planes-bounded-input.md) counts for the whole fleet,
-     holds for every instance; a record stored already is answered as it is stored, and passes no
-     bound;
+     [SEC-tls13-two-planes-bounded-input §19](SEC-tls13-two-planes-bounded-input.md) counts for the
+     whole fleet, holds for every instance; a record stored already is answered as it is stored, and
+     passes no bound;
    - `write_report(uid, &PersistedAgent)` — write the part of a stored record a report decides, as
      `put` does, and create none; it answers whether there was a record, and on a shared store
      none means the Agent was forgotten through another instance, which the fleet then drops
@@ -192,11 +192,12 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 
 8. **The budget is three heartbeat intervals, and on PostgreSQL the presence interval besides.**
    When the Server offers a heartbeat interval (`[connection_offer] heartbeat_interval_secs`,
-   [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)), the budget is three times
-   it; otherwise `stale_after_secs` in `server.toml`, default **90** — three times the Baseline's
-   default heartbeat of 30 seconds — and never zero. On PostgreSQL the budget is that plus
-   `presence_interval_secs`, since `last_seen_ms` in the database may be one interval old. One
-   missed heartbeat is a lost packet; a view that flickers on every hiccup is one nobody trusts.
+   [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)), the
+   budget is three times it; otherwise `stale_after_secs` in `server.toml`, default **90** — three
+   times the Baseline's default heartbeat of 30 seconds — and never zero. On PostgreSQL the budget
+   is that plus `presence_interval_secs`, since `last_seen_ms` in the database may be one interval
+   old. One missed heartbeat is a lost packet; a view that flickers on every hiccup is one nobody
+   trusts.
 
 9. **Staleness changes nothing about how the Server treats an Agent.** A stale Agent keeps its
    configuration, its package state, and its identity, is offered what it always would be, and

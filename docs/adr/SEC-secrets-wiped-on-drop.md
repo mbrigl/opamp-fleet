@@ -67,7 +67,8 @@ buffer from the moment it is read or made until it is dropped.
    with its default `alloc` feature
    and no derive, and named by `fleet-core`, `fleet-util`, `fleet-agent`, `fleet-server` and
    `fleet-tools` where they hold a secret. It pulls no TLS or crypto backend, so the rule of
-   [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) on the TLS and crypto backend holds.
+   [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) on the TLS and crypto
+   backend holds.
 2. **`Zeroizing` is the whole mechanism.** A secret is a `Zeroizing<Vec<u8>>` or a
    `Zeroizing<String>`, or a struct field of that type; no type of this project's own wraps it. A
    function that hands a secret on returns it so, and a borrow (`&[u8]`, `&str`) passes it to a
@@ -83,10 +84,11 @@ buffer from the moment it is read or made until it is dropped.
    outside the reach of this project's code. This decision makes no claim about them.
 
 **Out of scope:** `opamp`. Wiping the key `opamp::tls::Identity` carries adds `zeroize` to both
-features of the publishable crate and changes a public field's type, which changes DEV-six-crates-tokio-axum §3,
-supersedes DEV-six-crates-tokio-axum, and is its own decision. Also out of scope: locking secret pages
-against swap (`mlock`), excluding them from core dumps, and the ciphertext the Server keeps of a
-bootstrap certificate, which lies on disk under `config_dir` anyway.
+features of the publishable crate and changes a public field's type, which changes
+DEV-six-crates-tokio-axum §3, supersedes DEV-six-crates-tokio-axum, and is its own decision. Also
+out of scope: locking secret pages against swap (`mlock`), excluding them from core dumps, and the
+ciphertext the Server keeps of a bootstrap certificate, which lies on disk under `config_dir`
+anyway.
 
 ## Alternatives considered
 

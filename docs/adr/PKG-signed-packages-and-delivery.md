@@ -31,16 +31,17 @@ verifies, installs and reports each package through `Downloading → Installing 
 InstallFailed`. This decision covers the path from what the Server holds, through how an operator
 signs it and who may fetch it, to the Agent that downloads, verifies, unpacks, swaps, health-gates
 and rolls it back. When content reaches an Agent, and the version test it must pass, are
-[SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)'s; how a Package version is written and the floors
-below which nothing is taken are [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)'s.
+[SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)'s; how a Package
+version is written and the floors below which nothing is taken are
+[PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)'s.
 
 The store, and which held artifact can be meant for an Agent:
 
 - **A release is one version across several artifacts.** The release pipeline
-  ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)) publishes five platform builds
-  of one version, and upstream projects publish more. The store needs an object that *is* that
-  release, or "which version is this at" has one answer per platform and a half-finished upload
-  looks like a rollout in progress.
+  ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)) publishes
+  five platform builds of one version, and upstream projects publish more. The store needs an object
+  that *is* that release, or "which version is this at" has one answer per platform and a
+  half-finished upload looks like a rollout in progress.
 - **A mismatched binary is the worst mistake available.** A Windows artifact swapped over a Linux
   host's program, or a Promtail build swapped over a Collector, would be caught only by the health
   gate, a fleet-wide outage window for a mistake the Server had every attribute in hand to refuse.
@@ -66,9 +67,10 @@ What identifies a Package and how it is released:
 - **The Baseline's addon kind has no Client behind it.** The Client refuses every addon offer, as
   a defence against a foreign Server writing one over a Managed Process's binary.
 - **A Selector cannot say "not".** Every Selector is equality over the effective description
-  ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)); "everyone except the canary hosts" is not
-  writable. Disjoint targets come from membership, which is what Server-set Labels
-  ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) and provisioned attributes are.
+  ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)); "everyone except
+  the canary hosts" is not writable. Disjoint targets come from membership, which is what Server-set
+  Labels ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) and provisioned
+  attributes are.
 - **What a signature covers decides where it belongs.** The signed statement names the Agent type,
   the version and the artifact's SHA-256, and no Deployment. A signature kept beside the release
   would be an arrangement of the Server's data no Client can verify, signed again for every
@@ -83,8 +85,8 @@ The download route and the Gateway:
 
 - **The host is the one bound the Server has.** A certificate proves fleet membership and the host
   it was issued to, not an Agent; what a certificate speaks for is
-  [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)'s. Any test of "may fetch" can be no
-  finer than the host.
+  [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)'s. Any test of "may fetch" can
+  be no finer than the host.
 - **What reaches an Agent is already decided, per Agent.** Its offer is composed from its
   assignment alone: the assigned Package's entry for the Platform it reports, with that entry's
   signature. The download needs no rule of its own. It needs the same test the offer uses.
@@ -115,15 +117,16 @@ On the Agent:
   the signature covers the Agent type and the version as well.
 - **A running process cannot reliably replace its own binary,** so the work crosses a process
   boundary. For a Managed Process that boundary exists: the Supervisor owns its process's stop,
-  spawn and apply-grace health gate ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). The
-  Client's own binary is the other case
-  ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
+  spawn and apply-grace health gate
+  ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). The Client's own binary is
+  the other case ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
 - **Verification protects the host; the origin bounds what is exposed.** What stands between the
   bytes and an executed program is the content hash and an Ed25519 signature made with a key the
   operator holds (the Baseline's *Code Signing* leaves the method to the Agent). The `ring`
-  provider the build carries ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)) verifies
-  Ed25519. The transport still decides what a download exposes: the Client's certificate is its
-  fleet identity, and an offered header is a credential.
+  provider the build carries
+  ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)) verifies Ed25519.
+  The transport still decides what a download exposes: the Client's certificate is its fleet
+  identity, and an offered header is a credential.
 - **Many agents are more than one file.** Fluent Bit ships an executable plus the shared objects
   and plugins it loads. A package that unpacks into a tree gives the archive a say in where bytes
   land, a security boundary this decision creates. The protocol carries one file per package and
@@ -152,21 +155,22 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 1. **A Package is one release: one Agent type, one version, fixed at creation.** How a Package is
    identified and which versions it may carry is
-   [PKG-versions-high-water-mark-floor §1](PKG-versions-high-water-mark-floor.md). Both are stated when the
-   Package is created and never edited; a new version is a **new Package**, never a change to an old
-   one. There is no untyped Package and no moment in which one exists. The store keeps every version
-   openly as its own Package until an operator deletes it: there is no hidden "previous" artifact
-   and no automatic pruning, and the store is not where rollback happens
-   ([SRV-deployments-and-pinned-rollouts §21](SRV-deployments-and-pinned-rollouts.md): rollback is not a rollout). The type is
-   compared **raw** (clause 14); the version orders as [OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)
-   orders versions.
+   [PKG-versions-high-water-mark-floor §1](PKG-versions-high-water-mark-floor.md). Both are stated
+   when the Package is created and never edited; a new version is a **new Package**, never a change
+   to an old one. There is no untyped Package and no moment in which one exists. The store keeps
+   every version openly as its own Package until an operator deletes it: there is no hidden
+   "previous" artifact and no automatic pruning, and the store is not where rollback happens
+   ([SRV-deployments-and-pinned-rollouts §21](SRV-deployments-and-pinned-rollouts.md): rollback is
+   not a rollout). The type is compared **raw** (clause 14); the version orders as
+   [OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md) orders versions.
 
 2. **A Package holds one entry per Platform, so a duplicate is unrepresentable.** Entries are a map
    keyed by the canonical `(os, arch)` pair. Writing an entry for a Platform the Package already
    holds replaces it; deleting the last one leaves an empty Package, kept, because a Package being
    assembled is a normal state and deleting the Package is its own act. One entry suffices; five
    platforms are five entries under one identity. When an entry may be written at all is
-   [SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)'s rule on writes to an assigned Package.
+   [SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)'s rule on writes to
+   an assigned Package.
 
 3. **An entry is an uploaded artifact, and nothing else.** The body of an entry upload is the
    artifact. The Server streams it to a staging file, hashes it while streaming, refuses an empty
@@ -201,8 +205,9 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
    - the Client reports `host.arch` as `amd64`/`arm64`/`arm32` and `os.type` as `darwin`, mapping
      Rust's constants, so a Supervisor and a Collector's `opampextension` report the same string;
    - the release artifacts carry the same two tokens in their file names (the file-name format is
-     [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)'s), so the upload of a release
-     is a loop over the Client's archives with `os` and `arch` read straight out of each name.
+     [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)'s), so the
+     upload of a release is a loop over the Client's archives with `os` and `arch` read straight out
+     of each name.
 
 7. **A request that names bytes names their Platform; one that names the Package does not.** The
    entry upload, the entry delete and the artifact download all carry `os` and `arch`; creating,
@@ -275,8 +280,8 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
     An Agent that reports no type, or no `os.type` or `host.arch`, fits nothing. A per-Agent
     rollout act refused on fit says which of the three it was. A Label can never supply or override
-    these attributes ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)), so a slip there
-    cannot hand a host an artifact built for another machine.
+    these attributes ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)), so a slip
+    there cannot hand a host an artifact built for another machine.
 
 15. **The Platform does not travel on the wire.** All Agents of one type are offered the Package
     under the same key, each with the download URL and content hash of the entry that fits it (two
@@ -304,8 +309,8 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     - A signature for an entry that does not exist is `404`, an empty or malformed one `400`.
     - Writing new bytes to an entry removes its signature, because a signature covers the hash.
     - A signature write on a Package assigned to an Agent is refused (`409`), like any other write
-      to its entries ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md), writes to an assigned
-      Package).
+      to its entries ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md),
+      writes to an assigned Package).
     - What an Agent receives in `DownloadableFile.signature` is the signature of the entry for its
       Platform. An entry without one is no candidate, the Agent is offered nothing for it, and the
       fleet view says the signature is missing.
@@ -424,11 +429,12 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 33. **Uploaded artifacts are served on the Agent plane, and offered as a path.** The download
     route is the one `/api/v1` route on the Agent-plane listener
-    ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), not on the Operator plane and not
-    in the OpenAPI document. It streams the file and never holds it in memory. The offered
-    `download_url` is always a path, which the Client resolves against its own OpAMP endpoint.
-    There is no `advertised_url`: a `server.toml` that names it fails startup, naming the key as
-    removed. A download through another host would be refused by every Client (clause 51).
+    ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), not on the
+    Operator plane and not in the OpenAPI document. It streams the file and never holds it in
+    memory. The offered `download_url` is always a path, which the Client resolves against its own
+    OpAMP endpoint. There is no `advertised_url`: a `server.toml` that names it fails startup,
+    naming the key as removed. A download through another host would be refused by every Client
+    (clause 51).
 
 34. **The package download stays on the Agent plane, outside the credential check, under its
     `/api/v1` path.** The offered `download_url` is a path the Client resolves against its own
@@ -455,17 +461,18 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 36. **An offer stands until the assignment changes, not until it was last sent.** The hash gate
     suppresses re-sending an offer whose `all_packages_hash` the Agent has echoed
-    ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). It does not withdraw the offer, so an Agent
-    retrying after a failed install can fetch again. Neither connection state nor the version test
-    ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) enters the test. Matching does not enter it
-    either: a version that waits for an operator's press is no one's offer, and it cannot be
-    fetched until the press releases it.
+    ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). It does not
+    withdraw the offer, so an Agent retrying after a failed install can fetch again. Neither
+    connection state nor the version test
+    ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) enters the test.
+    Matching does not enter it either: a version that waits for an operator's press is no one's
+    offer, and it cannot be fetched until the press releases it.
 
 37. **Every other request for an artifact is answered `404`, as for one that does not exist.** The
     status, the body and the headers are the same whether the store holds no such artifact or holds
     an artifact that is not offered to any Agent the requesting host speaks for (what a certificate
-    speaks for is [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)'s). The Server decides
-    this before it opens a file. Two answers differ:
+    speaks for is [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)'s). The Server
+    decides this before it opens a file. Two answers differ:
     - a malformed identity or Platform token is `400`, which concerns syntax and reveals nothing
       about the store;
     - admission refusals (no member certificate, a bootstrap certificate, a revoked certificate)
@@ -493,8 +500,9 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     behind the same address.
 
 39. **Each download request is counted against the requesting host's rate.** It costs one token
-    from that host's bucket ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)). A download
-    names no `instance_uid`, so for a host marked as a Gateway the token comes from the Gateway's
+    from that host's bucket
+    ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)). A download names
+    no `instance_uid`, so for a host marked as a Gateway the token comes from the Gateway's
     aggregate bucket ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)). That bucket bounds how
     often a Gateway's request can scan the fleet's records under the fleet lock.
 
@@ -513,8 +521,8 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     artifact. The Gateway resolves the path against its own endpoint and fetches from its Server's
     origin with its own client certificate and no offered headers, by the rules every Client's
     download follows (clause 51). A marked Gateway may fetch what is offered to any Agent
-    ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)), and each request costs one token
-    of its aggregate bucket (clause 39). The message itself is forwarded unchanged and without
+    ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)), and each request costs one
+    token of its aggregate bucket (clause 39). The message itself is forwarded unchanged and without
     waiting for the fetch ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)). At most four
     fetches run at a time; further ones wait for a free slot. A `429` or `503` from the Server
     with `Retry-After` defers the fetch within the bound of clause 47, and a deferred fetch gives
@@ -585,8 +593,8 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 47. **A Client waits as its own Server origin asks before it reports a download failed.** A `429`
     or `503` with a `Retry-After` in seconds, answered by the Client's own Server origin (the
     Gateway behind one, otherwise the Server, whose rate limit answers `429` with
-    `Retry-After: 30` ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)) and whose
-    admission throttle answers `429` with the seconds of back-off left
+    `Retry-After: 30` ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md))
+    and whose admission throttle answers `429` with the seconds of back-off left
     ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md))),
     is waited out and the
     download sent again. Each wait is the `Retry-After`, at least 1 second and at most 60 seconds.
@@ -603,8 +611,8 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 48. **The Supervisor is the updater, and only a Client holding a verification key takes
     packages.** With `[packages] verification_key` set, every Supervisor-backed Agent declares
     `AcceptsPackages` and `ReportsPackageStatuses` (every Managed Process is one this Client
-    installed, [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). Without it, no Agent of this
-    Client declares `AcceptsPackages`, neither a Supervisor nor the Client's own Agent
+    installed, [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). Without it, no
+    Agent of this Client declares `AcceptsPackages`, neither a Supervisor nor the Client's own Agent
     ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)), and the Client says so
     at startup, once, naming `[packages] verification_key` as what to set. A package offered to
     such an Agent regardless is ignored: nothing is downloaded, and an Agent that declared no
@@ -695,10 +703,10 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     opens an encrypted `.7z` (AES-256); the Server never learns it, so a confidential artifact is
     readable only on the host that runs it. It is one secret for the fleet (a single archive
     serves every Agent) and must never be the `[auth]` credential, which the Server rotates on its
-    own ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)) and would leave
-    every archive unopenable. It is masked in the configuration the Client reports. An encrypted
-    archive without the key, or with the wrong one, fails naming the key. A `.zip` is never
-    encrypted: an encrypted zip member refuses the archive and names `.7z` as the way.
+    own ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)) and
+    would leave every archive unopenable. It is masked in the configuration the Client reports. An
+    encrypted archive without the key, or with the wrong one, fails naming the key. A `.zip` is
+    never encrypted: an encrypted zip member refuses the archive and names `.7z` as the way.
 
 55. **A single-file package installs one member, to a place the Client chose.** Without
     `program_path`, the artifact is the program or an archive holding it, and one member of it is
@@ -717,8 +725,8 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     relative path *inside* the package, e.g. `bin/fluent-bit`; absent, the package is one file. It
     is validated at startup (non-empty, relative, no `.` or `..`), and it says *where inside*,
     never *whether*: the program's bare file name stays the consent
-    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). Being written in the configuration, the
-    spawn path `program/tree/<program_path>` is known before any package exists.
+    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). Being written in the
+    configuration, the spawn path `program/tree/<program_path>` is known before any package exists.
     - `program_path` matches a member by its **trailing path components**, so `bin/fluent-bit`
       finds `fluent-bit-3.1.0/bin/fluent-bit` and stays right at the next release. No match fails
       naming what the archive holds; several matches fail naming them, answered by writing more of
@@ -753,14 +761,16 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
     The artifact is unpacked to the staged name first, beside what runs; a raw artifact is moved
     there rather than copied when it can be. A kind that declares a preflight proves the staged
-    program runs before anything is stopped ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md),
-    the preflight). Then the Managed Process is stopped, the live name renamed to the predecessor,
-    the staged name renamed to the live one, so the live name is always the old package or the new
-    one, never a mixture, and the process is spawned and must survive `apply_grace_secs`
-    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). Surviving is `Installed`, after which the
-    program is asked for its version again. A spawn failing with `ETXTBSY` right after the swap is
-    retried briefly rather than rolled back. When there is nothing to run yet (no Configuration),
-    the package is installed and reported `Installed`; the configuration that arrives starts it.
+    program runs before anything is stopped
+    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md), the preflight). Then the
+    Managed Process is stopped, the live name renamed to the predecessor, the staged name renamed to
+    the live one, so the live name is always the old package or the new one, never a mixture, and
+    the process is spawned and must survive `apply_grace_secs`
+    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). Surviving is `Installed`,
+    after which the program is asked for its version again. A spawn failing with `ETXTBSY` right
+    after the swap is retried briefly rather than rolled back. When there is nothing to run yet (no
+    Configuration), the package is installed and reported `Installed`; the configuration that
+    arrives starts it.
 
 59. **A failed apply rolls back only to a predecessor.** If the process does not start or exits
     within the grace and a predecessor exists, the predecessor is renamed back over the live name
@@ -798,25 +808,25 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     it travel byte for byte: the hash an Agent verifies is upstream's own.
 
 **Out of scope:** which Package reaches which Agent and when, and the Deployment's own shape and
-rollout ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)); how a Package version is written and the
-floors below which nothing is taken
-([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)); where and how the Server keeps the
-bytes
+rollout ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)); how a
+Package version is written and the floors below which nothing is taken
+([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)); where and how the
+Server keeps the bytes
 ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
-what a certificate speaks for ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)); what a
-host behind a Gateway receives from it ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)); verifying
-upstream sigstore/cosign signatures; a retention policy for superseded Packages; inequality in
-Selectors; refusing an overlapping Selector at write time; whether `[self_update] package` should be
-renamed, since its value is an Agent type; addons, and installing them, until a Client can install
-one; a bound finer than the host; roles, permissions and tenancy on the Operator plane; keeping the
-Gateway's cache and the offers it serves across a restart of the Gateway, and the Gateway's own
-Supervisors fetching through the cache; resuming an interrupted download with range requests;
-distributing the archive key or the verification key; keeping more than one predecessor; refusing an
-`invalid` signature on the Server; more than one verification key on the Server, or rotating it;
-signing on the Server or through it; an import or signing route on the Server; `sign` writing
-signatures to a Server itself; a signing file spanning several Packages; an external signer (HSM,
-`openssl`) reading the signing file, for whom the statement of clause 52 is documented; a
-reproducible tree mode for `opamp-fleetctl package pack`.
+what a certificate speaks for ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md));
+what a host behind a Gateway receives from it ([CLT-modes-and-gateway](CLT-modes-and-gateway.md));
+verifying upstream sigstore/cosign signatures; a retention policy for superseded Packages;
+inequality in Selectors; refusing an overlapping Selector at write time; whether
+`[self_update] package` should be renamed, since its value is an Agent type; addons, and installing
+them, until a Client can install one; a bound finer than the host; roles, permissions and tenancy on
+the Operator plane; keeping the Gateway's cache and the offers it serves across a restart of the
+Gateway, and the Gateway's own Supervisors fetching through the cache; resuming an interrupted
+download with range requests; distributing the archive key or the verification key; keeping more
+than one predecessor; refusing an `invalid` signature on the Server; more than one verification key
+on the Server, or rotating it; signing on the Server or through it; an import or signing route on
+the Server; `sign` writing signatures to a Server itself; a signing file spanning several Packages;
+an external signer (HSM, `openssl`) reading the signing file, for whom the statement of clause 52 is
+documented; a reproducible tree mode for `opamp-fleetctl package pack`.
 
 ## Alternatives considered
 
@@ -848,7 +858,8 @@ reproducible tree mode for `opamp-fleetctl package pack`.
   object, and is indistinguishable from a half-finished upload. Two Packages express that case
   explicitly.
 - **Encode the platform in the version** (`3.0.0+linux-amd64`). Needs no schema, and contradicts
-  [OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md): build metadata is provenance and is not compared.
+  [OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md): build metadata is
+  provenance and is not compared.
 - **Canonicalise onto what Rust reports** (`x86_64`, `aarch64`). The smaller change; rejected
   because it makes this project's canonical spelling one that neither the conventions, nor the
   Collector, nor the release artifact uses: a private vocabulary maintained by a table, forever.
@@ -986,7 +997,8 @@ reproducible tree mode for `opamp-fleetctl package pack`.
   no longer re-sends. The handshake already identifies the host.
 - **Allow whatever is a candidate for the host's Agents** (what matching would release now). This
   would let a host fetch a build the operator saved but did not release, which breaks the rule that
-  a release happens only by an operator's act ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)).
+  a release happens only by an operator's act
+  ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)).
 - **Limit a Gateway to the Agents currently carried on its connections.** The Server would have to
   track which connection or host carries each Agent. That would buy nothing, because a Gateway's
   certificate may report under any `instance_uid` and so can receive any Agent's offer over OpAMP

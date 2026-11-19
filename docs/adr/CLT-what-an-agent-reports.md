@@ -29,8 +29,8 @@ equals the Configuration's type, and a rollout pins the fitting ones to it. A De
 Selector can aim at `service.name`. A Package is resolved for the type the Agent reports. The
 Supervisor refuses an offered Package whose name is not its own type before anything is
 downloaded, and keeps the high-water mark per its own type
-([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)); both read the Supervisor's
-value.
+([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)); both read the
+Supervisor's value.
 
 **A Managed Process is code the Supervisor does not vouch for.** The Server ships its program as a
 Package and its configuration as Configurations, and a Configuration's language can run commands,
@@ -53,11 +53,11 @@ unfiltered, such a report could state:
   that reports another platform is offered a binary built for another machine, which the
   Supervisor swaps over the program; only the health gate would catch it.
 - **A Client Agent.** The Client Agent is recognised by the `supervisor.kind.*` attributes that it
-  alone reports ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)). A process that reports
-  one makes a second Client Agent in its group: nobody in the group inherits Labels, and every
-  Agent of the host is marked ambiguous and drops out of every Deployment aimed by an inherited
-  Label. Behind a Gateway the group is keyed by the reported `host.id` or `host.name`, so a process
-  that also reports another machine's `host.id` joins that machine's group.
+  alone reports ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)). A process that
+  reports one makes a second Client Agent in its group: nobody in the group inherits Labels, and
+  every Agent of the host is marked ambiguous and drops out of every Deployment aimed by an
+  inherited Label. Behind a Gateway the group is keyed by the reported `host.id` or `host.name`, so
+  a process that also reports another machine's `host.id` joins that machine's group.
 - **The operator's values.** An `[attributes]` entry such as `channel` would be overwritten, and a
   Label is shadowed by any key the Agent reports, so a process reporting `rollout = stable` would
   leave the canary channel its Label put it in.
@@ -65,10 +65,10 @@ unfiltered, such a report could state:
 What the process knows that nobody else does is its version, and for a Collector its `dist.name`.
 The rest of what a Collector's `opampextension` reports is `host.name`, `os.type`, `host.arch` and
 `os.description`, which the Supervisor reports from the same machine in the same spelling
-([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), plus attributes written in the Collector's
-own configuration under `agent_description.non_identifying_attributes` and its resource
-attributes. G-16 has the Supervisor Endpoint relay a Collector's `service.*` description and
-leaves what the host is to the Supervisor and the operator. No kind this project builds states a
+([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), plus attributes written
+in the Collector's own configuration under `agent_description.non_identifying_attributes` and its
+resource attributes. G-16 has the Supervisor Endpoint relay a Collector's `service.*` description
+and leaves what the host is to the Supervisor and the operator. No kind this project builds states a
 type of its own; `collector` and `command` take the block's `service_name` or fall back to the
 program's file name.
 
@@ -95,10 +95,11 @@ metrics — "CPU or RAM usage" — as what own metrics are for.
 
 **"Own" cannot mean a Managed Process's internals.** Upstream's `opampsupervisor` answers the offer
 by configuring the Collector's internal telemetry. That road is closed here: a Supervisor passes a
-Configuration through without touching it ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)), and
-the specification's non-goals forbid an abstraction over a Managed Process's configuration
-language. What this Client can honestly report is what it observes from outside: its own process,
-and the processes it spawned and holds the pids of.
+Configuration through without touching it
+([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)), and the specification's
+non-goals forbid an abstraction over a Managed Process's configuration language. What this Client
+can honestly report is what it observes from outside: its own process, and the processes it spawned
+and holds the pids of.
 
 **All three signals have a subject.** Metrics are process metrics. Logs are what the Client
 already writes through `tracing`. Traces are the control loop's lifecycles — a configuration
@@ -139,16 +140,17 @@ reading would leave both ends unable to drive each other.
 
 How an offer is applied, acknowledged and persisted — the telemetry destinations as a class of
 offer of their own, without a verifying connection or a reconnect — is
-[SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)'s. This ADR decides what an
-Agent states about itself, what own telemetry is, what an offer of it means, and what the Client
-admits.
+[SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)'s. This ADR
+decides what an Agent states about itself, what own telemetry is, what an offer of it means, and
+what the Client admits.
 
 **The `supervisor.` namespace is the Supervisor's own statement.** A Package is matched against
 the version of the Package a Supervisor installed
-([SRV-deployments-and-pinned-rollouts §25](SRV-deployments-and-pinned-rollouts.md)), and the Client Agent is told apart by
-the kinds it reports ([CLT-supervisor-mode-and-kinds §18](CLT-supervisor-mode-and-kinds.md)). An operator
-who could state a key in that namespace could make every Agent of the host a Client Agent or
-choose the version a Package is held against.
+([SRV-deployments-and-pinned-rollouts §25](SRV-deployments-and-pinned-rollouts.md)), and the Client
+Agent is told apart by the kinds it reports
+([CLT-supervisor-mode-and-kinds §18](CLT-supervisor-mode-and-kinds.md)). An operator who could state
+a key in that namespace could make every Agent of the host a Client Agent or choose the version a
+Package is held against.
 
 ## Decision
 
@@ -169,9 +171,10 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
    The fallback is read from the configuration, never parsed out of a program's output. What the
    Managed Process reports is never a source of the type (clause 8). The Baseline's reverse-FQDN
    shape is a recommendation and is not enforced. The Client Agent reports the constant
-   `supervisor` ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), never its configured
-   name. A Selector or a Configuration's type ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md))
-   on `service.name` aims at a type.
+   `supervisor` ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), never its
+   configured name. A Selector or a Configuration's type
+   ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)) on `service.name`
+   aims at a type.
 
 2. **`service.instance.name` is the operator's name for the Agent**, non-identifying: the
    `[[supervisor]]` block's `name`, or the top-level `name` for the Client Agent. It is always
@@ -180,25 +183,27 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
 3. **The block `name` keeps its local meaning.** It is the Supervisor's directory name and the
    uniqueness key across blocks, bound by the instance-name grammar of
-   [CLT-installed-service-and-state](CLT-installed-service-and-state.md): lowercase, digits, `-`, no dots. A
-   type may be a reverse FQDN; an instance name is a path component on three operating systems.
-   That is why the two cannot share a key.
+   [CLT-installed-service-and-state](CLT-installed-service-and-state.md): lowercase, digits, `-`, no
+   dots. A type may be a reverse FQDN; an instance name is a path component on three operating
+   systems. That is why the two cannot share a key.
 
 4. **The identifying attributes** are `service.name`; `service.namespace`, only when the top-level
    `service_namespace` key in `supervisor.toml` is set, since only an operator knows the
    deployment; `service.version` — for the Client Agent its baked version
-   ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)), for a Supervisor-backed Agent only what the Managed
-   Process reports, never invented from the Client's; and `service.instance.id`, the Instance UID.
+   ([OPS-cargo-decides-product-version](OPS-cargo-decides-product-version.md)), for a
+   Supervisor-backed Agent only what the Managed Process reports, never invented from the Client's;
+   and `service.instance.id`, the Instance UID.
 
 5. **Where the Agent runs is reported best effort, and absent rather than blank.** Beside
    `service.instance.name`, the non-identifying attributes are `os.type` and `host.arch` in the
-   conventions' vocabulary ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), `os.name`,
+   conventions' vocabulary
+   ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)), `os.name`,
    `os.version`, `os.build_id`, `os.description`, `host.name`, `host.id`, `host.cpu.model.name`,
    `host.ip`, and `host.mac`. A Supervisor-backed Agent also reports `supervisor.package.version`,
    the version of the Package its Supervisor installed, when and from what record
-   [SRV-deployments-and-pinned-rollouts §25](SRV-deployments-and-pinned-rollouts.md) states.
-   What the platform cannot answer is left out: a placeholder would be something false a Selector
-   could match. Nothing is taken from the connection.
+   [SRV-deployments-and-pinned-rollouts §25](SRV-deployments-and-pinned-rollouts.md) states. What
+   the platform cannot answer is left out: a placeholder would be something false a Selector could
+   match. Nothing is taken from the connection.
 
 6. **`host.ip` and `host.mac` follow the conventions.**
    - Enumerated with `sysinfo`'s `network` feature, the crate the Client already carries for its
@@ -263,8 +268,8 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     several is a Label's job ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)): a
     `[[supervisor]]` block carrying an `attributes` table fails at startup with a message naming
     the Server's Label. The Client Agent also reports the kinds it was compiled with
-    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). An `[attributes]` key that starts with
-    `supervisor.`, whether TOML spells it quoted, dotted, or as a sub-table under
+    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). An `[attributes]` key that
+    starts with `supervisor.`, whether TOML spells it quoted, dotted, or as a sub-table under
     `[attributes.supervisor]`, fails at startup with a message naming the key. That namespace is
     the Supervisor's own statement: `supervisor.kind.*`
     ([CLT-supervisor-mode-and-kinds §18](CLT-supervisor-mode-and-kinds.md))
@@ -290,7 +295,8 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     schema permits no gRPC destination. `tracing-opentelemetry` joins them at the version built
     against them — `0.34` against `opentelemetry` `0.33` — and that pairing is a decision, not a
     range to widen. No OTLP schema is vendored
-    ([API-protocol-pinned-interop-checked](API-protocol-pinned-interop-checked.md) covers OpAMP only).
+    ([API-protocol-pinned-interop-checked](API-protocol-pinned-interop-checked.md) covers OpAMP
+    only).
 
 13. **Names come from the standard where it has them.** Metric and attribute names are taken from
     `opentelemetry-semantic-conventions` (with `semconv_experimental`, since the process metrics
@@ -316,10 +322,10 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 16. **Logs are the Client's `tracing` output, bridged.** `opentelemetry-appender-tracing`'s
     `OpenTelemetryTracingBridge` turns events into OTLP log records at the level the log filter
     already selects. Stderr and the service-mode log file
-    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)) keep everything they print; this adds
-    a destination. A record written inside an instrumented operation carries that operation's
-    `TraceId` and `SpanId`, which is what makes a log-to-trace join answerable at the receiving
-    end.
+    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)) keep everything they
+    print; this adds a destination. A record written inside an instrumented operation carries that
+    operation's `TraceId` and `SpanId`, which is what makes a log-to-trace join answerable at the
+    receiving end.
 
 17. **Traces come from the `tracing` spans this Client writes.** `tracing-opentelemetry`'s layer
     converts them; instrumentation is written in `tracing` (`#[instrument]`,
@@ -393,9 +399,9 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     fleet identity the Server sees. It follows no redirect, so a destination cannot move an export
     to another host or to plaintext. It speaks TLS 1.3 alone, with TLS 1.3 as its minimum and the
     three TLS 1.3 suites of the ring provider, as every rustls configuration of this project does
-    ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). A destination that speaks only TLS 1.2 or
-    older fails the handshake, and that export fails. The client carries a 5 s timeout — half the
-    reporting interval — because neither the periodic reader nor a client handed to
+    ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). A destination that speaks only TLS
+    1.2 or older fails the handshake, and that export fails. The client carries a 5 s timeout — half
+    the reporting interval — because neither the periodic reader nor a client handed to
     `opentelemetry-otlp` bounds an export, and a destination that stops answering would otherwise
     hold the exporter until the Client restarts.
 
@@ -414,7 +420,8 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     whole truth about own telemetry: a signal it does not name is stopped and leaves the persisted
     state, not carried over. An offer naming none of the three — OpAMP settings only, a
     certificate, a heartbeat change — leaves all three as they are; that keeps the classes of
-    offer of [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md) independent.
+    offer of [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)
+    independent.
 
 29. **An empty `destination_endpoint` withdraws that signal.** It is admitted, not refused: the
     exporter is shut down, the destination leaves the persisted state, nothing is reported against
@@ -439,10 +446,11 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
 32. **A refused destination is reported, never warned about or downgraded.** Its exporter is not
     built, and the refusal reaches the Server in the offer's `connection_settings_status`
-    ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)) with the reason; the
-    cleartext message names the setting and the two loopback literals that would be accepted. A
-    refusal, not a warning, is the specification's answer to every plaintext connection off the
-    loopback (Q-1), and this one is a continuous stream of identifying attributes and log records.
+    ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)) with the
+    reason; the cleartext message names the setting and the two loopback literals that would be
+    accepted. A refusal, not a warning, is the specification's answer to every plaintext connection
+    off the loopback (Q-1), and this one is a continuous stream of identifying attributes and log
+    records.
 
 33. **`certificate`, `tls` and `proxy` behave as they do on the OpAMP settings.** An offered
     `certificate` is honoured: its `cert` is presented by the exporter, paired with the key this
@@ -484,10 +492,10 @@ telemetry — the specification keeps this project out of the telemetry-backend 
 on the Agent that drops the three capability bits. Also out of scope: the Supervisor Endpoint's
 token and which processes are handed it ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)); what a
 Managed Process can read on its host, which includes the Client's `state_dir` and key while both
-run under one account ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)); `service.version`,
-which stays the process's word; what a compromised Client reports, since its code builds the whole
-description and no rule on the Client binds it; and the Server's precedence of the effective
-description ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)).
+run under one account ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md));
+`service.version`, which stays the process's word; what a compromised Client reports, since its code
+builds the whole description and no rule on the Client binds it; and the Server's precedence of the
+effective description ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)).
 
 ## Alternatives considered
 
@@ -540,10 +548,11 @@ description ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)).
   Configuration fit and the artifact choice.** The Server receives one description and cannot tell
   which key the process supplied. Ignoring these keys for every Agent would remove the Supervisor's
   true values with the false ones: pinning one host by `host.name`
-  ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)) would stop working, the artifact could no
-  longer be chosen, and the grouping behind a Gateway
-  ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) would lose its key. The Supervisor
-  knows which value came from the process and can decide where the Server cannot. Rejected.
+  ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)) would stop working, the
+  artifact could no longer be chosen, and the grouping behind a Gateway
+  ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) would lose its key. The
+  Supervisor knows which value came from the process and can decide where the Server cannot.
+  Rejected.
 - **Let an operator admit further keys per `[[supervisor]]` block.** That would restore a
   Collector's own tags. But it puts a per-Agent setting back into `supervisor.toml`, where tagging
   one Agent is a Label's job (clause 10). It can be decided later if a need appears. Not taken now.
@@ -555,9 +564,9 @@ description ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)).
 - **Report no version of the installed Package, and leave the Agent's version as the only one.**
   A Package would then be held against the Agent's own claim, which is the same field for the
   Client Agent and for a Supervisor-backed one
-  ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md), which holds a Package against
-  `supervisor.package.version`). The Supervisor reports what it installed under a key of its
-  own (clause 5).
+  ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md), which holds a
+  Package against `supervisor.package.version`). The Supervisor reports what it installed under a
+  key of its own (clause 5).
 - **Derive the type from `<program> --version` output.** A name has no grammar the way a SemVer
   does (`Fluent Bit v3.1.0`, `promtail, version 3.0.0 (branch: main)`); the configuration fallback
   gets the same value without guessing.
@@ -747,8 +756,8 @@ description ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)).
 - Positive: a Managed Process cannot draw another host's Configurations, be offered an artifact
   for another platform, make its host or another one ambiguous, or override the operator's
   attributes or shadow a Label outside `service.*`. That the Client Agent is recognised by the
-  attributes it alone reports ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) holds on
-  every honest Client.
+  attributes it alone reports ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md))
+  holds on every honest Client.
 - Positive: the fleet view shows each host's addresses, the attributes are searchable, and the
   wire stays convention-shaped for any OpenTelemetry-aware consumer.
 - Positive: three capability bits from one mechanism, and a fleet's Clients become observable

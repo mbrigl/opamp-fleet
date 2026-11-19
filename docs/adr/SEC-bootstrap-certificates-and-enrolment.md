@@ -86,8 +86,8 @@ find the bootstrap identity beside its program and enrol with it.
    `400`, naming it, so every Host has a customer and a site its Selectors can rely on. The other
    four are optional. Each may appear at most once. A key outside this set is answered `400`. The
    Server sets the common name by the rule of the fleet's certificate names
-   ([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)), and the operator never does. The
-   order in the subject is C, ST, L, O, OU, organizationIdentifier, CN. The values describe and
+   ([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)), and the operator never does.
+   The order in the subject is C, ST, L, O, OU, organizationIdentifier, CN. The values describe and
    select through the effective description; they authorize nothing.
 
 2. **A bootstrap certificate's subject is the operator's choice per issue, and the host certificate
@@ -102,10 +102,10 @@ find the bootstrap identity beside its program and enrol with it.
    `POST /api/v1/bootstrap-certificates` with a JSON body
    `{"subject": {…}, "validity_days": n, "password": "…"}` (`Content-Type: application/json`, as
    `POST /api/v1/revocations`; `validity_days` as
-   [OPS-operator-program-fleetctl §14](OPS-operator-program-fleetctl.md) bounds it), `password` required
-   — a request without it is answered `400`, naming it — makes a fresh ECDSA P-256 key and signs a
-   certificate with the bootstrap CA's key. The certificate is `CA:FALSE`, `digitalSignature`,
-   `clientAuth`, with a 16-byte random serial
+   [OPS-operator-program-fleetctl §14](OPS-operator-program-fleetctl.md) bounds it), `password`
+   required — a request without it is answered `400`, naming it — makes a fresh ECDSA P-256 key and
+   signs a certificate with the bootstrap CA's key. The certificate is `CA:FALSE`,
+   `digitalSignature`, `clientAuth`, with a 16-byte random serial
    ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md))
    and no subject alternative
    name. The Server makes the PKCS#12 file of clause 4, records and keeps it as the record of issued
@@ -132,9 +132,10 @@ find the bootstrap identity beside its program and enrol with it.
 
 6. **The server CA stays a file of its own.** `server-ca.pem` is the trust anchor written as
    `[tls] ca_file` and kept for every later connection and renewal, while the bootstrap identity
-   serves once and is removed ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)). It comes
-   from the operator's offline directory, not from the Server it is meant to verify, and the Server
-   never puts it into a PKCS#12 file.
+   serves once and is removed
+   ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)). It comes from the
+   operator's offline directory, not from the Server it is meant to verify, and the Server never
+   puts it into a PKCS#12 file.
 
 7. **Only a revoked entry is deleted, and its revocation stays.**
    `DELETE /api/v1/bootstrap-certificates/{serial}` removes the entry and any PKCS#12 file of a
@@ -266,23 +267,23 @@ find the bootstrap identity beside its program and enrol with it.
     dependency.** `rcgen` (features stated: `crypto`, `ring`, `pem`, `x509-parser`) generates the
     CSR and signs it; `time` expresses validity; `x509-parser` reads a certificate's validity for
     the renewal window. The `ring` backend is the provider
-    [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) already installs, so no OpenSSL and no
-    cmake enter the build. `ring` compiles C and assembly in its build script, so a C compiler is
-    needed either way; what this keeps is the absence of system libraries. `p12-keystore` (pinned
-    exactly, `default-features = false`, so its `pbes1` feature with `rc2` and `des` is not linked)
-    writes the PKCS#12 file in the Server and reads it in the Client. It is pure Rust on the
-    RustCrypto crates; it handles the password-based encryption only, and the TLS handshake stays
-    on `ring`. `dialoguer` gains its `password` feature for the hidden question; its one
-    dependency, `zeroize`, is already in the tree.
+    [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) already installs, so
+    no OpenSSL and no cmake enter the build. `ring` compiles C and assembly in its build script, so
+    a C compiler is needed either way; what this keeps is the absence of system libraries.
+    `p12-keystore` (pinned exactly, `default-features = false`, so its `pbes1` feature with `rc2`
+    and `des` is not linked) writes the PKCS#12 file in the Server and reads it in the Client. It is
+    pure Rust on the RustCrypto crates; it handles the password-based encryption only, and the TLS
+    handshake stays on `ring`. `dialoguer` gains its `password` feature for the hidden question; its
+    one dependency, `zeroize`, is already in the tree.
 
 14. **Beside the program is the directory of the running executable, unless `--fleet-files` names
     another.** The install reads it from the operating system (`std::env::current_exe`), before
     the program is staged, so it is where the operator ran the program from.
     `service install --fleet-files <dir>` names the directory the install looks in instead, for all
     of the fleet's files, with or without `--interactive`; wherever this ADR or
-    [CLT-installed-service-and-state](CLT-installed-service-and-state.md) says "beside the program", that
-    directory is meant when the flag is given. A `<dir>` that is not a readable directory fails the
-    install before anything is written, naming the flag. The install never looks in both. A file
+    [CLT-installed-service-and-state](CLT-installed-service-and-state.md) says "beside the program",
+    that directory is meant when the flag is given. A `<dir>` that is not a readable directory fails
+    the install before anything is written, naming the flag. The install never looks in both. A file
     counts only when it is a readable regular file under its exact name. **A bootstrap identity**
     is either the bootstrap pair, `bootstrap.pem` with `bootstrap-key.pem`, or `bootstrap.p12`;
     wherever a "bootstrap pair" is named for the install, a bootstrap identity is meant. The
@@ -335,9 +336,9 @@ find the bootstrap identity beside its program and enrol with it.
     **The answered CA is copied beside the written file**, as `server-ca.pem`, owner-only on Unix,
     and the file names the copy. A copy left by an earlier answer is replaced. The copy is handed
     over to the service account with the file, as the install hands over the configuration
-    ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). The questionnaire asks nothing about
-    the self-update: the file carries `[packages] self_update = true`, and the verification key
-    decides whether that takes effect
+    ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). The questionnaire asks
+    nothing about the self-update: the file carries `[packages] self_update = true`, and the
+    verification key decides whether that takes effect
     ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)). Everything else
     is written as commented defaults. No question asks for a credential, and no written file
     has an `[auth]` section; a leftover `[auth]` section is kept and ignored. The
@@ -386,11 +387,12 @@ find the bootstrap identity beside its program and enrol with it.
 
 19. **A packaged host enrols in a step after the package.** The post-install of the `.deb` and the
     `.rpm` runs `service install` from the payload path as the Linux packages' install states
-    ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)): it finds no fleet files and enrols
-    nothing, so `apt` and `dnf` never wait for an approval. The host is enrolled by the step the
-    post-install prints ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), interactively,
-    or by a script that puts the fleet's files in a directory, names it with `--fleet-files`, and
-    runs the non-interactive install of clause 18:
+    ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)): it finds no fleet files
+    and enrols nothing, so `apt` and `dnf` never wait for an approval. The host is enrolled by the
+    step the post-install prints
+    ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), interactively, or by a
+    script that puts the fleet's files in a directory, names it with `--fleet-files`, and runs the
+    non-interactive install of clause 18:
 
     ```console
     sudo opamp-fleet service install --endpoint wss://<server>/v1/opamp \
@@ -553,15 +555,15 @@ find the bootstrap identity beside its program and enrol with it.
 -
   [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)
   (admission, the Operator plane,
-  revocation), [CLT-modes-and-gateway](CLT-modes-and-gateway.md) (approval through a proved bootstrap
-  certificate, renewal, enrolment through a Gateway),
+  revocation), [CLT-modes-and-gateway](CLT-modes-and-gateway.md) (approval through a proved
+  bootstrap certificate, renewal, enrolment through a Gateway),
   [CLT-installed-service-and-state](CLT-installed-service-and-state.md) and
-  [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md) (the installed service and the Linux
-  packages),
+  [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md) (the installed service and
+  the Linux packages),
   [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
   (the record of issued bootstrap certificates),
-  [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md) (certificate names, `pki p12-extract`),
-  [SEC-append-only-audit-record](SEC-append-only-audit-record.md)
+  [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md) (certificate names,
+  `pki p12-extract`), [SEC-append-only-audit-record](SEC-append-only-audit-record.md)
   (the audit record).
 - RFC 7292, PKCS #12 v1.1: <https://www.rfc-editor.org/rfc/rfc7292>. RFC 8018, PKCS #5 v2.1
   (PBES2, PBKDF2): <https://www.rfc-editor.org/rfc/rfc8018>.
@@ -689,13 +691,14 @@ Tests that carry `Verifies: SEC-bootstrap-certificates-and-enrolment`:
   the flag, or with the flag and no file, it fails before writing anything (clause 18).
 - A fuzz target for the Client's PKCS#12 reader runs in CI (Q-2).
 - `cargo deny` keeps `rc2` and `des` out of the graph: a `[bans]` entry names them (clause 13).
-- Tests that carry `Verifies: SEC-bootstrap-certificates-and-enrolment`, for clauses 10 and 16: a request rejected in one window and
-  sent again after the window closed or ran out is answered as rejected and not listed, on the
-  filesystem store, on PostgreSQL, on a second instance on the database and after a restart; a
-  rejection of an id the queue does not hold answers `204` with the window closed, and its request
-  is then refused; a malformed id answers `400`; an approval of a rejected key signs nothing, where
-  its request still waits; a rejection of a request an approval holds answers at once that it is
-  being decided — [`enrolment.rs`](../../crates/fleet-server/src/enrolment.rs)
+- Tests that carry `Verifies: SEC-bootstrap-certificates-and-enrolment`, for clauses 10 and 16: a
+  request rejected in one window and sent again after the window closed or ran out is answered as
+  rejected and not listed, on the filesystem store, on PostgreSQL, on a second instance on the
+  database and after a restart; a rejection of an id the queue does not hold answers `204` with the
+  window closed, and its request is then refused; a malformed id answers `400`; an approval of a
+  rejected key signs nothing, where its request still waits; a rejection of a request an approval
+  holds answers at once that it is being decided —
+  [`enrolment.rs`](../../crates/fleet-server/src/enrolment.rs)
   `a_rejected_key_stays_refused_on_one_store_in_memory`,
   `a_rejected_key_stays_refused_on_the_filesystem`, `a_rejected_key_stays_refused_without_a_store`,
   `an_approval_signs_no_rejected_key`;

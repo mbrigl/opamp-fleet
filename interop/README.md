@@ -1,8 +1,8 @@
 # Interop against opamp-go
 
 This directory holds the Go side of the conformance check of
-[API-protocol-pinned-interop-checked](../docs/adr/API-protocol-pinned-interop-checked.md): a small program
-that puts
+[API-protocol-pinned-interop-checked](../docs/adr/API-protocol-pinned-interop-checked.md): a small
+program that puts
 [`opamp-go`](https://github.com/open-telemetry/opamp-go), the OpAMP reference implementation, at the
 far end of a connection with this project's Server or Client. It decides nothing. It reports what
 `opamp-go` sees as one JSON object per line on stdout and takes commands on stdin. The scenarios and
