@@ -193,7 +193,23 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.0",
         sql: AUDIT_CHECKPOINTS,
     },
+    // Three indexes only added. A Server of 0.8.0 reads and writes the same rows through them.
+    Migration {
+        version: 18,
+        oldest_server: "0.8.0",
+        sql: PIN_COUNTS,
+    },
 ];
+
+/// What serves the counts of the Agents that pin a Package, a Deployment or a Configuration,
+/// which a delete of an unassigned one takes under its row lock: without them each count reads
+/// every Agent.
+const PIN_COUNTS: &str = r"
+CREATE INDEX agents_deployment ON agents (deployment);
+CREATE INDEX agents_package ON agents (package_agent_type, package_version);
+CREATE INDEX agent_assignment_configurations_configuration
+    ON agent_assignment_configurations (configuration);
+";
 
 /// The checkpoints of the audit record
 /// (ADR-0028 clause 11): each
@@ -928,9 +944,9 @@ mod tests {
         }
         assert_eq!(
             MIGRATIONS.len(),
-            17,
-            "migrations 11 to 17 name 0.8.0, the audit key's label of ADR-0028 and the \
-             checkpoints of the audit record among them"
+            18,
+            "migrations 11 to 18 name 0.8.0, the audit key's label of ADR-0028, the \
+             checkpoints of the audit record and the indexes of the pin counts among them"
         );
         assert!(
             LEASE_RELEASE.contains(&format!("DEFAULT '{RELEASE_BEFORE_THE_RECORD}'")),
@@ -968,6 +984,44 @@ mod tests {
                     .to_ascii_lowercase();
                 assert!(TABLES.contains(&name.as_str()), "{name} is not in TABLES");
             }
+        }
+    }
+
+    /// Each count of the Agents that pin a Package, a Deployment or a Configuration is served by
+    /// its own index: with sequential scans priced out, its plan names that index, not a whole
+    /// read of the primary key.
+    /// Verifies: ADR-0023
+    #[test]
+    fn a_pin_is_counted_by_index() {
+        let Some(test) = super::super::testing::TestDatabase::named() else {
+            return;
+        };
+        let _database = test.open();
+        for (count, index) in [
+            (
+                "SELECT count(*) FROM agents WHERE deployment = 'd'",
+                "agents_deployment",
+            ),
+            (
+                "SELECT count(*) FROM agents \
+                 WHERE package_agent_type = 't' AND package_version = '1'",
+                "agents_package",
+            ),
+            (
+                "SELECT count(*) FROM agent_assignment_configurations WHERE configuration = 'c'",
+                "agent_assignment_configurations_configuration",
+            ),
+        ] {
+            let plan = test
+                .rows(&format!("SET enable_seqscan = off; EXPLAIN {count}"))
+                .into_iter()
+                .filter_map(|row| row.into_iter().next().flatten())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                plan.split_whitespace().any(|word| word == index),
+                "{count}:\n{plan}"
+            );
         }
     }
 }
