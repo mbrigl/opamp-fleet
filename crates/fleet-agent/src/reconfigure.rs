@@ -1147,8 +1147,8 @@ mod tests {
     /// names another parent or node, or points the pin at a file in `${config_dir}` — which, with
     /// remote configuration off, nothing writes, so enrolment would fall back to trust on first
     /// use — is refused naming the key, since a delivered block for a listed Supervisor repeats the
-    /// running block whole (ADR-0018 clause 51). Unlisted, the same block passes.
-    /// Verifies: ADR-0018, ADR-draft-icinga-2
+    /// running block whole (CLT-supervisor-mode-and-kinds §51). Unlisted, the same block passes.
+    /// Verifies: CLT-supervisor-mode-and-kinds, CLT-icinga2-repacked-kind
     #[cfg(feature = "icinga2")]
     #[test]
     fn a_listed_icinga2_keeps_the_parent_and_the_pin_the_operator_wrote() {
@@ -1456,7 +1456,7 @@ mod tests {
     const ICINGA: &str = "[[supervisor]]\ntype = \"icinga2\"\nname = \"icinga\"\n\
                           parent_host = \"master.example\"\n";
 
-    /// Verifies: ADR-0018, ADR-draft-icinga-2
+    /// Verifies: CLT-supervisor-mode-and-kinds, CLT-icinga2-repacked-kind
     #[cfg(feature = "icinga2")]
     #[test]
     fn a_delivered_icinga2_block_reads_files_only_from_its_config_dir() {
@@ -1480,7 +1480,7 @@ mod tests {
 
     /// The operator's ticket goes only to the operator's parent: a delivered block that keeps the
     /// ticket file but names another parent is refused, and a node name is one plain name.
-    /// Verifies: ADR-0018, ADR-draft-icinga-2
+    /// Verifies: CLT-supervisor-mode-and-kinds, CLT-icinga2-repacked-kind
     #[cfg(feature = "icinga2")]
     #[test]
     fn a_delivered_icinga2_block_cannot_send_the_operators_ticket_elsewhere() {
@@ -1506,7 +1506,7 @@ mod tests {
             .expect("no parent, nothing to pin");
     }
 
-    /// Verifies: ADR-0018, ADR-draft-icinga-2
+    /// Verifies: CLT-supervisor-mode-and-kinds, CLT-icinga2-repacked-kind
     #[cfg(feature = "icinga2")]
     #[test]
     fn a_delivered_icinga2_block_must_pin_its_parent() {

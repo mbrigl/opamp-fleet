@@ -627,7 +627,7 @@ mod tests {
         config
     }
 
-    /// A block of a wrapped kind, as ADR-0018 clause 13 means one to be written.
+    /// A block of a wrapped kind, as CLT-supervisor-mode-and-kinds §13 means one to be written.
     #[cfg(feature = "icinga2")]
     fn wrapped(root: &std::path::Path, extra: &str) -> ClientConfig {
         toml::from_str(&format!(
@@ -638,7 +638,7 @@ mod tests {
         .expect("parse")
     }
 
-    /// The point of ADR-0018 clause 13, at the seam: a wrapped block names its agent and nothing
+    /// The point of CLT-supervisor-mode-and-kinds §13, at the seam: a wrapped block names its agent and nothing
     /// about how that agent is built. What the kind supplies has to reach the program path and the
     /// Agent type without the block saying either.
     #[cfg(feature = "icinga2")]
@@ -672,9 +672,9 @@ mod tests {
     }
 
     /// And a block that states one anyway is refused, naming what supplies it now — the pattern
-    /// `package` and `accepts_packages` already run (ADR-0018 clause 13). Silently preferring one
+    /// `package` and `accepts_packages` already run (CLT-supervisor-mode-and-kinds §13). Silently preferring one
     /// of the two is how a host quietly differs from what the fleet believes.
-    // Verifies: ADR-0018
+    // Verifies: CLT-supervisor-mode-and-kinds
     #[cfg(feature = "icinga2")]
     #[test]
     fn a_wrapped_block_that_restates_a_derived_value_is_refused() {
@@ -805,7 +805,7 @@ mod tests {
     }
 
     /// Timing is the fleet's, then the kind's correction of it, and nothing below that
-    /// (ADR-0018 clause 17). Icinga is the correction that exists: its shutdown drains checks and
+    /// (CLT-supervisor-mode-and-kinds §17). Icinga is the correction that exists: its shutdown drains checks and
     /// closes cluster connections, so the fleet's ten seconds would kill it mid-drain — a property
     /// of Icinga, which is why the kind holds it rather than every host repeating it.
     #[cfg(feature = "icinga2")]

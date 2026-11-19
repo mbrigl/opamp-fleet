@@ -80,7 +80,7 @@ pub struct Args {
     /// Which Debian build to repack, by codename (`bullseye`, `bookworm`, `trixie`). Icinga 2 only.
     /// Every file of the tree comes from that suite's signed archives, so any host builds any of
     /// them; omitted, it is this host's own. It is the artifact's reach: repack the oldest suite
-    /// you serve, since glibc cannot travel and is backward compatible (ADR-draft-icinga-2).
+    /// you serve, since glibc cannot travel and is backward compatible (CLT-icinga2-repacked-kind).
     #[arg(long, value_name = "CODENAME")]
     distro: Option<String>,
 }
@@ -95,7 +95,7 @@ enum AgentKind {
     /// The OpenTelemetry Collector, Contrib distribution — the one carrying `opampextension`.
     #[value(name = "otelcol-contrib")]
     OtelcolContrib,
-    /// Icinga 2, repacked from the vendor's distribution packages (ADR-draft-icinga-2).
+    /// Icinga 2, repacked from the vendor's distribution packages (CLT-icinga2-repacked-kind).
     #[value(name = "icinga2")]
     Icinga2,
     /// This fleet's own Client — the package a Client updates *itself* from (CLT-self-update-signed-package, CLT-installed-service-and-state).
@@ -183,7 +183,7 @@ impl AgentKind {
     fn repacked(self) -> bool {
         match self {
             // The Linux artifact is a tree built from Icinga's and Debian's packages
-            // (ADR-draft-icinga-2).
+            // (CLT-icinga2-repacked-kind).
             AgentKind::Icinga2 => true,
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
         }
@@ -210,7 +210,7 @@ impl AgentKind {
             }
             // This column answers one question for every agent alike — does it run on the hosts I
             // have — so Icinga 2 states its *reach*: that of the Debian suite this run repacks
-            // unless `--distro` names another, which is this host's own (ADR-draft-icinga-2).
+            // unless `--distro` names another, which is this host's own (CLT-icinga2-repacked-kind).
             AgentKind::Icinga2 => icinga2_reach(host),
             // Named rather than left to the release, unlike the Collectors': this is *this*
             // project's own build matrix (`.github/workflows/release.yml`), so it moves only when
@@ -227,7 +227,7 @@ impl AgentKind {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => true,
             // Icinga 2's GitHub releases carry none of what is repacked — its packages come from
-            // the vendor's own repositories (ADR-draft-icinga-2).
+            // the vendor's own repositories (CLT-icinga2-repacked-kind).
             AgentKind::Icinga2 => false,
         }
     }
@@ -249,7 +249,7 @@ impl AgentKind {
     /// they agree with the `[[supervisor]]` blocks in `config/supervisor.toml` down to the file names.
     ///
     /// Icinga 2 gets two, because it reads one root file and includes the rest by name
-    /// (ADR-draft-icinga-2). Its ticket and its parent's certificate are *not* here: both are per
+    /// (CLT-icinga2-repacked-kind). Its ticket and its parent's certificate are *not* here: both are per
     /// host, one is a secret, and neither has a sensible default — see `docs/manual/icinga2.md`.
     fn default_configurations(self) -> &'static [DefaultConfiguration] {
         // Each is stated for the `service.name` its agent reports, so a Deployment holding it
@@ -377,7 +377,7 @@ struct Plan {
     os: String,
     arch: String,
     /// What has to be fetched. Usually one file; a repacked Icinga 2 tree needs the vendor's binary
-    /// package *and* the one holding the ITL, so this is a list (ADR-draft-icinga-2). Every one of
+    /// package *and* the one holding the ITL, so this is a list (CLT-icinga2-repacked-kind). Every one of
     /// them is verified before any of them is used.
     sources: Vec<Download>,
     /// What has to happen to the downloaded bytes before they are a package artifact.
@@ -412,7 +412,7 @@ enum ChecksumSource {
     /// The digest is already known — read out of a repository index rather than a sidecar. Icinga
     /// signs its repositories with GPG instead of publishing per-file checksums, so the `SHA256:`
     /// field of the `Packages` index is where its hash comes from — an index read only after its
-    /// signed `InRelease` verified and vouched for it (ADR-draft-icinga-2).
+    /// signed `InRelease` verified and vouched for it (CLT-icinga2-repacked-kind).
     Known { sha256: String },
 }
 
@@ -422,11 +422,11 @@ enum Action {
     /// verifies is the hash on the release page (PKG-signed-packages-and-delivery).
     AsPublished,
     /// Unpack the vendor's Debian packages into one normalised, link-free tree and pack that
-    /// (ADR-draft-icinga-2): Icinga 2 publishes distribution packages and an MSI, and no portable
+    /// (CLT-icinga2-repacked-kind): Icinga 2 publishes distribution packages and an MSI, and no portable
     /// tree.
     ///
     /// The first `tree_packages` sources make the tree; the rest are the library packages of
-    /// Debian's archive the tree's shared libraries are taken from (ADR-draft-icinga-2 clause 18).
+    /// Debian's archive the tree's shared libraries are taken from (CLT-icinga2-repacked-kind §18).
     /// Nothing the tree carries comes from the host that repacks it.
     RepackDebs {
         wrapper: String,
@@ -596,7 +596,7 @@ pub async fn run(args: Args) -> Result<(), String> {
 /// Each row is the highest `libc6 (>= …)` floor the packages of that build state — the vendor's
 /// and every library's the tree carries — read back as the systems it covers: glibc is backward
 /// compatible, so a floor is the whole of it and the distribution family is none of it
-/// (ADR-draft-icinga-2). The floors are what this tool prints for real once the repository indexes
+/// (CLT-icinga2-repacked-kind). The floors are what this tool prints for real once the repository indexes
 /// have been read (`icinga2_plans`); the ones below were read for Icinga 2 2.16.5.
 ///
 /// The table is small because the source of truth is not it: it translates a floor into the names
@@ -884,9 +884,9 @@ async fn plans(agent: AgentKind, release: &Release<'_>) -> Result<Vec<Plan>, Str
 
 /// Which Debian suite's build is repacked: the one `--distro` names, else this host's own when it
 /// is one Icinga publishes for. A host that is none of them is refused, naming the flag: the
-/// Linux artifact is the only one this tool builds for Icinga 2 (ADR-draft-icinga-2 clause 23).
+/// Linux artifact is the only one this tool builds for Icinga 2 (CLT-icinga2-repacked-kind §23).
 ///
-/// The suite is the artifact's reach (ADR-draft-icinga-2 clause 19), and nothing else about the
+/// The suite is the artifact's reach (CLT-icinga2-repacked-kind §19), and nothing else about the
 /// host is: every file of the tree comes from the vendor's and Debian's signed archives, so any
 /// host builds any of the three. The host's codename is only the default, stated as it is taken.
 fn chosen_distro(flag: Option<&str>, host: Result<String, String>) -> Result<String, String> {
@@ -943,8 +943,8 @@ fn host_codename() -> Result<String, String> {
 /// Where Icinga publishes what this tool repacks.
 const ICINGA_REPO: &str = "https://packages.icinga.com/debian";
 
-/// The key Icinga signs its Debian repositories with, carried in the tool (ADR-draft-icinga-2
-/// clause 18): `Icinga GmbH (Build server) <info@icinga.com>`, fingerprint
+/// The key Icinga signs its Debian repositories with, carried in the tool (CLT-icinga2-repacked-kind §18):
+/// `Icinga GmbH (Build server) <info@icinga.com>`, fingerprint
 /// `DD3A F619 8ED0 00B4 C0B7 3956 CC11 6F55 AA7F 2382`. A binary keyring, because that is what
 /// `gpgv` reads. A repository index signed by any other key is refused.
 const ICINGA_ARCHIVE_KEY: &[u8] = include_bytes!("../trust/icinga-archive.gpg");
@@ -952,8 +952,8 @@ const ICINGA_ARCHIVE_KEY: &[u8] = include_bytes!("../trust/icinga-archive.gpg");
 /// The primary key a signature over Icinga's index must be made by, or by a subkey of.
 const ICINGA_PRIMARY_KEYS: &[&str] = &["DD3AF6198ED000B4C0B73956CC116F55AA7F2382"];
 
-/// The keys Debian signs its archives with, carried in the tool like Icinga's (ADR-draft-icinga-2
-/// clause 18) rather than read from the host, so what the tree carries depends on no file of the
+/// The keys Debian signs its archives with, carried in the tool like Icinga's (CLT-icinga2-repacked-kind §18)
+/// rather than read from the host, so what the tree carries depends on no file of the
 /// host that repacks it. A binary keyring of the six automatic signing keys of Debian 11, 12 and
 /// 13, as `ftp-master.debian.org/keys.html` lists them and the `debian-archive-keyring` package
 /// carries them:
@@ -993,7 +993,7 @@ const MAX_INDEX_BYTES: u64 = 512 * 1024 * 1024;
 /// Where the *check plugins* come from. They are not Icinga's to publish — `monitoring-plugins` is
 /// its own project, packaged by the distribution — but an Icinga Agent without `check_disk` and its
 /// siblings can barely check anything, so the artifact carries them
-/// (ADR-draft-icinga-2's "(+ plugins)").
+/// (CLT-icinga2-repacked-kind's "(+ plugins)").
 const DEBIAN_REPO: &str = "https://deb.debian.org/debian";
 
 /// Where Debian publishes its security updates, a suite `<codename>-security` of its own. The
@@ -1007,13 +1007,12 @@ const DEBIAN_SECURITY_REPO: &str = "https://deb.debian.org/debian-security";
 /// Two packages make one tree: `icinga2-bin` carries the daemon, `icinga2-common` the ITL. Their
 /// SHA-256 comes from the `Packages` index — Icinga signs repositories with GPG rather than
 /// publishing per-file checksums, and the index is where the digests live, read only once the
-/// repository's signature over it verified ([`signed_index`], ADR-draft-icinga-2). The check
+/// repository's signature over it verified ([`signed_index`], CLT-icinga2-repacked-kind). The check
 /// plugins and every shared library the tree needs come from Debian's archive the same way.
 ///
 /// Only `linux/amd64` for now, and deliberately: an artifact's reach is decided by the suite it
 /// was built from, so each build is its own act rather than a loop over architectures. No Windows
-/// artifact is offered until a repacked tree has run on a Windows host (ADR-draft-icinga-2 clause
-/// 23).
+/// artifact is offered until a repacked tree has run on a Windows host (CLT-icinga2-repacked-kind §23).
 async fn icinga2_plans(version: &str, distro: &str) -> Result<Vec<Plan>, String> {
     let packages = signed_index(ICINGA_REPO, &format!("icinga-{distro}"), &ICINGA_ARCHIVE).await?;
     let mut tree: Vec<&DebEntry> = Vec::new();
@@ -1046,8 +1045,8 @@ async fn icinga2_plans(version: &str, distro: &str) -> Result<Vec<Plan>, String>
         tree.push(entry);
     }
     // The shared libraries, as Debian's packages of the same suite: what the four packages declare
-    // they need, followed through the library packages, glibc left out (ADR-draft-icinga-2
-    // clause 18). Which of their files the tree carries is decided after unpacking, by what the
+    // they need, followed through the library packages, glibc left out (CLT-icinga2-repacked-kind §18).
+    // Which of their files the tree carries is decided after unpacking, by what the
     // programs link against.
     let libraries = library_packages(&tree, &debian);
     eprintln!(
@@ -1061,7 +1060,7 @@ async fn icinga2_plans(version: &str, distro: &str) -> Result<Vec<Plan>, String>
     );
     // How old a libc may be, as the packages themselves state it. It is the artifact's reach, and
     // it belongs in front of an operator before the rollout rather than after it
-    // (ADR-draft-icinga-2).
+    // (CLT-icinga2-repacked-kind).
     if let Some(floor) = glibc_floor(tree.iter().chain(&libraries).copied()) {
         eprintln!("  this build needs glibc >= {floor} on every host it is rolled out to");
     }
@@ -1080,7 +1079,7 @@ async fn icinga2_plans(version: &str, distro: &str) -> Result<Vec<Plan>, String>
 }
 
 /// Icinga 2's Linux artifact for `version`: the `sources`, of which the first `tree_packages` make
-/// the tree, repacked under the wrapper `icinga2-<version>` (ADR-draft-icinga-2 clause 17).
+/// the tree, repacked under the wrapper `icinga2-<version>` (CLT-icinga2-repacked-kind §17).
 fn linux_plan(version: &str, sources: Vec<Download>, tree_packages: usize) -> Plan {
     Plan {
         os: "linux".to_string(),
@@ -1151,7 +1150,7 @@ const DEBIAN_SECURITY_ARCHIVE: Archive = Archive {
     primaries: DEBIAN_SECURITY_PRIMARY_KEYS,
 };
 
-/// Reads a suite's `Packages` index the way `apt` trusts it (ADR-draft-icinga-2 clause 18): the
+/// Reads a suite's `Packages` index the way `apt` trusts it (CLT-icinga2-repacked-kind §18): the
 /// suite's `InRelease` is verified with `gpgv` against the archive's carried key, is refused
 /// unless it names the suite it was fetched for and once the `Valid-Until` it states has passed,
 /// and the index is checked against the SHA-256 and the size that signed text states for it,
@@ -1306,7 +1305,7 @@ fn verified_index(release: &str, compression: &str, compressed: &[u8]) -> Result
 }
 
 /// At most `limit` bytes of what `xz` decompresses `compressed` to. Shelled out to like `gpgv`
-/// and `dpkg-deb` (ADR-draft-icinga-2 clause 21): the bytes it is handed already matched the
+/// and `dpkg-deb` (CLT-icinga2-repacked-kind §21): the bytes it is handed already matched the
 /// digest the signed `Release` states, and what it answers is checked against that text's own.
 fn unxz(compressed: &[u8], limit: u64) -> Result<Vec<u8>, String> {
     use std::io::Write as _;
@@ -1471,7 +1470,7 @@ fn relationships(field: &str) -> Vec<Vec<&str>> {
 }
 
 /// The packages the host provides and the tree never carries: glibc and its loader
-/// (ADR-draft-icinga-2 clause 18), which are one package in Debian.
+/// (CLT-icinga2-repacked-kind §18), which are one package in Debian.
 const GLIBC_PACKAGES: [&str; 1] = ["libc6"];
 
 /// The package an index answers a relationship's name with: the real package of that name at its
@@ -1751,7 +1750,7 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
 /// The SHA-256 upstream published for this artifact, from whichever form the source uses.
 async fn published_sha256(source: &ChecksumSource, artifact: &Path) -> Result<String, String> {
     let urls = match source {
-        // Already read out of a repository index (ADR-draft-icinga-2) — there is nothing to fetch.
+        // Already read out of a repository index (CLT-icinga2-repacked-kind) — there is nothing to fetch.
         ChecksumSource::Known { sha256 } => return Ok(sha256.clone()),
         ChecksumSource::BareDigest { url } => {
             let text = String::from_utf8(get_bytes(url).await?)
@@ -1820,7 +1819,7 @@ fn files_below(root: &Path, name: &str) -> Vec<PathBuf> {
     found
 }
 
-/// Turns the vendor's Debian packages into one normalised, link-free tree (ADR-draft-icinga-2).
+/// Turns the vendor's Debian packages into one normalised, link-free tree (CLT-icinga2-repacked-kind).
 ///
 /// The layout is normalised rather than kept, so that **one** `program_path` serves every
 /// distribution: Debian puts the binary under `/usr/lib/<triplet>/icinga2/sbin` and RHEL under
@@ -1831,7 +1830,7 @@ fn files_below(root: &Path, name: &str) -> Vec<PathBuf> {
 ///
 /// Left out on purpose: `/etc/icinga2` (the fleet delivers configuration), the systemd unit and
 /// init script, and the `prepare-dirs`/`safe-reload` helpers, which need a `nagios` account that a
-/// fleet-managed host does not have — the Supervisor does that work instead (ADR-draft-icinga-2).
+/// fleet-managed host does not have — the Supervisor does that work instead (CLT-icinga2-repacked-kind).
 fn repack_debs(
     debs: &[PathBuf],
     tree_packages: usize,
@@ -1847,7 +1846,7 @@ fn repack_debs(
     // The library packages apart from the tree's own: only the shared objects the programs link
     // against are taken out of them, and nothing of theirs is looked for by name. Each group is
     // unpacked into one directory, and a link is resolved inside its group's directory
-    // (ADR-draft-icinga-2 clause 18).
+    // (CLT-icinga2-repacked-kind §18).
     let libraries = staging.join("libraries");
     let tree = staging.join("tree");
     for dir in [&extracted, &libraries] {
@@ -1905,7 +1904,7 @@ fn repack_debs(
     // Repacking is redistribution, so the copyright file of every package downloaded travels:
     // which library packages the tree carries files of is known only once the libraries are
     // gathered, and one too many errs toward attribution. The changelogs stay behind, weight
-    // nobody unpacks on a monitored host (ADR-draft-icinga-2 clause 17). A pool file is
+    // nobody unpacks on a monitored host (CLT-icinga2-repacked-kind §17). A pool file is
     // `<package>_<version>_<arch>.deb`.
     for (n, deb) in debs.iter().enumerate() {
         let root = if n < tree_packages {
@@ -1998,7 +1997,7 @@ fn apply_alternatives(deb: &Path, staging: &Path, extracted: &Path) -> Result<()
 /// Whether `to`, a path inside the unpacked payload `extracted`, is free for an alternative:
 /// nothing is there, not even a link. A directory on the way that is a link fails the repack naming
 /// it, since a copy to `to` would write wherever that link leads, the host's file system included
-/// (ADR-0036 clause 27).
+/// (OPS-operator-program-fleetctl §27).
 fn unoccupied(extracted: &Path, to: &Path) -> Result<bool, String> {
     let inside = to
         .strip_prefix(extracted)
@@ -2012,7 +2011,7 @@ fn unoccupied(extracted: &Path, to: &Path) -> Result<bool, String> {
             Ok(meta) if meta.file_type().is_symlink() => {
                 return Err(format!(
                     "an alternative names {}, below the link {}, and a repack follows no link to \
-                     write (ADR-0036 clause 27)",
+                     write (OPS-operator-program-fleetctl §27)",
                     to.display(),
                     at.display()
                 ));
@@ -2025,7 +2024,7 @@ fn unoccupied(extracted: &Path, to: &Path) -> Result<bool, String> {
 
 /// Where an absolute path of the installed system lies inside an unpacked payload, refused when it
 /// is not absolute or names anything but plain components — `..` above all
-/// (ADR-0036 clause 27).
+/// (OPS-operator-program-fleetctl §27).
 fn inside_payload(extracted: &Path, installed: &str) -> Result<PathBuf, String> {
     use std::path::Component;
     let path = Path::new(installed);
@@ -2073,7 +2072,7 @@ fn winning_alternatives(script: &str) -> Vec<(String, String)> {
 }
 
 /// The sonames glibc provides on the host, together with its loader: what the tree never carries
-/// (ADR-draft-icinga-2 clause 18). They are the shared objects Debian's `libc6` ships for amd64,
+/// (CLT-icinga2-repacked-kind §18). They are the shared objects Debian's `libc6` ships for amd64,
 /// and glibc has kept every one of these names since long before the oldest build this tool
 /// repacks.
 const GLIBC_SONAMES: [&str; 18] = [
@@ -2112,7 +2111,7 @@ const LIBRARY_DIRS: [&str; 4] = [
 /// Those two cannot travel: a libc without its matching loader does not work, and with it the
 /// program would have to *be* the loader, which a Supervisor's program path cannot express. What
 /// follows is the artifact's reach — it runs where the glibc is at least the floor its suite
-/// states (ADR-draft-icinga-2) — and the Supervisor points `LD_LIBRARY_PATH` at what lands here,
+/// states (CLT-icinga2-repacked-kind) — and the Supervisor points `LD_LIBRARY_PATH` at what lands here,
 /// which wins over the binary's own RUNPATH.
 ///
 /// What a program needs is read out of its `DT_NEEDED` entries ([`elf_needed`]), then out of each
@@ -2121,7 +2120,7 @@ const LIBRARY_DIRS: [&str; 4] = [
 /// not hold fails the repack naming it and who needs it, since a tree missing one would ship and
 /// die on its first start; one is copied as the file its link resolves to inside the directory
 /// its package was unpacked into, with the packages unpacked beside it
-/// (ADR-0036 clause 27).
+/// (OPS-operator-program-fleetctl §27).
 fn bundle_libraries(programs: &[PathBuf], lib_dir: &Path, roots: &[&Path]) -> Result<(), String> {
     std::fs::create_dir_all(lib_dir)
         .map_err(|e| format!("cannot create {}: {e}", lib_dir.display()))?;
@@ -2177,7 +2176,7 @@ fn bundle_libraries(programs: &[PathBuf], lib_dir: &Path, roots: &[&Path]) -> Re
         return Err(format!(
             "the packages the tree is made of hold no {} the programs link against: {}\n  the \
              tree would fail on its first start, so nothing is packed; the library packages are \
-             what the vendor packages declare in Debian's index (ADR-draft-icinga-2)",
+             what the vendor packages declare in Debian's index (CLT-icinga2-repacked-kind)",
             if missing.len() == 1 {
                 "library"
             } else {
@@ -2346,9 +2345,9 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Copies `from`, a file or directory of the tree `root` was unpacked into, to `to`, resolving
-/// every link inside that tree alone (ADR-0036 clause 27): a link that leads out of it fails the
+/// every link inside that tree alone (OPS-operator-program-fleetctl §27): a link that leads out of it fails the
 /// repack naming it, one that names nothing inside it is left out, and the copy carries no link
-/// (ADR-0033 clause 57).
+/// (PKG-signed-packages-and-delivery §57).
 fn copy_from_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
     let inside = from
         .strip_prefix(root)
@@ -2376,7 +2375,7 @@ fn copy_from_tree(root: &Path, from: &Path, to: &Path) -> Result<(), String> {
         Resolution::Nothing => Ok(()),
         Resolution::LeadsOut => Err(format!(
             "{} leads out of the tree it was unpacked into, and a repack follows no link out of \
-             its tree (ADR-0036 clause 27)",
+             its tree (OPS-operator-program-fleetctl §27)",
             from.display()
         )),
         Resolution::Special => Err(format!(
@@ -2964,7 +2963,7 @@ async fn get(url: &str) -> Result<reqwest::Response, String> {
 }
 
 /// Where Debian keeps what `deb.debian.org` no longer serves: an ended release's suites and pool
-/// files move to `archive.debian.org`, under the same paths (ADR-draft-icinga-2 clause 18).
+/// files move to `archive.debian.org`, under the same paths (CLT-icinga2-repacked-kind §18).
 const DEBIAN_MOVES: &[(&str, &str)] = &[
     (DEBIAN_REPO, "https://archive.debian.org/debian"),
     (
@@ -3084,11 +3083,11 @@ mod tests {
     /// Icinga 2's line is the reach of the artifact this host builds by default, its own suite's,
     /// so it is asserted per host rather than once. Three properties hold for every row: the
     /// systems are named with versions — "Debian" alone still leaves a RHEL 8 or Ubuntu 18.04
-    /// operator guessing — Linux is the one platform offered (ADR-draft-icinga-2 clause 22), and no
+    /// operator guessing — Linux is the one platform offered (CLT-icinga2-repacked-kind §22), and no
     /// build-host codename appears. That last one is the defect this test exists for: a line that
     /// named the container was read as the reach, and left every Red Hat host looking unserved
-    /// (ADR-draft-icinga-2 clause 19).
-    /// Verifies: ADR-draft-icinga-2
+    /// (CLT-icinga2-repacked-kind §19).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn icinga_2s_line_is_the_reach_of_the_host_it_is_read_on() {
         for (codename, _) in super::ICINGA2_REACH {
@@ -3127,9 +3126,9 @@ mod tests {
 
     /// The suite repacked is the one `--distro` names, any of the three on any host; omitted, the
     /// host's own when it is one of them. A host that is none of them, and a codename Icinga
-    /// publishes no build for, are refused naming the three (ADR-draft-icinga-2 clauses 19 and 23):
+    /// publishes no build for, are refused naming the three (CLT-icinga2-repacked-kind §19 and §23):
     /// with no Windows artifact, there is nothing else to build.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn any_host_repacks_any_suite_and_defaults_to_its_own() {
         let host = |name: &str| Ok::<_, String>(name.to_string());
@@ -3244,8 +3243,8 @@ echo done
     }
 
     /// What a maintainer script names is a path of the installed system, and inside the payload it
-    /// stays: a `..` or a relative path is refused rather than joined (ADR-0036 clause 27).
-    /// Verifies: ADR-draft-icinga-2
+    /// stays: a `..` or a relative path is refused rather than joined (OPS-operator-program-fleetctl §27).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn an_alternative_names_only_a_place_inside_the_payload() {
         let root = Path::new("/staging/extracted");
@@ -3272,8 +3271,8 @@ echo done
     /// An alternative is written only where nothing is, and never through a link: a name the
     /// payload already holds — as a file or as a link, dangling or not — is left as it is, and a
     /// directory link on the way fails the repack naming it rather than being written through
-    /// (ADR-0036 clause 27).
-    /// Verifies: ADR-draft-icinga-2
+    /// (OPS-operator-program-fleetctl §27).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[cfg(unix)]
     #[test]
     fn an_alternative_is_written_only_where_nothing_is_and_through_no_link() {
@@ -3308,7 +3307,7 @@ echo done
         );
     }
 
-    /// ADR-draft-icinga-2: the digests come out of the repository's own index, because Icinga signs
+    /// CLT-icinga2-repacked-kind: the digests come out of the repository's own index, because Icinga signs
     /// repositories with GPG instead of publishing per-file checksums. The parse has to find both
     /// packages of one version among the many versions a pool index carries.
     #[test]
@@ -3352,7 +3351,7 @@ SHA256: cccc
         assert_eq!(find("icinga2-bin", "2.16.3-").sha256, "bbbb");
 
         // The vendor's own statement of how old a libc may be: the artifact's reach
-        // (ADR-draft-icinga-2).
+        // (CLT-icinga2-repacked-kind).
         assert_eq!(
             super::libc_floor(&find("icinga2-bin", "2.16.4-").depends).as_deref(),
             Some("2.38")
@@ -3363,8 +3362,8 @@ SHA256: cccc
     /// Icinga's own `InRelease`, as the repository served it, verifies against the key the tool
     /// carries — and nothing else does: an altered byte inside the signed text, or a keyring
     /// without that key, is refused before any digest in it is believed
-    /// (ADR-draft-icinga-2 clause 18).
-    /// Verifies: ADR-draft-icinga-2
+    /// (CLT-icinga2-repacked-kind §18).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[cfg(target_os = "linux")]
     #[test]
     fn the_carried_key_verifies_icingas_own_signed_index() {
@@ -3402,8 +3401,8 @@ SHA256: cccc
     /// An ended Debian release lives on at `archive.debian.org` under the same paths: a URL below
     /// `deb.debian.org`'s two repositories moves to the same path below the archive's, by whole
     /// path segments, and no other URL moves — Icinga's repository among them
-    /// (ADR-draft-icinga-2 clause 18).
-    /// Verifies: ADR-draft-icinga-2
+    /// (CLT-icinga2-repacked-kind §18).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn only_debians_own_repositories_move_to_its_archive() {
         let moved = |url: &str| super::moved_url(url, super::DEBIAN_MOVES);
@@ -3435,8 +3434,8 @@ SHA256: cccc
     /// A file that answers `404` is read from where it moved, and only a `404` moves: another
     /// failure is the answer, a URL with no move keeps its `404`, and a moved file the archive
     /// does not hold either fails naming both places. A stand-in host serves both trees
-    /// (ADR-draft-icinga-2 clause 18).
-    /// Verifies: ADR-draft-icinga-2
+    /// (CLT-icinga2-repacked-kind §18).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn a_file_debian_no_longer_serves_is_read_from_its_archive_and_only_then() {
         use std::io::Write;
@@ -3501,8 +3500,8 @@ SHA256: cccc
     /// An archived suite verifies as a served one does: bullseye-security's last `InRelease`, as
     /// `archive.debian.org` serves it, verifies against the carried keys by a pinned primary, and
     /// states no `Valid-Until`, so it is not refused as expired — the one security index that
-    /// states none is the last one (ADR-draft-icinga-2 clause 18).
-    /// Verifies: ADR-draft-icinga-2
+    /// states none is the last one (CLT-icinga2-repacked-kind §18).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[cfg(target_os = "linux")]
     #[test]
     fn an_archived_suite_verifies_by_the_same_keys_and_states_no_valid_until() {
@@ -3530,8 +3529,8 @@ SHA256: cccc
     /// genuinely signed by Debian's security keys and stating no `Valid-Until`, is refused when it
     /// is served as `bookworm-security`, and Icinga's bookworm index as another distribution's —
     /// while each is read as itself, by its `Codename` or, as `apt` allows, its `Suite`
-    /// (ADR-draft-icinga-2 clause 18).
-    /// Verifies: ADR-draft-icinga-2
+    /// (CLT-icinga2-repacked-kind §18).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[cfg(target_os = "linux")]
     #[test]
     fn a_signed_index_served_for_another_suite_is_refused() {
@@ -3568,8 +3567,8 @@ SHA256: cccc
 
     /// A signed text past its `Valid-Until` is refused, so an old index served again — one that
     /// predates a security fix — is not read; a text that states none is not bounded by one
-    /// (ADR-draft-icinga-2 clause 18).
-    /// Verifies: ADR-draft-icinga-2
+    /// (CLT-icinga2-repacked-kind §18).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn an_index_past_its_valid_until_is_refused() {
         let at = |text: &str| {
@@ -3593,9 +3592,9 @@ SHA256: cccc
 
     /// The index is read only as the signed text states it: the compressed bytes match their
     /// digest and size, the decompressed text matches its own, and a stream that inflates past
-    /// the stated size is refused rather than followed (ADR-draft-icinga-2 clause 18) — in both
+    /// the stated size is refused rather than followed (CLT-icinga2-repacked-kind §18) — in both
     /// forms it is read in, Icinga's `.gz` and Debian's `.xz`.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[cfg(target_os = "linux")]
     #[test]
     fn an_index_is_read_only_as_its_signed_release_states_it() {
@@ -3673,7 +3672,7 @@ SHA256: cccc
 
     /// The newest packaging revision of a release is the one repacked, in Debian's own order —
     /// `-10` after `-9`, a `~` pre-release before the release, an epoch above everything.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_newest_revision_is_taken_in_debians_order() {
         use std::cmp::Ordering::{Greater, Less};
@@ -3707,11 +3706,11 @@ SHA256: cccc
         );
     }
 
-    /// Debian's archive keys are carried, not read from the host (ADR-draft-icinga-2 clause 18):
+    /// Debian's archive keys are carried, not read from the host (CLT-icinga2-repacked-kind §18):
     /// the keyring holds exactly the six automatic signing keys `ftp-master.debian.org/keys.html`
     /// lists for Debian 11, 12 and 13, by the fingerprints of their primary keys — computed here
     /// from the keyring's own packets, so a key added, dropped or swapped is a red test.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_carried_debian_keys_are_the_archives_own() {
         assert_eq!(
@@ -3808,7 +3807,7 @@ SHA256: cccc
     /// Debian's own `InRelease` of `bookworm-security`, as the archive served it, verifies against
     /// the carried keys — Debian signs with several keys at once, and one of them is enough — by
     /// its security keys, and not by the archive keys a suite and its `-updates` are signed with.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[cfg(target_os = "linux")]
     #[test]
     fn the_carried_keys_verify_debians_own_signed_index() {
@@ -3961,8 +3960,8 @@ Section: libs
     /// The library packages are the `Depends` and `Pre-Depends` closure of the tree's own packages
     /// in the verified index, through Debian's `libs` section alone and without glibc — newest
     /// version each, a virtual name answered by its provider, and the same answer whatever order
-    /// the index came in (ADR-draft-icinga-2 clause 18).
-    /// Verifies: ADR-draft-icinga-2
+    /// the index came in (CLT-icinga2-repacked-kind §18).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_library_packages_are_the_depends_closure_in_the_signed_index() {
         let closure = |text: &str, extra: &str| {
@@ -4101,9 +4100,9 @@ Section: libs
     /// the programs need is followed through the libraries gathered for them, a link resolves to
     /// its file inside its package's tree, glibc stays behind — and a library the packages do not
     /// hold fails the repack naming it and who needs it, even where the host has it, as does a
-    /// link that would reach into the host for it (ADR-draft-icinga-2 clause 18,
-    /// ADR-0036 clause 27).
-    /// Verifies: ADR-draft-icinga-2
+    /// link that would reach into the host for it (CLT-icinga2-repacked-kind §18,
+    /// OPS-operator-program-fleetctl §27).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[cfg(unix)]
     #[test]
     fn the_tree_takes_its_libraries_from_the_archives_packages_and_nothing_from_the_host() {
@@ -4174,15 +4173,18 @@ Section: libs
         let refused =
             super::bundle_libraries(&[wants_more], &dir.path().join("third/lib"), &[&packages])
                 .expect_err("a link into the host");
-        assert!(refused.contains("ADR-0036 clause 27"), "{refused}");
+        assert!(
+            refused.contains("OPS-operator-program-fleetctl §27"),
+            "{refused}"
+        );
     }
 
     use super::*;
 
     /// What the Icinga 2 repack copies out of an unpacked vendor package is resolved inside that
-    /// tree alone (ADR-0036 clause 27): a link to a file of the tree is copied as that file, a link
+    /// tree alone (OPS-operator-program-fleetctl §27): a link to a file of the tree is copied as that file, a link
     /// into the host's file system fails the repack naming it, and a link to nothing is left out.
-    /// Verifies: ADR-0036
+    /// Verifies: OPS-operator-program-fleetctl
     #[cfg(unix)]
     #[test]
     fn a_copy_out_of_an_unpacked_package_follows_no_link_out_of_it() {
@@ -4216,7 +4218,7 @@ Section: libs
         let err = copy_from_tree(&unpacked, &plugins, &dir.path().join("again"))
             .expect_err("a link into the host");
         assert!(
-            err.contains("check_host") && err.contains("ADR-0036 clause 27"),
+            err.contains("check_host") && err.contains("OPS-operator-program-fleetctl §27"),
             "{err}"
         );
         std::fs::remove_file(plugins.join("check_host")).expect("remove");
@@ -4314,8 +4316,8 @@ Section: libs
     }
 
     /// A later repack of one Icinga version is numbered as the core numbers any repack: the second
-    /// of 2.14.3 is `2.14.4-0.r.2`, the first keeps the version (ADR-draft-icinga-2 clause 27).
-    /// Verifies: ADR-draft-icinga-2
+    /// of 2.14.3 is `2.14.4-0.r.2`, the first keeps the version (CLT-icinga2-repacked-kind §27).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn a_later_icinga_repack_is_numbered_as_the_core_numbers_one() {
         assert!(AgentKind::Icinga2.repacked());
@@ -4352,8 +4354,8 @@ Section: libs
 
     /// Icinga 2's release numbers are SemVer already, so its Package is named by the release number
     /// itself — the number the kind reads out of the daemon's banner, which is what a rollout's
-    /// version test compares — and the tag is upstream's own (ADR-draft-icinga-2 clause 17).
-    /// Verifies: ADR-draft-icinga-2
+    /// version test compares — and the tag is upstream's own (CLT-icinga2-repacked-kind §17).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn icinga_2s_package_is_named_by_its_release_number() {
         assert_eq!(
@@ -4617,9 +4619,9 @@ Section: libs
 
     /// Icinga 2's Linux artifact is the Debian packages repacked under the wrapper
     /// `icinga2-<version>`, named by the Package version, and the block is the kind alone
-    /// (ADR-draft-icinga-2 clauses 17 and 24). The packing half of `docs/artifacts/icinga2.md`;
+    /// (CLT-icinga2-repacked-kind §17 and §24). The packing half of `docs/artifacts/icinga2.md`;
     /// its client half is in `crates/fleet-agent/src/supervisor/icinga2.rs`.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn icinga_2s_linux_artifact_is_the_debian_tree_under_its_wrapper() {
         let source = |name: &str| Download {
@@ -5360,7 +5362,7 @@ Section: libs
         assert_eq!(
             names,
             vec!["icinga2-conf", "icinga2-zones"],
-            "Icinga 2 reads a root file that includes the other by name (ADR-draft-icinga-2), so both travel"
+            "Icinga 2 reads a root file that includes the other by name (CLT-icinga2-repacked-kind), so both travel"
         );
     }
 

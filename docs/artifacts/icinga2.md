@@ -5,12 +5,12 @@
 
 **Who reads this.** Whoever changes how Icinga 2 is packed, and whoever changes what the `icinga2`
 kind knows. It is the one place both sides state the same facts
-([ADR-0018](../adr/0018-supervisor-mode-and-its-kinds.md) clause 20,
-[ADR-draft-icinga-2](../adr/draft-icinga-2.md)).
+([CLT-supervisor-mode-and-kinds §20](../adr/CLT-supervisor-mode-and-kinds.md),
+[CLT-icinga2-repacked-kind](../adr/CLT-icinga2-repacked-kind.md)).
 
 Icinga 2 publishes **no portable tree at all** — distribution packages and an MSI, and nothing
 else — so the tree is repacked here
-([ADR-draft-icinga-2](../adr/draft-icinga-2.md)). The tree's
+([CLT-icinga2-repacked-kind](../adr/CLT-icinga2-repacked-kind.md)). The tree's
 layout is therefore entirely this project's, and the whole reason this document exists.
 
 **Only the Linux artifact is built.** `opamp-fleetctl package fetch` offers no Windows artifact for
@@ -94,7 +94,7 @@ wrapper, and what the Supervisor must spawn is the real program.
 | plugin directory | `<tree>/plugins` | `<tree>/sbin` |
 | state, log, cache, spool, run | beside the tree, under `<supervisor_dir>/` | the same |
 | environment | `LD_LIBRARY_PATH=<tree>/lib` — the tree's own libraries must win over the machine's | none needed |
-| version | `--version`, with a parser for Icinga's own banner, reported as `service.version` — the one attribute of the Agent's description the daemon states; where it runs is the Supervisor's ([ADR-0017](../adr/0017-what-an-agent-reports-about-itself.md) clause 5) | the same |
+| version | `--version`, with a parser for Icinga's own banner, reported as `service.version` — the one attribute of the Agent's description the daemon states; where it runs is the Supervisor's ([CLT-what-an-agent-reports §5](../adr/CLT-what-an-agent-reports.md)) | the same |
 | preflight | `--version` against the staged program, with `LD_LIBRARY_PATH` | `--version` |
 | reload | `SIGHUP` | restart |
 | console severity | `information` | the same |
@@ -124,13 +124,13 @@ running daemon is stopped.
 
 A Configuration has no Selector: the Deployment that holds it aims it, and its Agent type fits it
 to the `icinga2` Agents of that Deployment alone
-([ADR-0032](../adr/0032-deployments-and-rollouts.md) clauses 3 and 5).
+([SRV-deployments-and-pinned-rollouts §3 and §5](../adr/SRV-deployments-and-pinned-rollouts.md)).
 
 **Which entry is the root is stated by a role, not by a name.** The daemon is pointed at one file,
 from which it `include`s the rest, and being unroled says *"this is configuration"* rather than
 *"this is the root"* — so the fleet marks the root with `role = "main"`
-([ADR-0031](../adr/0031-configurations-and-the-rest-api.md) clause 5,
-[ADR-draft-icinga-2](../adr/draft-icinga-2.md)). Where nothing is
+([SRV-configurations-compose-one-map §5](../adr/SRV-configurations-compose-one-map.md),
+[CLT-icinga2-repacked-kind](../adr/CLT-icinga2-repacked-kind.md)). Where nothing is
 marked, the conventional name `icinga2-conf` stands in, which is what this tool uploads. Two
 entries marked `main` are a reason not to start, naming both.
 

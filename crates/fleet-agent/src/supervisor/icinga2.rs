@@ -1,9 +1,9 @@
-//! The `icinga2` plugin (ADR-draft-icinga-2): Icinga 2 in the Agent role, delivered as a package
+//! The `icinga2` plugin (CLT-icinga2-repacked-kind): Icinga 2 in the Agent role, delivered as a package
 //! and run out of this Supervisor's own directory.
 //!
 //! Icinga 2 relocates only if it is *told* to, on every invocation, and the arguments that tell it
 //! are not operator choices: the account it may run under follows the Client's service account
-//! (ADR-0021 clause 1), the include directory follows the delivered tree, and the state directories
+//! (CLT-accounts-service-runs-under §1), the include directory follows the delivered tree, and the state directories
 //! follow `supervisor_dir`. So the block states values — the parent, the node name, where state
 //! lives — and this plugin assembles the command line. What supervision *means* is unchanged: the
 //! shared [`Runner`] spawns, watches, swaps packages, gates health, and stops.
@@ -19,7 +19,7 @@
 //!   configuration, so every apply is validated with `daemon -C` before it reaches the Runner —
 //!   otherwise the fleet would be told `APPLIED` for a configuration that never took effect.
 //!
-//! Enrolment (ADR-draft-icinga-2) rides in the adapter beside the Runner: the daemon stays
+//! Enrolment (CLT-icinga2-repacked-kind) rides in the adapter beside the Runner: the daemon stays
 //! unstarted until the Icinga parent has signed this node's certificate, and an unreachable parent
 //! is a wait with a reason rather than a crash loop.
 
@@ -39,9 +39,9 @@ use crate::supervisor::process::{
 use opamp::client::Backoff;
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup
-/// (ADR-0008 clause 23).
+/// (DEV-six-crates-tokio-axum §23).
 ///
-/// `binary` is not among them: the core takes it out and resolves it (ADR-0018 clause 21), and what
+/// `binary` is not among them: the core takes it out and resolves it (CLT-supervisor-mode-and-kinds §21), and what
 /// arrives here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,15 +49,15 @@ struct Icinga2Settings {
     /// This node's common name: its `NodeName`, the CN of its certificate, and its Endpoint name
     /// — Icinga requires the three to be the same string, and the master's ticket was minted for
     /// exactly it. Not derivable for that reason: nothing on this side can know what was typed on
-    /// the other (ADR-draft-icinga-2).
+    /// the other (CLT-icinga2-repacked-kind).
     node_name: Option<String>,
     /// The parent (master or satellite) this Agent enrols with and connects to, as `host` or
     /// `host:port` — the port defaults to Icinga's 5665. Absent means a standalone node: no
     /// enrolment, no certificate to fetch, only local checks.
     parent_host: Option<String>,
     /// The file holding this host's enrolment ticket — a Configuration delivered with
-    /// `role = "supplementary"` through a Deployment that claims this one Agent (ADR-draft-icinga-2
-    /// clause 11). Absent means the signing request waits for `icinga2 ca sign` on the parent.
+    /// `role = "supplementary"` through a Deployment that claims this one Agent (CLT-icinga2-repacked-kind §11).
+    /// Absent means the signing request waits for `icinga2 ca sign` on the parent.
     ticket_file: Option<String>,
     /// The parent's certificate — **its own**, not the CA that signed it: `pki request` compares
     /// what the parent presents against this file. Pinned rather than trusted on sight. Not named
@@ -66,7 +66,7 @@ struct Icinga2Settings {
     trusted_cert_file: Option<String>,
 }
 
-/// The keys this kind supplies itself (ADR-draft-icinga-2), each with what answers it. Refused by
+/// The keys this kind supplies itself (CLT-icinga2-repacked-kind), each with what answers it. Refused by
 /// name rather than met with serde's "unknown field": a block that carries one expects a Client
 /// that needs it, and the operator deleting the line deserves to be told where the value went — the
 /// pattern `package` and `accepts_packages` already run.
@@ -130,7 +130,7 @@ pub struct Layout {
     /// alike: a `pki` or `daemon -C` run without it fails on a host that lacks the bundled Boost.
     env: Vec<(String, String)>,
     /// Where the fleet's Configuration entries land; the root is resolved out of it on demand
-    /// (ADR-draft-icinga-2), because which entry is the root can change with every rollout.
+    /// (CLT-icinga2-repacked-kind), because which entry is the root can change with every rollout.
     config_dir: PathBuf,
     include_dir: PathBuf,
     plugin_dir: PathBuf,
@@ -143,7 +143,7 @@ pub struct Layout {
     run_as: Option<(String, String)>,
     parent: Option<(String, u16)>,
     /// Where the enrolment ticket is read from — a Configuration entry, delivered per host
-    /// (ADR-draft-icinga-2). Absent means on-demand signing: the request waits in the parent's
+    /// (CLT-icinga2-repacked-kind). Absent means on-demand signing: the request waits in the parent's
     /// queue.
     ticket_file: Option<PathBuf>,
     /// The parent certificate to pin, as delivered. Copied out of `config/` at enrolment, because
@@ -154,16 +154,16 @@ pub struct Layout {
     /// How close to expiry a certificate may come before it is renewed.
     renew_before: Duration,
     /// What was enrolled, so the ordinary start costs no subprocess. The certificate on disk is
-    /// the state; this is a hint (ADR-draft-icinga-2).
+    /// the state; this is a hint (CLT-icinga2-repacked-kind).
     marker: PathBuf,
     /// The delivered configuration Icinga refused, by digest, with its reason: what is on disk
-    /// after a refused apply is not started at the next spawn either (ADR-draft-icinga-2 clause 9).
+    /// after a refused apply is not started at the next spawn either (CLT-icinga2-repacked-kind §9).
     refused: PathBuf,
 }
 
 impl Layout {
     /// Where the enrolled certificate and key live — `DataDir/certs`, which is where the
-    /// `ApiListener` looks for `<NodeName>.crt` without being told (ADR-draft-icinga-2).
+    /// `ApiListener` looks for `<NodeName>.crt` without being told (CLT-icinga2-repacked-kind).
     pub fn certs_dir(&self) -> PathBuf {
         self.data_dir.join("certs")
     }
@@ -207,7 +207,7 @@ impl Layout {
     /// **The mark is a role, and a role is the kind's to define.** The Baseline says so of
     /// `AgentConfigFile.role`: *"The values and their semantics are Agent type-specific."* So
     /// `main` means *this* to `icinga2` and nothing to anyone else, which is the field working as
-    /// intended rather than being borrowed. ADR-0031 clause 5 keeps its own two values for kinds
+    /// intended rather than being borrowed. SRV-configurations-compose-one-map §5 keeps its own two values for kinds
     /// that define nothing further.
     ///
     /// Resolved on every spawn rather than once at start: which entry is the root is the fleet's
@@ -333,7 +333,7 @@ impl Layout {
     }
 
     /// The ticket this host enrols with, read from the file the fleet delivered it in. No
-    /// `ticket_file` means on-demand signing (ADR-draft-icinga-2); a named one that is not there
+    /// `ticket_file` means on-demand signing (CLT-icinga2-repacked-kind); a named one that is not there
     /// yet, or holds nothing, is a wait — sending the request without it would queue a request on
     /// the parent that nobody meant to sign by hand.
     fn ticket(&self) -> Result<Option<String>, String> {
@@ -357,7 +357,7 @@ impl Layout {
 
     /// Whether the marker says this is the enrolment we want — same node, same parent. It answers
     /// *"has anything changed?"*, never *"is there a certificate?"*, which is what the file on disk
-    /// answers (ADR-draft-icinga-2).
+    /// answers (CLT-icinga2-repacked-kind).
     fn enrolled_for(&self, want: &Enrolment) -> bool {
         std::fs::read_to_string(&self.marker)
             .ok()
@@ -387,7 +387,7 @@ impl Layout {
 
     /// Validates a configuration exactly as the daemon would, without touching what runs.
     ///
-    /// This is the gate ADR-draft-icinga-2 requires: Icinga aborts a reload it cannot validate and
+    /// This is the gate CLT-icinga2-repacked-kind requires: Icinga aborts a reload it cannot validate and
     /// **keeps running the old configuration**, printing the reason to stderr — so a Supervisor
     /// that forwarded the apply blindly would report `APPLIED` for a configuration that never took
     /// effect.
@@ -401,7 +401,7 @@ impl Layout {
     }
 
     /// The daemon's argument vector. Foreground — no `-d`, no `--close-stdio` — because the Runner
-    /// supervises what it started and the Client's logging carries the output (ADR-0018 clause 6).
+    /// supervises what it started and the Client's logging carries the output (CLT-supervisor-mode-and-kinds §6).
     fn daemon_args(&self, root: &std::path::Path) -> Vec<String> {
         self.daemon_args_with(root, true)
     }
@@ -445,7 +445,7 @@ const SUBCOMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// `-D RunAsUser`/`-D RunAsGroup` are not a daemon concern: **every** subcommand drops privileges
 /// to the compiled-in account first and refuses when it cannot, so `pki` needs them exactly as the
-/// daemon does (ADR-draft-icinga-2). The tree's environment is the same: the program links the
+/// daemon does (CLT-icinga2-repacked-kind). The tree's environment is the same: the program links the
 /// libraries the tree carries, whichever subcommand it runs.
 async fn run_subcommand(layout: &Layout, args: &[String]) -> Result<String, String> {
     let mut command = tokio::process::Command::new(&layout.program);
@@ -528,7 +528,7 @@ fn valid_until(text: &str) -> Option<time::OffsetDateTime> {
         .map(|stamp| stamp.assume_utc())
 }
 
-/// What the enrolment marker records — a hint, never the authority (ADR-draft-icinga-2).
+/// What the enrolment marker records — a hint, never the authority (CLT-icinga2-repacked-kind).
 #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct Enrolment {
     common_name: String,
@@ -539,7 +539,7 @@ struct Enrolment {
 
 /// Obtains a certificate for this node from its Icinga parent, once.
 ///
-/// The order matters and is ADR-draft-icinga-2's: a usable certificate ends it before anything
+/// The order matters and is CLT-icinga2-repacked-kind's: a usable certificate ends it before anything
 /// runs; the key is generated locally and never travels; the parent is pinned before it is talked
 /// to; and the ticket — when there is one — turns the request into an immediate signature instead
 /// of a queue entry. `Ok(false)` means there was nothing to do.
@@ -568,7 +568,7 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
     };
     // Whether this is a *renewal* — an existing certificate near its expiry — rather than a first
     // enrolment. The two differ in one place each: a renewal keeps its key, and it authenticates
-    // itself with the certificate it already holds instead of with a ticket (ADR-draft-icinga-2).
+    // itself with the certificate it already holds instead of with a ticket (CLT-icinga2-repacked-kind).
     let mut renewing = false;
     if cert.is_file() && ca.is_file() && layout.enrolled_for(&want) {
         // The certificate is the state, so it is *verified* rather than assumed: one that does not
@@ -609,7 +609,7 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
 
     // The parent is pinned before it is talked to, and before a key is made for it. A named file
     // that is missing — not yet arrived, or a path mistyped — is an error the enrolment retries:
-    // ADR-draft-icinga-2 clause 12 trusts on first use only when none was delivered. That holds for
+    // CLT-icinga2-repacked-kind §12 trusts on first use only when none was delivered. That holds for
     // a renewal too: the pin kept from an earlier run may itself have come from trust on first use.
     if let Some(delivered) = layout.trusted_cert_file.as_ref().filter(|f| !f.is_file()) {
         return Err(format!(
@@ -638,7 +638,7 @@ async fn ensure_enrolled(layout: &Layout) -> Result<bool, String> {
             Err(e) => return Err(format!("cannot remove {}: {e}", ca.display())),
         }
         // A renewal must not do this: it would overwrite the very key and certificate that
-        // authenticate the renewal, leaving a request nothing can prove (ADR-draft-icinga-2).
+        // authenticate the renewal, leaving a request nothing can prove (CLT-icinga2-repacked-kind).
         run_subcommand(
             layout,
             &[
@@ -758,7 +758,7 @@ fn write_pin_source(source: &std::path::Path, parent: &str) -> Result<(), String
 
 /// Icinga's own version banner is `icinga2 … (version: r2.14.6-1)`: an `r`, and a packaging
 /// revision the strict SemVer read rejects outright. Reported as `2.14.6`, which is the version an
-/// operator compares and the one a package Set is named after (ADR-0034 clause 6).
+/// operator compares and the one a package Set is named after (PKG-versions-high-water-mark-floor §6).
 fn parse_version(text: &str) -> Option<String> {
     fn numeric(part: Option<&str>) -> bool {
         part.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
@@ -770,7 +770,7 @@ fn parse_version(text: &str) -> Option<String> {
             three.iter().all(|part| numeric(*part)) && parts.next().is_none()
         })
         // Written by the rule the Package is named by, so the two agree
-        // (ADR-0034 clause 6).
+        // (PKG-versions-high-water-mark-floor §6).
         .and_then(fleet_core::version::written_as_semver)
 }
 
@@ -796,7 +796,7 @@ fn current_account() -> Option<(String, String)> {
 }
 
 /// The `icinga2` kind. Its [`Spawner`] is the one the registry hands every plugin
-/// (ADR-0021 clause 18).
+/// (CLT-accounts-service-runs-under §18).
 #[derive(Default)]
 pub struct Icinga2Plugin {
     pub spawner: Spawner,
@@ -804,14 +804,14 @@ pub struct Icinga2Plugin {
 
 impl Icinga2Plugin {
     /// Resolves the block against this Supervisor's directories. Everything an operator may write
-    /// goes through the placeholders of ADR-0018 clause 25; the defaults are expressed in them too,
+    /// goes through the placeholders of CLT-supervisor-mode-and-kinds §25; the defaults are expressed in them too,
     /// so a relocated `supervisor_dir` moves the state with it.
     fn layout(ctx: &SupervisorContext, settings: &Icinga2Settings) -> Layout {
         let path = |below: &str| -> PathBuf { PathBuf::from(ctx.expand(below)) };
-        // Inside the tree this kind delivers (ADR-draft-icinga-2): the ITL the root configuration
+        // Inside the tree this kind delivers (CLT-icinga2-repacked-kind): the ITL the root configuration
         // `include`s, and the check plugins. On Windows the checks stay beside the daemon in
         // `sbin`, because a Windows program finds its DLLs in its own directory first and the
-        // checks share that runtime (ADR-draft-icinga-2).
+        // checks share that runtime (CLT-icinga2-repacked-kind).
         let tree = ctx
             .supervisor_dir
             .join(crate::config::PROGRAM_DIR)
@@ -833,7 +833,7 @@ impl Icinga2Plugin {
             run_dir: path("${supervisor_dir}/run"),
             // The operator's, else this host's fully qualified name, else the Supervisor's own —
             // which the instance-name grammar cannot spell as an FQDN, so it is the last resort
-            // rather than the default (ADR-draft-icinga-2).
+            // rather than the default (CLT-icinga2-repacked-kind).
             node_name: settings
                 .node_name
                 .clone()
@@ -857,7 +857,7 @@ impl Icinga2Plugin {
     }
 }
 
-/// What a delivered tree rooted at `tree` needs in its environment (ADR-draft-icinga-2): on Unix
+/// What a delivered tree rooted at `tree` needs in its environment (CLT-icinga2-repacked-kind): on Unix
 /// its own libraries, so the bundled copies win over whatever the machine has. Windows needs none —
 /// a program there finds its DLLs beside itself.
 ///
@@ -870,7 +870,7 @@ fn tree_environment(tree: &str) -> Vec<(String, String)> {
     vec![("LD_LIBRARY_PATH".to_string(), format!("{tree}/lib"))]
 }
 
-/// The proof a staged package runs before it is installed (ADR-draft-icinga-2 clause 15):
+/// The proof a staged package runs before it is installed (CLT-icinga2-repacked-kind §15):
 /// `--version`, with the staged tree's own libraries — a tree built against a newer glibc than the
 /// host's is refused with the dynamic linker's message before the running daemon is stopped.
 fn preflight() -> Preflight {
@@ -878,13 +878,13 @@ fn preflight() -> Preflight {
         args: vec!["--version".to_string()],
         env: tree_environment(STAGED),
         // The daemon starts where it inherits, so the check does too
-        // (ADR-0018 clause 57).
+        // (CLT-supervisor-mode-and-kinds §57).
         working_dir: None,
     }
 }
 
 /// This host's fully qualified name, if it has one — the default for `node_name`
-/// (ADR-draft-icinga-2).
+/// (CLT-icinga2-repacked-kind).
 ///
 /// **Why a resolution rather than the host name this Agent already reports.** That one is
 /// `gethostname`, which the semantic conventions permit to be either form and which is the short
@@ -960,7 +960,7 @@ fn read_fqdn() -> Option<String> {
     None
 }
 
-/// The role a delivered Configuration carries to say it is Icinga's root (ADR-draft-icinga-2), and
+/// The role a delivered Configuration carries to say it is Icinga's root (CLT-icinga2-repacked-kind), and
 /// the name that stands in where the fleet marked nothing — the one `opamp-fleetctl package fetch`
 /// uploads.
 const ROOT_ROLE: &str = "main";
@@ -968,10 +968,10 @@ const CONVENTIONAL_ROOT: &str = "icinga2-conf";
 
 /// The console severity the daemon is started with (`-x`). Icinga's own default, and not a block
 /// key: where verbosity is worth raising, `object FileLogger` in Icinga's own configuration is the
-/// place, which the fleet rolls out (ADR-draft-icinga-2).
+/// place, which the fleet rolls out (CLT-icinga2-repacked-kind).
 const DEFAULT_LOG_LEVEL: &str = "information";
 
-/// Splits a parent into host and port, the port defaulting to Icinga's 5665 (ADR-draft-icinga-2).
+/// Splits a parent into host and port, the port defaulting to Icinga's 5665 (CLT-icinga2-repacked-kind).
 ///
 /// One address is one value. A bare IPv6 address has colons of its own, so the split is taken from
 /// the **last** one and only when what follows is a port — `::1` stays a host, `[::1]:5665` and
@@ -1000,12 +1000,12 @@ fn parent_address(raw: &str) -> (String, u16) {
     (raw.to_string(), DEFAULT_PARENT_PORT)
 }
 
-/// The daemon's file name and its place inside the delivered tree (ADR-draft-icinga-2), per
+/// The daemon's file name and its place inside the delivered tree (CLT-icinga2-repacked-kind), per
 /// platform.
 ///
 /// Windows carries the `.exe` and — the difference that is easy to miss — keeps the check plugins
 /// beside the daemon in `sbin` rather than in `plugins/`, because a Windows program finds its DLLs
-/// in its own directory first and the checks share that runtime (ADR-draft-icinga-2).
+/// in its own directory first and the checks share that runtime (CLT-icinga2-repacked-kind).
 #[cfg(windows)]
 const PROGRAM: &str = "icinga2.exe";
 #[cfg(not(windows))]
@@ -1020,14 +1020,14 @@ const DEFAULT_PARENT_PORT: u16 = 5665;
 
 /// How long before expiry a certificate is renewed by default. Icinga's own default validity is
 /// years, and the daemon renews over its established connection; this is the start-time safety net
-/// for the host that was switched off for longer than that (ADR-draft-icinga-2).
+/// for the host that was switched off for longer than that (CLT-icinga2-repacked-kind).
 const DEFAULT_RENEW_BEFORE_DAYS: u64 = 30;
 
 /// Enrols this node, retrying until it succeeds, and nudges the Runner when it does.
 ///
 /// An unreachable parent is a *wait*, not a failure: the health says what is missing, the attempt
 /// backs off, and no daemon is started — a crash loop would say nothing about why
-/// (ADR-draft-icinga-2). The nudge is an ordinary `Restart`, because the gate this opens is the one
+/// (CLT-icinga2-repacked-kind). The nudge is an ordinary `Restart`, because the gate this opens is the one
 /// `build()` reads.
 async fn enrol(layout: Layout, runner: mpsc::Sender<ProcessCommand>, events: EventSender) {
     let mut backoff = Backoff::new();
@@ -1058,7 +1058,7 @@ async fn enrol(layout: Layout, runner: mpsc::Sender<ProcessCommand>, events: Eve
 ///
 /// Everything else is forwarded untouched. A configuration that does not validate is answered
 /// `ConfigApplied{Err}` **and swallowed**: the running daemon is not stopped, not reloaded, and not
-/// left claiming to run something it refused (ADR-draft-icinga-2).
+/// left claiming to run something it refused (CLT-icinga2-repacked-kind).
 async fn intercept(
     mut from_core: mpsc::Receiver<ProcessCommand>,
     runner: mpsc::Sender<ProcessCommand>,
@@ -1078,7 +1078,7 @@ async fn intercept(
                     // what was just refused.
                     layout.record_refusal(&e);
                     // The apply ends here rather than at the Runner, so this is where its trace
-                    // learns why (ADR-0017 clause 19).
+                    // learns why (CLT-what-an-agent-reports §19).
                     crate::telemetry::failed(&span, &e);
                     events
                         .send(ProcessEvent::ConfigApplied {
@@ -1101,7 +1101,7 @@ async fn intercept(
 ///
 /// The Runner knows only that `build()` yielded nothing, and says "awaiting configuration"; why —
 /// no root yet, two roots, the configuration Icinga refused, the certificate — is the kind's to
-/// say, and an operator reading the health needs it (ADR-draft-icinga-2 clause 8).
+/// say, and an operator reading the health needs it (CLT-icinga2-repacked-kind §8).
 async fn explain_waits(
     mut from_runner: mpsc::Receiver<(usize, ProcessEvent)>,
     layout: Layout,
@@ -1126,7 +1126,7 @@ async fn explain_waits(
 }
 
 /// `node_name` names the certificate and key files of this host, so it is one plain file-name
-/// component and nothing that could climb out of the certificate directory (ADR-0018 clause 36).
+/// component and nothing that could climb out of the certificate directory (CLT-supervisor-mode-and-kinds §36).
 fn check_node_name(name: &str, node_name: Option<&str>) -> Result<(), String> {
     let Some(node_name) = node_name else {
         return Ok(());
@@ -1147,7 +1147,7 @@ fn check_node_name(name: &str, node_name: Option<&str>) -> Result<(), String> {
 }
 
 /// Windows hosts are not served by this kind until a repacked tree has been run on one
-/// (ADR-draft-icinga-2 clause 23): whether it runs without the MSI's product registration is
+/// (CLT-icinga2-repacked-kind §23): whether it runs without the MSI's product registration is
 /// unproven, and the kind has no other form to fall back on. Its block still checks, so a
 /// Supervisor set naming it is refused where it would run, naming why, rather than started on a
 /// guess.
@@ -1162,11 +1162,11 @@ fn refuse_an_unproven_platform(name: &str) -> Result<(), String> {
 }
 
 impl Icinga2Plugin {
-    /// Icinga 2 runs only on a host without a process account (ADR-draft-icinga-2): its daemon and
+    /// Icinga 2 runs only on a host without a process account (CLT-icinga2-repacked-kind): its daemon and
     /// every subcommand drop to an account of their own (`-D RunAsUser`), which a program the
     /// second service starts under the process account cannot do, and the kind runs its `pki` and
     /// `daemon -C` subcommands itself. A block is refused there, naming the way back, rather than
-    /// started past the second service (ADR-0021 clause 18).
+    /// started past the second service (CLT-accounts-service-runs-under §18).
     fn refuse_a_process_account(&self, name: &str) -> Result<(), String> {
         if matches!(self.spawner, Spawner::Channel(_)) {
             return Err(format!(
@@ -1189,7 +1189,7 @@ impl Plugin for Icinga2Plugin {
     }
 
     /// What the tree `opamp-fleetctl package fetch --agent icinga2` packs decides, per platform
-    /// (ADR-draft-icinga-2): the daemon's file name, where it sits inside that tree, and the Agent
+    /// (CLT-icinga2-repacked-kind): the daemon's file name, where it sits inside that tree, and the Agent
     /// type every Icinga Configuration is aimed at. None of the three is a decision a host makes.
     fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
         crate::supervisor::ports::KindDefaults {
@@ -1226,27 +1226,27 @@ impl Plugin for Icinga2Plugin {
         )?;
         check_node_name(&ctx.name, settings.node_name.as_deref())?;
         let layout = Self::layout(&ctx, &settings);
-        // What the delivered tree needs to run at all, and nothing else (ADR-draft-icinga-2): its
+        // What the delivered tree needs to run at all, and nothing else (CLT-icinga2-repacked-kind): its
         // own libraries have to win over whatever the machine has, which is the whole point of a
         // relocatable tree. Windows needs no equivalent — a program there finds its DLLs in its own
         // directory first, which is also why the check plugins sit beside the daemon on that
         // platform. The daemon, the version probe and every subcommand carry the same.
         let env = layout.env.clone();
         // Two channels, not one: what the core holds goes through the validation gate first, and
-        // what the Runner receives is what survived it (ADR-draft-icinga-2).
+        // what the Runner receives is what survived it (CLT-icinga2-repacked-kind).
         let (commands, from_core) = mpsc::channel(16);
         let (to_runner, command_rx) = mpsc::channel(16);
         let name = ctx.name.clone();
         let events = ctx.events.clone();
         // The Runner's events pass through the kind, so that its "awaiting configuration" says what
-        // is awaited — the gate's reason, which only the kind knows (ADR-draft-icinga-2 clause 8).
+        // is awaited — the gate's reason, which only the kind knows (CLT-icinga2-repacked-kind §8).
         let (runner_events, from_runner) = mpsc::channel(64);
         let gate = layout.clone();
         let runner = Runner {
             // None. The daemon speaks Icinga's cluster protocol and never connects to the
             // Supervisor Endpoint, so the token would only sit in the environment of every check
             // plugin it runs. An empty token is one the Runner does not set
-            // (ADR-0016 clause 28).
+            // (CLT-modes-and-gateway §28).
             endpoint_token: zeroize::Zeroizing::default(),
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
@@ -1263,14 +1263,14 @@ impl Plugin for Icinga2Plugin {
             }),
             // The delivered tree carries its own libraries, so what proves it runs must be run
             // against *those* — a version banner costs 30 ms and answers the one question a
-            // repacked tree raises: does this host's libc satisfy it (ADR-draft-icinga-2)?
+            // repacked tree raises: does this host's libc satisfy it (CLT-icinga2-repacked-kind)?
             preflight: Some(preflight()),
             // Icinga re-reads its configuration on SIGHUP and keeps the umbrella's pid, so the
-            // reload of ADR-0018 clause 9 applies as it stands. Windows refuses the concept, and
+            // reload of CLT-supervisor-mode-and-kinds §9 applies as it stands. Windows refuses the concept, and
             // the Runner falls back to the restart there.
             reload_signal: sighup(),
             // The Client itself: where a process account is registered the kind refused to start
-            // above (ADR-0021 clause 18).
+            // above (CLT-accounts-service-runs-under §18).
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
             supervisor_dir: ctx.supervisor_dir.clone(),
@@ -1287,10 +1287,10 @@ impl Plugin for Icinga2Plugin {
                         args: layout.daemon_args(&root),
                         env: env.clone(),
                         working_dir: None,
-                        // Its worker must not survive the stop (ADR-draft-icinga-2).
+                        // Its worker must not survive the stop (CLT-icinga2-repacked-kind).
                         own_process_group: true,
                         // Icinga creates none of its directories and exits when one is missing
-                        // (ADR-draft-icinga-2). Naming them here rather than making them in this
+                        // (CLT-icinga2-repacked-kind). Naming them here rather than making them in this
                         // closure is the same guarantee through the seam every kind now uses: made
                         // before every spawn, so one an operator removed comes back.
                         ensure_dirs: layout.state_dirs(),
@@ -1307,21 +1307,21 @@ impl Plugin for Icinga2Plugin {
             events.clone(),
         ));
         // In the adapter, never in `start`: a parent that is down must not hold up the Client's
-        // startup (ADR-draft-icinga-2).
+        // startup (CLT-icinga2-repacked-kind).
         tokio::spawn(enrol(gate, to_runner, events));
         Ok(commands)
     }
 
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
         // Retired keys are refused before the strict parse, so a block carrying one is told where
-        // its value went instead of meeting serde's "unknown field" (ADR-draft-icinga-2).
+        // its value went instead of meeting serde's "unknown field" (CLT-icinga2-repacked-kind).
         self.refuse_a_process_account(name)?;
         let settings = parse_settings::<Icinga2Settings>(name, self.kind(), RETIRED, settings)?;
         check_node_name(name, settings.node_name.as_deref())
     }
 
     /// A delivered block reads its ticket and the parent's certificate only from its own
-    /// configuration directory, and pins the parent it names (ADR-0018 clause 36): otherwise the
+    /// configuration directory, and pins the parent it names (CLT-supervisor-mode-and-kinds §36): otherwise the
     /// Server could name any file on the host and a parent to send it to.
     fn check_delivered(
         &self,
@@ -1378,8 +1378,8 @@ mod tests {
 
     /// Where a process account is registered, an icinga2 block is refused, when it is checked and
     /// when it starts, before anything is run: the kind would start its subcommands past the second
-    /// service (ADR-0021 clause 18).
-    /// Verifies: ADR-draft-icinga-2
+    /// service (CLT-accounts-service-runs-under §18).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[cfg(unix)]
     #[test]
     fn a_host_with_a_process_account_refuses_an_icinga2_block() {
@@ -1408,10 +1408,10 @@ mod tests {
             .expect("settings")
     }
 
-    /// The paths are the tree's own (ADR-draft-icinga-2), and the state directories sit beside it.
+    /// The paths are the tree's own (CLT-icinga2-repacked-kind), and the state directories sit beside it.
     /// Asserted against a context rather than against the settings, because the settings have
     /// nothing to say about any of them.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_layout_follows_the_delivered_tree_and_needs_no_settings() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1458,8 +1458,7 @@ mod tests {
         );
         assert_eq!(layout.data_dir, root.join("data"));
         assert_eq!(layout.run_dir, root.join("run"));
-        // The environment every invocation carries is the tree's own libraries (ADR-draft-icinga-2
-        // clause 5).
+        // The environment every invocation carries is the tree's own libraries (CLT-icinga2-repacked-kind §5).
         if cfg!(windows) {
             assert!(layout.env.is_empty(), "{:?}", layout.env);
         } else {
@@ -1481,9 +1480,9 @@ mod tests {
         );
     }
 
-    /// One address is one value (ADR-draft-icinga-2). The IPv6 case is why the split is taken from
+    /// One address is one value (CLT-icinga2-repacked-kind). The IPv6 case is why the split is taken from
     /// the last colon and only when what follows it is a port.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn a_parent_carries_its_port_or_icingas_default() {
         assert_eq!(
@@ -1500,7 +1499,7 @@ mod tests {
 
     /// A block carrying a key this kind supplies itself is told where its value went, rather than
     /// meeting serde's "unknown field" — the pattern `package` and `accepts_packages` already run.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn a_retired_key_is_refused_by_name_and_says_what_supplies_it_now() {
         for (key, expected) in [
@@ -1561,7 +1560,7 @@ mod tests {
 
     /// A validation is the daemon's command line with `-C`, and names the account once: the
     /// account [`run_subcommand`] adds for every subcommand is not in the arguments it is handed.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[cfg(unix)]
     #[tokio::test]
     async fn a_validation_names_the_account_once() {
@@ -1588,10 +1587,10 @@ mod tests {
         assert_eq!(printed.matches("RunAsGroup=fleet").count(), 1, "{printed}");
     }
 
-    /// What is left after ADR-draft-icinga-2: the enrolment. Everything else this kind supplies
+    /// What is left after CLT-icinga2-repacked-kind: the enrolment. Everything else this kind supplies
     /// itself, so a block naming one is an unknown key here — and is refused by name a step
     /// earlier, which the test below covers.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn settings_parse_strictly() {
         let parsed = settings(
@@ -1616,9 +1615,9 @@ mod tests {
         }
     }
 
-    /// The three arguments an operator must never have to write, and the shape ADR-draft-icinga-2
+    /// The three arguments an operator must never have to write, and the shape CLT-icinga2-repacked-kind
     /// fixes: the account, the include directory, and every state directory.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_daemon_arguments_carry_the_relocation() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1646,20 +1645,20 @@ mod tests {
             );
         }
         // Foreground: the Runner supervises what it started, and a daemonized Icinga would
-        // detach from it (ADR-draft-icinga-2's requirement).
+        // detach from it (CLT-icinga2-repacked-kind's requirement).
         assert!(
             !args.iter().any(|a| a == "-d" || a == "--daemonize"),
             "{joined}"
         );
         assert!(!args.iter().any(|a| a == "--close-stdio"), "{joined}");
         // Icinga's own console severity, last: verbosity is the fleet's to raise in Icinga's
-        // configuration, not a value this command line takes from anywhere (ADR-draft-icinga-2).
+        // configuration, not a value this command line takes from anywhere (CLT-icinga2-repacked-kind).
         assert_eq!(&args[args.len() - 2..], ["-x", "information"], "{joined}");
     }
 
     /// Nothing starts before the root configuration is there — and, in the Agent role, before the
     /// certificate is. Both are waits with a reason, not failures.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_daemon_waits_for_its_configuration_and_its_certificate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1689,7 +1688,7 @@ mod tests {
     /// `icinga_2s_linux_artifact_is_the_debian_tree_under_its_wrapper`. Icinga publishes no
     /// portable tree, so this tree's layout is entirely this project's: an upstream that moves
     /// something inside it is a change both halves have to answer.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_defaults_are_the_artifacts() {
         let defaults = Icinga2Plugin::default().defaults();
@@ -1711,7 +1710,7 @@ mod tests {
     /// unqualified answer — which is what a resolver hands back for a host with no domain — would
     /// put the short name where Icinga expects the CN its ticket was minted for, and enrolment
     /// would fail with a name that looks right; anything but a host name would name files.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn only_a_qualified_name_becomes_the_default() {
         // The resolution itself depends on this machine's resolver, so what is asserted is the
@@ -1742,8 +1741,8 @@ mod tests {
     }
 
     /// And the operator's value outranks it, because a master may know this host under a name no
-    /// resolver here would produce (ADR-draft-icinga-2).
-    /// Verifies: ADR-draft-icinga-2
+    /// resolver here would produce (CLT-icinga2-repacked-kind).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn a_configured_node_name_outranks_the_resolved_one() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1779,7 +1778,7 @@ mod tests {
     /// model, where *"the values and their semantics are Agent type-specific"*. A marked entry
     /// wins over the conventional name, which exists only so a rollout written earlier keeps
     /// working.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_marked_entry_is_the_root_even_beside_the_conventional_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1801,7 +1800,7 @@ mod tests {
 
     /// And two of them is a question this Client refuses to answer by guessing: the daemon reads
     /// one root, so a rollout that marks two is a rollout to fix, not a coin to flip.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn two_marked_entries_are_a_reason_not_to_start() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1819,7 +1818,7 @@ mod tests {
 
     /// Without a parent there is no enrolment to wait for: a standalone Icinga 2 runs as soon as
     /// its configuration arrives.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn a_standalone_node_needs_no_certificate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1832,7 +1831,7 @@ mod tests {
     }
 
     /// Icinga creates none of its directories and fails on the first write into a missing one.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn preparing_creates_every_state_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1844,7 +1843,7 @@ mod tests {
     }
 
     /// The banner the strict SemVer read rejects, and the versions it must keep reading.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_version_banner_is_read_without_its_packaging_revision() {
         assert_eq!(
@@ -1859,9 +1858,9 @@ mod tests {
     }
 
     /// The preflight asks the staged tree with that tree's own libraries, by the same rule the
-    /// daemon and every subcommand follow for the installed one (ADR-draft-icinga-2 clauses 5
+    /// daemon and every subcommand follow for the installed one (CLT-icinga2-repacked-kind §5
     /// and 15).
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_preflight_runs_the_staged_tree_against_its_own_libraries() {
         let check = preflight();
@@ -1879,10 +1878,10 @@ mod tests {
     }
 
     /// Every subcommand runs with the tree's environment, not the one the Client happens to have:
-    /// `pki` and `daemon -C` link the same bundled libraries the daemon does (ADR-draft-icinga-2
-    /// clause 5). The stub refuses to run without it, as the real binary does on a host without its
+    /// `pki` and `daemon -C` link the same bundled libraries the daemon does (CLT-icinga2-repacked-kind §5).
+    /// The stub refuses to run without it, as the real binary does on a host without its
     /// Boost.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn every_subcommand_carries_the_trees_environment() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1903,9 +1902,9 @@ mod tests {
         }
     }
 
-    /// Windows is not served until a repacked tree has run on it (ADR-draft-icinga-2 clause 23):
+    /// Windows is not served until a repacked tree has run on it (CLT-icinga2-repacked-kind §23):
     /// the kind refuses to start there, naming why, and starts everywhere else.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_kind_refuses_to_start_on_windows_until_it_is_proven_there() {
         let verdict = refuse_an_unproven_platform("icinga2");
@@ -1920,7 +1919,7 @@ mod tests {
     /// A `ticket_file` that is named but not there yet — or holds nothing — is a wait: no key is
     /// made and no request is queued on the parent that nobody meant to sign by hand. It enrols
     /// once the ticket has arrived.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn a_named_ticket_that_is_missing_is_waited_for() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1944,7 +1943,7 @@ mod tests {
     /// The ticket is a per-host secret: a subcommand that carried it and failed names the command
     /// with the ticket replaced, and drops it from what Icinga printed, so neither the log, the
     /// health nor the fleet view carries it.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn a_failed_request_never_shows_the_ticket() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2004,9 +2003,9 @@ mod tests {
         layout
     }
 
-    /// The whole of ADR-draft-icinga-2's happy path: a key generated here, a parent pinned, a
+    /// The whole of CLT-icinga2-repacked-kind's happy path: a key generated here, a parent pinned, a
     /// signature — and then nothing at all, because the certificate on disk is the state.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn enrolment_obtains_a_certificate_once() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2042,7 +2041,7 @@ mod tests {
     /// key and certificate, and once `icinga2 ca sign` ran there the next one fetches the signed
     /// certificate. Until then no CA stands beside the unsigned certificate, so the gate stays
     /// shut.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn a_queued_request_is_asked_again_with_the_same_key_until_the_parent_signs() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2088,7 +2087,7 @@ mod tests {
     /// Trust on first use happens once per parent: a renewal keeps the certificate pinned when the
     /// node first enrolled rather than trusting what the parent presents at that moment, and only
     /// another parent is pinned anew.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn trust_on_first_use_pins_a_parent_once() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2120,7 +2119,7 @@ mod tests {
     /// A `trusted_cert_file` that is named but not there — not yet delivered, or mistyped — never
     /// falls back to trust on first use: enrolment fails, nothing is saved from the parent, and it
     /// pins the file once it arrives.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn a_named_parent_certificate_that_is_missing_is_waited_for_not_trusted_on_sight() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2162,8 +2161,8 @@ mod tests {
     /// root, as one per-host Deployment delivers them: the ticket and the parent's own
     /// certificate. The Supervisor reads both and the daemon is pointed at neither — its root is
     /// the entry marked `main` — and what comes back is a key made on this host and a certificate
-    /// the parent signed, never a key from the fleet (ADR-draft-icinga-2 clause 11).
-    /// Verifies: ADR-draft-icinga-2
+    /// the parent signed, never a key from the fleet (CLT-icinga2-repacked-kind §11).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn the_ticket_and_the_parent_certificate_reach_the_supervisor_and_not_the_daemon() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2217,7 +2216,7 @@ mod tests {
 
     /// A parent that cannot be reached is a wait: the error names the reason, and nothing is
     /// recorded as enrolled.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn an_unreachable_parent_is_reported_rather_than_recorded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2233,7 +2232,7 @@ mod tests {
 
     /// The certificate is the state, so one that no longer verifies enrols again — the marker
     /// alone must never keep a dead certificate in service.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn an_expired_certificate_enrols_again() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2253,7 +2252,7 @@ mod tests {
 
     /// The line `pki verify` prints, in the shape a real Icinga 2 prints it — including the
     /// double space OpenSSL uses to pad a single-digit day.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn the_expiry_is_read_from_what_pki_verify_printed() {
         let real = " Subject:             CN = edge-01.local\n Valid From:          Aug 17 16:22:05 2026 GMT\n Valid Until:         Aug 13 16:20:17 2041 GMT\n";
@@ -2270,9 +2269,9 @@ mod tests {
         assert_eq!(valid_until(" Valid Until:         whenever"), None);
     }
 
-    /// ADR-draft-icinga-2's renewal, and the two things that make it a renewal rather than an
+    /// CLT-icinga2-repacked-kind's renewal, and the two things that make it a renewal rather than an
     /// enrolment: the key is kept — it is what authenticates the request — and no ticket is used.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn a_certificate_near_expiry_is_renewed_without_a_new_key() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2307,7 +2306,7 @@ mod tests {
     /// A renewal whose named parent certificate is gone waits for it too: the pin kept from the
     /// first enrolment is not reused and the parent is not trusted on sight, while the held
     /// certificate is kept untouched.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn a_renewal_whose_named_parent_certificate_is_gone_waits_for_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2335,10 +2334,10 @@ mod tests {
         );
     }
 
-    /// The measured case behind ADR-draft-icinga-2's validation gate: Icinga aborts a reload it
+    /// The measured case behind CLT-icinga2-repacked-kind's validation gate: Icinga aborts a reload it
     /// cannot validate and keeps running the old configuration, so the apply has to be refused
     /// *before* it reaches the running daemon.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn a_configuration_icinga_refuses_does_not_reach_the_daemon() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2363,8 +2362,8 @@ mod tests {
 
     /// A configuration Icinga refused stays on disk where the fleet wrote it, so the next spawn
     /// would start it — and fail. It is not started: the gate names the refusal, until a delivery
-    /// changes the configuration or one validates (ADR-draft-icinga-2 clause 9).
-    /// Verifies: ADR-draft-icinga-2
+    /// changes the configuration or one validates (CLT-icinga2-repacked-kind §9).
+    /// Verifies: CLT-icinga2-repacked-kind
     #[tokio::test]
     async fn a_refused_configuration_is_not_started_at_the_next_spawn_either() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2392,10 +2391,10 @@ mod tests {
         assert!(!layout.refused.exists());
     }
 
-    /// ADR-0018 clause 27: an offered Supervisor set is validated before a running process is
+    /// CLT-supervisor-mode-and-kinds §27: an offered Supervisor set is validated before a running process is
     /// touched — and what it refuses now is a block that still carries a key this kind supplies
     /// itself.
-    /// Verifies: ADR-draft-icinga-2
+    /// Verifies: CLT-icinga2-repacked-kind
     #[test]
     fn check_refuses_a_block_that_names_a_retired_key() {
         let table: toml::Table = "main_config = \"icinga2-conf\"".parse().expect("table");

@@ -2,7 +2,7 @@
   "name": "OpAMP Fleet DevContainer",
 
   // Pinned to a Debian *release*, not the floating `:debian` tag: it is also the Debian release an
-  // Icinga 2 repack in this container takes when `--distro` names none (ADR-draft-icinga-2), and a
+  // Icinga 2 repack in this container takes when `--distro` names none (CLT-icinga2-repacked-kind), and a
   // tag that moves would move that default with it.
   "image": "mcr.microsoft.com/devcontainers/base:debian12",
   // No workspaceFolder or workspaceMount: the default, /workspaces/<directory name>, keeps each
@@ -66,7 +66,7 @@
   //             Without it those tests skip locally.
   //
   // The Linux repack takes none of its libraries from this container: they come as verified
-  // packages from Debian's archive (ADR-draft-icinga-2), and `dpkg-deb`, `xz` and `gpgv` are in the
+  // packages from Debian's archive (CLT-icinga2-repacked-kind), and `dpkg-deb`, `xz` and `gpgv` are in the
   // base image.
   "postCreateCommand": {
     "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm softhsm2"

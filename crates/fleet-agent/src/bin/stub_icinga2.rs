@@ -1,4 +1,4 @@
-//! A stub `icinga2` for the tests of ADR-draft-icinga-2: pure Rust, so it behaves the same on
+//! A stub `icinga2` for the tests of CLT-icinga2-repacked-kind: pure Rust, so it behaves the same on
 //! Linux, macOS, and Windows CI — the discipline `stub_agent` set.
 //!
 //! It answers the subcommands the Supervisor drives, and nothing else:
@@ -28,7 +28,7 @@
 //! On Unix it refuses to run at all — exiting as the dynamic linker does — unless `LD_LIBRARY_PATH`
 //! names one tree's `lib/` and nothing else: the real binary links the Boost the tree carries, and
 //! a host without it runs no subcommand the kind starts without that environment
-//! (ADR-draft-icinga-2).
+//! (CLT-icinga2-repacked-kind).
 //!
 //! The behaviours are steered by the arguments themselves rather than by the environment, so the
 //! tests stay parallel-safe: a `--host` of `unreachable.example` is a parent that is down, one of

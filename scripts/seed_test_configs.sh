@@ -166,7 +166,7 @@ seed() {
 seed otelcol-contrib-conf "$examples/otelcol-contrib-conf.yaml" otelcol-contrib otelcol-contrib \
     '{"service.name": "otelcol-contrib"}'
 seed otelcol-conf "$examples/otelcol-conf.yaml" otelcol otelcol '{"service.name": "otelcol"}'
-# Icinga 2 reads one root file and includes the rest by name (ADR-draft-icinga-2), so both entries
+# Icinga 2 reads one root file and includes the rest by name (CLT-icinga2-repacked-kind), so both entries
 # are seeded. Its ticket is per host and a secret, so it is deliberately not seeded here — see
 # docs/manual/icinga2.md.
 seed icinga2-conf "$examples/icinga2-conf.conf" icinga2 icinga2 '{"service.name": "icinga2"}'

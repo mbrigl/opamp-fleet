@@ -1,4 +1,4 @@
-//! The `icinga2` kind as the core drives it (ADR-draft-icinga-2): the plugin's own adapter, its
+//! The `icinga2` kind as the core drives it (CLT-icinga2-repacked-kind): the plugin's own adapter, its
 //! enrolment task, and the validation gate in front of the shared `Runner`.
 //!
 //! The unit tests in the module check the pieces; this drives the assembled thing through
@@ -8,7 +8,7 @@
 //! refuses that never reaches the running process.
 //!
 //! Not on Windows: the kind refuses to start there until a repacked tree has run on it
-//! (ADR-draft-icinga-2 clause 23), which
+//! (CLT-icinga2-repacked-kind §23), which
 //! `the_kind_refuses_to_start_on_windows_until_it_is_proven_there` holds.
 #![cfg(all(feature = "icinga2", not(windows)))]
 
@@ -129,7 +129,7 @@ async fn wait_for_file(path: &Path) {
     }
 }
 
-/// Delivers Icinga's root configuration the way the fleet does (ADR-draft-icinga-2): the entry, and
+/// Delivers Icinga's root configuration the way the fleet does (CLT-icinga2-repacked-kind): the entry, and
 /// the role that says it is the root. The block does not name it — the marking is the fleet's.
 fn write_config(harness: &Harness, body: &str) {
     std::fs::write(harness.config_dir().join("icinga2-conf"), body).expect("configuration");
@@ -156,10 +156,10 @@ async fn apply_config(harness: &Harness) {
         .expect("send");
 }
 
-/// The Agent role's gate (ADR-draft-icinga-2): a parent that cannot be reached is a *wait* with a
+/// The Agent role's gate (CLT-icinga2-repacked-kind): a parent that cannot be reached is a *wait* with a
 /// reason, and the daemon stays unstarted. Before this, a Supervisor would have spawned a process
 /// that could not do its job and hidden the cause in a restart loop.
-/// Verifies: ADR-draft-icinga-2
+/// Verifies: CLT-icinga2-repacked-kind
 #[tokio::test]
 async fn an_unreachable_parent_waits_with_a_reason_and_starts_nothing() {
     let mut harness = start(
@@ -186,8 +186,8 @@ async fn an_unreachable_parent_waits_with_a_reason_and_starts_nothing() {
 }
 
 /// The whole path in one go: enrolment succeeds, the gate opens, and the daemon runs — with the
-/// state where ADR-draft-icinga-2 puts it, beside the tree rather than inside it.
-/// Verifies: ADR-draft-icinga-2
+/// state where CLT-icinga2-repacked-kind puts it, beside the tree rather than inside it.
+/// Verifies: CLT-icinga2-repacked-kind
 #[tokio::test]
 async fn enrolment_opens_the_gate_and_the_daemon_starts() {
     let mut harness = start(
@@ -198,8 +198,8 @@ async fn enrolment_opens_the_gate_and_the_daemon_starts() {
     );
     write_config(&harness, "include <itl>\n");
 
-    // No ticket: the parent queues the request, and the Agent waits saying so (ADR-draft-icinga-2
-    // clause 12). The stub's `<cert>.approved` stands in for `icinga2 ca sign` on the parent.
+    // No ticket: the parent queues the request, and the Agent waits saying so (CLT-icinga2-repacked-kind §12).
+    // The stub's `<cert>.approved` stands in for `icinga2 ca sign` on the parent.
     let certs = harness.supervisor_dir().join("data/certs");
     let reason = wait_for_health(&mut harness, "awaiting the certificate").await;
     assert!(reason.contains("icinga2 ca sign"), "{reason}");
@@ -230,10 +230,10 @@ async fn enrolment_opens_the_gate_and_the_daemon_starts() {
     harness.shutdown_tx.send(true).expect("shutdown");
 }
 
-/// ADR-draft-icinga-2's validation gate, through the assembled adapter: a configuration Icinga
+/// CLT-icinga2-repacked-kind's validation gate, through the assembled adapter: a configuration Icinga
 /// refuses is answered `FAILED` and never reaches the running daemon — which is the only way the
 /// fleet can be told the truth about an apply Icinga aborts silently.
-/// Verifies: G-4, G-7, ADR-draft-icinga-2
+/// Verifies: G-4, G-7, CLT-icinga2-repacked-kind
 #[tokio::test]
 async fn a_configuration_icinga_refuses_is_reported_failed() {
     let mut harness = start(
@@ -260,9 +260,8 @@ async fn a_configuration_icinga_refuses_is_reported_failed() {
 }
 
 /// The refused configuration stays on disk where the fleet wrote it; a restart does not start it,
-/// and the health says what the daemon waits for rather than only that it waits (ADR-draft-icinga-2
-/// clauses 8 and 9).
-/// Verifies: ADR-draft-icinga-2
+/// and the health says what the daemon waits for rather than only that it waits (CLT-icinga2-repacked-kind §8 and §9).
+/// Verifies: CLT-icinga2-repacked-kind
 #[tokio::test]
 async fn a_refused_configuration_is_not_started_again_and_the_health_says_why() {
     let mut harness = start(
@@ -297,7 +296,7 @@ async fn a_refused_configuration_is_not_started_again_and_the_health_says_why() 
 }
 
 /// A standalone node — no parent — needs no certificate, so its configuration is all it waits for.
-/// Verifies: ADR-draft-icinga-2
+/// Verifies: CLT-icinga2-repacked-kind
 #[tokio::test]
 async fn a_standalone_node_runs_without_enrolment() {
     let mut harness = start(
@@ -321,8 +320,8 @@ async fn a_standalone_node_runs_without_enrolment() {
 
 /// The daemon is handed no Supervisor Endpoint token: it never connects to the Endpoint, and a
 /// token in its environment would reach every check plugin it runs
-/// (ADR-0016 clause 28, ADR-draft-icinga-2 clause 1).
-/// Verifies: ADR-draft-icinga-2
+/// (CLT-modes-and-gateway §28, CLT-icinga2-repacked-kind §1).
+/// Verifies: CLT-icinga2-repacked-kind
 #[tokio::test]
 async fn the_daemon_is_handed_no_endpoint_token() {
     let mut harness = start(
@@ -345,9 +344,9 @@ async fn the_daemon_is_handed_no_endpoint_token() {
 
 /// The version probe runs the delivered program with the tree's environment, as the daemon runs:
 /// the stub, like the real binary on a host without its bundled Boost, prints nothing without it
-/// (ADR-draft-icinga-2 clauses 5 and 16). What the fleet sees is Icinga's version without its
+/// (CLT-icinga2-repacked-kind §5 and §16). What the fleet sees is Icinga's version without its
 /// packaging revision.
-/// Verifies: ADR-draft-icinga-2
+/// Verifies: CLT-icinga2-repacked-kind
 #[tokio::test]
 async fn the_version_is_probed_with_the_trees_environment() {
     let mut harness = start(
@@ -376,11 +375,11 @@ async fn the_version_is_probed_with_the_trees_environment() {
     harness.shutdown_tx.send(true).expect("shutdown");
 }
 
-/// The daemon is stopped as a process group (ADR-draft-icinga-2 clause 10): Icinga's umbrella runs
+/// The daemon is stopped as a process group (CLT-icinga2-repacked-kind §10): Icinga's umbrella runs
 /// a worker of its own, and when the polite stop is ignored and the Runner escalates to `SIGKILL`,
 /// the worker goes with the umbrella instead of being left holding the data directory and the
 /// port. The stub stands in for both, and ignores `SIGTERM` as `NodeName=stubborn`.
-/// Verifies: ADR-draft-icinga-2
+/// Verifies: CLT-icinga2-repacked-kind
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_stop_ends_the_worker_with_the_daemon() {
