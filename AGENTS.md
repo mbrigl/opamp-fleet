@@ -1,142 +1,136 @@
 # Agent Guide
 
-> **The single rule file of this project** ([ADR-0001](docs/adr/0001-agent-governance-model.md)).
-> Every working rule lives here. Where another document repeats one, this wording governs. The
-> file belongs to the template and is not edited per project, except the ADR rules of
-> [§3](#3-adr-rules): a derived project changes them by an ADR on the ADR process, which edits
-> them in the change that lands it. Project conventions go into
-> [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md), into checks, and into ADRs. A procedure is a skill
-> under [`.agents/skills/`](.agents/skills/). It cites a rule here and states none of its own
-> ([ADR-0003](docs/adr/0003-procedures-as-skills.md)).
+> **The single rule file of this project**
+> ([NUC-documents-are-fixed §3](docs/adr/NUC-documents-are-fixed.md)).
+> It states each working rule or links the `NUC-` clause that carries it. Where another document
+> repeats a rule, the wording here governs. The file belongs to the template, and a derived
+> project must not edit it. A project extends or narrows a `NUC-` clause only by an ADR of its own
+> ([NUC-base-is-fixed §1](docs/adr/NUC-base-is-fixed.md)). A project writes its
+> conventions into [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md), into checks, and into ADRs. A
+> procedure is a skill under [`.agents/skills/`](.agents/skills/) and states no rule of its own
+> ([NUC-procedures-are-skills §3](docs/adr/NUC-procedures-are-skills.md)).
 
 ## 1. Principles
 
-The human decides *why* and *what*; the agent works out *how*. A how that binds future choices is
-the human's too. It is recorded with its why in an ADR ([§3](#3-adr-rules)). Five principles win
-over speed and cleverness:
+The human decides *why* and *what*. The agent works out *how*. The human also decides a *how*
+that binds future choices. An ADR records it with its *why*
+([NUC-decisions-are-proposed-then-accepted §1](docs/adr/NUC-decisions-are-proposed-then-accepted.md)).
+Five principles win over speed and cleverness:
 
-- **Simplicity.** Build the simplest thing that satisfies the specification. Add a dependency or
-  an abstraction only for a present need. Removing code is progress. Justify warranted complexity
-  in an ADR.
-- **Evolvability.** Decide the essential architecture at the start, and keep it open to change.
-  To follow a technology, supersede the ADR that chose it; never work around it.
-- **Proportionality.** Ceremony scales with how hard a change is to reverse. Say it out loud when
-  you skip ceremony a reader would expect.
-- **Reflection.** Weigh alternatives and consequences, and write the reasoning down.
-- **Critical stance.** Take nothing at face value: not the human's framing, not your own earlier
-  output, not the existing code. Verify against the specification, the ADRs, the code, and
-  authoritative sources. Put disagreement, with its evidence, into the hand-off of the change
-  ([§6](#6-project-rules)). Put what you could not confirm there too; "none" is a claim the
-  reviewer checks.
+- **Simplicity.** The agent must build the simplest thing that satisfies the specification. It
+  may add a dependency or an abstraction only for a present need. Removing code is progress. An
+  ADR must justify complexity that is warranted.
+- **Evolvability.** The project decides the essential architecture at the start. That
+  architecture must stay open to change. To follow a technology, the project supersedes the ADR
+  that chose it. Nobody may work around that ADR.
+- **Proportionality.** Ceremony scales with how hard a change is to reverse. An agent that skips
+  ceremony a reader expects must say so.
+- **Reflection.** The agent must weigh alternatives and consequences. It must write the reasoning
+  down.
+- **Critical stance.** The agent must take nothing at face value: not the human's framing, not its
+  own earlier output, not the existing code. It must verify against the specification, the ADRs,
+  the code, and authoritative sources. It must put disagreement, with its evidence, into the
+  hand-off of the change. It must put there what it was unable to confirm, too. "None" is a claim
+  that the reviewer checks.
 
 ## 2. Start here
 
-Before any non-trivial work, read the decisions that bind it, and of the rest only what the work
-needs.
+Before any non-trivial work, the agent must read the decisions that bind it. Of the rest it must
+read only what the work needs.
 
-1. **The ADRs.** Run [`scripts/sensor-binding-adrs.sh`](scripts/sensor-binding-adrs.sh)
-   `--sections`, with a `--path` for each path the work will touch while nothing has changed yet.
-   Read what it prints, from the index [`docs/adr/README.md`](docs/adr/README.md) and the ADRs.
-   **Accepted ADRs are binding.** Match an *Applies to* written in prose against the work yourself,
-   and read the header, *Decision*, and *Enforcement* of each that binds it. Read the rest of an ADR
-   when the change questions, revises, or supersedes it, and the mechanics of the index when the
-   change writes one. A `proposed` ADR binds the work that implements it. Rejected and superseded
-   ADRs explain *why*; they are not rules.
-2. [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md): problem, goals, success criteria, in the
-   vocabulary of [`docs/GLOSSARY.md`](docs/GLOSSARY.md). Read it when the work serves or moves a
-   goal (`G-n`, `Q-n`), plans a feature, or decides an ADR.
-3. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): the system as it stands today. Read it when the
-   work changes the structure or has to find its way in it. Where it and an accepted ADR
-   disagree, the ADR is right.
+1. **The ADRs.** The agent must run
+   [`scripts/sensor-binding-adrs.sh`](scripts/sensor-binding-adrs.sh) `--sections`. While nothing
+   has changed yet, it must name each path the work will touch with a `--path`.
+   - The sensor prints the `NUC-` ADRs like any other. It reads each *Applies to* from the ADR
+     file, not from the index [`docs/adr/README.md`](docs/adr/README.md).
+   - Accepted ADRs are binding
+     ([NUC-decisions-are-proposed-then-accepted §5](docs/adr/NUC-decisions-are-proposed-then-accepted.md)).
+   - The agent must match each *Applies to* written in prose against the work by hand. Of each ADR
+     that binds the work, it must read the header, *Decision*, and *Enforcement*.
+   - The agent must read the rest of an ADR when the change questions, revises, or supersedes it.
+     It must read the mechanics of the index when the change writes one.
+   - A `proposed` ADR binds the work that implements it. Rejected and superseded ADRs explain
+     *why*. They are not rules.
+2. **The specification.** [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) holds the problem,
+   the goals, and the success criteria, in the vocabulary of the
+   [glossary](docs/GLOSSARY.md). The agent must read it when the work serves or moves a goal
+   (`G-n`, `Q-n`), plans a feature, or decides an ADR.
+3. **The overview.** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) holds the system as it
+   stands today, below the accepted ADRs
+   ([NUC-documents-are-fixed §4](docs/adr/NUC-documents-are-fixed.md)). The agent must read it when
+   the work changes the structure or has to find its way in it.
 
-Scaffold text in what the work reads is the first work: a placeholder title, an empty section, a
-`TODO`. Say so, and elaborate it with the human before implementing.
+Scaffold text in what the work reads is the first work, such as a placeholder title, an empty
+section, or a `TODO`. The agent must say so and elaborate it with the human before implementing.
 
 ## 3. ADR rules
 
-Authority runs **specification → accepted ADRs → task**. The mechanics of the record are in
-[`docs/adr/README.md`](docs/adr/README.md). Working rules originate here and nowhere else.
-Another document cites a section by its anchor (`[AGENTS.md §3](AGENTS.md#3-adr-rules)`) and
-restates nothing. A rule this file does not state is not a rule of this project.
+The rules of the record stand in `NUC-` ADRs. The mechanics of the record are in
+[`docs/adr/README.md`](docs/adr/README.md).
 
-1. **Create an ADR before any architecture-relevant decision.** Such a decision picks a
-   dependency or framework, a public interface, a persistence or synchronization strategy, or a
-   protocol or data format. In general, it is anything that constrains future technology choices.
-   One decision per ADR. A cross-cutting ADR is only for an integration, where the decision *is*
-   the interplay. The skill `propose-adr` carries a catalogue of concepts. When a change takes a
-   decision the catalogue has an entry for and no ADR in force decides, propose the entry's
-   fitting concepts before implementing, the simplest among them.
-2. **Calibrate.** An ADR is for a decision that is *costly to reverse*, that *constrains future
-   choices*, or that **a reader without this conversation would take for a mistake**. Record the
-   last however cheap it is to reverse. No ADR is needed for implementing within an ADR in force,
-   for bug fixes, interface-preserving refactorings, tests, docs, formatting, or dev-only tooling.
-   When genuinely unsure, prefer a short `proposed` ADR over a silent decision.
-3. **Develop the ADR with the human, critically.** Submit it with status `proposed` **in
-   commits of ADRs only**, and hand those commits to the human before anything is implemented
-   against them. They go on the branch of the work they belong to, or on a branch of their own
-   for an ADR that waits for its decision while other work goes on. ADRs the same human decides
-   may travel together, as the founding decisions of a new project do. Each stays one decision.
-   One the human sends back leaves the work's branch for a branch of its own, so the work's pull
-   request does not carry it, and nothing is implemented against it until it is settled. Skill:
-   `propose-adr`. The two exceptions of rule 5, a normalization and the template repository's
-   correction of its own ADRs, carry the restated or corrected ADRs with the text that cites
-   them.
-4. **After human review, implement while the ADR is still `proposed`,** after its commits on
-   the same branch, or on a branch stacked on the ADR's. A commit that changes the text of an
-   ADR changes nothing else, and a sensor lists one that does. Findings return as revisions,
-   each a commit of ADRs only. The hand-off names the commit of ADRs the human reviewed before
-   the implementation. **Only a human changes the status.** The flip to `accepted`, a header
-   line and no text, may land with the implementation.
-5. **Accepted ADRs are binding and immutable.** Never violate or work around one; change it only
-   by superseding it. Outside a normalization, never rewrite or delete one. Two edits are
-   permitted, both by a human. One flips the `Status` line. The other adds the project's decider
-   to the `Deciders` line of an ADR inherited from the template, when the project accepts it as
-   its own. ADR numbers are permanent between normalizations. The template repository corrects
-   its own ADRs in place ([ADR-0005](docs/adr/0005-template-releases.md)). If the specification
-   and an ADR conflict, the specification wins. Raise the conflict; never choose silently.
+- Authority:
+  [NUC-decisions-are-proposed-then-accepted §7](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
+- The one rule file and citation by anchor:
+  [NUC-documents-are-fixed §3](docs/adr/NUC-documents-are-fixed.md).
 
-   **A normalization restates the record, only on a human's instruction.** The specification is
-   restated first, under rule 7. The ADRs it invalidates are superseded next. Then the ADRs in
-   force are rewritten as a new series in reading order, the inherited ones among them, and
-   superseded and rejected ADRs are deleted. A normalization changes no decision. It is rare, at a
-   milestone or a release, because it makes the numbers cited outside the tree harder to read.
+1. When an ADR is due:
+   [NUC-decisions-are-proposed-then-accepted §1](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
+   Skill: `propose-adr`.
+2. Calibration:
+   [NUC-decisions-are-proposed-then-accepted §2](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
+3. Proposal:
+   [NUC-decisions-are-proposed-then-accepted §3](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
+   The exception for a normalization and for the template's correction:
+   [NUC-decisions-are-proposed-then-accepted §4](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
+4. Implementation:
+   [NUC-decisions-are-proposed-then-accepted §4](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
+   Status:
+   [NUC-decisions-are-proposed-then-accepted §5](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
+5. Immutability:
+   [NUC-decisions-are-proposed-then-accepted §6](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
+   Fixed identifiers:
+   [NUC-adrs-are-named-by-category §1](docs/adr/NUC-adrs-are-named-by-category.md). Conflict with
+   the specification:
+   [NUC-decisions-are-proposed-then-accepted §7](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
+   Normalization:
+   [NUC-decisions-are-proposed-then-accepted §8](docs/adr/NUC-decisions-are-proposed-then-accepted.md).
    Skill: `normalize`.
-6. **Use the vocabulary of [`docs/GLOSSARY.md`](docs/GLOSSARY.md)** in code, comments, and
-   documentation. Add a term in the same change that settles it. A missing entry is a gap to
-   close there, not a word to invent.
-7. **A change to the specification is a decision, not an edit.** Only a human lands one. It names
-   every accepted ADR whose basis it moves. An agent drafts specification text. It never lands
-   the change and never judges alone that no ADR is affected.
+6. Glossary: [NUC-documents-are-fixed §5](docs/adr/NUC-documents-are-fixed.md).
+7. Change of the specification: [NUC-documents-are-fixed §2](docs/adr/NUC-documents-are-fixed.md).
 
 ## 4. Working style
 
-- **Reply to the human in their own language.** Everything else is English: code, comments,
+- **Reply to the human in their own language.** Everything else must be English: code, comments,
   commits, docs, ADRs, pull requests.
-- **Prefer small, reviewable changes.** Plan and explore before a larger one. Commits and pull
-  requests name the ADR they implement (`Implements ADR-NNNN`, a draft by its `ADR-draft-<slug>`).
+- **Prefer small, reviewable changes.** Before a larger change, the agent must plan and explore.
+  A commit or a pull request must name the ADR it implements, as `Implements <CAT>-<slug>`.
 - **Cut work into vertical slices.** Each slice is a thin, tested path through every layer it
-  touches. The first slice through new ground is the tracer bullet. The one exception is a wide
-  mechanical refactor: expand, migrate in batches, contract, every step green.
-- **Write to [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).** Settle a new judgement call there,
-  in the same change that raised it. A judgement call a check can decide becomes the check
-  ([§5](#5-quality-bar--definition-of-done)). One that constrains future choices becomes an ADR.
+  touches. The first slice through new ground is the tracer bullet. A wide mechanical refactor is
+  the one exception. It expands, migrates in batches, and contracts, and every step must stay
+  green.
+- **Write code and tests to [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md).** Where a new judgement
+  call goes: [NUC-documents-are-fixed §6](docs/adr/NUC-documents-are-fixed.md).
 - **Write a rule plainly.** This covers the rules of this file and the *Decision* and
-  *Enforcement* of an ADR. Write one statement per sentence. Name who acts, in the active voice.
-  Use the terms of the glossary. Write several items as a list. State a duty with *must* or *must
-  not*, and a permission with *may*. *Should*, *could*, *might*, and *ideally* leave the reader
-  guessing.
+  *Enforcement* of an ADR.
+  - The author must write one statement per sentence.
+  - The author must name who acts, in the active voice.
+  - The author must use the terms of the glossary.
+  - The author must write several items as a list.
+  - The author must state a duty with *must* or *must not*, and a permission with *may*. *Should*,
+    *could*, *might*, and *ideally* leave the reader guessing.
+
   [`scripts/sensor-plain-rules.sh`](scripts/sensor-plain-rules.sh) reports each sentence over 25
   words, each soft modal verb, and each word the glossary lists under _Avoid:_ on the lines a
-  change adds.
-- **Plan work larger than one session in the tree, under `docs/plan/`.** A feature spec is cut
-  into tracer-bullet tickets. The change that lands a ticket's work deletes its file
-  ([ADR-0006](docs/adr/0006-feature-layer.md)). Skill: `plan-feature`. The skill `work-tickets`
-  works the tickets, one at a time or in parallel.
-- **Record a finding outside your ticket in the backlog.** A finding is a defect, a doubt, or an
-  idea that no ticket covers. Do not widen the ticket for it. The human decides which entry becomes
-  a ticket ([ADR-0006](docs/adr/0006-feature-layer.md)).
-- **Work with the human:** small steps, reasoning surfaced, feedback sought early. A task runs
-  unattended only when its ticket answers for all of the following:
+  change adds. With `--require`, it fails on a soft modal verb or an avoided word in a project ADR.
+- **Plan work larger than one session:**
+  [NUC-large-work-is-planned §1](docs/adr/NUC-large-work-is-planned.md) to
+  [NUC-large-work-is-planned §5](docs/adr/NUC-large-work-is-planned.md). Skill: `plan-feature`.
+  The skill `work-tickets` works the tickets, one at a time or in parallel.
+- **Record a finding outside your ticket in the backlog:**
+  [NUC-large-work-is-planned §6](docs/adr/NUC-large-work-is-planned.md) to
+  [NUC-large-work-is-planned §8](docs/adr/NUC-large-work-is-planned.md).
+- **Work with the human.** The agent must work in small steps, surface its reasoning, and seek
+  feedback early. A task may run unattended only when its ticket answers for all of the following:
   - a test decides its criteria;
   - its scope is isolated, and a wrong result costs one revert;
   - it touches nothing the harness ADR keeps with the human, and it fits under that ADR's cap on
@@ -144,111 +138,121 @@ restates nothing. A rule this file does not state is not a rule of this project.
   - it says how a wrong result is noticed and undone, and what proves it right;
   - it names the stop past which the session hands off instead of trying on.
 
-  The harness ADR is the project's founding decision on who decides, which agents work, and how
-  much agent work may be open at once.
-- **Keep the context lean.** Besides a review, delegate to a subagent only work that is independent
-  of the rest or a search whose answer is a conclusion. Subagents return conclusions, not file
-  dumps, and are briefed with paths, not with the files' content. Alignment, implementation, and
-  review each start in a fresh session with only what they need. Never start one by compacting the
-  old session. The implementing session loads what its ticket's *Read first* names. Read a file by
-  the sections the work needs, and whole where a rule or a procedure names it so, or where the work
-  judges the file as a whole. Run a command whose output is longer than the work reads through a
-  filter for what it is run for, and read its exit status, and a failure, unfiltered. A degraded
-  session hands off, and so does one whose topic is done, with a note under `.scratch/` of what the
-  next session needs, not an account of this one: every turn resends the whole session. A review's
-  topic lasts until the fixes it asked for are judged.
-- **Session artifacts are not tracked.** Session plans, handoff notes, and scratch files live under
-  `.scratch/` (gitignored) or outside the tree. What has to outlive the session becomes a ticket,
-  a `proposed` ADR, or a change to one of the six documents of ADR-0001. An agent's own memory
-  keeps how the human works, not the state of the work, which the tree and its history hold:
-  every session loads that memory first.
-- **Research before a decision that is costly to reverse,** external sources included. Cite them
-  in the ADR. Below that bar, research what you are actually unsure of. Never pass off recalled
-  interfaces, versions, or defaults as verified.
+  The harness ADR is the project's ADR in the role `harness`
+  ([NUC-base-is-fixed §3](docs/adr/NUC-base-is-fixed.md)). It decides who
+  decides, which agents work, and how much agent work may be open at once.
+- **Keep the context lean.**
+  - Besides a review, the agent may delegate to a subagent only independent work or a search
+    whose answer is a conclusion.
+  - A subagent must return conclusions, not file dumps. Its brief must give paths, not the
+    content of the files.
+  - Alignment, implementation, and review must each start in a fresh session with only what it
+    needs. No session may start by compacting the old one.
+  - The implementing session loads what the *Read first* of its ticket names.
+  - The agent must read a file by the sections the work needs. It must read a file whole where a
+    rule or a procedure says so, or where the work judges the file as a whole.
+  - The agent must run a command whose output is longer than the work reads through a filter for
+    its purpose. It must read the exit status and a failure unfiltered.
+  - A degraded session must hand off, and so must one whose topic is done. Every turn resends the
+    whole session.
+  - A session that hands off must leave a note under `.scratch/`. The note says what the next
+    session needs, not what this one did.
+  - A review's topic lasts until the fixes it asked for are judged.
+- **Session artifacts are not tracked.** Session plans, handoff notes, and scratch files live
+  under `.scratch/` (gitignored) or outside the tree. What has to outlive the session becomes a
+  ticket, a `proposed` ADR, or a change to one of the six documents of
+  [NUC-documents-are-fixed §1](docs/adr/NUC-documents-are-fixed.md). An agent's own memory must
+  keep how the human works, not the state of the work. The tree and its history hold that state.
+  Every session loads that memory first.
+- **Research before a decision that is costly to reverse,** external sources included. The ADR
+  must cite them. Below that bar, the agent must research what it is actually unsure of. It must
+  not pass off recalled interfaces, versions, or defaults as verified.
 - **Settle scope and intent with the human first when they are still open.** The trigger is
-  disagreement about *why* and *what*, not size. **When in doubt, ask the human before
-  implementing.**
+  disagreement about *why* and *what*, not size. **When in doubt, the agent must ask the human
+  before implementing.**
 
 ## 5. Quality bar & Definition of Done
 
 - **A change is done only when it builds, its tests pass, and linters and formatters are clean,**
-  locally and in CI. Never hand off or propose merging red.
+  locally and in CI. Nobody may hand off a red change or propose merging it.
 - **Run [`scripts/check-all.sh`](scripts/check-all.sh) before pushing.** It runs the repository's
   checks and the build, test, and lint commands of the README's **Build, Test & Run** section.
-  CI runs the same on every pull request.
-- **New behaviour ships with tests; a bug fix ships with a regression test** that fails before the
-  fix and passes after. Genuinely untestable: say so and why.
-- **The suite is the contract an implementation is held to.** So it tests through interfaces the
-  implementation can change behind. Before changing what exists, pin the behaviour that must
-  stay, tests first where none exist. A rewrite or migration is done when the old suite passes
-  against the new implementation.
-- **Every accepted ADR, and every specification criterion (`G-n`, `Q-n`) a change meets, is
-  cited by a test** with a `Verifies: <id>` marker
-  ([ADR-0002](docs/adr/0002-decisions-verified-by-tests.md)). An ADR no test can decide says so
-  in its *Enforcement* section. A criterion no test cites yet is pending work.
-- **Never weaken the suite to make it pass. A flaky test is a defect, not noise:** no retries, no
-  re-running until green.
-- **Review in a fresh context before handing off.** The session that wrote a change never reviews
-  it. The reviewer gets the diff, the task, the doubts, and the standards, never the reasoning. It
-  reports on two axes: does the change do what was asked, and does it meet this bar, simplicity
-  first. A finding that must be fixed is fixed before the change is handed off; a lesser one is
-  fixed or named in the hand-off's doubts. Every existing test the diff changes or removes needs a
-  reason. The hand-off names the commit the review saw, and a sensor lists what landed after it. A
-  rework replaces the commits a review saw, so after one the review that binds is a review of the
-  whole branch at its head. The review scales with the change ([§1](#1-principles)): one that only
-  touches `.github/ISSUE_TEMPLATE/` or documents under `docs/` other than those ADR-0001 names and
-  `docs/plan/`, its checks green, gets a light review of the diff, the task, the doubts, and the
-  check output; every other change gets the full one. Skill: `review`.
-- **A feature spec closes only after a design revision.** A fresh session revisits the modules
-  its tickets touched, the ADRs that bind them, and the criteria they serve. It files what it
-  finds as tickets, checks, a `proposed` ADR, or a drafted specification change. With no spec
-  open, a revision runs when the revision sensor says it is due
-  ([ADR-0006](docs/adr/0006-feature-layer.md)). A sensor is a script that reports to the reviewer
-  and fails nothing. Skill: `design-revision`.
-- **A mistake a check could have caught becomes a check,** shipped with the fix. A rule in prose
-  is the fallback for what no check can decide. The design revision drops what prevented nothing.
-- **Keep the diff releasable.** No commented-out code, stray debug output, or `TODO` standing in
-  for a decision. Unfinished work is a ticket or a `proposed` ADR, not hidden in the code.
-- **A change to the structure updates [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** in the same
-  change.
+  CI runs the same on every pull request. The git hooks run the checks before a commit, a merge,
+  and a push ([NUC-checks-are-bash §6](docs/adr/NUC-checks-are-bash.md)).
+- **New behaviour must ship with tests.** A bug fix must ship with a regression test that fails
+  before the fix and passes after. For behaviour that is genuinely untestable, the agent must say
+  so and why.
+- **The suite is the contract an implementation is held to.** So it must test through interfaces
+  the implementation can change behind. Before changing what exists, the agent must pin the
+  behaviour that must stay, with tests first where none exist. A rewrite or a migration is done
+  when the old suite passes against the new implementation.
+- **Tests cite the ADRs and criteria they verify:**
+  [NUC-decisions-cite-tests §2](docs/adr/NUC-decisions-cite-tests.md) to
+  [NUC-decisions-cite-tests §5](docs/adr/NUC-decisions-cite-tests.md). An invalid citation fails:
+  [NUC-decisions-cite-tests §6](docs/adr/NUC-decisions-cite-tests.md).
+- **Never weaken the suite to make it pass.** A flaky test is a defect, not noise. Nobody may
+  retry it or re-run it until green.
+- **Review in a fresh context before handing off.** Skill: `review`.
+  - The session that wrote a change must not review it.
+  - The reviewer must get the diff, the task, the doubts, and the standards. It must not get the
+    reasoning.
+  - It reports on two axes: whether the change does what was asked, and whether it meets this
+    bar, simplicity first.
+  - A finding that must be fixed must be fixed before the hand-off. A lesser one must be fixed or
+    named in the doubts of the hand-off.
+  - Each existing test that the diff changes or removes must have a reason.
+  - The hand-off must name the commit the review saw. A sensor lists what landed after it. A
+    sensor is a script that reports. It fails only where a decision makes it a check, as
+    `--require` makes the plain-rules sensor
+    ([NUC-checks-are-bash §4](docs/adr/NUC-checks-are-bash.md)).
+  - A rework replaces the commits a review saw. After a rework, only a review of the whole branch
+    at its head binds.
+  - The review scales with the change ([§1](#1-principles)). A change with green checks gets a
+    light review when it touches only these paths:
+    - `.github/ISSUE_TEMPLATE/`;
+    - documents under `docs/`, except `docs/plan/` and the set of
+      [NUC-documents-are-fixed §1](docs/adr/NUC-documents-are-fixed.md).
+  - A light review reads the diff, the task, the doubts, and the check output. Every other change
+    gets the full review.
+- **A feature spec closes only after a design revision:**
+  [NUC-design-is-revised §1](docs/adr/NUC-design-is-revised.md) to
+  [NUC-design-is-revised §5](docs/adr/NUC-design-is-revised.md). Skill: `design-revision`.
+- **A mistake that a check would have caught must become a check,** shipped with the fix. A rule in
+  prose is the fallback for what no check can decide. The design revision drops what prevented
+  nothing.
+- **Keep the diff releasable.** It must hold no commented-out code, no stray debug output, and no
+  `TODO` standing in for a decision. Unfinished work must be a ticket or a `proposed` ADR, not
+  hidden in the code.
+- **A change to the structure updates [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md):**
+  [NUC-documents-are-fixed §4](docs/adr/NUC-documents-are-fixed.md).
 
 ## 6. Project rules
 
-- **Commit freely on a branch, never on `main`. A human decides what leaves the machine.**
-  Pushing, `gh`, and anything that rewrites or discards history (`reset`, `rebase`, `merge`,
-  `restore`, `clean`) wait for an instruction. The instruction names the action and implies no
-  next one. A standing instruction may cover one push only: the claim on a ticket across clones,
-  where the harness ADR grants it. The session releases a local claim, a human one on a remote
-  ([ADR-0006](docs/adr/0006-feature-layer.md)). The git hooks under [`.githooks/`](.githooks/)
-  enforce what a file can of this section and of [§5](#5-quality-bar--definition-of-done); what
-  each refuses is under [Git hooks](CONTRIBUTING.md#git-hooks). **An agent never bypasses this
-  repository's hooks:** no `--no-verify`, no git run without them, no hand-moved `origin/main`, no
-  hand-written record of a green tree. The one exception is the push of a claim, which skips the
-  pre-push hook. A human may bypass one, deliberately.
-- **A rule is enforced only by what every agent hits:** the git hooks, the checks, and the
-  repository settings. A tool's own configuration enforces none, because a gate one agent
-  honours and the next does not looks like a rule and is not one. It may close a path for its
-  agent as defence in depth ([ADR-0001](docs/adr/0001-agent-governance-model.md)).
-- **Authenticate `gh` through its web flow;** a human enters the one-time code. Never request,
-  store, or hard-code personal access tokens.
-- **Changes reach `main` through a pull request,** merged as a merge commit. The local `main`
-  only takes up the remote's, with `git merge --ff-only origin/main`. What no file can enforce
-  is listed under [Repository settings](CONTRIBUTING.md#repository-settings).
-- **Branches may integrate first on a `feat/` branch,** on the human's instruction, after the
-  review of [§5](#5-quality-bar--definition-of-done): by a local merge, or by a pull request
-  against the `feat/` branch. Each integrated branch is one merge commit, whose message is the
-  hand-off of the change and fills the sections of the
-  [pull request template](.github/PULL_REQUEST_TEMPLATE.md). Until the `feat/` branch's pull
-  request into `main` merges, all of it is the human's to rework and push again, what pull
-  requests merged into it included. What has reached `main` is never rewritten. The steps are
-  under [Integration branches](CONTRIBUTING.md#integration-branches).
+The rules of integration stand in
+[NUC-main-only-via-pr](docs/adr/NUC-main-only-via-pr.md).
+
+- Branches, and the human's instruction before anything leaves the machine:
+  [NUC-main-only-via-pr §1](docs/adr/NUC-main-only-via-pr.md) and
+  [NUC-main-only-via-pr §2](docs/adr/NUC-main-only-via-pr.md).
+- The claim of a ticket: [NUC-large-work-is-planned §4](docs/adr/NUC-large-work-is-planned.md).
+  Its release, local or remote, waits for an instruction
+  ([NUC-main-only-via-pr §2](docs/adr/NUC-main-only-via-pr.md)). Skill: `work-tickets`.
+- The git hooks, and that no agent bypasses them:
+  [NUC-main-only-via-pr §6](docs/adr/NUC-main-only-via-pr.md). What each hook refuses is under
+  [Git hooks](CONTRIBUTING.md#git-hooks).
+- What enforces a rule: [NUC-main-only-via-pr §7](docs/adr/NUC-main-only-via-pr.md).
+- Credentials for `gh`: [NUC-main-only-via-pr §3](docs/adr/NUC-main-only-via-pr.md).
+- `main` only through a pull request: [NUC-main-only-via-pr §4](docs/adr/NUC-main-only-via-pr.md).
+  What no file can enforce is under [Repository settings](CONTRIBUTING.md#repository-settings).
+- Integration on a `feat/` branch: [NUC-main-only-via-pr §5](docs/adr/NUC-main-only-via-pr.md).
+  The steps are under [Integration branches](CONTRIBUTING.md#integration-branches).
 
 ## 7. Secrets
 
-- **Never write a secret into a tracked file, commit message, ADR, log, or CI output.** Secrets live
-  in environment variables, gitignored `.env*` files, or GitHub Actions secrets. A placeholder in a
-  tracked `.env.example` is not a secret.
-- **A secret that reaches git is compromised.** Rotation comes first and is the human's to perform.
-  Removing it from the branch tip is cleanup, not remediation. Tell the human immediately.
+- **Never write a secret into a tracked file, commit message, ADR, log, or CI output.** Secrets
+  live in environment variables, gitignored `.env*` files, or GitHub Actions secrets. A
+  placeholder in a tracked `.env.example` is not a secret.
+- **A secret that reaches git is compromised.** The human must rotate it first. Removing it from
+  the branch tip is cleanup, not remediation. The agent must tell the human immediately.
 - No check enforces either rule. [`SECURITY.md`](SECURITY.md) says what the repository's
   configuration does about secrets and where it stops.

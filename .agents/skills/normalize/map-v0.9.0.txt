@@ -1,0 +1,261 @@
+# The map of release v0.9.0: the six numbered ADRs a project inherited, 0001 to 0006, to the twelve
+# NUC- ADRs that carry their clauses. The migration of the normalize skill applies it once with
+# remap.sh, whose header gives the form of a line; the release notes point here.
+#
+# The six lines below are the map. An ADR whose clauses went to one NUC- ADR moves; one whose
+# clauses went to several is a split, whose references remap.sh lists and leaves. Each split names
+# every NUC- ADR that is the home of one of its clauses in the table after the map; a pointer in a
+# home, such as an Out of scope that names another ADR, counts for nothing. Place each left
+# reference by hand at the NUC- clause that carries what it cites, from that table.
+
+0001-agent-governance-model.md       NUC-documents-are-fixed NUC-decisions-are-proposed-then-accepted NUC-adrs-are-named-by-category NUC-base-is-fixed NUC-main-only-via-pr NUC-releases-are-semver-tags
+0002-decisions-verified-by-tests.md  NUC-decisions-cite-tests NUC-checks-are-bash NUC-adrs-are-named-by-category NUC-main-only-via-pr
+0003-procedures-as-skills.md         NUC-procedures-are-skills
+0004-dev-container-runtime.md        NUC-container-hides-host-daemon NUC-checks-are-bash
+0005-template-releases.md            NUC-releases-are-semver-tags NUC-decisions-are-proposed-then-accepted NUC-adrs-are-named-by-category NUC-base-is-fixed
+0006-feature-layer.md                NUC-large-work-is-planned NUC-design-is-revised NUC-main-only-via-pr
+
+# The clause table: each clause of an old ADR, shortened to a line, with its home. A row reads
+# 'number | old clause | home'. In a home, bN is the Nth bullet of the clause; OoS is the Out of
+# scope, Lat N the Nth item of the Latitude, Enf the Enforcement, and NMD its paragraph on what is
+# not mechanically decidable. CM marks a clause whose meaning changed: a project ADR that rests on
+# it is reviewed against its new home, and superseded where the change moves its basis.
+#
+# 0001-agent-governance-model.md
+#
+#   1.01 | Six documents with six roles; no other document carries a rule | NUC-documents-are-fixed §1
+#   1.02 | Specification = the constitution: what the project is for | NUC-documents-are-fixed §1
+#   1.03 | A spec change is a decision, not an edit; a human makes it | NUC-documents-are-fixed §2 (b1)
+#   1.04 | It names every accepted ADR whose basis it moves | NUC-documents-are-fixed §2 (b2)
+#   1.05 | Each named ADR is reconsidered in the same review and superseded where invalidated | NUC-documents-are-fixed §2 (b3) for project ADRs. CM: a `NUC-` clause it invalidates is narrowed by a project ADR or forked (NUC-documents-are-fixed §2 b4), and the template corrects its own `NUC-` ADR in place (NUC-documents-are-fixed §2 b5 → NUC-decisions-are-proposed-then-accepted §6)
+#   1.06 | An agent drafts spec text; never lands it; never judges alone that no ADR is affected | NUC-documents-are-fixed §2 (b1)
+#   1.07 | While nothing derives from a passage, there is nothing to name | NUC-documents-are-fixed §2 (b2, "a passage no ADR derives from names none")
+#   1.08 | `docs/adr/` = the record of every architecture-relevant decision | NUC-documents-are-fixed §1 (role) → NUC-decisions-are-proposed-then-accepted §1 (when)
+#   1.09 | … derived from the specification | NUC-decisions-are-proposed-then-accepted §7 (authority)
+#   1.10 | `AGENTS.md` = one vendor-neutral rule file, the single source of working rules | NUC-documents-are-fixed §3
+#   1.11 | Overview = current state: parts, responsibilities, how they fit | NUC-documents-are-fixed §1
+#   1.12 | Overview holds no rule and no decision | NUC-documents-are-fixed §4
+#   1.13 | Overview cites the ADR behind each structural choice | NUC-documents-are-fixed §4
+#   1.14 | Overview updated in the same change as the structure | NUC-documents-are-fixed §4
+#   1.15 | Where overview and an accepted ADR disagree, the ADR is right | NUC-documents-are-fixed §4
+#   1.16 | Glossary defines terms and decides nothing | NUC-documents-are-fixed §5
+#   1.17 | Glossary updated inline by whoever resolves a term, agent included, same change | NUC-documents-are-fixed §5 (b2)
+#   1.18 | Entry form: one bold term, one or two sentences, _Avoid:_ synonyms "where there are any" | NUC-documents-are-fixed §5 (b1); "where there are any" implicit
+#   1.19 | Only domain-specific terms belong | NUC-documents-are-fixed §5 ("the domain's terms")
+#   1.20 | Spec is written in the glossary's vocabulary and carries none of its own | NUC-documents-are-fixed §5 (b3 use its terms; b4 no term of its own)
+#   1.21 | Conventions = how code and tests are written where no check decides | NUC-documents-are-fixed §1, §6
+#   1.22 | Convention entry: a sentence or two, what and why | NUC-documents-are-fixed §6
+#   1.23 | Conventions updated inline by whoever settles one, agent included, same change | NUC-documents-are-fixed §6 (b1)
+#   1.24 | A convention a check can decide becomes the check | NUC-documents-are-fixed §6 (b2)
+#   1.25 | A convention that constrains future choices is an ADR | NUC-documents-are-fixed §6 (b3)
+#   1.26 | The reviewer always has the conventions; the implementer reads them when needed | NUC-documents-are-fixed §6 (b4)
+#   1.27 | Every other document (README, CONTRIBUTING, SECURITY, setup file, templates, pointers, catalogue) points at the rule file, holds no rule | NUC-documents-are-fixed §7
+#   1.28 | Exception: mechanics delegated — `docs/adr/README.md`, `template.md` (by §3), CONTRIBUTING *Git hooks*, *Integration branches*, *Repository settings* (by §6) | NUC-documents-are-fixed §8 (delegated "by the rule file or a `NUC-` ADR"; CONTRIBUTING sections generalised); the three sections → NUC-main-only-via-pr OoS ("which CONTRIBUTING.md lists")
+#   1.29 | README is for users, CONTRIBUTING for contributors, so a user reads no mechanics | NUC-documents-are-fixed §8 ("README.md must hold no mechanics")
+#   1.30 | Mechanics say how a rule is carried out and add no rule | NUC-documents-are-fixed §8
+#   1.31 | A per-agent configuration may close a path for its one agent as defence in depth; enforces no rule; no rule rests on it | NUC-main-only-via-pr §7 (NUC-documents-are-fixed OoS points there)
+#   1.32 | Load-bearing: exactly one rule file | NUC-documents-are-fixed §3
+#   1.33 | An ADR that supersedes any other part of this record restates the load-bearing clause | dropped, CM: no project ADR may supersede a `NUC-` ADR (NUC-base-is-fixed §1)
+#   1.34 | The ADR rules of `AGENTS.md` §3 are the one block with no ADR behind it — accepted here | dropped, CM: NUC-decisions-are-proposed-then-accepted and NUC-adrs-are-named-by-category now carry the §3 rules (spec, *The cut*)
+#   1.35 | In the template the §3 block changes as this ADR is corrected in place, release notes say so | NUC-decisions-are-proposed-then-accepted §6 (template corrects `NUC-` in place, a release ships it); notes → NUC-releases-are-semver-tags §2
+#   1.36 | In a derived project §3 changes by an ADR on the ADR process, which edits the block in the change that lands it | CM: a project ADR extends or narrows a clause of NUC-decisions-are-proposed-then-accepted (NUC-base-is-fixed §1); the rule file is not edited. The normalize skill §7 step 3 follows
+#   1.37 | Rule 1 belongs to the block: the catalogue is what a decision is proposed from | NUC-decisions-are-proposed-then-accepted §1 (b3)
+#   1.38 | Rule 3: ADRs the same human decides may travel together, in commits of ADRs only | NUC-decisions-are-proposed-then-accepted §3 (head + b2)
+#   1.39 | … the founding decisions of a new project always, proposed as one start, revised while proposed | dropped as a rule, CM: NUC-decisions-are-proposed-then-accepted §3 b2 keeps "may"; the practice is the order of TEMPLATE-SETUP step 4 / `setup-project` §4
+#   1.40 | Rule 5 with its normalization: on instruction, record restated in reading order, without dead ADRs, no decision changed | NUC-decisions-are-proposed-then-accepted §8. CM: no "reading order" renumbering; identifiers stay except merged/split; `NUC-` files untouched
+#   1.41 | Why: a record that only grows costs every session the reconstruction | NUC-decisions-are-proposed-then-accepted Context / reason, no rule
+#   1.42 | OoS: what AGENTS.md says and how documents cite it | NUC-documents-are-fixed OoS (beyond §3); citing → NUC-documents-are-fixed §3 (b1)
+#   1.43 | OoS: which agents, which need a pointer file | NUC-documents-are-fixed Lat 1 (harness entry)
+#   1.44 | OoS: how the ADR record is kept | NUC-decisions-are-proposed-then-accepted (NUC-documents-are-fixed §1 links it)
+#   1.45 | OoS: notation and depth of the overview | NUC-documents-are-fixed Lat 2
+#   1.46 | OoS: vocabulary with more than one bounded context | NUC-documents-are-fixed Lat 3
+#   1.47 | OoS: which documents a derived project drops | NUC-documents-are-fixed Lat 4 + §1. CM: the six of §1 may no longer be dropped, only those of §7
+#   1.48 | Enf: check-docs — record and index agree | NUC-adrs-are-named-by-category Enf (cl. 4–6; index §5)
+#   1.49 | Enf: links resolve; section references point at their section; hence cite by anchor, never restate | NUC-documents-are-fixed Enf (checks 3, 4) + NUC-documents-are-fixed §3 (b1)
+#   1.50 | Enf: plain-rules sensor holds _Avoid:_ lists on added lines of AGENTS.md / Decision / Enforcement; names the term; skips code spans and italics; fails nothing | NUC-documents-are-fixed Enf (cl. 5); skip details → sensor header (mechanics)
+#   1.51 | Enf: binding sensor lists ADRs in force by *Applies to*; `--sections`; prose *Applies to* from the index Binding table; reads paths only, never fails; self-test cites | NUC-decisions-are-proposed-then-accepted Enf. CM: reads every ADR file, `NUC-` included, not the index
+#   1.52 | Enf: remap self-test — a map moves every reference once, a swap included; record left to the normalization. CODEOWNERS routes a spec change to the owner. Review list (no other doc holds a rule / overview matches / glossary terms in use / no convention where a check decides / normalization changed no decision) | NUC-decisions-are-proposed-then-accepted Enf (cl. 8); NUC-documents-are-fixed Enf (CODEOWNERS, cl. 2); NUC-documents-are-fixed NMD (cl. 1, 7, 8 / 4 / 5 / 6); NUC-decisions-are-proposed-then-accepted NMD (cl. 8)
+#
+# 0002-decisions-verified-by-tests.md
+#
+#   2.01 | CI fails on an accepted ADR no test cites with `Verifies:` | NUC-decisions-cite-tests §3
+#   2.02 | Report each Goals / Quality Goals criterion no test cites | NUC-decisions-cite-tests §5
+#   2.03 | Each item of the two sections starts with bold `G-n` / `Q-n`; an item without one fails | NUC-decisions-cite-tests §1
+#   2.04 | Criterion identifiers are never reused | NUC-decisions-cite-tests §1
+#   2.05 | Only a normalization renumbers them and moves every marker | NUC-decisions-cite-tests §1 (→ NUC-decisions-are-proposed-then-accepted §8)
+#   2.06 | Marker = `Verifies:` + identifiers (`ADR-NNNN`, `ADR-draft-<slug>`, `G-n`) | NUC-decisions-cite-tests §2. CM: identifier forms now NUC-adrs-are-named-by-category §1; draft form gone
+#   2.07 | … in any non-ignored, non-Markdown file; plain text so every language carries it | NUC-decisions-cite-tests §2 (reason in Context)
+#   2.08 | Draft = `docs/adr/draft-<slug>.md`, slug form, cited `ADR-draft-<slug>` | dropped, CM: NUC-adrs-are-named-by-category §1 (no draft state)
+#   2.09 | `scripts/number-adrs.sh` numbers drafts on the branch to `main`, after taking up `main`, in add order | dropped, CM: NUC-adrs-are-named-by-category §1 ("no step numbers ADRs")
+#   2.10 | Two commits (docs/adr only, then the rest), map in the body, rule 4 kept, first red | dropped with 2.09
+#   2.11 | Commits before numbering keep draft ids; the map resolves them | dropped with 2.09
+#   2.12 | No draft reaches `main` (ready PR fails, push fails, draft PR passes) | dropped with 2.08
+#   2.13 | Exception: `Not mechanically decidable:` paragraph with reason in *Enforcement* | NUC-decisions-cite-tests §4
+#   2.14 | … only when a human decides it or it concerns how the project works | NUC-decisions-cite-tests §4
+#   2.15 | Criteria have no exception; rewritten until a test can decide | NUC-decisions-cite-tests §5
+#   2.16 | An uncited criterion is pending work, listed, not failing | NUC-decisions-cite-tests §5
+#   2.17 | Nothing in the spec marks the state | NUC-decisions-cite-tests §5
+#   2.18 | Invalid citation (unknown, superseded, rejected) fails | NUC-decisions-cite-tests §6
+#   2.19 | Every check and sensor the template ships is bash under `scripts/`: bash ≥ 4.4, git, standard tools of the base image (coreutils, grep, sed, awk, find, tar), ShellCheck aside | NUC-checks-are-bash §1. CM (minor): fixed tool list, no longer tied to the base image
+#   2.20 | Each runs after its own self-test on fixture repositories | NUC-checks-are-bash §2
+#   2.21 | A git hook needs no more than bash 3.2 (it runs before any check) | NUC-checks-are-bash §3
+#   2.22 | A sensor fails on nothing it counts until a decision makes it a check | NUC-checks-are-bash §4
+#   2.23 | check-all, `checks.yml`, required checks list the same; matrix job by its check runs | NUC-checks-are-bash §5
+#   2.24 | A publishing workflow is no gate; check-all names it; own commands allowed; its scripts count | NUC-checks-are-bash §5
+#   2.25 | Local gate: hooks run the checks before commit, merge, push | NUC-checks-are-bash §6
+#   2.26 | … and refuse what `AGENTS.md` §6 keeps from `main` | NUC-main-only-via-pr §6 (NUC-checks-are-bash §6 now only cites it)
+#   2.27 | `--changed` runs a self-test only where `# Inputs:` names a changed path; CI runs all | NUC-checks-are-bash §6
+#   2.28 | Sensors are `scripts/sensor-*.sh`, header says what each counts | NUC-checks-are-bash §4
+#   2.29 | Each sensor self-test cites this ADR | NUC-checks-are-bash §4 (now `test-sensor-<name>.sh`, held by check-traceability)
+#   2.30 | GitHub-repository sensors may need `gh`, authenticated through its web flow | NUC-checks-are-bash §7; auth → NUC-main-only-via-pr §3 (NUC-checks-are-bash §7 now only cites it)
+#   2.31 | … run on a human's instruction, not in check-all / `checks.yml` (reasons) | NUC-checks-are-bash §7
+#   2.32 | … self-test on fixture responses, no `gh`, stays in the three lists | NUC-checks-are-bash §7
+#   2.33 | Proposed ADRs are out of the check's scope; tests land while proposed, acceptance with them | NUC-decisions-cite-tests §3 (→ NUC-decisions-are-proposed-then-accepted §4, §5)
+#   2.34 | OoS: adequacy of a citing test | NUC-decisions-cite-tests OoS
+#   2.35 | OoS: whether tests pass (project's build-test job) | NUC-decisions-cite-tests OoS. CM (minor): attributed to the `toolchain` role ADR
+#   2.36 | OoS: test framework, layout, kind | NUC-decisions-cite-tests OoS + Lat 1
+#   2.37 | Enf: check-traceability, run by check-all and its own job; lists criteria; self-test cites | NUC-decisions-cite-tests Enf
+#   2.38 | Enf: check 9 holds the three lists, a job running no script, a matrix job named bare | NUC-checks-are-bash Enf (cl. 5, 7)
+#   2.39 | Enf: check-shell lints every script | NUC-checks-are-bash Enf (cl. 1)
+#   2.40 | Enf: no further dependency, self-test first — review | NUC-checks-are-bash NMD (cl. 1, 2)
+#   2.41 | Enf: GitHub sensor on instruction only, self-test without `gh` — review | NUC-checks-are-bash Enf (check 9) + NMD (cl. 7)
+#   2.42 | Enf: check-all refuses bash < 4.4 by name | NUC-checks-are-bash Enf (cl. 1)
+#   2.43 | Enf: test-git-hooks exercises every refusal; each sensor self-test cites this ADR | NUC-checks-are-bash Enf (cl. 6, cl. 4)
+#   2.44 | Enf: checks 2 and 16 and number-adrs self-test hold drafts | dropped with 2.08–2.12; check 2 now holds the NUC-adrs-are-named-by-category §1/§2 form (NUC-adrs-are-named-by-category Enf)
+#
+# 0003-procedures-as-skills.md
+#
+#   3.01 | The rule file's procedures are Agent Skills, one directory with `SKILL.md` each, under `.agents/skills/` | NUC-procedures-are-skills §1
+#   3.02 | The list: propose ADR, plan, work tickets alone/parallel, review, revise, normalize incl. take-up | NUC-procedures-are-skills §1
+#   3.03 | Claude Code reaches them through one symlink per skill under `.claude/skills/` | NUC-procedures-are-skills §6. CM: generalised to any agent reading another directory
+#   3.04 | The `TEMPLATE-SETUP.md` walk is a skill, deleted with the file | NUC-procedures-are-skills §2
+#   3.05 | A skill carries one procedure, cites what requires it, states no rule | NUC-procedures-are-skills §3 (general rule → NUC-documents-are-fixed §1/§7, NUC-procedures-are-skills OoS)
+#   3.06 | Rule file and templates name the skill and drop the steps | NUC-procedures-are-skills §4
+#   3.07 | Reference files hold knowledge, no rule | NUC-procedures-are-skills §5
+#   3.08 | A script where command order decides the outcome; a how; a self-test runs it | NUC-procedures-are-skills §5
+#   3.09 | OoS: skills a project adds | NUC-procedures-are-skills Lat 1. CM: now bound to §3, §5, §6
+#   3.10 | OoS: whether a skill runs unattended | NUC-procedures-are-skills OoS (→ `AGENTS.md` §4)
+#   3.11 | OoS: checks on front matter | NUC-procedures-are-skills OoS + Consequences follow-up
+#   3.12 | OoS: pointers deleted once Claude Code reads the neutral path | NUC-procedures-are-skills Consequences follow-up
+#   3.13 | Enf: no rule in a skill, rule file names the skill — review | NUC-procedures-are-skills NMD (§3–§5)
+#   3.14 | Enf: check-docs resolves links and section references of a skill | NUC-procedures-are-skills Enf item 2 (checks 3, 4; no clause)
+#   3.15 | Enf: check 11 — skill without pointer, pointer to nothing, copy, skill only in pointer dir | NUC-procedures-are-skills §6 + Enf item 1
+#   3.16 | Enf: why check 11 matters | dropped as rationale (Context keeps the observation)
+#
+# 0004-dev-container-runtime.md
+#
+#   4.01 | No host Docker socket mounted | NUC-container-hides-host-daemon §2
+#   4.02 | No Feature that would mount one | NUC-container-hides-host-daemon §2
+#   4.03 | "in every variant" | NUC-container-hides-host-daemon §2 ("in any variant"); variants review-held (NMD)
+#   4.04 | Features pinned by major version tag | NUC-container-hides-host-daemon §3
+#   4.05 | `devcontainer-lock.json` committed, naming the same Features | NUC-container-hides-host-daemon §3
+#   4.06 | Host containers managed from an extension pinned host-side via `remote.extensionKind` | NUC-container-hides-host-daemon §4. CM: binds only a project that uses VS Code with its Dev Container (check: a tree with `.vscode/`)
+#   4.07 | Repository mounted at `/workspaces/<host dir name>` | NUC-container-hides-host-daemon §5
+#   4.08 | (Enforcement only) `postStartCommand` enables the hooks and merge settings | NUC-container-hides-host-daemon §6 (promoted to a clause)
+#   4.09 | (implicit) binds every project, a project without a container supersedes 0004 | CM: NUC-container-hides-host-daemon §1 — binds only with `.devcontainer/`; a project without one deletes it and supersedes nothing
+#   4.10 | OoS: base image, Features, extensions, extension pinning | NUC-container-hides-host-daemon OoS + Lat
+#   4.11 | OoS: toolchain | NUC-container-hides-host-daemon OoS → NUC-base-is-fixed §3 (role)
+#   4.12 | OoS: engine inside / container access (catalogue *Container access*) | NUC-container-hides-host-daemon OoS + Lat (catalogue link)
+#   4.13 | OoS: work outside the container | NUC-container-hides-host-daemon OoS + Lat
+#   4.14 | OoS: hardening | NUC-container-hides-host-daemon OoS
+#   4.15 | OoS: lock refresh | NUC-container-hides-host-daemon OoS + Lat
+#   4.16 | Enf: failure cases of check-devcontainer | NUC-container-hides-host-daemon Enf, one bullet per clause
+#   4.17 | Enf: not checked (variants, current digests, compose mount, the container itself) | NUC-container-hides-host-daemon NMD
+#   4.18 | Enf: the git settings are "the container's share of the local gate of 0002" | NUC-checks-are-bash §6 (local gate); NUC-container-hides-host-daemon's Out of scope now links NUC-checks-are-bash §6
+#
+# 0005-template-releases.md
+#
+#   5.01 | Annotated tags `vX.Y.Z` on `main`, SemVer 2.0.0 | NUC-releases-are-semver-tags §1
+#   5.02 | A Template section in README with a `Template release` line | NUC-releases-are-semver-tags §4
+#   5.03 | The line names the last cut / the release created from / `unreleased` | NUC-releases-are-semver-tags §4. CM (wording): "created from" → "carries"
+#   5.04 | Cutting a release is a human's act | NUC-releases-are-semver-tags §2
+#   5.05 | A PR moves the line; tagged once merged | NUC-releases-are-semver-tags §2
+#   5.06 | Annotation and GitHub release say what changed and how to take it up | NUC-releases-are-semver-tags §2
+#   5.07 | No pre-release suffix, no build metadata | NUC-releases-are-semver-tags §1
+#   5.08 | What is not ready is not tagged | implicit / dropped as reason of 5.07.
+#   5.09 | Major = a change a derived project must act on (examples: a failing check, an inherited ADR superseded, the record normalized) | NUC-releases-are-semver-tags §3. CM: example now only "a `NUC-` clause changed in meaning"; removal/re-cut → §7.
+#   5.10 | Minor = adds check, ADR, skill, catalogue entry, document | NUC-releases-are-semver-tags §3
+#   5.11 | Patch = wording, or a script fix that keeps what it decides | NUC-releases-are-semver-tags §3
+#   5.12 | Before `v1.0.0` a minor may break (SemVer item 4) | NUC-releases-are-semver-tags §3
+#   5.13 | A derived project moves the line on take-up, only then; a line never moved stays true | NUC-releases-are-semver-tags §5
+#   5.14 | The template corrects its own ADRs in place | NUC-decisions-are-proposed-then-accepted §6 (NUC-releases-are-semver-tags OoS points there)
+#   5.15 | A project takes them up by release, not by reference; corrections come with the notes | NUC-releases-are-semver-tags §6 + NUC-decisions-are-proposed-then-accepted §6 ("a release ships the correction") + NUC-base-is-fixed §1
+#   5.16 | A correction the project must act on makes a major | NUC-releases-are-semver-tags §3
+#   5.17 | Template ADR numbers permanent between normalizations | NUC-adrs-are-named-by-category §1. CM: identifiers permanent, no normalization renumbers
+#   5.18 | A normalization of the template is a major; notes carry the old-to-new map | NUC-releases-are-semver-tags §7. CM: re-cut (merge/split/remove a `NUC-` ADR), map per identifier and clause
+#   5.19 | A derived project's ADRs, accepted inherited ones included, change only by supersession or its own normalization | NUC-decisions-are-proposed-then-accepted §6, §8; NUC-adrs-are-named-by-category §4. CM: inherited ADRs are no longer the project's; `NUC-` files never edited (NUC-base-is-fixed §1)
+#   5.20 | A project takes up a release's ADRs by a normalization | dropped, CM: NUC-releases-are-semver-tags §6 ("A take-up needs no normalization")
+#   5.21 | OoS: changelog file, release automation | NUC-releases-are-semver-tags OoS 1
+#   5.22 | OoS: how a derived project merges a release | NUC-releases-are-semver-tags OoS 2 + Lat 2
+#   5.23 | OoS: which releases get fixes (`SECURITY.md`) | NUC-releases-are-semver-tags OoS 3
+#   5.24 | Follow-up: taking up a release's files is a `normalize` procedure | NUC-releases-are-semver-tags Consequences; normalize skill §7
+#   5.25 | Enf: check 14 on missing/malformed line; self-test cites | NUC-releases-are-semver-tags Enf 1 (cl. 4)
+#   5.26 | Not checked: tag exists; line moved with a release | NUC-releases-are-semver-tags NMD (cl. 2, 5)
+#   5.27 | Applies to: "its own ADRs" | NUC-base-is-fixed *Applies to*
+#
+# 0006-feature-layer.md
+#
+#   6.01 | Work larger than one session is planned as a spec cut into tracer-bullet tickets | NUC-large-work-is-planned §1
+#   6.02 | … in the tree under `docs/plan/` | NUC-large-work-is-planned §2 (unless issues, §9)
+#   6.03 | Both disposable; ticket file deleted by the landing branch | NUC-large-work-is-planned §5
+#   6.04 | Spec file deleted by the closing design revision | NUC-design-is-revised §1
+#   6.05 | What must last moves to spec, ADR, overview, glossary, conventions first | NUC-large-work-is-planned §5
+#   6.06 | History keeps deleted files | NUC-large-work-is-planned Consequences (fact, no rule)
+#   6.07 | `docs/plan/<spec>/spec.md` + `<NN>-<slug>.md`, numbered by cut order | NUC-large-work-is-planned §2
+#   6.08 | Tickets outside a spec (by a revision, or for unfinished work) in a directory without `spec.md` | NUC-large-work-is-planned §2 (examples dropped)
+#   6.09 | A directory without files is gone; `docs/plan/` = exactly the open work | NUC-large-work-is-planned §2
+#   6.10 | Shapes are templates of `plan-feature` | NUC-large-work-is-planned §3
+#   6.11 | Spec parts (problem, existing behaviour, goals by id, stories, decisions, seams, OoS, ADR?); no paths or code | NUC-large-work-is-planned §3 (no path/code) + `plan-feature` spec template
+#   6.12 | Ticket parts incl. *Mode* and stop (`AGENTS.md` §4) | NUC-large-work-is-planned §3 + `plan-feature` ticket template
+#   6.13 | Ticket sized to one fresh session, demoable or verifiable | NUC-large-work-is-planned §3
+#   6.14 | Blockers by path, as text; closed once the file is gone | NUC-large-work-is-planned §3
+#   6.15 | Frontier = open, unblocked, unclaimed; agents pick from it; a sensor lists it with *Mode* | NUC-large-work-is-planned §4 + Enf
+#   6.16 | Claim = branch `ticket/<spec>/<NN>-<slug>` before any work, via the claim script | NUC-large-work-is-planned §4 (b1–b3)
+#   6.17 | Shared repo: the local branch is the claim; no commit, nothing pushed | `work-tickets` §1.3. CM: rule → how
+#   6.18 | Across clones: create-only push with an empty commit on remote `main`, and why | `work-tickets` §1.3. CM: rule → how
+#   6.19 | That push skips the pre-push hook (tree unchanged) | NUC-main-only-via-pr §6 (b2); reason in `work-tickets` §1.3
+#   6.20 | That push is the one the harness ADR may grant without an instruction per push | NUC-main-only-via-pr §2 (b3)
+#   6.21 | A project whose sessions share a repository grants none | dropped as redundant: follows from NUC-main-only-via-pr §2 (the claim push exists only across clones)
+#   6.22 | Claimable once on `main` | NUC-large-work-is-planned §4 ("open tickets on `main`")
+#   6.23 | Release a claim by deleting its branch; local by the session, remote by a human | `work-tickets` §3.3 (how; the remote deletion is a push under NUC-main-only-via-pr §2)
+#   6.24 | Parallel sessions each in a worktree or container of their own, as the harness ADR says | harness role ADR (NUC-large-work-is-planned OoS → NUC-base-is-fixed §3). CM: no template rule any more
+#   6.25 | The harness ADR says how a claim is made among sessions sharing neither repo nor remote | NUC-large-work-is-planned Lat 3
+#   6.26 | A spec closes when its tickets merged and a fresh session revised the design | NUC-design-is-revised §1
+#   6.27 | The revision revisits modules, binding ADRs, criteria; files what it found | NUC-design-is-revised §2, §3
+#   6.28 | Finding = defect, doubt, idea no ticket covers; recorded in the backlog; ticket not widened | NUC-large-work-is-planned §6
+#   6.29 | Backlog form by project ADR from the catalogue; files by default | NUC-large-work-is-planned §7 + Lat 1
+#   6.30 | Files form: one per entry under `docs/backlog/`, beside the plan; title, observed, where; own commit | NUC-large-work-is-planned §7 (location reason → Alternatives)
+#   6.31 | Issues form for reports from outside | NUC-large-work-is-planned §7; fit in the backlog catalogue entry
+#   6.32 | Backlog sensor lists `main` and unmerged local entries | NUC-large-work-is-planned Enf (cl. 7)
+#   6.33 | The human decides which entry becomes a ticket; that commit deletes the entry | NUC-large-work-is-planned §8
+#   6.34 | The revision lists backlog entries touching its modules | NUC-design-is-revised §3
+#   6.35 | Revision due on a count: line format, change = non-docs non-merge commit, start, ordinal, 20 on the line not the sensor | NUC-design-is-revised §4
+#   6.36 | Reported, never enforced; once reached the revision runs and moves the date; does not block a merge | NUC-design-is-revised §5
+#   6.37 | The line sits in the overview because … | NUC-design-is-revised Context
+#   6.38 | OoS: smaller work, foggy effort, triage | NUC-large-work-is-planned OoS
+#   6.39 | Enf: revision sensor (NUC-design-is-revised); frontier sensor + claim self-test, backlog sensor (NUC-large-work-is-planned); NMD lists | NUC-design-is-revised Enf/NMD; NUC-large-work-is-planned Enf/NMD
+#   6.40 | The merge message names the ticket a change deletes (`AGENTS.md` §6) | NUC-main-only-via-pr §5 (message = hand-off in the PR template's sections); the template's `Ticket:` field cites NUC-large-work-is-planned §5
+#
+# The rules of AGENTS.md sections 3 and 6, which that file now links in their NUC- ADRs
+#
+#   3 | preamble: authority | NUC-decisions-are-proposed-then-accepted §7
+#   3 | preamble: rules originate in the rule file, cited by anchor | NUC-documents-are-fixed §3
+#   3 | rule 1: when an ADR is written | NUC-decisions-are-proposed-then-accepted §1
+#   3 | rule 2: calibration | NUC-decisions-are-proposed-then-accepted §2
+#   3 | rule 3: proposal | NUC-decisions-are-proposed-then-accepted §3
+#   3 | rule 4: implementation; status | NUC-decisions-are-proposed-then-accepted §4, §5
+#   3 | rule 5: binding and immutable | NUC-decisions-are-proposed-then-accepted §5, §6
+#   3 | rule 5: an inherited ADR accepted by adding a decider | dropped, CM: the base is accepted by the release line, NUC-base-is-fixed §1
+#   3 | rule 5: numbers permanent | NUC-adrs-are-named-by-category §1, CM
+#   3 | rule 5: the template corrects its ADRs in place | NUC-decisions-are-proposed-then-accepted §6
+#   3 | rule 5: the specification wins | NUC-decisions-are-proposed-then-accepted §7
+#   3 | rule 5: normalization | NUC-decisions-are-proposed-then-accepted §8, CM
+#   3 | rule 6: glossary | NUC-documents-are-fixed §5
+#   3 | rule 7: specification change | NUC-documents-are-fixed §2
+#   6 | commit on a branch, never on main | NUC-main-only-via-pr §1
+#   6 | a human decides what leaves the machine; the claim push | NUC-main-only-via-pr §2; the claim itself NUC-large-work-is-planned §4
+#   6 | gh authenticated through its web flow | NUC-main-only-via-pr §3
+#   6 | changes reach main through a pull request, as a merge commit | NUC-main-only-via-pr §4
+#   6 | branches may integrate first on a feat/ branch | NUC-main-only-via-pr §5
+#   6 | the hooks enforce what a file can; an agent never bypasses them | NUC-main-only-via-pr §6
+#   6 | a rule is enforced only by what every agent hits | NUC-main-only-via-pr §7
