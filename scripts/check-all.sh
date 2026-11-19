@@ -218,6 +218,8 @@ run "Dev Container self-test" scripts/test-check-devcontainer.sh
 run "Dev Container" scripts/check-devcontainer.sh
 run "Tests-kept sensor self-test" scripts/test-sensor-tests-kept.sh
 run "Tests-kept sensor" scripts/sensor-tests-kept.sh
+run "Timed waits sensor self-test" scripts/test-sensor-timed-waits.sh
+run "Timed waits sensor" scripts/sensor-timed-waits.sh
 run "Binding ADRs sensor self-test" scripts/test-sensor-binding-adrs.sh
 run "Binding ADRs sensor" scripts/sensor-binding-adrs.sh
 run "Plain rules sensor self-test" scripts/test-sensor-plain-rules.sh

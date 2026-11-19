@@ -169,6 +169,12 @@ jobs:
         run: bash scripts/sensor-tests-kept.sh "$BASE"
         env:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
+      - name: Self-test the timed waits sensor
+        run: bash scripts/test-sensor-timed-waits.sh
+      - name: Report the timed waits added to the Rust tests without a reason since the base
+        run: bash scripts/sensor-timed-waits.sh "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the binding ADRs sensor
         run: bash scripts/test-sensor-binding-adrs.sh
       - name: Report the ADRs in force whose Applies to names a path the change touches
