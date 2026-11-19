@@ -74,6 +74,16 @@ git -C "${d:?}" mv tests/a_test.py src/helper.py
 commit "$d" "move a test out"
 expect 0 "a test file renamed to a path that is no test" "$d" "moved out of the tests: tests/a_test.py -> src/helper.py"
 
+d="$(repo ticket-deleted)"
+mkdir -p "$d/docs/plan/f"
+printf '# Spec\n' > "$d/docs/plan/f/spec.md"
+printf '# The who-shares test reads a tree\n' > "$d/docs/plan/f/04-the-who-shares-test-reads-a-tree.md"
+commit "$d" "plan a feature"
+git -C "${d:?}" tag planned
+git -C "${d:?}" rm -q -r docs/plan/f
+commit "$d" "land the feature"
+expect 0 "a deleted ticket and spec under docs/plan/ whose names say test and spec" "$d" "nothing to report" planned
+
 d="$(repo test-moved-within)"
 git -C "${d:?}" mv tests/a_test.py tests/a_more_test.py
 commit "$d" "rename a test"
