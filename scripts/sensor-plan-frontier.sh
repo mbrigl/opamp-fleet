@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Sensor: the frontier of the plan (ADR-0006).
+# Sensor: the frontier of the plan (NUC-large-work-is-planned §3, §4).
 #
 # Reads every ticket under docs/plan/ — a file docs/plan/<spec>/<NN>-<slug>.md — and sorts it
 # into one of three lists: claimed, when the branch ticket/<spec>/<NN>-<slug> exists, locally or
@@ -14,16 +14,24 @@
 # cannot place or claim that ticket.
 #
 # Pure bash + git + coreutils/awk. Usage:
-#     scripts/sensor-plan-frontier.sh [repository root]
+#     scripts/sensor-plan-frontier.sh [--root <dir>]
 # The root defaults to this repository; scripts/test-sensor-plan-frontier.sh passes fixtures.
-# Exit code 0 when every ticket was read, 1 otherwise.
+# Exit code 0 when every ticket was read, 1 otherwise, and 2 on an argument it does not read
+# or a root that is no directory.
 
 set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR source=lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
 
 # shellcheck source-path=SCRIPTDIR source=lib/ticket.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ticket.sh"
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-plan-frontier.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 PLAN="docs/plan"
 
 # section <file> <heading> — the lines of a '## <heading>' section, HTML comments removed;
@@ -109,7 +117,7 @@ for t in "${tickets[@]}"; do
 done
 
 if ((${#errors[@]})); then
-  echo "Plan frontier sensor: $((${#errors[@]})) ticket(s) unreadable (ADR-0006):" >&2
+  echo "Plan frontier sensor: $((${#errors[@]})) ticket(s) unreadable (NUC-large-work-is-planned §3, §4):" >&2
   printf '  - %s\n' "${errors[@]}" >&2
   exit 1
 fi

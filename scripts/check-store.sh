@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Runs the tests of one of the Server's external stores against a real one: 's3' against an
-# S3-compatible object store (ADR-0039), 'postgres' against PostgreSQL over TLS (ADR-0039). A
+# S3-compatible object store (SRV-state-stores-contract-pair), 'postgres' against PostgreSQL over TLS (SRV-state-stores-contract-pair). A
 # plain `cargo test` skips them; the 's3-store' and 'postgres-store' jobs of
 # .github/workflows/checks.yml start the store and run this. Locally, the development stack of
 # observability/compose.yaml provides both; without a store named the check says so and skips,
@@ -16,17 +16,23 @@
 # is not passed: once a store is named, a test that reports it skipped fails the run.
 #
 # Usage:
-#     scripts/check-store.sh s3|postgres
-# Exit code 0 when every test of the store passed against it, 1 otherwise, 2 on a wrong argument.
+#     scripts/check-store.sh [--root <dir>] s3|postgres
+# Exit code 0 when every test of the store passed against it, 1 otherwise, 2 on a wrong argument
+# or a root that is no directory.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-store.sh [--root <dir>] s3|postgres"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
+rest_args "${BASH_SOURCE[0]}" "$usage" 1 "$@"
 
 case "${1:-}" in
   s3) filter="s3::" skipped="skipped: no S3 store" named="${FLEET_TEST_S3_ENDPOINT:-}" ;;
   postgres) filter="" skipped="skipped: no PostgreSQL" named="${FLEET_TEST_POSTGRES_HOST:-}" ;;
-  *) echo "usage: scripts/check-store.sh s3|postgres" >&2; exit 2 ;;
+  *) echo "check-store.sh: name s3 or postgres — usage: $usage" >&2; exit 2 ;;
 esac
 if [[ -z "$named" ]]; then
   if [[ "${CI:-}" == "true" ]]; then

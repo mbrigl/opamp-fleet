@@ -1,7 +1,7 @@
 //! The two tests that decide G-20: a fleet is served on when one of three Server instances is lost,
 //! and the database carries the presence and the notifications of 100 000 Agents
-//! (ADR-0025
-//! clause 20 and the Enforcement).
+//! (SRV-instances-share-one-postgresql §20
+//! and the Enforcement).
 //!
 //! Each runs three `server` processes at the defaults, `max_connections` and `max_agents` raised
 //! for the fleet, on the database the `FLEET_TEST_POSTGRES_*` variables name, in a role and schema
@@ -1434,7 +1434,7 @@ fn in_list(uids: impl IntoIterator<Item = InstanceUid>) -> String {
 /// drew; a revocation committed meanwhile ends its session on either instance within
 /// `lease_renew_secs`; no notification is left unread; and a Gateway's ten pool connections from
 /// one address are refused by neither the admission throttle nor the bound on new connections.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 /// Verifies: G-20
 #[test]
 fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() {
@@ -1444,8 +1444,8 @@ fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() 
 /// G-20's failover with the instance frozen (`SIGSTOP`) rather than killed: it closes nothing, its
 /// kernel keeps the connections, and its Agents notice it only by the silence of one heartbeat
 /// interval. The same bounds hold as for a killed instance.
-/// Verifies: ADR-0014
-/// Verifies: ADR-0025
+/// Verifies: API-silent-websocket-is-ended
+/// Verifies: SRV-instances-share-one-postgresql
 /// Verifies: G-20
 #[test]
 fn g20_a_frozen_instance_s_agents_are_carried_by_the_others_within_the_bounds() {
@@ -1834,7 +1834,7 @@ fn failover(loss: Loss) {
 /// minute, and a page of the Agents is read every ten seconds: no presence batch is written later
 /// than its interval after it was due, and no notification is left unread. No Agent is re-keyed
 /// as a duplicate, while the fleet connects or after.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 /// Verifies: G-20
 #[test]
 fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() {

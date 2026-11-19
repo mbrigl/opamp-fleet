@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Manual check for this repository: no file under docs/manual/ cites an ADR, by an 'ADR-NNNN' or
-# by a link or path into docs/adr/. The manual is for the people who run the software and says
+# Manual check for this repository: no file under docs/manual/ cites an ADR, by its identifier,
+# '<CAT>-<slug>' of a fixed category or one the index of docs/adr/ lists, or by a link or path into
+# docs/adr/. The manual is for the people who run the software and says
 # what to do; a decision record is for those who change it, and a citation sends an operator to a
 # page that does not answer their question. The rule is this check; no ADR holds it.
 #
@@ -11,16 +12,24 @@
 # nothing to check.
 #
 # Pure bash + coreutils/grep/find. Usage:
-#     scripts/check-manual.sh [repository root]
+#     scripts/check-manual.sh [--root <dir>]
 # The root defaults to this repository; scripts/test-check-manual.sh passes fixtures.
-# Exit code 0 when the check passes, 1 otherwise.
+# Exit code 0 when the check passes, 1 otherwise, and 2 on an argument it does not read or a
+# root that is no directory.
 
 set -uo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=lib/check.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/check.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/adr.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/adr.sh"
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-manual.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
+adr_categories "$ROOT/docs/adr/README.md"
 dir="$ROOT/docs/manual"
 
 if [[ ! -d "$dir" ]]; then
@@ -33,7 +42,7 @@ while IFS= read -r file; do
   files=$((files + 1))
   while IFS= read -r hit; do
     add_error "${file#"$ROOT"/}:${hit%%:*}: cites an ADR — the manual says what to do and why it matters to an operator; the decision record stays in docs/adr/"
-  done < <(grep -nE 'ADR-[0-9]{4}|\.\./adr/|docs/adr/' "$file")
+  done < <(grep -nE "$ADR_REF_WORD_RE|\.\./adr/|docs/adr/" "$file")
 done < <(find "$dir" -type f -name '*.md' | LC_ALL=C sort)
 
 if ((${#errors[@]})); then

@@ -1,8 +1,7 @@
-//! Deployments in PostgreSQL (ADR-0039 clause 6): the PostgreSQL adapter behind
+//! Deployments in PostgreSQL (SRV-state-stores-contract-pair §6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
-//! (ADR-0025
-//! clause 19).
+//! (SRV-instances-share-one-postgresql §19).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -54,8 +53,7 @@ impl DeploymentBackend for PgDeploymentBackend {
             let transaction = client.transaction().await.map_err(sql)?;
             // `packages` and `configurations` mirrored the member rows; no release reads them,
             // so a new row takes their defaults and nothing names them after
-            // (ADR-0039
-            // clause 22).
+            // (SRV-state-stores-contract-pair §22).
             transaction
                 .execute(
                     "INSERT INTO deployments (name, selector) VALUES ($1, $2) \
@@ -195,8 +193,8 @@ impl DeploymentBackend for PgDeploymentBackend {
 /// Takes `member` out of every Deployment that holds it inside the transaction that deletes it,
 /// which holds the member's row `FOR UPDATE`: an add that holds that row `FOR KEY SHARE` has
 /// committed before this reads the member rows, and every later one finds the member gone
-/// (ADR-0025
-/// clause 19). The Deployments' rows are not held, so this takes no lock in the order of an add,
+/// (SRV-instances-share-one-postgresql §19).
+/// The Deployments' rows are not held, so this takes no lock in the order of an add,
 /// which holds the Deployment's row before the member's.
 pub(super) async fn drop_member_rows(
     client: &impl GenericClient,
@@ -632,14 +630,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn the_deployment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0039, ADR-0025
+    /// Verifies: SRV-state-stores-contract-pair, SRV-instances-share-one-postgresql
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -650,11 +648,11 @@ mod tests {
         contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
     }
 
-    /// A stored Deployment is loaded by the rules it was written by (ADR-0039 clause 6). A
+    /// A stored Deployment is loaded by the rules it was written by (SRV-state-stores-contract-pair §6). A
     /// Package reference with a field no write puts there is refused. A second Package of one
     /// Agent type is refused in the words the write refuses it with, rather than loaded with the
     /// last one kept. Each refusal names the file.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_stored_deployment_is_held_to_the_write_rules_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -697,7 +695,7 @@ mod tests {
     /// The database cannot hold what the filesystem test plants: a Package of a Deployment is a
     /// row of two columns keyed by its Agent type, so a second of one type is refused by the
     /// database itself, and no field beside the two has a place.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_second_package_of_one_agent_type_cannot_be_stored_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -727,7 +725,7 @@ mod tests {
     /// A Deployment created with its member through another instance between the statements of
     /// `load` is read whole or not at all: the members are read in the snapshot the Deployments
     /// were, so none names a Deployment the read did not see, and the load does not fail.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[test]
     fn a_deployment_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
         let Some(test) = TestDatabase::named() else {
@@ -790,7 +788,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), [before]);
     }
 
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -804,7 +802,7 @@ mod tests {
 
     /// Each write of `canary`'s row and of its member rows is refused: a replacing Package
     /// removes the old row before its insert is refused, and the whole change is refused with it.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -837,9 +835,8 @@ mod tests {
     /// their defaults, what a release before wrote into them stays as it was through every change
     /// of the members, and with the columns dropped, as the release after this one drops them,
     /// every change and the load still succeed
-    /// (ADR-0039
-    /// clause 22).
-    /// Verifies: ADR-0039
+    /// (SRV-state-stores-contract-pair §22).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn the_mirror_columns_are_written_no_more() {
         let Some(test) = TestDatabase::named() else {
@@ -896,7 +893,7 @@ mod tests {
 
     /// Migration 5 moves the members out of the Deployments' columns into rows of their own, and
     /// the Deployments load as the release before left them.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[test]
     fn the_members_move_out_of_the_deployments_columns() {
         use crate::postgres::schema::{MIGRATIONS, SCHEMA_TABLE};
@@ -934,7 +931,7 @@ mod tests {
     /// write, so the second runs exactly then; the gate opens once the second waits for the
     /// Deployment's row, or has reached the gate itself, which only an amendment that took no hold
     /// does.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: SRV-instances-share-one-postgresql, PKG-signed-packages-and-delivery
     #[test]
     fn two_packages_of_one_type_added_at_once_add_one() {
         let Some(test) = TestDatabase::named() else {
@@ -1008,7 +1005,7 @@ mod tests {
     /// The deletion of a Configuration or a Package takes it out of every Deployment that holds it
     /// in the transaction that deletes it: nothing the fleet does after, which a crash would cut
     /// off, is needed for no Deployment to name it.
-    /// Verifies: ADR-0025, ADR-0032
+    /// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_deleted_member_leaves_every_deployment_in_the_transaction_that_deletes_it() {
         use crate::configs::{ConfigBackend as _, Removal};
@@ -1041,8 +1038,8 @@ mod tests {
         );
     }
 
-    /// A row that does not decode fails the load naming it (ADR-0039 clause 6).
-    /// Verifies: ADR-0039
+    /// A row that does not decode fails the load naming it (SRV-state-stores-contract-pair §6).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_deployment_row_that_does_not_decode_fails_the_load_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -1064,7 +1061,7 @@ mod tests {
     /// A deletion of a Deployment through B while a rollout through A that releases through it
     /// has not yet committed waits for the rollout, and then refuses it from the assignment the
     /// rollout stored: the rollout holds the Deployment's row until it commits.
-    /// Verifies: ADR-0025, ADR-0032
+    /// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_deletion_waits_for_a_rollout_through_the_deployment_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};

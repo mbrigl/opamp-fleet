@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
 # Creates the certificates a development Server and Client need, since both refuse to run without
-# them (ADR-0012, ADR-0026), with the operator tool's `opamp-fleetctl pki init`
-# (ADR-0036) — no openssl. Every certificate of the set says it is a development one:
-# `OpAMP Fleet Dev … CA`, `O=Development` (ADR-0036 clause 20).
+# them (SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate), with the operator tool's `opamp-fleetctl pki init`
+# (OPS-operator-program-fleetctl) — no openssl. Every certificate of the set says it is a development one:
+# `OpAMP Fleet Dev … CA`, `O=Development` (OPS-operator-program-fleetctl §20).
 # Everything lands in one directory, gitignored, and is for a development machine only: the keys
 # are unencrypted and the CAs are throwaway.
 #
@@ -21,19 +21,27 @@
 #                  telemetry to the observability stack in observability/ commented out
 #
 # The development Client enrols like any other host, with a bootstrap certificate the Server issues
-# (ADR-0027): start the Server, run `scripts/seed_test_configs.sh --enrol`, which issues it,
+# (SEC-bootstrap-certificates-and-enrolment): start the Server, run `scripts/seed_test_configs.sh --enrol`, which issues it,
 # extracts its pair from the bootstrap.p12 into offline/ and approves the request, and start the
 # Client while it waits.
 # Trust the server CA, offline/server-ca.pem, in curl and in the browser.
 #
 # Usage:
-#     scripts/dev-pki.sh [directory]      (default: .dev-pki in the repository root)
-# Refuses to overwrite a directory that already holds a set.
+#     scripts/dev-pki.sh [--root <dir>] [directory]      (default: .dev-pki in the repository root)
+# Refuses to overwrite a directory that already holds a set. Exit code 2 on an argument it does
+# not read or a root that is no directory.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${1:-$ROOT/.dev-pki}"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/dev-pki.sh [--root <dir>] [directory]"
+# A directory it is given is read from where it was started, so it returns there after enter_root.
+started="$PWD"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 1 "${ARGS[@]}"
+cd "$started"
+OUT="${ARGS[0]:-$ROOT/.dev-pki}"
 
 if [[ -e "$OUT/server" || -e "$OUT/offline" ]]; then
   echo "$OUT already holds a set; remove the directory to start over" >&2

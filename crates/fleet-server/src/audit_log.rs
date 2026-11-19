@@ -1,4 +1,4 @@
-//! The audit record on disk (ADR-0028), the adapter behind [`crate::audit::Audit`]: one JSON line
+//! The audit record on disk (SEC-append-only-audit-record), the adapter behind [`crate::audit::Audit`]: one JSON line
 //! per security decision, each carrying the SHA-256 of the line before it, written by one task in
 //! the order the decisions were taken. What is queued together is written and synced together, up
 //! to [`WRITE_BATCH`] lines, so how fast the channel empties is not bound by how often the disk
@@ -7,15 +7,15 @@
 //! A decision is recorded through [`AuditLog::record`], which never waits on the disk: the entry goes
 //! through a bounded channel to the writer task. When the channel is full, or the last write failed,
 //! the call answers [`Unavailable`], and the caller refuses what it was about to allow — a security
-//! decision is never taken without its record (ADR-0028 clause 5). Refusals are aggregated per
-//! event and peer past ten a second, never dropped (ADR-0028 clause 4), and counted before they
+//! decision is never taken without its record (SEC-append-only-audit-record §5). Refusals are aggregated per
+//! event and peer past ten a second, never dropped (SEC-append-only-audit-record §4), and counted before they
 //! reach the channel, where they may take no more than [`REFUSAL_SHARE`] of it: a flood of refusals
 //! from however many peers cannot leave an admission or an operator act without room for its
 //! record. The store behind the writer is a port; the filesystem adapter is
 //! [`crate::fs::FsAuditStore`], one chain in files that rotate by size.
 //!
 //! On PostgreSQL the record is one chain per lease
-//! (ADR-0028), the adapter
+//! (SEC-append-only-audit-record), the adapter
 //! [`crate::postgres::audit::PgAuditStore`]. Each entry is marked with the lease it was decided
 //! under. The writer writes into the chain of the lease held now: entries decided under a lease
 //! that lapsed before they were written go into the next chain, marked `taken_under` the old one,
@@ -36,7 +36,7 @@ use crate::audit::{Audit, Entry, Field, Permit, Unavailable};
 use crate::fleet::Clock;
 
 /// The entries waiting for the writer at most, the places held for entries counted among them
-/// (ADR-0028 clause 5).
+/// (SEC-append-only-audit-record §5).
 pub const CHANNEL_CAPACITY: usize = 10_000;
 
 /// The room the channel keeps beyond [`CHANNEL_CAPACITY`] for the writer's requests, a drain or
@@ -86,7 +86,7 @@ pub enum Chain {
     Unleased,
 }
 
-/// The record's port (ADR-0009): where the lines go.
+/// The record's port (DEV-ports-and-adapters): where the lines go.
 pub trait AuditStore: Send {
     /// The chain the next lines go into, as of now; [`tail`](Self::tail), [`append`](Self::append)
     /// and [`close`](Self::close) act on it until this is asked again. A store of one chain
@@ -144,7 +144,7 @@ pub trait AuditStore: Send {
 
     /// The `checkpoint_seq` and hash of the last checkpoint the file `file`, which the last
     /// [`rotate`](Self::rotate) deleted, held or named as removed, if any
-    /// (ADR-0028 clause 10).
+    /// (SEC-append-only-audit-record §10).
     fn removed_checkpoint(&mut self, file: &str) -> Option<(u64, String)> {
         let _ = file;
         None
@@ -154,7 +154,7 @@ pub trait AuditStore: Send {
     /// is `checkpoint_prev`, alone, as [`append`](Self::append) does. A store several processes
     /// write holds at most one checkpoint per `checkpoint_seq` and takes one only while
     /// `checkpoint_prev` names its newest
-    /// (ADR-0028 clause 11).
+    /// (SEC-append-only-audit-record §11).
     ///
     /// # Errors
     /// Returns an error when the line cannot be written, or another checkpoint came first; then
@@ -201,8 +201,7 @@ enum Message {
 
 /// The lease a decision was taken under, as its entry names it where the store keeps one chain
 /// per lease
-/// (ADR-0028
-/// clause 7).
+/// (SEC-append-only-audit-record §7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Under {
     /// No lease to name: the store keeps one chain, or the writer adds the entry of its own.
@@ -370,8 +369,7 @@ impl AuditLog {
 
     /// [`start`](Self::start), or with `held` [`start_under`](Self::start_under), and every line
     /// the store accepts handed to `export` as well
-    /// (ADR-0028
-    /// clause 15).
+    /// (SEC-append-only-audit-record §15).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read.
@@ -387,7 +385,7 @@ impl AuditLog {
 
     /// [`start_exporting`](Self::start_exporting), and, with `signing`, a checkpoint of the heads
     /// of every chain signed at every interval and at the shutdown's close
-    /// (ADR-0028 clause 11).
+    /// (SEC-append-only-audit-record §11).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read.
@@ -483,7 +481,7 @@ impl AuditLog {
 
     /// Waits until every entry queued so far is written, for at most `timeout`; `false` when it
     /// was not, in time or at all because the record is failing. The process exits after this at shutdown, and the writer thread with it, so what
-    /// is still queued would otherwise be lost without a trace (ADR-0028).
+    /// is still queued would otherwise be lost without a trace (SEC-append-only-audit-record).
     #[must_use]
     pub fn drain(&self, timeout: Duration) -> bool {
         self.ask(timeout, Message::Drain)
@@ -491,8 +489,8 @@ impl AuditLog {
 
     /// [`drain`](Self::drain) at an orderly shutdown, and then, where the store keeps one chain
     /// per lease, the chain closed with `audit.chain_closed` and `reason` `shutdown`
-    /// (ADR-0028
-    /// clause 7). A closing write whose answer was lost counts as written when the chain holds its
+    /// (SEC-append-only-audit-record §7).
+    /// A closing write whose answer was lost counts as written when the chain holds its
     /// closing entry. Once the chain is closed every decision is refused and counted
     /// ([`unrecorded_count`](Self::unrecorded_count)).
     /// From its start no place is given ([`Audit::reserve`]), and it waits within `timeout` for
@@ -758,8 +756,7 @@ pub fn render(seq: u64, time_ms: u64, entry: &Entry, prev: &str) -> String {
     Value::Object(line).to_string()
 }
 
-/// Emits a line written to the record as the `tracing` event every entry is also (ADR-0028
-/// clause 6).
+/// Emits a line written to the record as the `tracing` event every entry is also (SEC-append-only-audit-record §6).
 pub(crate) fn emit(seq: u64, event: &str, outcome: &str, text: &str) {
     info!(target: "audit", seq, event = %event, outcome = %outcome, "{}", text);
 }
@@ -1029,8 +1026,7 @@ impl Writer {
                         let mut entry = Entry::new("audit.rotated", "recorded")
                             .with("deleted_last_hash", line_hash(&last));
                         // The last checkpoint the file held, which a verifier goes on from
-                        // (ADR-0028
-                        // clause 10).
+                        // (SEC-append-only-audit-record §10).
                         if let Some((seq, hash)) = self.store.removed_checkpoint(&file) {
                             entry = entry
                                 .with("checkpoint_seq", seq)
@@ -1210,7 +1206,7 @@ impl Writer {
 }
 
 /// The checkpoints' signing
-/// (ADR-0028 clause 11): the
+/// (SEC-append-only-audit-record §11): the
 /// audit key, where the heads come from, and how often.
 pub struct Signing {
     pub signer: Arc<dyn crate::checkpoint::CheckpointSigner>,
@@ -1574,7 +1570,7 @@ impl Held {
 }
 
 /// Walks lines in order and names the first whose `prev` does not match the line before it
-/// (ADR-0028 clause 3); [`Held`] when the whole chain holds. Lines that are not entries hold when
+/// (SEC-append-only-audit-record §3); [`Held`] when the whole chain holds. Lines that are not entries hold when
 /// the file store repaired them: the torn pieces crashes left, the repair's own among them,
 /// followed by one `audit.chain_broken` chained on the last of them and naming as `last_whole` the
 /// hash of the entry before the first. Torn lines nothing follows do not hold. A repair of one
@@ -1686,12 +1682,12 @@ pub struct Walked {
     pub closed: bool,
     /// The `seq` and the hash of the archive's last entry, where its `audit.chain_opened` names
     /// them as its predecessor
-    /// (ADR-0028 clause 9).
+    /// (SEC-append-only-audit-record §9).
     pub predecessor: Option<(u64, String)>,
 }
 
 /// Walks one chain of a lease in `seq` order
-/// (ADR-0028 clauses 7 and 8):
+/// (SEC-append-only-audit-record §7 and §8):
 /// it starts with `audit.chain_opened` and 64 zeros as `prev`, or, once pruned, after an entry an
 /// `audit.pruned` names as the last it removed; every entry names the chain, carries the `seq`
 /// after the one before and the hash of the one before as its `prev`, and nothing follows an
@@ -1999,7 +1995,7 @@ mod tests {
 
     /// Draining returns only once every entry queued before it is written, so the shutdown that
     /// follows it loses none of them.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_drain_returns_once_everything_queued_is_written() {
         let slow = Slow::default();
@@ -2017,7 +2013,7 @@ mod tests {
 
     /// A drain over a failing record says so, so the shutdown that follows does not pass the lost
     /// entries over in silence.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_drain_over_a_failing_record_answers_false() {
         let memory = Memory::default();
@@ -2052,7 +2048,7 @@ mod tests {
 
     /// Entries that queue while the store is busy are synced together, in the order they were
     /// queued, so a flood empties the channel at more than the disk's sync rate.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn entries_queued_together_are_synced_together_in_order() {
         let counting = Counting::default();
@@ -2090,7 +2086,7 @@ mod tests {
 
     /// A batch is counted against the file it goes into: a file full before the batch ends is
     /// closed there, never filled past its limit by more than the line that reached it.
-    /// Verifies: ADR-0028, ADR-0039
+    /// Verifies: SEC-append-only-audit-record, SRV-state-stores-contract-pair
     #[test]
     fn a_batch_rotates_where_a_single_line_would() {
         const MAX: u64 = 1_000;
@@ -2124,7 +2120,7 @@ mod tests {
 
     /// An append that fails loses every line of its batch, as it loses a single one: none of them
     /// is kept, each is counted unrecorded, and the chain goes on from the line before them.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_failed_append_loses_every_line_of_its_batch() {
         let memory = Memory::default();
@@ -2160,7 +2156,7 @@ mod tests {
     /// The export is handed every line once the store has accepted it, as the store holds it, in
     /// the order of the chain; the lines of a batch the store refused are lost, and none of them is
     /// exported.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn the_export_is_handed_each_line_the_store_accepted_as_it_holds_it() {
         let memory = Memory::default();
@@ -2199,7 +2195,7 @@ mod tests {
         assert_eq!(taken.lines(), memory.lines()[1..].to_vec());
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn each_entry_carries_the_hash_of_the_one_before() {
         let memory = Memory::default();
@@ -2230,7 +2226,7 @@ mod tests {
         .is_err());
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn the_chain_survives_a_restart_and_a_rotation() {
         let memory = Memory::default();
@@ -2272,7 +2268,7 @@ mod tests {
         assert!(chain_of(&memory).is_ok(), "{lines:#?}");
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_truncated_file_is_recorded_as_a_broken_chain() {
         let memory = Memory::default();
@@ -2311,7 +2307,7 @@ mod tests {
     /// on its hash and naming the entry before it as `last_whole`), and refuses a torn line nothing
     /// records as broken, in the middle or at the end, and a repair whose `last_whole` is not the
     /// entry before the torn line.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_torn_line_holds_only_when_the_next_entry_records_it_as_broken() {
         let first = format!("{{\"seq\":1,\"prev\":\"{GENESIS}\",\"event\":\"a\"}}");
@@ -2406,7 +2402,7 @@ mod tests {
 
     /// A repair that names no `last_whole` holds and is named by its place, as a repair without a
     /// link.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_repair_without_a_link_holds_and_is_named() {
         let first = format!("{{\"seq\":1,\"prev\":\"{GENESIS}\",\"event\":\"a\"}}");
@@ -2434,7 +2430,7 @@ mod tests {
         )
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn refusals_beyond_ten_a_second_are_aggregated_with_their_count() {
         let memory = Memory::default();
@@ -2480,7 +2476,7 @@ mod tests {
 
     /// A refusal of the rate limit never waits for its entry: one that finds the channel full is
     /// counted, and the next entry written says so in `unrecorded_before`.
-    /// Verifies: ADR-0012, ADR-0028
+    /// Verifies: SEC-tls13-two-planes-bounded-input, SEC-append-only-audit-record
     #[test]
     fn a_throttle_refusal_that_finds_the_channel_full_is_counted_unrecorded() {
         let memory = Memory::default();
@@ -2526,7 +2522,7 @@ mod tests {
     /// written is queued though the channel is full by then, a place asked for while the channel
     /// is full is refused and counted, a drain waiting in the channel leaves the place held its
     /// room, and once the writer has taken everything no place is left counted.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_held_place_counts_against_the_channel_until_it_is_written_or_given_back() {
         let memory = Memory::default();
@@ -2599,7 +2595,7 @@ mod tests {
 
     /// The shutdown's close gives no place once it began, fails while a place is still held when
     /// its bound runs out, and otherwise waits for the place to be written before it closes.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn the_close_waits_for_the_places_held_and_gives_none_once_it_began() {
         let memory = Memory::default();
@@ -2627,7 +2623,7 @@ mod tests {
 
     /// A flood of refusals — from one peer, and from as many peers as the channel holds entries —
     /// never leaves an admission without room for its record, even while the writer is stalled.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_flood_of_refusals_leaves_room_for_every_other_record() {
         let memory = Memory::default();
@@ -2683,7 +2679,7 @@ mod tests {
     /// While the writer is stalled, the refusals it has yet to account for are counted for a
     /// bounded number of events and peers; a refusal of one more is unrecorded, not remembered.
     /// The bound is on memory, which no interface shows, so the table is looked at directly.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_stalled_writer_counts_refusals_for_a_bounded_number_of_peers() {
         let memory = Memory::default();
@@ -2703,7 +2699,7 @@ mod tests {
         drop(held);
     }
 
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_write_that_fails_refuses_until_one_succeeds() {
         let memory = Memory::default();
@@ -2781,7 +2777,7 @@ mod tests {
     /// as the last it removed, and a closed chain pruned whole when one names its closing hash;
     /// a first retained entry no `audit.pruned` links, and a closed empty chain whose closing hash
     /// none names, fail naming the chain.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_pruned_chain_holds_only_where_an_audit_pruned_links_it() {
         let chain = lease_chain(4, true);
@@ -2826,7 +2822,7 @@ mod tests {
     /// follows the one before; an altered entry, one removed from the end of a closed chain, an
     /// entry after its `audit.chain_closed`, and a closing the record does not hold each fail,
     /// naming the chain and the entry; an open chain is reported open with its last entry.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_chain_of_a_lease_fails_where_it_was_cut_or_changed() {
         let open = lease_chain(3, false);
@@ -2926,7 +2922,7 @@ mod tests {
     /// A checkpoint is written once an interval has passed, naming the head of the chain, the
     /// entry before it, and following the one before; none is written while nothing grew; and the
     /// shutdown's close writes a last one.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_checkpoint_names_the_head_each_interval_and_at_the_close() {
         let memory = Memory::default();
@@ -3002,7 +2998,7 @@ mod tests {
 
     /// A token that refuses to sign, or does not sign in time, leaves `audit.checkpoint_failed`
     /// naming why, and decisions are recorded meanwhile.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_token_that_does_not_sign_leaves_checkpoint_failed_and_decisions_go_on() {
         for (refuse, delay, why) in [
@@ -3045,7 +3041,7 @@ mod tests {
 
     /// A rotation that deletes a file holding checkpoints names the last of them, and the writer
     /// started on what is left goes on from it.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_rotation_names_the_last_checkpoint_it_deleted() {
         let dir = tempfile::tempdir().expect("dir");

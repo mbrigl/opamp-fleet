@@ -1,4 +1,4 @@
-//! The package channel (ADR-0033, ADR-0020): an offer checked and taken or refused, the
+//! The package channel (PKG-signed-packages-and-delivery, CLT-self-update-signed-package): an offer checked and taken or refused, the
 //! download and install in flight, and the `PackageStatuses` this Agent reports about them.
 
 use opamp::proto::{
@@ -11,7 +11,7 @@ use super::{AgentState, Handled, Local};
 use crate::supervisor::ports::{HighWaterMarks, InstalledPackage, PackageFloors};
 
 impl AgentState {
-    /// Opts this Agent into package delivery (ADR-0033): declares `AcceptsPackages` and
+    /// Opts this Agent into package delivery (PKG-signed-packages-and-delivery): declares `AcceptsPackages` and
     /// `ReportsPackageStatuses`, and restores what it last installed so a restarted Client reports
     /// the version it runs and is not re-offered it.
     ///
@@ -19,8 +19,8 @@ impl AgentState {
     /// rollout is aimed centrally rather than from this host's file.
     ///
     /// For a Supervisor the restored record also seeds the high-water mark of its Agent type
-    /// (ADR-0034 clause 9), and a record whose version is not SemVer is dropped with a warning
-    /// (ADR-0034 clause 10): nothing enters the mark from it, and the Agent reports no version for
+    /// (PKG-versions-high-water-mark-floor §9), and a record whose version is not SemVer is dropped with a warning
+    /// (PKG-versions-high-water-mark-floor §10): nothing enters the mark from it, and the Agent reports no version for
     /// it.
     pub fn accept_packages(&mut self) {
         self.local.accepts_packages = true;
@@ -33,7 +33,7 @@ impl AgentState {
     }
 
     /// Hands this Supervisor the high-water marks it shares with every other Supervisor of the
-    /// Client (ADR-0034 clause 8). Set before [`accept_packages`](Self::accept_packages), which
+    /// Client (PKG-versions-high-water-mark-floor §8). Set before [`accept_packages`](Self::accept_packages), which
     /// seeds the mark from the installed record.
     #[must_use]
     pub fn with_high_water(mut self, marks: std::sync::Arc<dyn HighWaterMarks>) -> Self {
@@ -41,14 +41,14 @@ impl AgentState {
         self
     }
 
-    /// Hands this Agent the floors every Agent of the Client shares (ADR-0034 clause 17).
+    /// Hands this Agent the floors every Agent of the Client shares (PKG-versions-high-water-mark-floor §17).
     pub fn set_floors(&mut self, floors: std::sync::Arc<dyn PackageFloors>) {
         self.local.floors = Some(floors);
     }
 
-    /// Why an offer of `version` is refused by this Supervisor's floor (ADR-0034 clause 18): it
+    /// Why an offer of `version` is refused by this Supervisor's floor (PKG-versions-high-water-mark-floor §18): it
     /// orders below the floor kept for its Agent type, or the floors cannot be read. `None` for
-    /// the Client's own Agent, whose self-update holds it to its floor (ADR-0034 clause 21).
+    /// the Client's own Agent, whose self-update holds it to its floor (PKG-versions-high-water-mark-floor §21).
     pub fn floor_refusal(&self, version: &str) -> Option<String> {
         self.local.floor_refusal(version)
     }
@@ -76,7 +76,7 @@ impl AgentState {
         }
     }
 
-    /// Opts this Agent into package delivery for **one named package only** (ADR-0020) — what the
+    /// Opts this Agent into package delivery for **one named package only** (CLT-self-update-signed-package) — what the
     /// Client's own Agent does. A Supervisor takes whichever top-level package the Server offers
     /// it, because the worst case there is a Managed Process that will not start and is rolled
     /// back. The Client has no such safety net: a package written over this binary takes the host
@@ -84,7 +84,7 @@ impl AgentState {
     ///
     /// The restored record is held against the version this binary *is*, and dropped when the two
     /// are not the same release. `service uninstall` deliberately keeps the install layout and the
-    /// state (ADR-0021), so an operator who reinstalls an older Client comes up on top of the
+    /// state (CLT-installed-service-and-state), so an operator who reinstalls an older Client comes up on top of the
     /// record its successor wrote — and reporting that record would tell the Server this host runs
     /// a version it does not have. Worse than the wrong line in the fleet view: the offer is gated
     /// on the hash inside it, so the Server would never offer this host the package again. A
@@ -95,7 +95,7 @@ impl AgentState {
         if let Some(installed) = &self.local.installed_package {
             // Not string equality: the record holds the version the operator uploaded (`1.2.3`)
             // and this binary calls itself `1.2.3+a1b2c3d`. The same comparison the self-update
-            // probe makes before a version is ever pointed at (ADR-0037).
+            // probe makes before a version is ever pointed at (OPS-cargo-decides-product-version).
             if !fleet_core::version::same_release(&installed.version, running) {
                 warn!(
                     recorded = %installed.version, running = %running,
@@ -111,15 +111,15 @@ impl AgentState {
         self.local.expected_package = Some(name);
     }
 
-    /// Whether this Agent takes Server-offered packages (ADR-0033) — the self-Agent unless
-    /// `[packages] self_update = false` withdraws the consent (ADR-0020), and every Supervisor, since every Managed
-    /// Process is one this Client installs (ADR-0019). Read without side effects, so a startup
+    /// Whether this Agent takes Server-offered packages (PKG-signed-packages-and-delivery) — the self-Agent unless
+    /// `[packages] self_update = false` withdraws the consent (CLT-self-update-signed-package), and every Supervisor, since every Managed
+    /// Process is one this Client installs (CLT-supervisor-mode-and-kinds). Read without side effects, so a startup
     /// check can ask it before anything is polled.
     pub fn accepts_packages(&self) -> bool {
         self.protocol.declares(AgentCapabilities::AcceptsPackages)
     }
 
-    /// Records how far the artifact download has got (ADR-0033), so the next report carries
+    /// Records how far the artifact download has got (PKG-signed-packages-and-delivery), so the next report carries
     /// `Downloading` with the details. The Baseline only *permits* these interim reports; without
     /// them a multi-hundred-megabyte download is indistinguishable from a stuck install.
     pub fn package_downloading(&mut self, details: PackageDownloadDetails) {
@@ -136,7 +136,7 @@ impl AgentState {
     }
 
     /// A package `Installing` names `reason` as what it waits for, the second service, or nothing
-    /// once `reason` is empty (ADR-0022 clause 17); the outcome replaces it. A package still
+    /// once `reason` is empty (CLT-accounts-service-runs-under §17); the outcome replaces it. A package still
     /// downloading, and a status other than `Installing`, stay as they are.
     pub(super) fn package_waits(&mut self, reason: &str) {
         let local = &mut self.local;
@@ -148,7 +148,7 @@ impl AgentState {
         self.protocol.package_status_changed();
     }
 
-    /// Closes a package's lifecycle the Supervisor applied (ADR-0033): `Ok(version)` records it
+    /// Closes a package's lifecycle the Supervisor applied (PKG-signed-packages-and-delivery): `Ok(version)` records it
     /// Installed and persists it; `Err` reports InstallFailed (the binary was rolled back). Either
     /// way the offered aggregate is echoed, so the Server stops re-offering the same bytes — a
     /// refusal is a report, not a loop.
@@ -172,7 +172,7 @@ impl AgentState {
                     warn!(error = %e, "cannot persist the installed package record");
                 }
                 // The program survived the apply grace: its Agent type's mark rises to it
-                // (ADR-0034 clause 8). A rollback is an `Err` and moves nothing.
+                // (PKG-versions-high-water-mark-floor §8). A rollback is an `Err` and moves nothing.
                 if local.expected_package.is_none() {
                     if let Some(marks) = &local.high_water {
                         marks.raise(&local.service_name, &version);
@@ -182,7 +182,7 @@ impl AgentState {
                 local.installed_package = Some(installed);
                 local.package_error.clear();
                 // The description states the installed Package's version
-                // (ADR-0032 clause 25), and only a full report carries
+                // (SRV-deployments-and-pinned-rollouts §25), and only a full report carries
                 // the description.
                 self.protocol.force_full();
             }
@@ -199,7 +199,7 @@ impl AgentState {
 impl Local {
     /// The package this Agent is processing or has: the one being installed, else the installed
     /// one, else the one last offered — and for the Client's own Agent, else the one it consents
-    /// to, which it knows from its own configuration before any offer arrives (ADR-0020).
+    /// to, which it knows from its own configuration before any offer arrives (CLT-self-update-signed-package).
     ///
     /// That last fallback is what lets this Client state a version for its own package from the
     /// first report on. A Supervisor has no such name: which package it gets is the Server's
@@ -232,7 +232,7 @@ impl Local {
         // For the Client's own Agent there is one without an install record too: *this process*. A
         // Client that arrived by `.deb`, `.rpm`, MSI or by hand has installed no package, and
         // reporting nothing there says "nothing installed under this name" — which is precisely the
-        // answer (ADR-0032) that lets a Set of the version it already runs reach it, and a Set
+        // answer (SRV-deployments-and-pinned-rollouts) that lets a Set of the version it already runs reach it, and a Set
         // *older* than it downgrade it. The binary knows what it is; the record only says how it
         // got here.
         let (has_version, has_hash) = self
@@ -247,7 +247,7 @@ impl Local {
             .or_else(|| {
                 // The *identity* of what this binary reports, not the whole string: a version
                 // recorded by an install carries the operator's spelling, without the build
-                // metadata this binary appends (ADR-0037), and the two have to read alike in the
+                // metadata this binary appends (OPS-cargo-decides-product-version), and the two have to read alike in the
                 // fleet view. Nothing is lost — metadata takes no part in a comparison.
                 self.expected_package.as_ref().and_then(|_| {
                     fleet_core::version::identity(fleet_core::version::current())
@@ -297,7 +297,7 @@ impl Local {
     }
 
     /// Reacts to a `PackagesAvailable` offer: the Server selected what this Agent may have
-    /// (ADR-0033), so this side takes the one **top-level** package out of the offer — the binary
+    /// (PKG-signed-packages-and-delivery), so this side takes the one **top-level** package out of the offer — the binary
     /// of its Managed Process — and ignores addons, which a Supervisor has no way to apply.
     pub(super) fn handle_package_offer(
         &mut self,
@@ -352,7 +352,7 @@ impl Local {
             return;
         }
         let name = name.clone();
-        // The Client's own Agent takes one named package and nothing else (ADR-0020). A
+        // The Client's own Agent takes one named package and nothing else (CLT-self-update-signed-package). A
         // fleet-wide package with an empty Selector reaches every consenting Agent, so without
         // this an artifact meant for a Collector would be written over this binary and the host
         // would be gone. Refused and reported, never silently ignored.
@@ -369,7 +369,7 @@ impl Local {
         }
         // A Supervisor takes a package for its own Agent type and nothing else, only under a
         // SemVer version, and never one below what it runs or below the highest version this
-        // Client has installed for the type (ADR-0034 clause 7). The signature binds the artifact
+        // Client has installed for the type (PKG-versions-high-water-mark-floor §7). The signature binds the artifact
         // to its type and version, but says nothing about how that version orders against
         // another, so the order is this side's to hold — against a Server that offers an old,
         // validly signed build.
@@ -442,10 +442,10 @@ impl Local {
                 self.refuse_offer(offer, error, handled);
                 return;
             }
-            // The operator's floor stands beside the mark; the stricter one decides (ADR-0034
-            // clause 18). Refused before anything is downloaded, and reported as the package's
+            // The operator's floor stands beside the mark; the stricter one decides (PKG-versions-high-water-mark-floor §18).
+            // Refused before anything is downloaded, and reported as the package's
             // own failure. An offer of what is installed is no install, and is answered below
-            // as installed: what runs below the floor stays (ADR-0034 clause 19).
+            // as installed: what runs below the floor stays (PKG-versions-high-water-mark-floor §19).
             if let Some(reason) = self
                 .floor_refusal(&available.version)
                 .filter(|_| !self.already_has(available))
@@ -487,7 +487,7 @@ impl Local {
             content_hash: file.content_hash.clone(),
             signature: file.signature.clone(),
             // The Baseline asks the Agent to send these on the GET. This Server sends none; any a
-            // Server does send go to its own origin alone (ADR-0033).
+            // Server does send go to its own origin alone (PKG-signed-packages-and-delivery).
             headers: file
                 .headers
                 .as_ref()
@@ -524,7 +524,7 @@ impl Local {
         handled.send_report = true;
     }
 
-    /// Refuses an offer below the floor (ADR-0034 clause 18) as a failure of the package it names:
+    /// Refuses an offer below the floor (PKG-versions-high-water-mark-floor §18) as a failure of the package it names:
     /// `InstallFailed`, with `reason` naming the version and the floor, the offered version and
     /// hash reported beside it, and the aggregate echoed at once so the Server stops re-offering.
     fn refuse_below_floor(
@@ -568,8 +568,8 @@ impl Local {
         }
     }
 
-    /// What the health says while the installed version lies below its type's floor (ADR-0034
-    /// clause 19), naming both; empty otherwise, and for the Client's own Agent.
+    /// What the health says while the installed version lies below its type's floor (PKG-versions-high-water-mark-floor §19),
+    /// naming both; empty otherwise, and for the Client's own Agent.
     pub(super) fn floor_note(&self) -> String {
         let (Some(installed), Some(floors), true) =
             (&self.installed_package, &self.floors, self.managed)
@@ -594,9 +594,9 @@ impl Local {
     /// Whether this offer is what the Agent already has, so the offer ends with an echo rather
     /// than a download.
     ///
-    /// For the package that carries the Client itself (ADR-0020, ADR-0021) that question is
+    /// For the package that carries the Client itself (CLT-self-update-signed-package, CLT-installed-service-and-state) that question is
     /// answered by the version *this process runs*: what a program reports about itself outranks
-    /// what a record says was once installed here (ADR-0032). The record's hash would otherwise end
+    /// what a record says was once installed here (SRV-deployments-and-pinned-rollouts). The record's hash would otherwise end
     /// an offer of the very bytes this host is not running: a state directory that outlived its
     /// binary claims a version, the Server offers it again, and the claim is what swallows the
     /// offer.
@@ -634,7 +634,7 @@ pub struct PackageDownload {
     /// The Ed25519 signature over the artifact; empty means unsigned.
     pub signature: Vec<u8>,
     /// The headers the offer says this download needs, sent only to this Client's own Server
-    /// origin (ADR-0033). The Baseline: *"The Agent SHOULD include the HTTP headers provided in the
+    /// origin (PKG-signed-packages-and-delivery). The Baseline: *"The Agent SHOULD include the HTTP headers provided in the
     /// headers field for the GET request."*
     ///
     /// Raw pairs rather than the wire type, like every other field here: what the download needs is
@@ -645,7 +645,7 @@ pub struct PackageDownload {
 /// Written by hand rather than derived, because a header value is a credential.
 ///
 /// This struct travels inside `Handled`, which derives `Debug`; a single `debug!(?handled)` added
-/// later would otherwise put a download credential in the log file that ADR-0021 writes to disk in
+/// later would otherwise put a download credential in the log file that CLT-installed-service-and-state writes to disk in
 /// service mode. Keys are printed — they are what a diagnosis needs — and values never are.
 impl std::fmt::Debug for PackageDownload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

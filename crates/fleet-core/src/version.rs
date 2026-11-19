@@ -1,7 +1,7 @@
-//! Taking a version string apart (ADR-0037).
+//! Taking a version string apart (OPS-cargo-decides-product-version).
 //!
 //! A version this project produces looks like `1.2.3`, `1.2.3+a1b2c3d`, or `1.2.3-dev+a1b2c3d`
-//! (ADR-0037). Three different questions get asked of that one string, and they do not want the
+//! (OPS-cargo-decides-product-version). Three different questions get asked of that one string, and they do not want the
 //! same answer:
 //!
 //! - *Which release is this?* — the base and, when present, the pre-release. A `-dev` build is not
@@ -16,7 +16,7 @@
 //!
 //! This lives in `fleet-core` rather than in either end: the Client writes these strings and the
 //! Server displays them, so one implementation keeps the two from drifting. It is this project's
-//! grammar, not OpAMP's, which is why it is not in the `opamp` crate (ADR-0008).
+//! grammar, not OpAMP's, which is why it is not in the `opamp` crate (DEV-six-crates-tokio-axum).
 //!
 //! [`current`] is the other half of that: the version *this build* reports. `build.rs` computes it
 //! and bakes it in, and every surface on either end reads it here rather than `CARGO_PKG_VERSION`,
@@ -24,11 +24,11 @@
 
 /// The version this build reports, e.g. `1.2.3+a1b2c3d` or `1.2.3-dev+b4e5f6a`.
 ///
-/// The one place either binary states its version (ADR-0037): the OpAMP `service.version`
-/// attribute, both CLIs' `--version` output, and the install layout of ADR-0022 all call this.
+/// The one place either binary states its version (OPS-cargo-decides-product-version): the OpAMP `service.version`
+/// attribute, both CLIs' `--version` output, and the install layout of CLT-accounts-service-runs-under all call this.
 ///
 /// It is resolved at compile time by this crate's `build.rs` — the base from `Cargo.toml`
-/// (ADR-0037), the `-dev` marker and the commit short-hash from git — so a binary carries the
+/// (OPS-cargo-decides-product-version), the `-dev` marker and the commit short-hash from git — so a binary carries the
 /// answer rather than looking for a repository that is not there when it runs.
 #[must_use]
 pub fn current() -> &'static str {
@@ -67,7 +67,7 @@ impl<'a> Version<'a> {
 ///
 /// The pre-release and build metadata are held to the SemVer character set — dot-separated,
 /// non-empty identifiers of `[0-9A-Za-z-]`. That is not pedantry: this string becomes a directory
-/// name in the self-update layout (ADR-0022), so a value carrying `/`, `\`, or a bare `..` is both
+/// name in the self-update layout (CLT-accounts-service-runs-under), so a value carrying `/`, `\`, or a bare `..` is both
 /// not a version *and* a path-traversal waiting to happen. Refusing it here is the single gate the
 /// rest of the project trusts.
 #[must_use]
@@ -121,15 +121,15 @@ fn is_dot_identifiers(field: &str) -> bool {
 }
 
 /// The longest version [`is_semver`] takes: the bound a Package's identity tokens carry
-/// (ADR-0034 clause 1), so a version that passes here also fits a Package.
+/// (PKG-versions-high-water-mark-floor §1), so a version that passes here also fits a Package.
 pub const MAX_SEMVER_LEN: usize = 64;
 
 /// Whether `raw` is a SemVer 2.0.0 version — the one predicate the Server, `opamp-fleetctl` and the
-/// Client ask of a Package version (ADR-0034 clause 2).
+/// Client ask of a Package version (PKG-versions-high-water-mark-floor §2).
 ///
 /// [`parse`] already holds the core and both identifier sets to SemVer. The one rule it does not
 /// check is added here: a numeric pre-release identifier has no leading zero (SemVer 2.0.0 §9).
-/// `parse` itself keeps its shape, because ADR-0037 defines it. A value longer than
+/// `parse` itself keeps its shape, because OPS-cargo-decides-product-version defines it. A value longer than
 /// [`MAX_SEMVER_LEN`] is not taken either.
 #[must_use]
 pub fn is_semver(raw: &str) -> bool {
@@ -143,8 +143,8 @@ pub fn is_semver(raw: &str) -> bool {
         })
 }
 
-/// An upstream program's number written as SemVer, the way a Package is numbered (ADR-0034
-/// clause 6): fewer than three numeric components are completed with `.0` (`1.19` becomes
+/// An upstream program's number written as SemVer, the way a Package is numbered (PKG-versions-high-water-mark-floor §6):
+/// fewer than three numeric components are completed with `.0` (`1.19` becomes
 /// `1.19.0`), and a leading zero is dropped from a numeric component (`24.04.1` becomes `24.4.1`).
 /// Both keep the program's own order. A pre-release or build suffix is carried as it is. `None`
 /// when the number cannot be written so.
@@ -173,7 +173,7 @@ pub fn written_as_semver(upstream: &str) -> Option<String> {
 }
 
 /// The identifying part of a version string — everything except the build metadata — or `None`
-/// when the value is not a version (ADR-0037).
+/// when the value is not a version (OPS-cargo-decides-product-version).
 ///
 /// `1.2.3+a1b2c3d` yields `1.2.3`; `1.2.3-dev+a1b2c3d` yields `1.2.3-dev`.
 #[must_use]
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(dev.identity(), "0.1.1-dev");
     }
 
-    /// The failure that prompted ADR-0037: a package uploaded as the release number against a
+    /// The failure that prompted OPS-cargo-decides-product-version: a package uploaded as the release number against a
     /// binary that reports the commit it was built from.
     #[test]
     fn a_release_matches_the_build_that_carries_it() {
@@ -336,8 +336,8 @@ mod tests {
         assert_eq!(precedence("", "1.0.0"), None);
     }
 
-    /// The distinction the pre-release exists for (ADR-0037), kept at the gate that can enforce it.
-    // Verifies: ADR-0037
+    /// The distinction the pre-release exists for (OPS-cargo-decides-product-version), kept at the gate that can enforce it.
+    // Verifies: OPS-cargo-decides-product-version
     #[test]
     fn a_development_build_is_not_the_release_it_heads_for() {
         assert!(!same_release("0.1.1", "0.1.1-dev+799e36a"));
@@ -377,7 +377,7 @@ mod tests {
         assert!(!same_release("latest", "latest"));
     }
 
-    /// The self-update turns this string into a directory name (ADR-0022), so a pre-release or
+    /// The self-update turns this string into a directory name (CLT-accounts-service-runs-under), so a pre-release or
     /// build metadata that smuggles a path separator or `..` is not a version. Parsing it away is
     /// the gate that stops a crafted Server offer from escaping `versions/`.
     #[test]
@@ -405,9 +405,9 @@ mod tests {
         assert!(parse("1.2.3-rc.1+build.7").is_some());
     }
 
-    /// The baked string has the shape ADR-0037 prescribes — and, since both live here, it is
+    /// The baked string has the shape OPS-cargo-decides-product-version prescribes — and, since both live here, it is
     /// checked with the parser the rest of the project judges it by rather than a second grammar.
-    // Verifies: ADR-0037
+    // Verifies: OPS-cargo-decides-product-version
     #[test]
     fn the_baked_version_has_the_prescribed_shape() {
         let full = current();
@@ -425,8 +425,8 @@ mod tests {
 
     /// An upstream number is written as SemVer in its own order: completed with `.0`, a leading
     /// zero dropped, a suffix carried, and a number that cannot be written so refused
-    /// (ADR-0034 clause 6).
-    /// Verifies: ADR-0034
+    /// (PKG-versions-high-water-mark-floor §6).
+    /// Verifies: PKG-versions-high-water-mark-floor
     #[test]
     fn an_upstream_number_is_written_as_semver_in_its_own_order() {
         assert_eq!(written_as_semver("1.19").as_deref(), Some("1.19.0"));
@@ -442,8 +442,8 @@ mod tests {
         }
     }
 
-    /// The one predicate every end asks of a Package version (ADR-0034 clause 2).
-    /// Verifies: ADR-0034
+    /// The one predicate every end asks of a Package version (PKG-versions-high-water-mark-floor §2).
+    /// Verifies: PKG-versions-high-water-mark-floor
     #[test]
     fn a_package_version_is_semver() {
         for semver in ["1.2.3", "1.19.0", "1.2.3-rc.1+abc", "0.110.0", "1.0.0-0"] {

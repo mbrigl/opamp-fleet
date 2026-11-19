@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Runs both ends against opamp-go, on both transports (ADR-0011): the Go harness under interop/
+# Runs both ends against opamp-go, on both transports (API-protocol-pinned-interop-checked): the Go harness under interop/
 # is formatted and vetted first, the test is built next, so that a compile failure does not read
 # as an interop failure, and then run. The 'interop' job of .github/workflows/interop.yml runs it
 # on a schedule; interop/README.md says what it covers and how a red run is triaged.
@@ -10,12 +10,17 @@
 # Needs the Rust toolchain of rust-toolchain.toml and Go as interop/go.mod names it.
 #
 # Usage:
-#     scripts/check-interop.sh
+#     scripts/check-interop.sh [--root <dir>]
 # Exit code 0 when everything passes; the first failing command ends the run.
+# It exits 2 on an argument it does not read or a root that is no directory.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-interop.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 
 if ! command -v go >/dev/null; then
   if [[ "${CI:-}" == "true" ]]; then

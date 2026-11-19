@@ -1,4 +1,4 @@
-//! Packages in the fleet (ADR-0033, ADR-0034): the Package Sets, their entries and signatures the
+//! Packages in the fleet (PKG-signed-packages-and-delivery, PKG-versions-high-water-mark-floor): the Package Sets, their entries and signatures the
 //! Operator plane writes, the upload limit of the store, the offer of a Package to an Agent and of
 //! an artifact to a Host, and the Packages a Deployment holds. Its entry points are methods of
 //! `AppState`.
@@ -25,7 +25,7 @@ impl AppState {
             .map_or(0, |p| p.store().total_bytes())
     }
 
-    /// Whether the package store takes another upload at all (ADR-0033): one already at its
+    /// Whether the package store takes another upload at all (PKG-signed-packages-and-delivery): one already at its
     /// ceiling, counting the uploads still arriving, takes nothing more. Asked before an upload is
     /// streamed, so a gibibyte that would only be rejected is never read. The upload's bytes are
     /// counted through the answer as they arrive, and no longer once it is dropped.
@@ -45,7 +45,7 @@ impl AppState {
         })
     }
 
-    /// The package offer for one Agent, composed from its **assignments** (ADR-0032), or `None`
+    /// The package offer for one Agent, composed from its **assignments** (SRV-deployments-and-pinned-rollouts), or `None`
     /// when it cannot accept packages, is assigned nothing it fits, or the aggregate hash it last
     /// reported already matches what it is assigned.
     ///
@@ -77,8 +77,8 @@ impl AppState {
     }
 
     /// Whether a certificate naming `host` may fetch the artifact `(id, platform)` from the download
-    /// route (ADR-0033): it is offered to an Agent the host speaks for. The offer's own test
-    /// decides (ADR-0033 clause 35), for each such Agent — the `instance_uid`s bound to the host, or
+    /// route (PKG-signed-packages-and-delivery): it is offered to an Agent the host speaks for. The offer's own test
+    /// decides (PKG-signed-packages-and-delivery §35), for each such Agent — the `instance_uid`s bound to the host, or
     /// every Agent for a host marked as a Gateway. Nothing is offered without package delivery or a
     /// host register.
     ///
@@ -149,12 +149,12 @@ impl AppState {
     }
 
     /// Why this Agent is **proposed** nothing: more than one Deployment claims it, and an Agent
-    /// belongs to at most one (ADR-0033 clause 28). `None` when nothing is wrong. Every Agent can
-    /// be in conflict, since a Deployment carries Configurations as well as Packages (ADR-0032).
+    /// belongs to at most one (PKG-signed-packages-and-delivery §28). `None` when nothing is wrong. Every Agent can
+    /// be in conflict, since a Deployment carries Configurations as well as Packages (SRV-deployments-and-pinned-rollouts).
     ///
     /// A conflict takes the *candidate* away and never a standing assignment: an Agent already
     /// rolled out to keeps its offer, because nothing distributes or un-distributes by itself
-    /// (ADR-0032). Creating an overlapping channel must not withdraw anything from a running host.
+    /// (SRV-deployments-and-pinned-rollouts). Creating an overlapping channel must not withdraw anything from a running host.
     ///
     /// `claim` is what [`deployment_for`](crate::deployments::deployment_for) answered for this
     /// Agent — `Ok(None)` when package delivery, which arms the Deployments, is not configured.
@@ -176,8 +176,8 @@ impl AppState {
     }
 
     /// Whether any Agent's assignment references this Package — the gate that makes an assigned
-    /// Package's bytes immutable (ADR-0032 clause 13). The Agent store answers it (ADR-0039
-    /// clause 2); the fleet lock keeps a rollout of this Server from pinning it meanwhile. A
+    /// Package's bytes immutable (SRV-deployments-and-pinned-rollouts §13). The Agent store answers it (SRV-state-stores-contract-pair §2);
+    /// the fleet lock keeps a rollout of this Server from pinning it meanwhile. A
     /// store that other Servers write too refuses the write again from the stored assignments, in
     /// the act that writes.
     fn package_set_assigned(&self, id: &PackageId) -> bool {
@@ -197,7 +197,7 @@ impl AppState {
         self.agent_store.pinning(pin)
     }
 
-    /// Puts a Package into a channel (ADR-0033 clause 25). Not gated: adding one for an Agent type
+    /// Puts a Package into a channel (PKG-signed-packages-and-delivery §25). Not gated: adding one for an Agent type
     /// the channel does not hold surfaces as waiting on the Agents of that type, and replacing the
     /// one it holds is how a rollout proceeds — an Agent already rolled out to keeps the Package
     /// its assignment pins until the next act. A store that other Servers write too reads the
@@ -214,7 +214,7 @@ impl AppState {
     }
 
     /// Takes a Package out of a channel. Not gated: nothing a Deployment holds is frozen
-    /// (ADR-0032 clause 11) — an assignment pins the Package itself, so an Agent already released
+    /// (SRV-deployments-and-pinned-rollouts §11) — an assignment pins the Package itself, so an Agent already released
     /// keeps its offer until the next press.
     pub fn remove_deployment_package(
         &self,
@@ -233,7 +233,7 @@ impl AppState {
             .map_err(|e| PackageError::refused(Refusal::NotFound, e))
     }
 
-    /// The refusal every write to an assigned Package answers with (ADR-0032 clause 13).
+    /// The refusal every write to an assigned Package answers with (SRV-deployments-and-pinned-rollouts §13).
     fn refuse_if_assigned(&self, id: &PackageId) -> Result<(), PackageError> {
         if self.package_set_assigned(id) {
             return Err(crate::packages::assigned(id));
@@ -241,7 +241,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Creates a Package (ADR-0033). **Nothing is distributed** (ADR-0032), and there is nothing
+    /// Creates a Package (PKG-signed-packages-and-delivery). **Nothing is distributed** (SRV-deployments-and-pinned-rollouts), and there is nothing
     /// to update: a Package is its identity and its entries, so creating one that exists is the
     /// same request arriving twice.
     pub fn create_package_set(&self, id: &PackageId) -> Result<(), PackageError> {
@@ -250,8 +250,8 @@ impl AppState {
         Ok(())
     }
 
-    /// Stores one streamed upload as an entry of a Package (ADR-0033, ADR-0039). Refused while the
-    /// Package is assigned to an Agent (ADR-0032 clause 13); no push, because saving never
+    /// Stores one streamed upload as an entry of a Package (PKG-signed-packages-and-delivery, SRV-state-stores-contract-pair). Refused while the
+    /// Package is assigned to an Agent (SRV-deployments-and-pinned-rollouts §13); no push, because saving never
     /// distributes.
     pub fn put_package_entry(
         &self,
@@ -267,16 +267,16 @@ impl AppState {
     }
 
     /// Whether an upload for one entry of `id` may begin: the Package exists and is not assigned
-    /// to an Agent (ADR-0032 clause 13), so a refused upload is refused before its bytes are
+    /// to an Agent (SRV-deployments-and-pinned-rollouts §13), so a refused upload is refused before its bytes are
     /// streamed.
     pub fn check_package_upload(&self, id: &PackageId) -> Result<(), PackageError> {
         self.refuse_if_assigned(id)?;
         self.packages_for_a_route()?.writable(id)
     }
 
-    /// Writes the operator's signature onto one entry of a Package (ADR-0033), and answers what the
+    /// Writes the operator's signature onto one entry of a Package (PKG-signed-packages-and-delivery), and answers what the
     /// Server found when it checked it. Refused while the Package is assigned to an Agent, like
-    /// any other write to its entries (ADR-0032 clause 13): the re-offer gate does not cover the
+    /// any other write to its entries (SRV-deployments-and-pinned-rollouts §13): the re-offer gate does not cover the
     /// signature, so one changed under a standing offer would never reach the Agent.
     pub fn put_package_entry_signature(
         &self,
@@ -292,8 +292,8 @@ impl AppState {
         Ok(state)
     }
 
-    /// Takes one entry's signature away (ADR-0033); `Ok(false)` when it carries none. Refused
-    /// while the Package is assigned to an Agent (ADR-0032 clause 13).
+    /// Takes one entry's signature away (PKG-signed-packages-and-delivery); `Ok(false)` when it carries none. Refused
+    /// while the Package is assigned to an Agent (SRV-deployments-and-pinned-rollouts §13).
     pub fn remove_package_entry_signature(
         &self,
         id: &PackageId,
@@ -310,7 +310,7 @@ impl AppState {
     }
 
     /// Deletes one entry of a Package; `Ok(false)` when the Package or entry does not exist.
-    /// Refused while the Package is assigned to an Agent (ADR-0032 clause 13).
+    /// Refused while the Package is assigned to an Agent (SRV-deployments-and-pinned-rollouts §13).
     pub fn delete_package_entry(
         &self,
         id: &PackageId,
@@ -324,10 +324,10 @@ impl AppState {
         Ok(deleted)
     }
 
-    /// Deletes a Package (ADR-0032 clause 12); `Ok(false)` when none of that identity exists.
+    /// Deletes a Package (SRV-deployments-and-pinned-rollouts §12); `Ok(false)` when none of that identity exists.
     /// **Refused while any Agent's assignment pins it** — the message says how many — because a
     /// deletion must not change what a running Agent receives. A deleted Package leaves every
-    /// Deployment that held it. Nothing is uninstalled either way (ADR-0033).
+    /// Deployment that held it. Nothing is uninstalled either way (PKG-signed-packages-and-delivery).
     ///
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between; a store that other Servers write too counts the stored assignments again
@@ -370,7 +370,7 @@ impl AppState {
     }
 }
 
-/// Why the package store refuses an upload: its whole-store ceiling (ADR-0033).
+/// Why the package store refuses an upload: its whole-store ceiling (PKG-signed-packages-and-delivery).
 #[derive(Debug, PartialEq, Eq)]
 pub enum StoreFull {
     /// The store is already at its ceiling.
@@ -396,7 +396,7 @@ impl std::fmt::Display for StoreFull {
 }
 
 /// The bytes of one upload still arriving, counted against the package store's ceiling until it is
-/// dropped (ADR-0033). Taken from [`AppState::admit_upload`].
+/// dropped (PKG-signed-packages-and-delivery). Taken from [`AppState::admit_upload`].
 pub struct UploadReservation<'a> {
     state: &'a AppState,
     /// The stored artifacts' bytes when the upload began; walking the store per chunk would cost
@@ -450,9 +450,9 @@ impl Drop for UploadReservation<'_> {
     }
 }
 
-/// The package store and the Deployments that release from it (ADR-0033). Every `download_url`
+/// The package store and the Deployments that release from it (PKG-signed-packages-and-delivery). Every `download_url`
 /// is a path the Client resolves against its own endpoint — the Agent plane, where the download
-/// is served behind the same handshake as `/v1/opamp` (ADR-0033).
+/// is served behind the same handshake as `/v1/opamp` (PKG-signed-packages-and-delivery).
 pub struct PackageOffering {
     pub(super) store: PackageStore,
     deployments: DeploymentStore,
@@ -473,7 +473,7 @@ impl PackageOffering {
 }
 
 /// Whether this Agent declared that it accepts packages — the first condition of every offer
-/// (ADR-0033 clause 35).
+/// (PKG-signed-packages-and-delivery §35).
 fn accepts_packages(record: &AgentRecord) -> bool {
     record.capabilities & opamp::proto::AgentCapabilities::AcceptsPackages as u64 != 0
 }
@@ -491,7 +491,7 @@ mod tests {
 
     /// Without package delivery every write of the Package routes is a `404`, the signature's
     /// included: what each route's contract names, whatever the text.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn without_package_delivery_every_package_write_is_not_found() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -515,7 +515,7 @@ mod tests {
         assert_eq!(kinds, [Some(Refusal::NotFound); 7]);
     }
 
-    /// The whole-store ceiling (ADR-0033), decided without a request: a store at its limit takes
+    /// The whole-store ceiling (PKG-signed-packages-and-delivery), decided without a request: a store at its limit takes
     /// no upload, an artifact is refused when it would take the store past it, and an upload still
     /// arriving counts until it is dropped.
     #[test]
@@ -560,7 +560,7 @@ mod tests {
         ));
     }
 
-    // ---- Who may fetch an uploaded artifact (ADR-0033) ----
+    // ---- Who may fetch an uploaded artifact (PKG-signed-packages-and-delivery) ----
 
     /// One report of an `otelcol` Agent on linux/amd64 that accepts packages, over a certificate
     /// naming `host`, echoing `echoed` as the aggregate hash it holds.
@@ -599,7 +599,7 @@ mod tests {
     /// An artifact is fetched by a host only through an Agent it speaks for: the host whose Agent
     /// it was released to, not another host, not a host the register does not know, and not for
     /// another Platform or version — until that other host is marked as a Gateway.
-    /// Verifies: ADR-0033, Q-4
+    /// Verifies: PKG-signed-packages-and-delivery, Q-4
     #[test]
     fn an_artifact_is_offered_to_a_host_only_through_an_agent_it_speaks_for() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -638,10 +638,10 @@ mod tests {
         );
     }
 
-    /// The offer and the download agree on the capability half of the test (ADR-0033 clause 35): an
+    /// The offer and the download agree on the capability half of the test (PKG-signed-packages-and-delivery §35): an
     /// Agent that does not declare `AcceptsPackages` is offered nothing, and its host may fetch
     /// nothing through it, although its assignment names a signed Package that fits it.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn an_agent_that_accepts_no_packages_is_neither_offered_nor_fetched_for() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -680,7 +680,7 @@ mod tests {
 
     /// An Agent that echoes the aggregate hash of its offer is not sent it again, and can still
     /// fetch it — a retry after a failed install re-reads an offer no longer re-sent.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn an_offer_still_stands_after_its_hash_is_echoed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -699,7 +699,7 @@ mod tests {
 
     /// A version saved into the channel but not yet released by an operator's press is no one's
     /// offer: not the Agent's host's, not a Gateway's — while the version released before stays.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn a_version_waiting_for_its_press_is_offered_to_no_host() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -783,7 +783,7 @@ mod tests {
 
     /// The deletion of a Package sweeps its blobs once it has let the fleet lock go: while the
     /// sweep waits for the blob store's lock, every other act of the fleet goes on.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_package_deletion_sweeps_once_it_lets_the_fleet_lock_go() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -841,7 +841,7 @@ mod tests {
     /// An entry's deletion sweeps once it has let go of every lock of the Package store: while
     /// its sweep waits for the blob store's lock, the deletion of another Package, which takes
     /// the fleet lock and then the store's, goes on, and so does every act behind the fleet lock.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn an_entry_deletion_sweeps_once_it_lets_the_store_go() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -908,7 +908,7 @@ mod tests {
     /// it, read the Agents that arrived over the Gateway's Host through the port's `query_page`,
     /// not the whole fleet, and still find the Client Agent behind the Gateway whose labels the
     /// Agent inherits.
-    /// Verifies: ADR-0030, ADR-0033
+    /// Verifies: API-lists-paged-by-cursor, PKG-signed-packages-and-delivery
     #[test]
     fn a_gateways_download_and_an_agent_behind_it_read_the_gateways_agents_and_not_the_fleet() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

@@ -1,5 +1,5 @@
 //! This fleet's platform vocabulary: the spellings of an operating system and an architecture that
-//! mean one canonical `os.type` / `host.arch` value (ADR-0033).
+//! mean one canonical `os.type` / `host.arch` value (PKG-signed-packages-and-delivery).
 //!
 //! The canonical tokens are the semantic conventions'; the alias table is this project's leniency,
 //! so that a release file name and an Agent's report meet. Both ends read it, because they are two
@@ -37,7 +37,7 @@ const ARCH_ALIASES: &[(&str, &str)] = &[
 ///
 /// One table for both ends, because they are two halves of one comparison: the Client writes this
 /// value into its `os.type` attribute and the Server matches an artifact's platform against it
-/// (ADR-0033). Two tables that disagreed would not fail — they would offer a host the wrong binary,
+/// (PKG-signed-packages-and-delivery). Two tables that disagreed would not fail — they would offer a host the wrong binary,
 /// or none, and say nothing.
 #[must_use]
 pub fn canonical_os(raw: &str) -> &str {
@@ -52,7 +52,7 @@ pub fn canonical_arch(raw: &str) -> &str {
 }
 
 /// The canonical `os.type` token for a spelling of it, as a Platform is stored and compared
-/// (ADR-0033 clause 6): trimmed, lower-cased, folded by the alias table.
+/// (PKG-signed-packages-and-delivery §6): trimmed, lower-cased, folded by the alias table.
 ///
 /// # Errors
 /// Returns an error when the token is empty, longer than 16 characters, or carries anything but
@@ -103,8 +103,8 @@ mod tests {
     use super::*;
 
     /// The pairs both ends depend on agreeing: the Client writes the left, the Server matches an
-    /// artifact's platform against the right (ADR-0033).
-    /// Verifies: ADR-0033
+    /// artifact's platform against the right (PKG-signed-packages-and-delivery).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn folds_the_spellings_this_project_does_not_control() {
         assert_eq!(canonical_os("macos"), "darwin");
@@ -120,7 +120,7 @@ mod tests {
 
     /// Rust names the host one way and the semantic conventions another, and this is the table that
     /// bridges them — so what a Client compiled by rustc reports is a token the Server knows.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn what_rust_calls_this_machine_folds_onto_a_canonical_token() {
         assert_eq!(
@@ -137,8 +137,8 @@ mod tests {
     }
 
     /// A token is trimmed, lower-cased and folded, and one that cannot be half of a file name is
-    /// refused (ADR-0033 clause 6).
-    /// Verifies: ADR-0033
+    /// refused (PKG-signed-packages-and-delivery §6).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn a_token_is_folded_and_held_to_its_shape() {
         assert_eq!(os_token(" MacOS ").as_deref(), Ok("darwin"));
@@ -151,7 +151,7 @@ mod tests {
 
     /// A system the table has never heard of is served under its own name rather than refused: a
     /// fleet may run one, and offering it nothing would be the worse failure.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn an_unknown_token_passes_through_unchanged() {
         assert_eq!(canonical_os("plan9"), "plan9");
@@ -168,9 +168,8 @@ mod tests {
 
     /// A Collector release names its 32-bit ARM build `armv7`, an Agent reports `arm`, and the
     /// semantic conventions say `arm32`: all three meet there, so the build is offered to the host
-    /// it runs on. `armv6` keeps its own token (ADR-0033
-    /// clause 6).
-    /// Verifies: ADR-0033
+    /// it runs on. `armv6` keeps its own token (PKG-signed-packages-and-delivery §6).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn a_32_bit_arm_build_is_spelled_arm32() {
         assert_eq!(arch_token("armv7").as_deref(), Ok("arm32"));

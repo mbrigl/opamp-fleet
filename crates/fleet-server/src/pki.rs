@@ -1,9 +1,9 @@
-//! When the Server's certificates end (ADR-0036).
+//! When the Server's certificates end (OPS-operator-program-fleetctl).
 //!
 //! `server pki status` says when each certificate the Server host depends on ends, and the running
 //! Server reads the same ends and warns before one of them does. The Server makes no certificate
 //! authority, no server certificate and no bootstrap certificate: those are made by the operator
-//! tool's `pki` commands, on the operator's machine (ADR-0036). When a certificate counts as ending,
+//! tool's `pki` commands, on the operator's machine (OPS-operator-program-fleetctl). When a certificate counts as ending,
 //! and how its end is read and said, is [`fleet_core::ending`], so both programs judge alike.
 
 use std::path::{Path, PathBuf};
@@ -26,8 +26,8 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
     Ending::read(file, der.as_ref())
 }
 
-/// The certificates a running Server depends on (ADR-0036 clause 21): its own on each plane
-/// (ADR-0012), the client CA as both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each
+/// The certificates a running Server depends on (OPS-operator-program-fleetctl §21): its own on each plane
+/// (SEC-tls13-two-planes-bounded-input), the client CA as both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each
 /// file once.
 #[must_use]
 pub fn depended_on(config: &ServerConfig) -> Vec<PathBuf> {
@@ -50,7 +50,7 @@ pub fn depended_on(config: &ServerConfig) -> Vec<PathBuf> {
     files
 }
 
-/// `server pki status` (ADR-0036 clause 22): every certificate the configuration depends on, with
+/// `server pki status` (OPS-operator-program-fleetctl §22): every certificate the configuration depends on, with
 /// its end.
 ///
 /// # Errors
@@ -65,7 +65,7 @@ pub fn status(config: &ServerConfig) -> Result<Vec<Ending>, String> {
 /// The audit key `[audit] key_label` names on the `[pkcs11]` token, as `server pki status` prints
 /// it: its label, its public half as PEM, and the SHA-256 of that half the checkpoints carry in
 /// `key`
-/// (ADR-0028 clause 12). `None`
+/// (SEC-append-only-audit-record §12). `None`
 /// without an audit key.
 ///
 /// # Errors
@@ -107,7 +107,7 @@ pub fn loaded(files: &[PathBuf]) -> Vec<Ending> {
         .collect()
 }
 
-/// The running Server's look at what it depends on (ADR-0036 clause 21): a certificate that is
+/// The running Server's look at what it depends on (OPS-operator-program-fleetctl §21): a certificate that is
 /// ending is a warning and `pki.expiring`, one that has ended an error and `pki.expired`.
 /// Nothing stops: the hosts decide for themselves.
 ///
@@ -213,7 +213,7 @@ mod tests {
         }
     }
 
-    // Verifies: ADR-0036
+    // Verifies: OPS-operator-program-fleetctl
     #[test]
     fn the_server_records_what_is_ending_and_what_has_ended() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -250,8 +250,8 @@ mod tests {
 
     /// The running Server judges the certificate it serves, read at startup, not whatever the
     /// file holds a day later: a file replaced without a restart neither silences the warning
-    /// for the certificate still served nor goes unsaid (ADR-0036 clause 21).
-    /// Verifies: ADR-0036
+    /// for the certificate still served nor goes unsaid (OPS-operator-program-fleetctl §21).
+    /// Verifies: OPS-operator-program-fleetctl
     #[test]
     fn a_file_replaced_without_a_restart_neither_silences_the_warning_nor_goes_unsaid() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -278,8 +278,8 @@ mod tests {
     }
 
     /// The Operator plane's own certificate is one the Server depends on, and a file both
-    /// sections name is watched once (ADR-0012 clause 13).
-    /// Verifies: ADR-0012
+    /// sections name is watched once (SEC-tls13-two-planes-bounded-input §13).
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[test]
     fn the_operator_planes_certificate_is_watched_once() {
         let config: ServerConfig = toml::from_str(
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(depended_on(&config), [PathBuf::from("server.pem")]);
     }
 
-    // Verifies: ADR-0036
+    // Verifies: OPS-operator-program-fleetctl
     #[test]
     fn status_exits_by_the_worst_end() {
         let now = OffsetDateTime::now_utc();

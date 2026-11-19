@@ -9,7 +9,7 @@
 # holds; every other case is one setting that differs. What
 # the --jq expressions make of GitHub's JSON is not run here, since it needs gh; that is review.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-main-only-via-pr NUC-checks-are-bash
 # Inputs: scripts/sensor-repo-settings.sh scripts/lib/
 #
 # Usage:
@@ -73,7 +73,7 @@ answer() {
 # contain the needle, and not the second needle when one is given.
 expect() {
   local name="$1" dir="$2" want="$3" needle="$4" absent="${5:-}" out rc
-  out="$(GH="${GH_CMD:-$fake}" FIX="$dir/fix" bash "$SENSOR" "$dir" 2>&1)"; rc=$?
+  out="$(GH="${GH_CMD:-$fake}" FIX="$dir/fix" bash "$SENSOR" --root "$dir" 2>&1)"; rc=$?
   if ((rc == want)) && [[ "$out" == *"$needle"* ]] && [[ -z "$absent" || "$out" != *"$absent"* ]]; then
     passed=$((passed + 1))
     return

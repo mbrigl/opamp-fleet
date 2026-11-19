@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Sensor: the backlog (ADR-0006).
+# Sensor: the backlog (NUC-large-work-is-planned §7).
 #
 # Lists the backlog entries, one file each under docs/backlog/: those on main, and those a local
 # branch adds that main does not have yet, with the branch, so that a session in a parallel
@@ -9,19 +9,27 @@
 # the entry back. Each line carries the entry's title, its first '# ' heading. Main is origin/main
 # when it exists, else main, else HEAD. A project whose backlog is the issue tracker of its host
 # has no docs/backlog/, and the sensor says there is nothing to report. An entry not yet committed
-# is not listed: ADR-0006 has each created in a commit of its own. It reports and never fails.
+# is not listed: NUC-large-work-is-planned §7 has each created in a commit of its own. It
+# reports and never fails.
 #
 # Pure bash + git. Usage:
-#     scripts/sensor-backlog.sh [repository root]
+#     scripts/sensor-backlog.sh [--root <dir>]
 # The root defaults to this repository; scripts/test-sensor-backlog.sh passes fixtures.
 # Exit code 0, except 2 on a root that is no git repository.
 
 set -uo pipefail
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" 2>/dev/null && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
+
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-backlog.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 DIR="docs/backlog"
-if [[ -z "$ROOT" ]] || ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "Backlog sensor: '${1:-}' is no git repository." >&2
+if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "Backlog sensor: '$ROOT' is no git repository." >&2
   exit 2
 fi
 g() { git -C "$ROOT" "$@"; }

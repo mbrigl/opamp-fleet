@@ -1,5 +1,5 @@
 //! The Client under the machine's **real** service manager — systemd, launchd, or the SCM
-//! (ADR-0021, ADR-0020).
+//! (CLT-installed-service-and-state, CLT-self-update-signed-package).
 //!
 //! Every other test in this project stands in for the service manager: the self-update end-to-end
 //! test restarts the Client itself, "exactly as systemd would". That is what makes the update loop
@@ -9,7 +9,7 @@
 //! `ServiceSpecific(10)` on exit so the SCM reads a failure rather than a clean stop. Nothing has
 //! ever proved that this brings a Client back.
 //!
-//! It also installs as a script enrols a host after the package (ADR-0027 clause 19): from
+//! It also installs as a script enrols a host after the package (SEC-bootstrap-certificates-and-enrolment §19): from
 //! `--fleet-files` with a `bootstrap.p12`, against a Server in the test that the service it
 //! registers then reaches on the certificate the enrolment was issued.
 //!
@@ -39,11 +39,11 @@ use fleet_agent::service::{ServiceControl, ServiceLevel, ServiceState};
 use fleet_server::fleet::{AgentView, AppState};
 
 /// The operator's name for this Agent — written as `name` in the `supervisor.toml` below and
-/// reported as `service.instance.name` (ADR-0018), which is what the fleet view is searched by.
+/// reported as `service.instance.name` (CLT-what-an-agent-reports), which is what the fleet view is searched by.
 /// Deliberately not `service.name`: that carries the Agent *type*, which for this Client is always
-/// `supervisor` (ADR-0021).
+/// `supervisor` (CLT-installed-service-and-state).
 ///
-/// There is no `--instance` to isolate this run under (ADR-0021 clause 10), and the service it
+/// There is no `--instance` to isolate this run under (CLT-installed-service-and-state §10), and the service it
 /// registers carries the product's name like any other install. This test therefore takes over the
 /// host's one service for its duration, which is what `Registered` exists to undo.
 const AGENT_NAME: &str = "service-smoke-client";
@@ -118,7 +118,7 @@ fn agent(state: &AppState) -> Option<AgentView> {
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running
 /// under that name — which is itself an answer the assertions below use.
 fn service_pid() -> Option<u32> {
-    // One name on every platform (ADR-0022 clause 17), so this is what systemd, launchd, and the SCM
+    // One name on every platform (CLT-accounts-service-runs-under §17), so this is what systemd, launchd, and the SCM
     // are each asked about.
     let qualified = service_name();
     #[cfg(windows)]
@@ -213,7 +213,7 @@ fn spawn_server() -> (
 /// The kill is the assertion the stand-in service manager cannot make, and the reason this test
 /// exists: `RestartPolicy::OnFailure` is what a self-update relies on to come back at all, and on
 /// Windows it is a set of recovery actions this Client registers itself.
-/// Verifies: ADR-0020, ADR-0021, G-11
+/// Verifies: CLT-self-update-signed-package, CLT-installed-service-and-state, G-11
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_stop() {
@@ -229,7 +229,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     let (addr, state, _server) = spawn_server();
     let config = dir.path().join("supervisor.toml");
     // The identity lies under the root, which the install hands to the service's account: on
-    // Windows that is the virtual account, which reads nothing else of the runner's (ADR-0022).
+    // Windows that is the virtual account, which reads nothing else of the runner's (CLT-accounts-service-runs-under).
     std::fs::create_dir_all(&root).expect("the root");
     std::fs::write(
         &config,
@@ -246,7 +246,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     )
     .expect("install the service");
     let _registered = Registered;
-    // A first registration on Windows runs as the service's own virtual account (ADR-0022), and
+    // A first registration on Windows runs as the service's own virtual account (CLT-accounts-service-runs-under), and
     // the start below proves the Client works under it.
     #[cfg(windows)]
     assert!(
@@ -256,7 +256,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
         logon_account_on_windows(service_name())
     );
 
-    // launchd does not auto-start after an install (a known ADR-0021 gap), so every platform is
+    // launchd does not auto-start after an install (a known CLT-installed-service-and-state gap), so every platform is
     // started explicitly — which is also what the manual tells an operator to do.
     client(&["service", "start"], &config).expect("start the service");
     wait_for(
@@ -311,7 +311,7 @@ fn the_installed_service_starts_comes_back_from_a_crash_and_stays_down_after_a_s
     assert_eq!(
         service().state().expect("query the service"),
         ServiceState::Stopped,
-        "an explicitly stopped service must stay down (ADR-0021)"
+        "an explicitly stopped service must stay down (CLT-installed-service-and-state)"
     );
 
     client(&["service", "uninstall"], &config).expect("uninstall the service");
@@ -441,7 +441,7 @@ fn shared_tempdir() -> tempfile::TempDir {
 /// the service still runs as the account, and the unit the Client wrote leaves it the privileges
 /// a Managed Process needs for `sudo` and setuid helpers — no `no_new_privs`, and `/` not mounted
 /// `nosuid`. `systemd-analyze verify` accepts the unit.
-/// Verifies: ADR-0022
+/// Verifies: CLT-accounts-service-runs-under
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -552,7 +552,7 @@ fn a_reregistration_keeps_the_account_and_the_service_keeps_its_privileges() {
 }
 
 /// Adds the account `member` to the group `group`, as the operator does before naming a process
-/// account (ADR-0022 clause 21).
+/// account (CLT-accounts-service-runs-under §21).
 #[cfg(target_os = "linux")]
 fn add_to_group(member: &str, group: &str) {
     let status = Command::new("usermod")
@@ -632,7 +632,7 @@ fn owner_and_mode(path: &Path) -> (u32, u32, u32) {
     (meta.uid(), meta.gid(), meta.mode() & 0o7777)
 }
 
-/// A Managed Process under a process account (ADR-0022): installed with `--run-as` and
+/// A Managed Process under a process account (CLT-accounts-service-runs-under): installed with `--run-as` and
 /// `--process-account` naming two real accounts, the Client starts its program through the second
 /// service, and the program runs as the process account. It reads its `config/`, writes into its
 /// data directory, and can neither read the Client's `client-key.pem` or its log nor write its own
@@ -643,7 +643,7 @@ fn owner_and_mode(path: &Path) -> (u32, u32, u32) {
 /// service under the test's own uid; this is the one place the shipped binary starts a program
 /// over the socket under another account. On Linux under systemd, and on macOS under launchd with
 /// role accounts made as the refusal of a missing account says.
-/// Verifies: ADR-0022
+/// Verifies: CLT-accounts-service-runs-under
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -670,7 +670,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     let data = supervisor.join("data");
     std::fs::create_dir_all(&program).expect("program/");
     std::fs::create_dir_all(&config_dir).expect("config/");
-    // A data directory as ADR-0022 clause 21 gives it: the process account's group, `2770`. The
+    // A data directory as CLT-accounts-service-runs-under §21 gives it: the process account's group, `2770`. The
     // command kind names none, so the test makes it as a kind would.
     std::fs::create_dir_all(&data).expect("data/");
     let chgrp = Command::new("chgrp")
@@ -689,7 +689,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o777)).expect("chmod out/");
     let result = out.join("result");
 
-    // The Client's key where ADR-0022 protects it: in the state directory, owner-only.
+    // The Client's key where CLT-accounts-service-runs-under protects it: in the state directory, owner-only.
     common::client_identity(dir.path());
     let key = state.join("client-key.pem");
     let cert = state.join("client.pem");
@@ -792,7 +792,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(user_of(&again["pid"]), process_account.0, "{again:?}");
 
     // Re-registered without either flag, as every package upgrade does: both accounts are kept,
-    // and the hand-over leaves the process account its data (ADR-0022 clause 1).
+    // and the hand-over leaves the process account its data (CLT-accounts-service-runs-under §1).
     let again_pid: u32 = again["pid"].parse().expect("a pid");
     client(&["service", "stop"], &config).expect("stop the service");
     let reinstalled = client(&["service", "install", "--root", &root_arg], &config)
@@ -819,7 +819,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(upgraded["key"], "denied", "{upgraded:?}");
 
     // Dropped while both run: the install stops them before it re-owns, and starts the Client
-    // again once it has succeeded, with no `service start` (ADR-0022 clause 26). The Client then
+    // again once it has succeeded, with no `service start` (CLT-accounts-service-runs-under §26). The Client then
     // starts its program itself again, under its own account.
     let again_pid: u32 = upgraded["pid"].parse().expect("a pid");
     let dropping = client(
@@ -913,13 +913,13 @@ fn restart(name: &str) {
     assert!(restarted.success(), "cannot restart {name}");
 }
 
-/// A Managed Process takes the second service's place (ADR-0022 clause 19): it leaves its process
+/// A Managed Process takes the second service's place (CLT-accounts-service-runs-under §19): it leaves its process
 /// group, so it outlives the Client's connection, removes the second service's socket and listens
 /// at its name. The Client, restarted, finds a peer of the process account there and refuses it —
 /// it writes it nothing and logs the impostor's process id — and starts no Managed Process until
 /// the second service is restarted and serves the socket again. On Linux the second service is not
 /// dumpable, and the program it starts is.
-/// Verifies: ADR-0022
+/// Verifies: CLT-accounts-service-runs-under
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -1293,9 +1293,9 @@ fn acl_names(path: &Path, who: &str) -> bool {
 /// On Windows a first install without `--run-as` registers the service's own virtual account and
 /// grants it the root; a re-install without the flag, as an MSI upgrade makes, keeps it;
 /// `--run-as LocalSystem` registers `LocalSystem` and withdraws what the virtual account was
-/// granted; and a re-install without the flag then keeps `LocalSystem` (ADR-0022 clause 1). The
+/// granted; and a re-install without the flag then keeps `LocalSystem` (CLT-accounts-service-runs-under §1). The
 /// runner's shell is elevated, as `service install` needs.
-/// Verifies: ADR-0022
+/// Verifies: CLT-accounts-service-runs-under
 #[cfg(windows)]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -1367,7 +1367,7 @@ fn on_windows_a_first_install_runs_as_the_virtual_account_and_local_system_is_na
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
 
-/// A Managed Process under a process account on Windows (ADR-0022): installed with `--run-as`
+/// A Managed Process under a process account on Windows (CLT-accounts-service-runs-under): installed with `--run-as`
 /// naming the Client's own virtual account and `--process-account` the second service's, the
 /// Client starts its program through the second service, on its named pipe, and the program runs
 /// as `NT SERVICE\<PRODUCT_NAME>-agents` without `SeImpersonatePrivilege`. It reads its `config/`
@@ -1378,7 +1378,7 @@ fn on_windows_a_first_install_runs_as_the_virtual_account_and_local_system_is_na
 ///
 /// A re-registration without either flag, as an upgrade makes, rewrites both SCM entries in place
 /// and keeps both accounts; `--no-process-account` returns the program to the Client's account.
-/// Verifies: ADR-0022
+/// Verifies: CLT-accounts-service-runs-under
 #[cfg(windows)]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -1776,14 +1776,14 @@ impl Drop for ScheduledTask {
 }
 
 /// On Windows a pipe of the second service's name, made by a task under the process account, `NT
-/// AUTHORITY\LocalService`, while the second service is stopped (ADR-0022 clause 19): the Client,
+/// AUTHORITY\LocalService`, while the second service is stopped (CLT-accounts-service-runs-under §19): the Client,
 /// restarted, refuses it as a peer the SCM names no process for, writes it nothing and logs it, and
 /// starts no Managed Process; once the task has ended and the second service runs again, the Client
 /// reaches it and the program runs. The second service is stopped first because a client that opens
 /// a pipe both serve would reach either one; the case of a differing process is decided by the test
 /// with a fake service manager. A failure midway leaves the second service stopped until
 /// `Registered` uninstalls both services.
-/// Verifies: ADR-0022
+/// Verifies: CLT-accounts-service-runs-under
 #[cfg(windows)]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -1931,7 +1931,7 @@ while ($true) {
     scm_to("start", service_name(), "RUNNING");
     let pipe_text = pipe.display().to_string();
     // The impostor's process carries the default security of its account, which grants the
-    // Client nothing: the Client cannot open it to hold it (ADR-0022) and refuses it as a process
+    // Client nothing: the Client cannot open it to hold it (CLT-accounts-service-runs-under) and refuses it as a process
     // it cannot read, before the SCM's answer; were it opened, the SCM would name no process.
     wait_telling(
         "the restarted Client to refuse the impostor",
@@ -1991,14 +1991,14 @@ while ($true) {
     client(&["service", "uninstall"], &config).expect("uninstall the service");
 }
 
-/// On Windows the second service's process and threads are closed to its own account (ADR-0022):
+/// On Windows the second service's process and threads are closed to its own account (CLT-accounts-service-runs-under):
 /// with `NT AUTHORITY\LocalService` as the process account, a task scheduled under that account —
 /// as a Managed Process would be — is refused `ERROR_ACCESS_DENIED` when it opens the second
 /// service's process with `PROCESS_VM_READ`, `PROCESS_DUP_HANDLE` or `PROCESS_CREATE_THREAD`, and
 /// any of its threads with `THREAD_SET_CONTEXT`, while it may still open the process to ask about
 /// it (`PROCESS_QUERY_LIMITED_INFORMATION`), and the Managed Process the second service started
 /// still runs.
-/// Verifies: ADR-0022
+/// Verifies: CLT-accounts-service-runs-under
 #[cfg(windows)]
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
@@ -2235,7 +2235,7 @@ Set-Content -Path $out -Value $lines
 /// The password of the `bootstrap.p12` the enrolment smoke test installs with.
 const P12_PASSWORD: &str = "a password of the operator";
 
-/// The fleet's files a script puts in the directory `--fleet-files` names (ADR-0027 clause 19),
+/// The fleet's files a script puts in the directory `--fleet-files` names (SEC-bootstrap-certificates-and-enrolment §19),
 /// made from what `served` issued: its bootstrap certificate and key as `bootstrap.p12` under
 /// [`P12_PASSWORD`], and the CA of its certificate as `server-ca.pem`. Answers the bootstrap key.
 fn fleet_files(served: &enrolling::Served, dir: &Path) -> rcgen::KeyPair {
@@ -2361,7 +2361,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// The arguments of the install a script runs after the package (ADR-0027 clause 19).
+/// The arguments of the install a script runs after the package (SEC-bootstrap-certificates-and-enrolment §19).
 fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path) -> Vec<String> {
     vec![
         "service".into(),
@@ -2377,7 +2377,7 @@ fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path
     ]
 }
 
-/// The install a script runs after the package (ADR-0027 clause 19): `service install --endpoint
+/// The install a script runs after the package (SEC-bootstrap-certificates-and-enrolment §19): `service install --endpoint
 /// --fleet-files --bootstrap-password-file` opens the `bootstrap.p12` in that directory, waits for
 /// an operator's approval with nothing staged or registered, and only then stages and registers.
 /// The configuration it wrote names a copy of the CA and no bootstrap identity, the Client's
@@ -2385,7 +2385,7 @@ fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path
 /// neither the `bootstrap.p12`, its password nor its key is in any file under the root. The
 /// service started then reaches the Server on the issued certificate: the Server takes it into the
 /// fleet as the Host that certificate names, and has issued no other.
-/// Verifies: ADR-0027, ADR-0021, ADR-0026
+/// Verifies: SEC-bootstrap-certificates-and-enrolment, CLT-installed-service-and-state, SEC-admission-by-client-certificate
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_certificate() {
@@ -2430,7 +2430,7 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
                 .map(|pending| pending.id.clone())
         },
     );
-    // Enrolled before anything is staged or registered (ADR-0021 clause 26).
+    // Enrolled before anything is staged or registered (CLT-installed-service-and-state §26).
     assert_eq!(
         service().state().expect("query the service"),
         ServiceState::NotInstalled,
@@ -2505,13 +2505,13 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
         "the state directory holds another certificate than the one issued"
     );
 
-    // The fleet's files are read, never copied, changed or removed (ADR-0027 clauses 17 and 18).
+    // The fleet's files are read, never copied, changed or removed (SEC-bootstrap-certificates-and-enrolment §17 and §18).
     assert!(
         (read(&p12), read(&password_file)) == before,
         "the install changed bootstrap.p12 or the password file"
     );
     // The decrypted bootstrap key — as PKCS#8, in DER or in PEM however it is wrapped — the
-    // `bootstrap.p12` and its password are in no file under the root (ADR-0027 clause 15).
+    // `bootstrap.p12` and its password are in no file under the root (SEC-bootstrap-certificates-and-enrolment §15).
     let key_der = key.serialize_der();
     let key_body: String = key
         .serialize_pem()
@@ -2588,8 +2588,8 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
 
 /// A `bootstrap.p12` that does not open under the password `--bootstrap-password-file` names fails
 /// the install before anything is written, staged or registered, saying so of the file and naming
-/// the flag (ADR-0027 clause 18, ADR-0021 clause 26).
-/// Verifies: ADR-0027, ADR-0021
+/// the flag (SEC-bootstrap-certificates-and-enrolment §18, CLT-installed-service-and-state §26).
+/// Verifies: SEC-bootstrap-certificates-and-enrolment, CLT-installed-service-and-state
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]
 fn a_wrong_bootstrap_password_fails_the_install_before_anything_is_written() {

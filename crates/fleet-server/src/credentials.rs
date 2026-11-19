@@ -1,6 +1,6 @@
-//! The Operator plane's credential check (ADR-0026 clause 2).
+//! The Operator plane's credential check (SEC-admission-by-client-certificate §2).
 //!
-//! Nothing configured authenticates on its own (ADR-0026 clause 21): a Basic password is kept as an
+//! Nothing configured authenticates on its own (SEC-admission-by-client-certificate §21): a Basic password is kept as an
 //! Argon2id hash and verified against it, and a success is remembered for a while by the hash of
 //! the whole header, so a browser that re-sends the header with every request pays the password
 //! hash once and not per request.
@@ -117,7 +117,7 @@ impl Credentials {
     /// one address cannot hold every slot.
     pub async fn check(self: &Arc<Self>, peer: Option<IpAddr>, headers: &HeaderMap) -> Verdict {
         // The header carries the password until it is verified, so it is held in a buffer wiped
-        // when it is dropped (ADR-0015); the copy `hyper` keeps is its own.
+        // when it is dropped (SEC-secrets-wiped-on-drop); the copy `hyper` keeps is its own.
         let presented = Zeroizing::new(
             headers
                 .get(header::AUTHORIZATION)
@@ -227,7 +227,7 @@ impl Credentials {
             return true;
         }
         // The decoded credential is held in a buffer wiped when it is dropped, and the user and
-        // the password are borrowed from it (ADR-0015).
+        // the password are borrowed from it (SEC-secrets-wiped-on-drop).
         let Ok(decoded) = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .map(Zeroizing::new)
@@ -358,7 +358,7 @@ mod tests {
         )
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: SEC-admission-by-client-certificate
     #[test]
     fn a_basic_password_is_verified_against_its_argon2id_hash() {
         let phc = hash_basic("s3cret").expect("hash");
@@ -369,7 +369,7 @@ mod tests {
         assert!(!credentials.verify(&basic("ops", "wrong")));
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: SEC-admission-by-client-certificate
     #[test]
     fn an_unknown_user_costs_the_same_verification() {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
@@ -387,7 +387,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0026
+    /// Verifies: SEC-admission-by-client-certificate
     #[test]
     fn a_basic_verification_is_remembered_and_bounded() {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
@@ -431,7 +431,7 @@ mod tests {
 
     /// Password hashes run off the async workers and at most a few at once; past that a request
     /// is answered busy rather than queued behind them.
-    /// Verifies: ADR-0026
+    /// Verifies: SEC-admission-by-client-certificate
     #[tokio::test]
     async fn password_hashes_are_bounded_and_off_the_async_workers() {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
@@ -475,7 +475,7 @@ mod tests {
 
     /// One address holds at most one password hash at a time: wrong passwords sent at once from
     /// it wait for each other, and an operator at another address still finds a slot.
-    /// Verifies: ADR-0026
+    /// Verifies: SEC-admission-by-client-certificate
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn one_address_holds_one_password_hash_at_a_time() {
         let users = BTreeMap::from([("ops".to_string(), hash_basic("s3cret").expect("hash"))]);
@@ -520,7 +520,7 @@ mod tests {
     }
 
     /// The comparison hash for an unknown user costs what the costliest user's hash costs.
-    /// Verifies: ADR-0026
+    /// Verifies: SEC-admission-by-client-certificate
     #[test]
     fn the_comparison_hash_matches_the_costliest_user() {
         let costly = Argon2::new(

@@ -7,7 +7,8 @@ golden path. Its **sensors** check what the agent did: the computational ones, t
 that are deterministic and cheap enough to run on every change, and the inferential one, the
 review in a fresh context. The harness ADR is the one
 [`AGENTS.md` §4](../../../../AGENTS.md#4-working-style) names for the parts kept with the human
-and the cap on open agent work.
+and the cap on open agent work. It carries the header field `Role: harness`
+([NUC-base-is-fixed §3](../../../../docs/adr/NUC-base-is-fixed.md)).
 
 ## Signals
 
@@ -26,16 +27,16 @@ and the cap on open agent work.
   context, a stronger model where one exists; the parts the specification's *Threats & Forbidden
   Actions* protects get a second reviewer of a different kind and the human who owns the part.
 - **Parallel tickets under a cap**: tickets whose *Mode* allows it run without the human
-  ([ADR-0006](../../../../docs/adr/0006-feature-layer.md)), several at once; a dispatching
-  session claims each from the frontier by creating its branch together with a worktree, or
-  a container, of its own, and starts a fresh session of the implementing agent in each; where
-  several humans or machines dispatch from clones of their own, the claim is made on the
-  shared remote, the one push the ADR grants without an instruction per push; the
-  open agent work is capped at what the humans can review, two or three at the start. Parallel
-  sessions save time, not tokens: each pays its own start and its own review, and two whose
-  branches collide pay a rework and the review of the whole branch after it. The
-  [`work-tickets`](../../work-tickets/SKILL.md) skill is the order of that work, and every
-  agent that reads skills and runs from a command line can be dispatcher or worker.
+  ([NUC-large-work-is-planned](../../../../docs/adr/NUC-large-work-is-planned.md)), several at once;
+  a dispatching session claims each from the frontier by creating its branch together with a
+  worktree, or a container, of its own, and starts a fresh session of the implementing agent in
+  each; where several humans or machines dispatch from clones of their own, the claim is made on the
+  shared remote, the one push the ADR grants without an instruction per push; the open agent work is
+  capped at what the humans can review, two or three at the start. Parallel sessions save time, not
+  tokens: each pays its own start and its own review, and two whose branches collide pay a rework
+  and the review of the whole branch after it. The [`work-tickets`](../../work-tickets/SKILL.md)
+  skill is the order of that work, and every agent that reads skills and runs from a command line
+  can be dispatcher or worker.
 
 Whichever fits, the ADR answers: who decides ADRs and lands changes to the specification, one
 maintainer or several, and where several, which of them decides for which part of the system, named
@@ -46,10 +47,13 @@ stronger one, such as a light review, a search whose answer is a conclusion, or 
 no decision; the command that starts a session of each without a human, such as the agent's
 non-interactive mode, and the one that continues a session, where the agent has one; how parallel
 sessions are kept apart, if there are any, and on which remote claims on tickets are made where the
-sessions do not all share one repository; how much agent work may be open at once; and which parts
-of the system are never worked unattended however small the ticket, such as authentication and
-authorization, payment, public interfaces, data migrations, and whatever else the specification's
-threats protect.
+sessions do not all share one repository; whether the plan lies in the tree or in the host's issues,
+where the assignment of a ticket's issue is the claim, the host's list of open, unblocked,
+unassigned ticket issues the frontier, and closing an issue replaces deleting the file
+([NUC-large-work-is-planned §9](../../../../docs/adr/NUC-large-work-is-planned.md)); how much agent
+work may be open at once; and which parts of the system are never worked unattended however small
+the ticket, such as authentication and authorization, payment, public interfaces, data migrations,
+and whatever else the specification's threats protect.
 
 ## Does not fit
 
@@ -59,14 +63,14 @@ threats protect.
   [`AGENTS.md` §5](../../../../AGENTS.md#5-quality-bar--definition-of-done) excludes it whatever
   the harness says.
 - A gate in one agent's own configuration as the enforcement of a rule
-  ([`AGENTS.md` §6](../../../../AGENTS.md#6-project-rules)).
+  ([NUC-main-only-via-pr §7](../../../../docs/adr/NUC-main-only-via-pr.md)).
 
 ## The rule a test decides
 
 None, as a rule: who reviews, who decides which ADRs, and what runs unattended is decided
 outside the tree. The ADR says so in a `**Not mechanically decidable:**` paragraph
-([ADR-0002](../../../../docs/adr/0002-decisions-verified-by-tests.md)). What the harness relies
-on mechanically is already checked: the git hooks, the required checks, and the Code Owners
+([NUC-decisions-cite-tests §4](../../../../docs/adr/NUC-decisions-cite-tests.md)). What the harness
+relies on mechanically is already checked: the git hooks, the required checks, and the Code Owners
 review of the repository settings.
 
 ## Sensors
@@ -79,8 +83,8 @@ the tickets that may be claimed, for the dispatching session.
 ## Alternatives
 
 The three forms above grow into each other. A process-owning framework that brings agents,
-artifacts, and pipeline in one piece is a fourth; ADR-0003 and ADR-0006 decline it for the
-template.
+artifacts, and pipeline in one piece is a fourth; NUC-procedures-are-skills and
+NUC-large-work-is-planned decline it for the template.
 
 ## Sources
 

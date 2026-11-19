@@ -1,0 +1,83 @@
+# Cases of the rules shell/root, shell/bash-floor, and shell/mode of scripts/check-shell.sh, read
+# by scripts/test-check-shell.sh. The cases of ShellCheck, sed, and grep stay inline there: their
+# findings carry no key yet.
+#
+# One case per line, four fields separated by ' | ':
+#
+#   <pass or fail> | <what the output holds, or -> | <name> | <tree>
+#
+# A run exits 0 for pass and 1 for fail. The second field is '<key>', then ' @ <subject>' for each
+# datum the line names, such as the script. A line of the output ends in '[<key>]', the rule and a
+# reason word, and holds each subject, in that order and with no ASCII letter, digit, hyphen,
+# or underscore beside it; the rest of its wording is free.
+#
+# A line that starts with '#' is a comment, not a case. The subjects are looked for in the part of
+# the line before its key, so that none holds by the key alone. A field may start with '!': it then
+# holds where no line that ends in '[<key>]' holds the subjects in their order.
+#
+# The tree is a list of steps separated by '; ', or '-' for none, applied in order to a git
+# repository with no commit that holds a copy of this repository's scripts/lib/ and a
+# .shellcheckrc that disables SC1091 and SC2154, since a fixture's script sources what ShellCheck
+# does not follow. The steps:
+#
+#   script <path> <kind>   a bash script at the path, of one of these kinds:
+#                          rooted    sources the bash floor and scripts/lib/root.sh, calls
+#                                    enter_root on a line of its own and rest_args, and prints its
+#                                    root
+#                          unrooted  prints a word, and sources nothing
+#                          noargs    as rooted, without rest_args: it takes any argument
+#                          ownroot   as rooted, with an enter_root of its own that reads no root
+#                          floor     sources the bash floor of scripts/lib/ and prints a word
+#                          floorless sources lib/bash.sh beside it and prints a word
+#                          cased     reads its options in a case loop: --flag alone, and --path
+#                                    with its value, which its usage writes '[--path <path>]'
+#                          caseless  as cased, its usage writing '[--path]'
+#                          tested    reads '--require' in a test and a value after it, its usage
+#                                    writing '[--require]'
+#                          flagged   as tested, shifting '--require' alone, and reading the
+#                                    positional '$2' after
+#                          flaggedif reads '--sections' in a test spread over lines, shifting it on a
+#                                    line of its own, and the positional '$2' after
+#                          setflag   reads '--check' in a test on one line, which drops it with
+#                                    'set -- "${@:2}"', and the positional '$2' after
+#                          fiflag    reads '--check' in a test spread over lines that ends in 'fi', and
+#                                    the positional '$2' on the line after
+#                          quoted    reads '"--path" | -p)' with its value, its usage writing
+#                                    '[--path|-p]'
+#   write <path> <text>    the file written with the text and a line break, its directories made
+#   mode <path> <mode>     the file at the path added to the index with the mode, 100644 or 100755
+#   link <path> <target>   a symbolic link at the path to the target, added to the index
+#   conflict <path>        the file at the path put into the index as a conflict, at stages 1, 2,
+#                          and 3 with the mode 100644 and none at stage 0
+
+pass | - | a script that takes its root through root.sh | script scripts/build.sh rooted
+fail | shell/root:unrooted @ scripts/build.sh @ scripts/lib/root.sh @ CONTRIBUTING.md @ NUC-checks-are-bash @ §9 | a project's script that calls no enter_root | script scripts/build.sh unrooted
+fail | shell/root:verbose @ scripts/build.sh | a script without rest_args, which takes --verbose | script scripts/build.sh noargs
+fail | shell/root:missing @ scripts/build.sh | a script whose enter_root is its own reads a missing root | script scripts/build.sh ownroot
+pass | - | a self-test is not held to the root | script scripts/test-build.sh unrooted
+pass | - | check-all.sh is not held to the root | script scripts/check-all.sh unrooted
+pass | - | a script below scripts/ is not held | script scripts/tools/build.sh unrooted
+pass | - | a script outside scripts/ is not held | script tools/build.sh unrooted
+pass | - | a skill script is not held to the root | script .agents/skills/x/run.sh unrooted
+pass | - | a skill script that sources the bash floor stops below bash 4.4 | script .agents/skills/x/run.sh floor
+fail | shell/bash-floor:silent @ .agents/skills/x/run.sh | a skill script whose floor does not stop it | write .agents/skills/x/lib/bash.sh # shellcheck shell=bash; script .agents/skills/x/run.sh floorless
+fail | shell/bash-floor:silent @ scripts/test-build.sh | a self-test whose floor does not stop it | write scripts/lib/bash.sh # shellcheck shell=bash; script scripts/test-build.sh floor
+pass | - | a script below scripts/ is not held to the bash floor | write scripts/tools/lib/bash.sh # shellcheck shell=bash; script scripts/tools/build.sh floorless
+pass | - | an option whose branch reads a value, written with its value in the usage | script scripts/build.sh cased
+fail | shell/root:valued @ scripts/build.sh @ --path | an option whose branch reads a value, written without one in the usage | script scripts/build.sh caseless
+fail | shell/root:valued @ scripts/build.sh @ --require | an option a test reads a value after, written without one in the usage | script scripts/build.sh tested
+pass | - | an option shifted alone is a flag, though a positional '$2' follows | script scripts/build.sh flagged
+pass | - | a flag shifted on a line of its own in a test, a positional '$2' read after | script scripts/build.sh flaggedif
+fail | shell/root:valued @ scripts/build.sh @ --path | a quoted case label with an alternative reads a value | script scripts/build.sh quoted
+pass | - | a flag dropped by 'set -- "${@:2}"', a positional '$2' read after | script scripts/build.sh setflag
+pass | - | a flag test that ends in 'fi', a positional '$2' read on the line after | script scripts/build.sh fiflag
+pass | - | a script tracked executable | script scripts/build.sh rooted; mode scripts/build.sh 100755
+fail | shell/mode:exec @ scripts/build.sh @ 100644 @ NUC-checks-are-bash @ §9 | a script tracked without the executable bit | script scripts/build.sh rooted; mode scripts/build.sh 100644
+pass | - | a skill script tracked executable | script .agents/skills/x/run.sh unrooted; mode .agents/skills/x/run.sh 100755
+fail | shell/mode:exec @ .agents/skills/x/run.sh @ 100644 @ NUC-checks-are-bash @ §9 | a skill script tracked without the executable bit | script .agents/skills/x/run.sh unrooted; mode .agents/skills/x/run.sh 100644
+pass | - | a library under scripts/lib/ is sourced, not run, and is not held to the mode | write scripts/lib/extra.sh # shellcheck shell=bash; mode scripts/lib/extra.sh 100644
+pass | - | a script below scripts/ is not held to the mode | script scripts/tools/build.sh unrooted; mode scripts/tools/build.sh 100644
+pass | - | a library below a skill is not held to the mode | write .agents/skills/x/lib/bash.sh # shellcheck shell=bash; mode .agents/skills/x/lib/bash.sh 100644
+pass | - | a script outside scripts/ is not held to the mode | script tools/build.sh unrooted; mode tools/build.sh 100644
+pass | - | a tracked symbolic link has the mode 120000 and is not held to the mode | script scripts/tools/build.sh unrooted; link scripts/test-build.sh tools/build.sh
+pass | - | a script in conflict has no mode at stage 0 and is not held to the mode | script scripts/test-build.sh unrooted; conflict scripts/test-build.sh

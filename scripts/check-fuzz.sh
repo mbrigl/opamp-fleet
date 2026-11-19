@@ -12,12 +12,18 @@
 # which the sanitizer refuses.
 #
 # Usage:
-#     scripts/check-fuzz.sh [<target> <seconds>]
-# Exit code 0 when the run ends without a finding, 2 on a wrong argument.
+#     scripts/check-fuzz.sh [--root <dir>] [<target> <seconds>]
+# Exit code 0 when the run ends without a finding, 2 on a wrong argument or a root that is no
+# directory.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-fuzz.sh [--root <dir>] [<target> <seconds>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
+rest_args "${BASH_SOURCE[0]}" "$usage" 2 "${ARGS[@]}"
 
 if (($# == 0)); then
   # Every [[bin]] of fuzz/Cargo.toml is a target.
@@ -26,7 +32,7 @@ if (($# == 0)); then
 elif (($# == 2)) && [[ -n "$1" && "$2" =~ ^[0-9]+$ ]]; then
   targets=("$1") seconds="$2"
 else
-  echo "usage: scripts/check-fuzz.sh [<target> <seconds>]" >&2
+  echo "check-fuzz.sh: name a target and its seconds, or neither — usage: $usage" >&2
   exit 2
 fi
 if ! command -v cargo-fuzz >/dev/null; then

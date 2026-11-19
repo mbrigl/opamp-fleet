@@ -1,5 +1,5 @@
 //! The Server's signing keys on a PKCS#11 token
-//! (ADR-0026).
+//! (SEC-admission-by-client-certificate).
 //!
 //! `[pkcs11]` names a module, a token and a PIN file. The Server loads the module through
 //! `cryptoki`, logs in once, and keeps a pool of four sessions on the token. A key on it is named
@@ -408,7 +408,7 @@ impl rcgen::SigningKey for TokenKey {
 }
 
 /// The audit key signs checkpoints through the signer port
-/// (ADR-0028 clause 10): one
+/// (SEC-append-only-audit-record §10): one
 /// `C_Sign` over the digest the writer computes. The checkpoint is its own signature's entry, so
 /// no `pkcs11.signed` is written beside it.
 impl crate::checkpoint::CheckpointSigner for TokenKey {

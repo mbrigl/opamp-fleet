@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-build-hardening.sh. Verifies: ADR-0008
+# Self-test of scripts/check-build-hardening.sh. Verifies: DEV-six-crates-tokio-axum
 #
 # Each case builds a fixture under a temporary directory — a release workflow, a second workflow,
 # rust-toolchain.toml, Cargo.toml and the crate roots the check names — runs the check against
@@ -107,7 +107,7 @@ repo() {
 expect() {
   local want="$1" name="$2" dir="$3" needle="${4:-}"
   local out rc
-  out="$(bash "$CHECK" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$CHECK" --root "$dir" 2>&1)"; rc=$?
   if [[ "$want" == "pass" && $rc -eq 0 && ( -z "$needle" || "$out" == *"$needle"* ) ]] \
      || [[ "$want" == "fail" && $rc -ne 0 && ( -z "$needle" || "$out" == *"$needle"* ) ]]; then
     passed=$((passed + 1))

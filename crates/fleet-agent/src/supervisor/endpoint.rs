@@ -1,4 +1,4 @@
-//! The Supervisor Endpoint (ADR-0016, ADR-0019): the loopback OpAMP endpoint every Supervisor
+//! The Supervisor Endpoint (CLT-modes-and-gateway, CLT-supervisor-mode-and-kinds): the loopback OpAMP endpoint every Supervisor
 //! exposes, WebSocket-only — what a Managed Process carrying an OpAMP client of its own
 //! (notably the Collector's `opampextension`) connects to.
 //!
@@ -7,7 +7,7 @@
 //! Supervisor's. It is not a Server in the specification's sense — it manages no fleet, holds
 //! no configuration, and serves exactly one local process; for a Foreign Agent nothing ever
 //! connects, and that is the whole of the handling. The communication itself is
-//! `opamp::server`'s, the same endpoint the Server and the Gateway sit on (ADR-0008).
+//! `opamp::server`'s, the same endpoint the Server and the Gateway sit on (DEV-six-crates-tokio-axum).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,8 +36,8 @@ pub struct Endpoint {
     max_message_size: usize,
     /// How long a connection may take to its first request, and an HTTP/1 request to its headers.
     header_read_timeout: Duration,
-    /// What a connection must present as `Authorization: Bearer …` (ADR-0016); empty asks nothing.
-    /// Wiped when it is dropped (ADR-0015).
+    /// What a connection must present as `Authorization: Bearer …` (CLT-modes-and-gateway); empty asks nothing.
+    /// Wiped when it is dropped (SEC-secrets-wiped-on-drop).
     token: Zeroizing<String>,
 }
 
@@ -67,7 +67,7 @@ impl Endpoint {
         })
     }
 
-    /// Asks every connection for `token` (ADR-0016).
+    /// Asks every connection for `token` (CLT-modes-and-gateway).
     #[must_use]
     pub fn with_token(mut self, token: Zeroizing<String>) -> Self {
         self.token = token;
@@ -75,7 +75,7 @@ impl Endpoint {
     }
 
     /// Tightens the header bound, which also bounds the time to a connection's first request —
-    /// what a test waits out instead of the 30 seconds every OpAMP listener applies (ADR-0008).
+    /// what a test waits out instead of the 30 seconds every OpAMP listener applies (DEV-six-crates-tokio-axum).
     #[must_use]
     pub fn with_header_read_timeout(mut self, timeout: Duration) -> Self {
         self.header_read_timeout = timeout;
@@ -110,7 +110,7 @@ impl Endpoint {
                 any_path: true,
             },
         );
-        // On the listener every OpAMP endpoint is served on (ADR-0008), so a local process that
+        // On the listener every OpAMP endpoint is served on (DEV-six-crates-tokio-axum), so a local process that
         // falls silent mid-request is bounded as a remote one is.
         let handle = Handle::new();
         let trigger = handle.clone();
@@ -139,13 +139,13 @@ struct Folding {
     events: EventSender,
     shutdown: Shutdown,
     /// The `Authorization` value a connection must carry; `None` asks nothing. Wiped when it is
-    /// dropped (ADR-0015).
+    /// dropped (SEC-secrets-wiped-on-drop).
     expected: Option<Zeroizing<String>>,
 }
 
-/// A fresh token for one Supervisor start (ADR-0016): 32 bytes from the system's secure random
+/// A fresh token for one Supervisor start (CLT-modes-and-gateway): 32 bytes from the system's secure random
 /// source, hex. The bytes and the token are held in buffers wiped when they are dropped, the token
-/// sized up front so it is never grown (ADR-0015).
+/// sized up front so it is never grown (SEC-secrets-wiped-on-drop).
 ///
 /// # Errors
 /// Returns an error when no secure random source is available.
@@ -163,7 +163,7 @@ pub fn new_token() -> Result<Zeroizing<String>, String> {
     Ok(token)
 }
 
-/// `Bearer <token>`, sized up front so the buffer is never grown and left behind (ADR-0015).
+/// `Bearer <token>`, sized up front so the buffer is never grown and left behind (SEC-secrets-wiped-on-drop).
 fn bearer(token: &str) -> Zeroizing<String> {
     const SCHEME: &str = "Bearer ";
     let mut value = Zeroizing::new(String::with_capacity(SCHEME.len() + token.len()));
@@ -305,7 +305,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     /// A fake `opampextension`: connects, reports, and expects the capability echo.
-    /// Verifies: ADR-0016
+    /// Verifies: CLT-modes-and-gateway
     #[tokio::test]
     async fn extension_reports_are_folded_into_process_events() {
         let (event_tx, mut events) = mpsc::channel(16);
@@ -417,7 +417,7 @@ mod tests {
     /// A process that reports its components as a hash alone is asked for the map once per hash:
     /// not again when it answers without the map, again when the hash changes, and not when the
     /// map arrives.
-    /// Verifies: ADR-0019
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn a_hash_without_the_map_is_asked_for_the_map_once() {
         let (event_tx, _events) = mpsc::channel(16);
@@ -460,7 +460,7 @@ mod tests {
         assert!(!asks(&exchange(&mut socket, &reporting(b"b", true)).await));
     }
 
-    /// Verifies: ADR-0016
+    /// Verifies: CLT-modes-and-gateway
     #[tokio::test]
     async fn shutdown_stops_the_endpoint() {
         let (event_tx, _events) = mpsc::channel(16);
@@ -512,7 +512,7 @@ mod tests {
     /// the WebSocket upgrade is dropped, other connections are served while it hangs, and the
     /// endpoint serves the next one afterwards — the measure, since a listener that died would
     /// drop the first connection too.
-    /// Verifies: ADR-0008
+    /// Verifies: DEV-six-crates-tokio-axum
     #[tokio::test]
     async fn a_half_finished_upgrade_is_dropped_and_the_endpoint_keeps_serving() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -548,7 +548,7 @@ mod tests {
 
     /// Only the Managed Process reports through the endpoint: a connection without the token
     /// handed to the process is refused before the upgrade, one with it is served.
-    /// Verifies: ADR-0016
+    /// Verifies: CLT-modes-and-gateway
     #[tokio::test]
     async fn the_endpoint_admits_only_the_token_it_handed_out() {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;

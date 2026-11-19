@@ -3,12 +3,15 @@
 The language, its build, test, and lint commands, and the sensors that check what an agent
 wrote. Every project decides it at setup; the template ships none. The toolchain ADR is the one
 the review skill, the pull request template, and the shape entries of this catalogue name when
-they speak of "the sensors the toolchain ADR names".
+they speak of "the sensors the toolchain ADR names". It carries the header field
+`Role: toolchain`
+([NUC-base-is-fixed §3](../../../../docs/adr/NUC-base-is-fixed.md)).
 
 The sensors come in three kinds:
 
 - **Behaviour:** the tests, and the `Verifies:` markers that tie them to the decisions and
-  criteria they protect ([ADR-0002](../../../../docs/adr/0002-decisions-verified-by-tests.md)).
+  criteria they protect
+  ([NUC-decisions-cite-tests §2](../../../../docs/adr/NUC-decisions-cite-tests.md)).
 - **Maintainability:** what agents get wrong most: a module or function grown too large or too
   complex, logic written a second time, code nothing calls, a test removed or skipped, and a
   suite that passes without asserting much, which mutation testing measures.
@@ -37,13 +40,14 @@ of `checks.yml` runs after setting up the toolchain; and, for each column of the
 tool or "none" and why, and where it runs. A job with a matrix, such as one per operating
 system, reports one check run per entry, so the required checks of `CONTRIBUTING.md` name those,
 `build (ubuntu-latest)`, and not the job. A job of `checks.yml` keeps the name GitHub gives it,
-with no `name:` of its own, since check 9 holds the required checks to the job's id. A workflow
-that publishes, such as a release, is named on a `# Not a gate:` line of `scripts/check-all.sh`.
+with no `name:` of its own, since the rule `docs/check-lists` holds the required checks to the
+job's id. A workflow that publishes, such as a release, is named on a `# Not a gate:` line of
+`scripts/check-all.sh`.
 
 ## Does not fit
 
-- Commands written inline in the workflow: they run in CI and never in the pre-push hook; check 9
-  of `scripts/check-docs.sh` fails on such a job.
+- Commands written inline in the workflow: they run in CI and never in the pre-push hook; the
+  rule `docs/check-lists` of `scripts/check-docs.sh` fails on such a job.
 - A sensor that runs only in someone's head: it is a rule in prose.
 - A slow suite as a job of `checks.yml`: it gates every push; it is a workflow of its own on a
   schedule.
@@ -51,8 +55,8 @@ that publishes, such as a release, is named on a `# Not a gate:` line of `script
 ## The rule a test decides
 
 The golden path's tests cite the toolchain ADR with a `Verifies:` marker, and the ADR flips to
-accepted with them. Check 9 of `scripts/check-docs.sh` holds the build job, the local runner, and
-the required checks of `CONTRIBUTING.md` together.
+accepted with them. The rule `docs/check-lists` of `scripts/check-docs.sh` holds the build job,
+the local runner, and the required checks of `CONTRIBUTING.md` together.
 
 ## Sensors
 

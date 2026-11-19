@@ -18,19 +18,24 @@
 #      'git push' either runs it earlier itself or names the job that does in its 'needs:', so a
 #      version with a known advisory is never tagged. Only a direct 'needs:' counts.
 #   5. Compiler: rust-toolchain.toml pins 'channel' to an exact 'MAJOR.MINOR.PATCH'
-#      (ADR-0008 clause 11), not a moving channel name.
+#      (DEV-six-crates-tokio-axum §11), not a moving channel name.
 #   6. Release profile: Cargo.toml has a '[profile.release]' with 'overflow-checks = true'.
 #   7. Unsafe code: the crate roots in FORBID_UNSAFE carry '#![forbid(unsafe_code)]'. The roots
 #      not listed (the Client's library and binaries, the Server's binary) hold documented unsafe.
 #
 # Full-line '#' comments are not read. Pure bash + coreutils/grep/awk. Usage:
-#     scripts/check-build-hardening.sh [repository root]
+#     scripts/check-build-hardening.sh [--root <dir>]
 # The root defaults to this repository; scripts/test-check-build-hardening.sh passes fixtures.
-# Exit code 0 when the check passes, 1 otherwise.
+# Exit code 0 when the check passes, 1 otherwise, and 2 on an argument it does not read or a
+# root that is no directory.
 
 set -uo pipefail
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-build-hardening.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 WORKFLOWS=".github/workflows"
 RELEASE="$WORKFLOWS/release.yml"
 FORBID_UNSAFE=(
@@ -149,9 +154,9 @@ fi
 # 5. Compiler.
 toolchain="$ROOT/rust-toolchain.toml"
 if [[ ! -f "$toolchain" ]]; then
-  add_error "rust-toolchain.toml: not found — ADR-0008 clause 11 pins the compiler there"
+  add_error "rust-toolchain.toml: not found — DEV-six-crates-tokio-axum §11 pins the compiler there"
 elif ! grep -qE '^[[:space:]]*channel[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+"[[:space:]]*$' <<< "$(uncommented "$toolchain")"; then
-  add_error "rust-toolchain.toml: 'channel' is not an exact 'MAJOR.MINOR.PATCH' — a channel name moves under every build (ADR-0008 clause 11)"
+  add_error "rust-toolchain.toml: 'channel' is not an exact 'MAJOR.MINOR.PATCH' — a channel name moves under every build (DEV-six-crates-tokio-axum §11)"
 fi
 
 # 6. Release profile.

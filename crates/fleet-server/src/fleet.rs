@@ -1,5 +1,5 @@
 //! In-memory fleet state, keyed by Instance UID — never by the connection that carried a message
-//! (ADR-0016). Each context that changes it is a submodule, which imports by name what it takes
+//! (CLT-modes-and-gateway). Each context that changes it is a submodule, which imports by name what it takes
 //! from the root, its siblings and the crate.
 
 #![deny(clippy::wildcard_imports)]
@@ -57,13 +57,13 @@ pub const DEFAULT_MAX_PACKAGE_SIZE: usize = 1024 * 1024 * 1024; // 1 GiB
 /// caller can fill by uploading under many names (see `server.toml`, `max_total_package_bytes`).
 pub const DEFAULT_MAX_TOTAL_PACKAGE_SIZE: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
-/// Three times the Baseline's own default heartbeat of 30 seconds (ADR-0029).
+/// Three times the Baseline's own default heartbeat of 30 seconds (SRV-fleet-record-agents-hosts).
 pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(90);
 
 /// The most Agent records the fleet holds when nothing configures a ceiling (see `server.toml`,
 /// `max_agents`). Generous enough that a real fleet never meets it, low enough that the in-memory
 /// map and the per-Agent files it mirrors to disk stay bounded when an unauthenticated endpoint is
-/// flooded with fresh, self-asserted UIDs (ADR-0026).
+/// flooded with fresh, self-asserted UIDs (SEC-admission-by-client-certificate).
 pub const DEFAULT_MAX_AGENTS: usize = 100_000;
 
 /// The heartbeat interval an Agent is held to where this Server offers none: the OpAMP default,
@@ -76,7 +76,7 @@ pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
     | ServerCapabilities::AcceptsEffectiveConfig as u64;
 
 /// Identifies one WebSocket connection for the duplicate detection the Baseline asks of the
-/// Server. Never a routing key — Agents are routed by `instance_uid` alone (ADR-0016); this only
+/// Server. Never a routing key — Agents are routed by `instance_uid` alone (CLT-modes-and-gateway); this only
 /// answers "is this identity already alive on *another* connection?".
 pub type ConnId = u64;
 
@@ -126,10 +126,10 @@ pub struct AgentRecord {
     /// runtime-only. An Agent that answers the demand without the map is not asked again for the
     /// same hash, or every answer would draw the next demand.
     pub components_demanded: Option<Vec<u8>>,
-    /// The outcome of the last connection-settings offer this Agent reported (ADR-0013); its
+    /// The outcome of the last connection-settings offer this Agent reported (SEC-connection-settings-never-plaintext); its
     /// hash is what gates re-offering.
     pub connection_settings_status: Option<ConnectionSettingsStatus>,
-    /// The package statuses this Agent last reported (ADR-0033); the
+    /// The package statuses this Agent last reported (PKG-signed-packages-and-delivery); the
     /// `server_provided_all_packages_hash` inside is what gates re-offering packages.
     pub package_statuses: Option<PackageStatuses>,
     /// The WebSocket connection currently carrying this Agent; `None` for plain HTTP, whose
@@ -139,39 +139,38 @@ pub struct AgentRecord {
     /// When the connection that carries it last carried a report of it, in milliseconds since the
     /// epoch — runtime-only. An older connection of its host takes it back once this is a
     /// heartbeat interval old
-    /// (ADR-0025
-    /// clause 8).
+    /// (SRV-instances-share-one-postgresql §8).
     pub carried_ms: u64,
     /// Whether this Server heard the Agent report since it started — runtime-only. What it holds
     /// of one it did not is what it loaded, which on a shared store another instance may have
     /// written since.
     pub heard: bool,
-    /// The operator's labels for this Agent (ADR-0029), part of its persisted record (ADR-0029
-    /// clause 21): they follow a re-key and leave with a forget.
+    /// The operator's labels for this Agent (SRV-fleet-record-agents-hosts), part of its persisted record (SRV-fleet-record-agents-hosts §21):
+    /// they follow a re-key and leave with a forget.
     pub labels: BTreeMap<String, String>,
-    /// The Host this Agent last arrived over (ADR-0029 clause 16): its own on a direct connection,
+    /// The Host this Agent last arrived over (SRV-fleet-record-agents-hosts §16): its own on a direct connection,
     /// the Gateway's behind one. For the fleet view and label inheritance; it grants nothing.
     pub host: Option<String>,
     /// Where the Host and the Client Agent place this Agent — derived, never persisted.
     pub placement: Placement,
     /// The instance that holds it, as a shared store read it
-    /// (ADR-0025
-    /// clause 13); `None` for what this Server holds in memory.
+    /// (SRV-instances-share-one-postgresql §13);
+    /// `None` for what this Server holds in memory.
     pub holder: Option<crate::agent_store::Holder>,
-    /// What the operator's last rollout released to this Agent (ADR-0032 clause 6). **Every offer
+    /// What the operator's last rollout released to this Agent (SRV-deployments-and-pinned-rollouts §6). **Every offer
     /// is composed from this**; matching only proposes. Written by the rollout acts, persisted like
-    /// `restart_pending` — operator intent that survives a restart (ADR-0029). `None` is what it
+    /// `restart_pending` — operator intent that survives a restart (SRV-fleet-record-agents-hosts). `None` is what it
     /// says: nothing has been rolled out.
     pub assignment: Option<Assignment>,
 }
 
-/// One Agent's assignment (ADR-0032 clause 6): one release, pinned as of the press that wrote it
+/// One Agent's assignment (SRV-deployments-and-pinned-rollouts §6): one release, pinned as of the press that wrote it
 /// and replaced whole by the next.
 ///
 /// The Deployment is carried alongside the release rather than derived from it, because a
 /// Deployment re-aimed or edited after the act must not change what an Agent was given, nor what
 /// the fleet view says it was given through. The signature a package offer travels with is the
-/// entry's own (ADR-0033).
+/// entry's own (PKG-signed-packages-and-delivery).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assignment {
     /// The Deployment the release went through.
@@ -187,7 +186,7 @@ pub struct Assignment {
 
 impl Assignment {
     /// Whether a stored assignment keeps the rules its write met, which both stores ask on load
-    /// (ADR-0039 clause 4): the Deployment's and each Configuration's name keep the name grammar
+    /// (SRV-state-stores-contract-pair §4): the Deployment's and each Configuration's name keep the name grammar
     /// of [`validate_name`](crate::configs::validate_name), and each pinned revision is named by
     /// a content hash, the form [`revision_hash`](crate::configs::revision_hash) gives. Whether
     /// the revision is still retained is not asked. Each store names the record before the
@@ -217,7 +216,7 @@ impl Assignment {
 static NO_CONFIGURATIONS: BTreeMap<String, String> = BTreeMap::new();
 
 impl AgentRecord {
-    /// What a Selector is matched against (ADR-0029 clause 18): the Host's values, what the Agent
+    /// What a Selector is matched against (SRV-fleet-record-agents-hosts §18): the Host's values, what the Agent
     /// reported, its own labels and its Client Agent's, each key from the first that has it.
     ///
     /// Borrowed when it adds nothing to the report, which is the overwhelming majority of Agents —
@@ -252,7 +251,7 @@ impl AgentRecord {
             .map_or(&NO_CONFIGURATIONS, |a| &a.configurations)
     }
 
-    /// What this Agent last reported as installed, per package name (ADR-0032): the versions
+    /// What this Agent last reported as installed, per package name (SRV-deployments-and-pinned-rollouts): the versions
     /// the upgrade test measures a Package against. A package reported with an empty
     /// `agent_has_version` — offered, not yet installed — carries no version and is left out, so
     /// it reads as "nothing installed under that name" rather than as an unorderable value.
@@ -265,12 +264,11 @@ impl AgentRecord {
             .collect()
     }
 
-    /// What of this record survives a restart (ADR-0029): everything report-derived or
+    /// What of this record survives a restart (SRV-fleet-record-agents-hosts): everything report-derived or
     /// operator-queued, never what a live connection knows.
     /// Where it is connected, as a presence batch writes it.
     /// What its derived values come from
-    /// (ADR-0030
-    /// clause 8).
+    /// (API-lists-paged-by-cursor §8).
     fn source<'a>(&'a self, uid: &'a InstanceUid) -> crate::listing::Source<'a> {
         crate::listing::Source {
             uid,
@@ -311,7 +309,7 @@ impl AgentRecord {
     }
 
     /// A restored record is **disconnected with no owning connection** until live evidence says
-    /// otherwise — connectedness is runtime-only (ADR-0029). Its placement is derived once the
+    /// otherwise — connectedness is runtime-only (SRV-fleet-record-agents-hosts). Its placement is derived once the
     /// fleet is whole.
     fn from_persisted(persisted: PersistedAgent) -> AgentRecord {
         AgentRecord {
@@ -352,7 +350,7 @@ pub enum RestartError {
     Storage(String),
 }
 
-/// Why forgetting an Agent was refused (`DELETE /api/v1/agents/{uid}`, ADR-0029).
+/// Why forgetting an Agent was refused (`DELETE /api/v1/agents/{uid}`, SRV-fleet-record-agents-hosts).
 pub enum ForgetError {
     /// No Agent of that identity is known.
     UnknownAgent,
@@ -364,7 +362,7 @@ pub enum ForgetError {
     Storage(String),
 }
 
-/// Why a rollout act (ADR-0032 clause 9) was refused.
+/// Why a rollout act (SRV-deployments-and-pinned-rollouts §9) was refused.
 #[derive(Debug)]
 pub enum RolloutError {
     /// No Agent of that identity is known.
@@ -380,7 +378,7 @@ pub enum RolloutError {
     Storage(String),
 }
 
-/// Why deleting a Configuration was refused (ADR-0032 clause 12).
+/// Why deleting a Configuration was refused (SRV-deployments-and-pinned-rollouts §12).
 #[derive(Debug)]
 pub enum DeleteError {
     /// An Agent's assignment pins it; the message says how many.
@@ -389,18 +387,18 @@ pub enum DeleteError {
     Storage(String),
 }
 
-/// The one `OpAMPConnectionSettings` this Server offers (ADR-0013), precompiled from the
+/// The one `OpAMPConnectionSettings` this Server offers (SEC-connection-settings-never-plaintext), precompiled from the
 /// `[connection_offer]` section with the hash that gates its delivery.
 pub struct ConnectionOffer {
     settings: OpAmpConnectionSettings,
 }
 
-/// The own-telemetry destinations this Server offers (ADR-0018), precompiled from
+/// The own-telemetry destinations this Server offers (CLT-what-an-agent-reports), precompiled from
 /// `[telemetry_offer]`. Part of the same `ConnectionSettingsOffers` message the OpAMP settings
 /// ride, and hashed with them: one offer, one hash, one acknowledgement.
 ///
 /// A field here is `Some` for every signal the section mentions, **including one it withdraws** —
-/// a destination whose endpoint is empty (ADR-0018). That is why a withdrawal counts as something
+/// a destination whose endpoint is empty (CLT-what-an-agent-reports). That is why a withdrawal counts as something
 /// to offer in [`is_empty`](Self::is_empty): it has to reach the Agent to take effect, and a
 /// Server that has it to say declares `OffersConnectionSettings` for it like any other offer.
 #[derive(Default, Clone)]
@@ -418,15 +416,15 @@ impl TelemetryOffer {
 
 impl ConnectionOffer {
     /// The offer of `settings`. Its hash is computed over the whole `ConnectionSettingsOffers` at
-    /// send time, because an offer carries telemetry destinations too (ADR-0018) and the Agent
+    /// send time, because an offer carries telemetry destinations too (CLT-what-an-agent-reports) and the Agent
     /// acknowledges the message rather than any one part of it.
     pub fn new(settings: OpAmpConnectionSettings) -> Self {
         ConnectionOffer { settings }
     }
 }
 
-/// The wall clock's port (ADR-0009): when an Agent was last heard from, and how long ago that
-/// is (ADR-0029). The system clock ([`SystemClock`](crate::clock::SystemClock)) is what the
+/// The wall clock's port (DEV-ports-and-adapters): when an Agent was last heard from, and how long ago that
+/// is (SRV-fleet-record-agents-hosts). The system clock ([`SystemClock`](crate::clock::SystemClock)) is what the
 /// composition root wires.
 pub trait Clock: Send + Sync {
     /// Milliseconds since the Unix epoch.
@@ -434,8 +432,8 @@ pub trait Clock: Send + Sync {
 }
 
 /// The port of the time that has passed, as a lease and a sweep measure it
-/// (ADR-0025
-/// clause 3, ADR-0039 clause 14): a clock that counts the time the host was suspended, which the
+/// (SRV-instances-share-one-postgresql §3,
+/// SRV-state-stores-contract-pair §14): a clock that counts the time the host was suspended, which the
 /// binary hands the lease and the package store (on Linux `CLOCK_BOOTTIME`). A reading is the time since an origin of the
 /// clock's own: two readings of one clock compare, readings of two clocks do not. The adapters'
 /// constructors are in [`crate::clock`].
@@ -481,16 +479,15 @@ impl UseCase {
     }
 }
 
-/// The CSR flow's port (ADR-0026): what signs an Agent's certificate signing request. The local
+/// The CSR flow's port (SEC-admission-by-client-certificate): what signs an Agent's certificate signing request. The local
 /// CA ([`ClientCa`](crate::ca::ClientCa)) is the adapter the composition root wires when
 /// `[client_ca]` is configured.
 pub trait CertificateSigner: Send + Sync {
     /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself. Its subject
     /// carries `subject` — the values copied from the bootstrap certificate or the predecessor
-    /// (ADR-0016 clause 23 and ADR-0027 clause 12) — and never the request's. `use_case` is what
+    /// (CLT-modes-and-gateway §23 and SEC-bootstrap-certificates-and-enrolment §12) — and never the request's. `use_case` is what
     /// asked for it, which the audit entry of a signature with a token key names
-    /// (ADR-0026
-    /// clause 38).
+    /// (SEC-admission-by-client-certificate §38).
     ///
     /// # Errors
     /// Returns an error when the request does not parse or cannot be signed.
@@ -502,21 +499,21 @@ pub trait CertificateSigner: Send + Sync {
         use_case: UseCase,
     ) -> Result<Signed, String>;
 
-    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0016
-    /// clause 18); `Ok(None)` when it carries none.
+    /// The certificate a CSR proves it renews, when it carries a renewal proof (CLT-modes-and-gateway §18);
+    /// `Ok(None)` when it carries none.
     ///
     /// # Errors
     /// Returns the `BadRequest` text for a proof that does not hold.
     fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String>;
 
-    /// The issuer and serial of the bootstrap certificate a CSR's bootstrap proof names (ADR-0016
-    /// clause 18), read without checking the proof; `Ok(None)` when it carries none.
+    /// The issuer and serial of the bootstrap certificate a CSR's bootstrap proof names (CLT-modes-and-gateway §18),
+    /// read without checking the proof; `Ok(None)` when it carries none.
     ///
     /// # Errors
     /// Returns the `BadRequest` text for a proof that does not parse.
     fn bootstrap_proof_id(&self, csr_pem: &str) -> Result<Option<CertId>, String>;
 
-    /// Checks the request's claims to an `instance_uid` against its sender's (ADR-0026).
+    /// Checks the request's claims to an `instance_uid` against its sender's (SEC-admission-by-client-certificate).
     ///
     /// # Errors
     /// Returns the `BadRequest` text for a request that claims another identity.
@@ -527,7 +524,7 @@ pub trait CertificateSigner: Send + Sync {
 /// WebSocket loops subscribe to.
 pub struct AppState {
     fleet: Mutex<HashMap<InstanceUid, AgentRecord>>,
-    /// Where Agent records survive a restart (ADR-0029) — the port, never a concrete backend:
+    /// Where Agent records survive a restart (SRV-fleet-record-agents-hosts) — the port, never a concrete backend:
     /// the filesystem adapter is merely what [`AppState::new`] wires by default.
     agent_store: Box<dyn AgentStore>,
     /// What this instance keeps of each Agent beside its record and its group, dropped by a forget
@@ -539,59 +536,59 @@ pub struct AppState {
     push: watch::Sender<u64>,
     /// Hands every WebSocket connection its identity for the duplicate detection.
     next_conn: AtomicU64,
-    /// The connection settings offered to the fleet (ADR-0013); `None` offers nothing and leaves
+    /// The connection settings offered to the fleet (SEC-connection-settings-never-plaintext); `None` offers nothing and leaves
     /// `OffersConnectionSettings` undeclared.
     connection_offer: Option<ConnectionOffer>,
-    /// The packages offered to the fleet (ADR-0033); `None` offers nothing and leaves
+    /// The packages offered to the fleet (PKG-signed-packages-and-delivery); `None` offers nothing and leaves
     /// `OffersPackages` undeclared.
     packages: Option<PackageOffering>,
-    /// The authority that signs Agent CSRs (ADR-0026); `None` signs nothing and leaves
+    /// The authority that signs Agent CSRs (SEC-admission-by-client-certificate); `None` signs nothing and leaves
     /// `AcceptsConnectionSettingsRequest` undeclared.
     client_ca: Option<Box<dyn CertificateSigner>>,
-    /// The enrolment window and its queue (ADR-0026); `None` while `[enrolment]` is not set, and no
+    /// The enrolment window and its queue (SEC-admission-by-client-certificate); `None` while `[enrolment]` is not set, and no
     /// host enrols.
     enrolment: Option<Arc<Enrolment>>,
-    /// The bootstrap certificates the Server issued (ADR-0027); `None` while `[enrolment]` is not
+    /// The bootstrap certificates the Server issued (SEC-bootstrap-certificates-and-enrolment); `None` while `[enrolment]` is not
     /// set.
     bootstrap: Option<Arc<crate::bootstrap::BootstrapCertificates>>,
-    /// What the client CA signed and what is revoked (ADR-0026); `None` only where a test serves
+    /// What the client CA signed and what is revoked (SEC-admission-by-client-certificate); `None` only where a test serves
     /// without it.
     revocations: Option<Arc<Revocations>>,
-    /// The floor of each Agent type (ADR-0034); `None` only where a test serves without it.
+    /// The floor of each Agent type (PKG-versions-high-water-mark-floor); `None` only where a test serves without it.
     floors: Option<Arc<crate::floors::PackageFloors>>,
-    /// The audit record every security decision goes to (ADR-0028); `None` only in tests.
+    /// The audit record every security decision goes to (SEC-append-only-audit-record); `None` only in tests.
     audit: Option<Arc<dyn Audit>>,
-    /// How often an admitted peer may be heard (ADR-0012); `None` only in tests.
+    /// How often an admitted peer may be heard (SEC-tls13-two-planes-bounded-input); `None` only in tests.
     agent_rate: Option<Arc<crate::agent_rate::AgentRate>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
-    /// Where Agents send their own telemetry (ADR-0018); empty offers no destination.
+    /// Where Agents send their own telemetry (CLT-what-an-agent-reports); empty offers no destination.
     telemetry_offer: TelemetryOffer,
     /// The message size limit both transports enforce, in each direction (the Baseline's MUST).
     max_message_size: usize,
-    /// The largest package artifact the REST API accepts on upload (ADR-0033) — a program, not a
+    /// The largest package artifact the REST API accepts on upload (PKG-signed-packages-and-delivery) — a program, not a
     /// message, so it is bounded separately and far more generously.
     max_package_size: usize,
     /// The total size of all stored artifacts the REST API keeps before it refuses a new upload
-    /// (ADR-0033): what bounds the store — and so the disk — against many uploads under distinct
+    /// (PKG-signed-packages-and-delivery): what bounds the store — and so the disk — against many uploads under distinct
     /// names, where `max_package_size` bounds only one.
     max_total_package_bytes: u64,
     /// The bytes of uploads still arriving, counted against `max_total_package_bytes` beside the
     /// stored artifacts, so uploads sent at once cannot pass the ceiling together.
     uploading_bytes: AtomicU64,
     /// How long an Agent that promised to report periodically may be silent before the fleet view
-    /// calls it stale (ADR-0029). Overridden by an offered heartbeat interval, which is the period
+    /// calls it stale (SRV-fleet-record-agents-hosts). Overridden by an offered heartbeat interval, which is the period
     /// this Server actually asked for.
     stale_after: Duration,
     /// The most Agent records the fleet holds at once. A report bearing a new `instance_uid` past
     /// this ceiling is refused `Unavailable` rather than admitted, so a peer cycling fresh UIDs —
     /// each of which would pin an in-memory record and a persisted file — cannot exhaust memory or
-    /// disk (a self-asserted UID is free to mint, ADR-0026). Existing Agents keep reporting; only
+    /// disk (a self-asserted UID is free to mint, SEC-admission-by-client-certificate). Existing Agents keep reporting; only
     /// growth past the ceiling is refused. The real defence against a flood is admission by client
-    /// certificate (ADR-0026); this is the backstop that bounds what an admitted peer can do.
+    /// certificate (SEC-admission-by-client-certificate); this is the backstop that bounds what an admitted peer can do.
     max_agents: usize,
     /// How often an instance on a shared store writes the presence of the Agents it carries
-    /// (ADR-0029 clause 4); zero where the store keeps none.
+    /// (SRV-fleet-record-agents-hosts §4); zero where the store keeps none.
     /// What is stored may be one interval old, so it adds to the staleness budget (clause 8).
     presence_interval: Duration,
     /// The lease this instance serves under on a shared store, whose instance id the presence
@@ -601,7 +598,7 @@ pub struct AppState {
     /// is answered; unset where there is no lease.
     proof: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
     /// The Agents forgotten while a WebSocket carried them, by that connection, until its loop
-    /// takes them and ends their session (ADR-0029 clause 10). Locked strictly after `fleet`.
+    /// takes them and ends their session (SRV-fleet-record-agents-hosts §10). Locked strictly after `fleet`.
     forgotten: Mutex<HashMap<ConnId, Vec<InstanceUid>>>,
     /// Each Agent's own lock, one of [`AGENT_LOCKS`] by its `instance_uid`. A report holds its
     /// Agent's from its start to its answer, across what it reads and writes in the store, and
@@ -622,8 +619,8 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Builds the state on any backend for the Agent records, their labels included (ADR-0029), and
-    /// the Configurations (ADR-0032). The ports are the only thing the fleet logic knows about that
+    /// Builds the state on any backend for the Agent records, their labels included (SRV-fleet-record-agents-hosts), and
+    /// the Configurations (SRV-deployments-and-pinned-rollouts). The ports are the only thing the fleet logic knows about that
     /// persistence, so a database or an external store is an implementation of [`AgentStore`] or
     /// [`ConfigBackend`] plus one wiring call.
     pub fn with_stores(
@@ -640,7 +637,7 @@ impl AppState {
             );
         }
         // Every restored Agent comes back disconnected — what it last reported is knowledge,
-        // whether it is still there is not (ADR-0029) — and in the channel its labels put it in.
+        // whether it is still there is not (SRV-fleet-record-agents-hosts) — and in the channel its labels put it in.
         //
         // A record carrying no assignments is simply one nothing has been rolled out to. There is
         // no seed to run: the store this Server would have migrated from is not supported, so an
@@ -648,8 +645,7 @@ impl AppState {
         //
         // On a shared store an instance holds only the Agents it carries, each loaded at its first
         // report here, and loads none at startup
-        // (ADR-0025
-        // clause 8).
+        // (SRV-instances-share-one-postgresql §8).
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
         let restored = if agent_store.is_shared() {
@@ -664,8 +660,8 @@ impl AppState {
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
         }
-        // A rollout cut short leaves at most a revision no assignment references (ADR-0039
-        // clause 2); it is collected here, before anything is offered.
+        // A rollout cut short leaves at most a revision no assignment references (SRV-state-stores-contract-pair §2);
+        // it is collected here, before anything is offered.
         for config in configs.list() {
             configs.retain_only(
                 &config.name,
@@ -723,7 +719,7 @@ impl AppState {
         self.max_message_size
     }
 
-    /// Sets the largest package artifact the REST API accepts on upload (ADR-0033).
+    /// Sets the largest package artifact the REST API accepts on upload (PKG-signed-packages-and-delivery).
     #[must_use]
     pub fn with_max_package_size(mut self, limit: usize) -> Self {
         self.max_package_size = limit;
@@ -736,7 +732,7 @@ impl AppState {
     }
 
     /// Sets the whole-store size limit the REST API enforces before accepting a new upload
-    /// (ADR-0033).
+    /// (PKG-signed-packages-and-delivery).
     #[must_use]
     pub fn with_max_total_package_bytes(mut self, limit: u64) -> Self {
         self.max_total_package_bytes = limit;
@@ -748,7 +744,7 @@ impl AppState {
         self.max_total_package_bytes
     }
 
-    /// Arms the connection-settings offer (ADR-0013); with it the Server declares
+    /// Arms the connection-settings offer (SEC-connection-settings-never-plaintext); with it the Server declares
     /// `OffersConnectionSettings`.
     #[must_use]
     pub fn with_connection_offer(mut self, offer: Option<ConnectionOffer>) -> Self {
@@ -756,7 +752,7 @@ impl AppState {
         self
     }
 
-    /// Sets how long a heartbeating Agent may be silent before it reads as stale (ADR-0029).
+    /// Sets how long a heartbeating Agent may be silent before it reads as stale (SRV-fleet-record-agents-hosts).
     #[must_use]
     pub fn with_stale_after(mut self, stale_after: Duration) -> Self {
         self.stale_after = stale_after;
@@ -764,7 +760,7 @@ impl AppState {
     }
 
     /// Sets the most Agent records the fleet holds at once — the backstop against a peer minting
-    /// fresh UIDs to exhaust memory and disk (ADR-0026 clause 12).
+    /// fresh UIDs to exhaust memory and disk (SEC-admission-by-client-certificate §12).
     #[must_use]
     pub fn with_max_agents(mut self, max_agents: usize) -> Self {
         self.max_agents = max_agents;
@@ -772,7 +768,7 @@ impl AppState {
     }
 
     /// Sets how often the presence of the Agents this instance carries is written to a shared
-    /// store (ADR-0029 clause 4), which the staleness budget
+    /// store (SRV-fleet-record-agents-hosts §4), which the staleness budget
     /// adds (clause 8).
     #[must_use]
     pub fn with_presence_interval(mut self, interval: Duration) -> Self {
@@ -782,7 +778,7 @@ impl AppState {
 
     /// Names the lease this instance serves under on a shared store: the presence it writes when
     /// an Agent connects here names that lease's instance id as the holder, at once
-    /// (ADR-0029 clause 11). Set once; a later call is
+    /// (SRV-fleet-record-agents-hosts §11). Set once; a later call is
     /// ignored.
     pub fn serve_under(&self, lease: watch::Receiver<Option<String>>) {
         let _ = self.lease.set(lease);
@@ -790,8 +786,8 @@ impl AppState {
 
     /// Answers the messages of Agents only while `holds` answers that the lease is held by its
     /// clock
-    /// (ADR-0025
-    /// clause 3). Set once; a later call is ignored.
+    /// (SRV-instances-share-one-postgresql §3).
+    /// Set once; a later call is ignored.
     pub fn answer_while(&self, holds: impl Fn() -> bool + Send + Sync + 'static) {
         let _ = self.proof.set(Box::new(holds));
     }
@@ -807,15 +803,14 @@ impl AppState {
     /// one — the period it actually asked for — else the configured default. Three of them, not
     /// one: a single missed heartbeat is a lost packet, and a fleet view that flickers on every
     /// hiccup is one nobody trusts. On a shared store the presence interval besides, since what is
-    /// stored may be one interval old (ADR-0029 clause 8).
+    /// stored may be one interval old (SRV-fleet-record-agents-hosts §8).
     fn stale_after(&self) -> Duration {
         self.heartbeat_budget() + self.presence_interval
     }
 
     /// One heartbeat interval: the one this Server offers, else 30 seconds, the default interval
     /// a WebSocket's silence is judged by without one
-    /// (ADR-0014
-    /// clause 2).
+    /// (API-silent-websocket-is-ended §2).
     fn heartbeat_interval(&self) -> Duration {
         self.connection_offer
             .as_ref()
@@ -837,14 +832,14 @@ impl AppState {
         }
     }
 
-    /// Offers the fleet somewhere to send its own telemetry (ADR-0018).
+    /// Offers the fleet somewhere to send its own telemetry (CLT-what-an-agent-reports).
     #[must_use]
     pub fn with_telemetry_offer(mut self, offer: TelemetryOffer) -> Self {
         self.telemetry_offer = offer;
         self
     }
 
-    /// Arms the CSR flow (ADR-0026); with it the Server declares
+    /// Arms the CSR flow (SEC-admission-by-client-certificate); with it the Server declares
     /// `AcceptsConnectionSettingsRequest` and signs the requests Agents send.
     #[must_use]
     pub fn with_client_ca(mut self, client_ca: Option<impl CertificateSigner + 'static>) -> Self {
@@ -852,7 +847,7 @@ impl AppState {
         self
     }
 
-    /// Arms enrolment (ADR-0026): a host with a bootstrap certificate may ask for its first one,
+    /// Arms enrolment (SEC-admission-by-client-certificate): a host with a bootstrap certificate may ask for its first one,
     /// and an operator decides.
     #[must_use]
     pub fn with_enrolment(mut self, enrolment: Option<Arc<Enrolment>>) -> Self {
@@ -860,7 +855,7 @@ impl AppState {
         self
     }
 
-    /// Arms the issuing of bootstrap certificates and their record (ADR-0027).
+    /// Arms the issuing of bootstrap certificates and their record (SEC-bootstrap-certificates-and-enrolment).
     #[must_use]
     pub fn with_bootstrap(
         mut self,
@@ -875,7 +870,7 @@ impl AppState {
         self.bootstrap.as_ref()
     }
 
-    /// Arms the register and the revocation list (ADR-0026).
+    /// Arms the register and the revocation list (SEC-admission-by-client-certificate).
     #[must_use]
     pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
         self.revocations = revocations;
@@ -885,7 +880,7 @@ impl AppState {
     }
 
     /// The fleet as the Operator plane reads it
-    /// (ADR-0039 clause 3): on a shared store every record as
+    /// (SRV-state-stores-contract-pair §3): on a shared store every record as
     /// stored, connected as its stored presence says, placed among the others, and nothing of what
     /// this instance holds in memory; on a store this Server alone writes, what it holds.
     ///
@@ -968,7 +963,7 @@ impl AppState {
         self.revocations.as_ref()
     }
 
-    /// Arms the floors (ADR-0034).
+    /// Arms the floors (PKG-versions-high-water-mark-floor).
     #[must_use]
     pub fn with_floors(mut self, floors: Option<Arc<crate::floors::PackageFloors>>) -> Self {
         self.floors = floors;
@@ -980,7 +975,7 @@ impl AppState {
         self.floors.as_ref()
     }
 
-    /// Arms the audit record (ADR-0028).
+    /// Arms the audit record (SEC-append-only-audit-record).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn Audit>>) -> Self {
         self.audit = audit;
@@ -992,7 +987,7 @@ impl AppState {
         self.audit.as_ref()
     }
 
-    /// Arms the rate limit on the Agent plane (ADR-0012).
+    /// Arms the rate limit on the Agent plane (SEC-tls13-two-planes-bounded-input).
     #[must_use]
     pub fn with_agent_rate(
         mut self,
@@ -1008,7 +1003,7 @@ impl AppState {
     }
 
     /// Records a decision this Server is about to act on; without a record it is not taken
-    /// (ADR-0028 clause 5).
+    /// (SEC-append-only-audit-record §5).
     fn audited(&self, entry: Entry) -> Result<(), String> {
         match &self.audit {
             Some(audit) => audit
@@ -1030,7 +1025,7 @@ impl AppState {
         self.enrolment.as_ref()
     }
 
-    /// Arms package delivery (ADR-0033); with a non-empty store the Server declares
+    /// Arms package delivery (PKG-signed-packages-and-delivery); with a non-empty store the Server declares
     /// `OffersPackages` and `AcceptsPackagesStatus`.
     #[must_use]
     pub fn with_packages(mut self, packages: Option<PackageOffering>) -> Self {
@@ -1043,7 +1038,7 @@ impl AppState {
         self.packages.as_ref().map(PackageOffering::store)
     }
 
-    /// Read access to the Deployment store, armed with the package store (ADR-0033).
+    /// Read access to the Deployment store, armed with the package store (PKG-signed-packages-and-delivery).
     pub fn deployment_store(&self) -> Option<&DeploymentStore> {
         self.packages.as_ref().map(PackageOffering::deployments)
     }
@@ -1054,7 +1049,7 @@ impl AppState {
     /// declared one never hollow.
     fn capabilities(&self) -> u64 {
         let mut caps = SERVER_CAPABILITIES;
-        // All three ways a `ConnectionSettingsOffers` leaves this Server (ADR-0013 clause 3): the
+        // All three ways a `ConnectionSettingsOffers` leaves this Server (SEC-connection-settings-never-plaintext §3): the
         // standing `[connection_offer]`, the own-telemetry destinations of `[telemetry_offer]`, and
         // the certificate a `[client_ca]` issues in answer to a CSR — which travels as an ordinary
         // offer. Keying the bit on the first alone left the other two exercising a capability this
@@ -1083,7 +1078,7 @@ fn parse_hex_uid(uid: &str) -> Option<InstanceUid> {
     ))
 }
 
-/// Whether nothing has been heard from this Agent for longer than its budget (ADR-0029).
+/// Whether nothing has been heard from this Agent for longer than its budget (SRV-fleet-record-agents-hosts).
 ///
 /// Gated on `ReportsHeartbeat`: an Agent that never promised to report periodically is not late,
 /// however long it has been quiet, and flagging it would train an operator to ignore the flag.
@@ -1099,7 +1094,7 @@ fn is_stale(record: &AgentRecord, stale_after: Duration, now_ms: u64) -> bool {
 ///
 /// The two are deliberately not the same test. Calling an Agent *stale* accuses it of being late,
 /// which is only fair when it declared `ReportsHeartbeat` and so promised to be punctual. Asking
-/// whether it is safe to forget (ADR-0029) is a question about evidence, not about promises: an
+/// whether it is safe to forget (SRV-fleet-record-agents-hosts) is a question about evidence, not about promises: an
 /// Agent nobody has heard from cannot be disturbed by being forgotten, whatever it once declared.
 fn is_silent(record: &AgentRecord, budget: Duration, now_ms: u64) -> bool {
     now_ms.saturating_sub(record.last_seen_ms) > budget.as_millis() as u64
@@ -1114,7 +1109,7 @@ mod tests {
 
     /// The host derived for a certificate that names none is the one this Server derived before
     /// the derivation moved into `fleet-core`: hosts already in the register keep their ids.
-    /// Verifies: ADR-0016
+    /// Verifies: CLT-modes-and-gateway
     #[test]
     fn a_derived_host_is_the_one_the_register_already_holds() {
         use sha2::Digest as _;
@@ -1128,8 +1123,8 @@ mod tests {
 
     /// The gatewayed case, which is why this exists: the connection is up — it is the Gateway's —
     /// and the Agent behind it has stopped talking. Both facts are reported, neither overwrites
-    /// the other (ADR-0029).
-    // Verifies: ADR-0029
+    /// the other (SRV-fleet-record-agents-hosts).
+    // Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn an_agent_that_stopped_reporting_is_stale_while_its_connection_is_up() {
         let mut record = record_with(opamp::proto::AgentCapabilities::ReportsHeartbeat as u64);
@@ -1159,7 +1154,7 @@ mod tests {
 
     /// The offered interval wins over the configured default: it is the period this Server actually
     /// asked for, so it is the one silence should be measured against.
-    /// Verifies: ADR-0013
+    /// Verifies: SEC-connection-settings-never-plaintext
     #[test]
     fn an_offered_heartbeat_interval_sets_the_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1186,7 +1181,7 @@ mod tests {
     use crate::revocation::Presented;
     use opamp::proto::{AgentToServer, AgentToServerFlags};
 
-    // ---- Hosts, the effective description and label inheritance (ADR-0029) ----
+    // ---- Hosts, the effective description and label inheritance (SRV-fleet-record-agents-hosts) ----
 
     /// Whether a Selector of `pairs` matches this Agent — the one test every Selector is decided by.
     fn selects(state: &AppState, uid: &InstanceUid, pairs: &[(&str, &str)]) -> bool {
@@ -1202,7 +1197,7 @@ mod tests {
     /// An Agent on a direct connection carries its Host's subject values as `fleet.host.*`; an
     /// Agent that reports `fleet.host.organization` itself is not selected by it, and the attribute
     /// is listed as ignored. Without a host register an Agent names no Host.
-    /// Verifies: ADR-0029
+    /// Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn a_direct_agent_matches_its_hosts_values_and_none_it_reports_itself() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1274,7 +1269,7 @@ mod tests {
     /// A Supervisor Agent matches a Selector on a label set only on its Client Agent, its own label
     /// of the same key wins, the Agents tab is told which labels are inherited, and all of it
     /// survives a restart.
-    /// Verifies: ADR-0029
+    /// Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn a_supervisor_agent_inherits_its_client_agents_labels_below_its_own() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1322,7 +1317,7 @@ mod tests {
     /// refused one — is ignored after a restart: no Selector matches it on the Agent or on its
     /// Client's other Agents, it is not inherited, the fleet row lists it as ignored, and the next
     /// label set put without it removes it.
-    /// Verifies: ADR-0029
+    /// Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn a_stored_label_in_the_supervisors_space_matches_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1371,7 +1366,7 @@ mod tests {
     /// Behind a Gateway an Agent carries no `fleet.host.*`; the Agents sharing a `host.id` inherit
     /// their Client Agent's labels, and two Client Agents with one `host.id` leave every Agent of it
     /// inheriting nothing and marked ambiguous.
-    /// Verifies: ADR-0029
+    /// Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn behind_a_gateway_agents_sharing_a_host_id_inherit_unless_ambiguous() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1430,7 +1425,7 @@ mod tests {
     /// A Client Agent re-keyed by a compressed message — no description to place it by — stays
     /// its group's Client Agent: its Supervisor Agents keep inheriting its labels, and a label set
     /// on its new identity reaches them.
-    /// Verifies: ADR-0029
+    /// Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn a_client_agent_rekeyed_without_a_description_keeps_its_group_inheriting() {
         let dir = tempfile::tempdir().expect("tempdir");

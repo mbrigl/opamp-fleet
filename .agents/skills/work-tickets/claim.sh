@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Claims a ticket under docs/plan/ by its branch, ticket/<spec>/<NN>-<slug> (ADR-0006).
+# Claims a ticket under docs/plan/ by its branch, ticket/<spec>/<NN>-<slug>
+# (NUC-large-work-is-planned §4).
 #
 # Without a remote, the claim is the local branch, created at main: it holds among the sessions
 # that share this repository, its worktrees included, because git refuses a branch that exists.
@@ -13,9 +14,10 @@
 # at the same main would both win; a nonce keeps two claims made in the same second apart. The
 # push skips the pre-push hook: the commit carries the tree of the remote's main unchanged, so
 # the checks have nothing to decide on it, and running the build for a claim costs minutes.
-# Only the harness ADR grants this push (AGENTS.md, section 6). A claim given up is released by
-# deleting its branch where it was made; on a remote that is a push the grant does not cover,
-# so a human makes it.
+# NUC-main-only-via-pr §2 lets the harness ADR grant this push as a standing instruction, and §6
+# lets the granted push skip the hook. A claim given up is released by deleting its branch
+# where it was made, only on the human's instruction (NUC-main-only-via-pr §2); on a remote
+# that is a push the grant does not cover, so a human makes it.
 #
 # The ticket must be on main, local or the remote's: the worker's worktree starts from there,
 # and other clones read the frontier from there.
@@ -26,6 +28,9 @@
 # Prints the branch on success. Exit code 0 when this session holds the claim, 2 when another
 # session was first, 1 on anything else.
 set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR source=../../../scripts/lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib/bash.sh"
 
 # shellcheck source-path=SCRIPTDIR source=../../../scripts/lib/ticket.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib/ticket.sh"

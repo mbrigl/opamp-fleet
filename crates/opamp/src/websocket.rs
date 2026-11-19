@@ -1,5 +1,5 @@
 //! The configuration of every WebSocket the Server's endpoint and the Client's socket open, with
-//! `tungstenite` (ADR-0008, ADR-0012): one place, so the two ends cannot drift apart.
+//! `tungstenite` (DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input): one place, so the two ends cannot drift apart.
 
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
@@ -17,7 +17,7 @@ pub(crate) const READ_BUFFER_SIZE: usize = 4 * 1024;
 /// The configuration of every WebSocket either end opens: the receive limit, the per-frame cap
 /// moved with it, and the [`READ_BUFFER_SIZE`]. Left at its default, the per-frame cap would refuse
 /// messages *below* the configured limit, which is the limit's business, not the framing's. One
-/// function, so the Server's endpoint and the Client's socket cannot drift apart (ADR-0008).
+/// function, so the Server's endpoint and the Client's socket cannot drift apart (DEV-six-crates-tokio-axum).
 pub(crate) fn websocket_config(limit: usize) -> WebSocketConfig {
     WebSocketConfig::default()
         .read_buffer_size(READ_BUFFER_SIZE)
@@ -33,7 +33,7 @@ mod tests {
     /// while the receive limit and the per-frame cap stay the configured limit, and the write side
     /// stays at its defaults. The Server's endpoint and the Client's socket build their
     /// configuration nowhere else.
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[test]
     fn every_websocket_reads_into_a_small_buffer_under_the_configured_limit() {
         let default = WebSocketConfig::default();

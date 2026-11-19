@@ -14,25 +14,6 @@ main_merge_base() {
   return 1
 }
 
-# enter_root <name> <script> [--root <dir>] — change to the repository the sensor reads: the one
-# the script lives in, as the checks find theirs, or the one '--root' names, as a self-test does
-# with its fixtures. Sets ROOT_TAKEN to the number of arguments the option took, 0 or 2, for the
-# caller to shift; exits 2 when the directory does not exist.
-# shellcheck disable=SC2034 # ROOT_TAKEN is the caller's
-enter_root() {
-  local name="$1" script="$2" root
-  root="$(cd "$(dirname "$script")/.." && pwd)"
-  ROOT_TAKEN=0
-  if [[ "${3:-}" == "--root" ]]; then
-    root="${4:-}"
-    ROOT_TAKEN=2
-  fi
-  if [[ -z "$root" ]] || ! cd "$root" 2>/dev/null; then
-    echo "$name: '$root' is not a directory." >&2
-    exit 2
-  fi
-}
-
 # resolve_change <name> <base> [head] — the change a sensor reads, from the base and head it was
 # given. Sets CHANGE_HEAD to the head, or HEAD when none is given, and CHANGE_WORKTREE to 1 when
 # none is given, for a change that ends in the working tree, else 0. Sets CHANGE_BASE to the base,

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-backlog.sh. Verifies: ADR-0006
+# Self-test of scripts/sensor-backlog.sh. Verifies: NUC-large-work-is-planned
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 #
 # Each case builds a throwaway git repository under a temporary directory, records backlog
 # entries under docs/backlog/ on main or on branches, runs the sensor against it, and asserts the
@@ -54,7 +54,7 @@ entry() {
 expect() {
   local want="$1" name="$2" dir="$3" needle="$4" absent="${5:-}"
   local out rc
-  out="$(bash "$SENSOR" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" --root "$dir" 2>&1)"; rc=$?
   if [[ $rc -eq "$want" && "$out" == *"$needle"* && ( -z "$absent" || "$out" != *"$absent"* ) ]]; then
     passed=$((passed + 1))
     return
@@ -106,7 +106,7 @@ mkdir -p "$r/docs/plan/s"
 printf '# Ticket: fixture\n\n## Blocked by\n\n- None (can start immediately)\n\n## Mode\n\nwith the human\n' \
   > "$r/docs/plan/s/01-real.md"
 expect 0 "an entry is no ticket: the frontier sensor ignores it" "$r" "not-a-ticket.md"
-out="$(bash "$FRONTIER" "$r" 2>&1)"; rc=$?
+out="$(bash "$FRONTIER" --root "$r" 2>&1)"; rc=$?
 check "an entry is no ticket: the frontier sensor reads the ticket and no entry" \
   test "$rc" -eq 0 -a "${out/not-a-ticket/}" == "$out" -a "${out/01-real/}" != "$out"
 

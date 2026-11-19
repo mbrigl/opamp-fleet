@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Sensor: design revision due (ADR-0006).
+# Sensor: design revision due (NUC-design-is-revised).
 #
 # Reads the 'Last design revision' line of docs/ARCHITECTURE.md — the date of the last revision,
 # or 'none yet', and the number of changes after which the next is due — counts the commits that
@@ -18,27 +18,35 @@
 # The line:  **Last design revision:** <YYYY-MM-DD [(<n>)] or none yet>, due after <N> changes.
 #
 # Pure bash + git + coreutils. Usage:
-#     scripts/sensor-revision-due.sh [repository root]
+#     scripts/sensor-revision-due.sh [--root <dir>]
 # The root defaults to this repository; scripts/test-sensor-revision-due.sh passes fixtures.
-# Exit code 0 when the line was read, 1 otherwise.
+# Exit code 0 when the line was read, 1 otherwise, and 2 on an argument it does not read
+# or a root that is no directory.
 
 set -uo pipefail
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
+
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-revision-due.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 OVERVIEW="docs/ARCHITECTURE.md"
 LINE_RE='\*\*Last design revision:\*\*[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2}( \([1-9][0-9]*\))?|none yet),[[:space:]]+due after[[:space:]]+([1-9][0-9]*)[[:space:]]+changes\.'
 
 if [[ ! -f "$ROOT/$OVERVIEW" ]]; then
-  echo "Design revision sensor: $OVERVIEW not found — the 'Last design revision' line lives there (ADR-0006)." >&2
+  echo "Design revision sensor: $OVERVIEW not found — the 'Last design revision' line lives there (NUC-design-is-revised §4)." >&2
   exit 1
 fi
 line="$(grep -m1 -F '**Last design revision:**' "$ROOT/$OVERVIEW")"
 if [[ -z "$line" ]]; then
-  echo "Design revision sensor: $OVERVIEW has no '**Last design revision:**' line — add one: '**Last design revision:** none yet, due after 20 changes.' (ADR-0006)" >&2
+  echo "Design revision sensor: $OVERVIEW has no '**Last design revision:**' line — add one: '**Last design revision:** none yet, due after 50 changes.' (NUC-design-is-revised §4)" >&2
   exit 1
 fi
 if ! [[ "$line" =~ $LINE_RE ]]; then
-  echo "Design revision sensor: the 'Last design revision' line of $OVERVIEW is unreadable — it reads '<YYYY-MM-DD [(<n>)] or none yet>, due after <N> changes.' (ADR-0006)" >&2
+  echo "Design revision sensor: the 'Last design revision' line of $OVERVIEW is unreadable — it reads '<YYYY-MM-DD [(<n>)] or none yet>, due after <N> changes.' (NUC-design-is-revised §4)" >&2
   exit 1
 fi
 date="${BASH_REMATCH[1]}"
@@ -68,7 +76,7 @@ if ((count < number)); then
   echo "Design revision sensor: $count of $number changes outside docs/ since $from — not yet due."
   exit 0
 fi
-echo "Design revision sensor: $count changes outside docs/ since $from, due after $number — DUE: run the design-revision skill over the directories they touched, then move the line (ADR-0006)."
+echo "Design revision sensor: $count changes outside docs/ since $from, due after $number — DUE: run the design-revision skill over the directories they touched, then move the line (NUC-design-is-revised §5)."
 # One line per top-level entry and commit, so the number beside it counts changes, not files.
 while read -r n entry; do
   [[ -e "$ROOT/${entry%/}" ]] && printf '  - %s (%s change%s)\n' "$entry" "$n" "$( ((n == 1)) || echo s)"

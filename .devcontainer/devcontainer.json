@@ -4,7 +4,8 @@
   // Pinned to a Debian *release*, not the floating `:debian` tag.
   "image": "mcr.microsoft.com/devcontainers/base:debian12",
   // No workspaceFolder or workspaceMount: the default, /workspaces/<directory name>, keeps each
-  // project under a path of its own, and an agent keys its memory by the path (ADR-0004).
+  // project under a path of its own, and an agent keys its memory by the path
+  // (NUC-container-hides-host-daemon §5).
 
   "remoteUser": "vscode",
   "containerEnv": {
@@ -28,15 +29,16 @@
   "initializeCommand": "mkdir \"${localEnv:HOME}${localEnv:USERPROFILE}/.claude\" || exit 0",
 
   // DevContainer Features layered on top of the base image. The container intentionally has NO
-  // access to the host Docker daemon (no socket mount) — see ADR-0004. Manage the host's containers
-  // from a host-side VS Code extension instead (CONTRIBUTING.md → "Dev Container").
+  // access to the host Docker daemon (no socket mount) — see NUC-container-hides-host-daemon §2.
+  // Manage the host's containers from a host-side VS Code extension instead (CONTRIBUTING.md →
+  // "Host container management").
   "features": {
     // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
     // credential helper. A push and every gh action wait for a human instruction
-    // (AGENTS.md, section 6).
+    // (NUC-main-only-via-pr §2).
     "ghcr.io/devcontainers/features/github-cli:1": {},
     // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
-    // toolchain (ADR-0008). The build chain needs no system protoc (ADR-0011 uses the
+    // toolchain (DEV-six-crates-tokio-axum). The build chain needs no system protoc (API-protocol-pinned-interop-checked uses the
     // pure-Rust protox), so no extra system packages are required here.
     "ghcr.io/devcontainers/features/rust:1": {}
   },
@@ -44,7 +46,7 @@
   // System packages the base image does not carry, installed once when the container is created.
   //
   // All four are *developer tooling* — nothing shipped depends on them, which is why the first
-  // three need no ADR (AGENTS.md §3.6); the fourth is ADR-0026's below — and each earns
+  // three need no ADR (NUC-decisions-are-proposed-then-accepted §2); the fourth is SEC-admission-by-client-certificate's below — and each earns
   // its place:
   //
   //   shellcheck  the shell lint, from the base image's signed Debian archive, so the pre-push
@@ -58,8 +60,8 @@
   //   softhsm2  the PKCS#11 token the tests of the Server's keys on a token run against, as the
   //             CI runner's do; scripts/check-rust.sh and scripts/check-store.sh give it a
   //             configuration and a token directory of their own, outside the repository
-  //             (ADR-0026
-  //             clause 39). Without it those tests skip locally.
+  //             (SEC-admission-by-client-certificate §39).
+  //             Without it those tests skip locally.
   "postCreateCommand": {
     "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm softhsm2"
   },
@@ -70,9 +72,9 @@
   // CONTRIBUTING.md → "Git hooks". The development observability stack runs on the host,
   // apart from this container (observability/compose.yaml); this puts its Collector on the
   // container's loopback, 127.0.0.1:4317 and :4318, because the Client sends own telemetry in
-  // plaintext to a loopback IP literal alone (ADR-0018), the stack's rustfs on :9100, the S3
-  // store a development Server may use (ADR-0039), and its PostgreSQL on :5432, the database it may
-  // keep its records in (ADR-0039). See observability/README.md.
+  // plaintext to a loopback IP literal alone (CLT-what-an-agent-reports), the stack's rustfs on :9100, the S3
+  // store a development Server may use (SRV-state-stores-contract-pair), and its PostgreSQL on :5432, the database it may
+  // keep its records in (SRV-state-stores-contract-pair). See observability/README.md.
   "postStartCommand": {
     "hooks": "git config core.hooksPath .githooks",
     "merge": "git config merge.ff false && git config pull.ff only",
@@ -94,7 +96,7 @@
     }
   },
 
-  // The Server's two planes (ADR-0012), published the way each one is meant to be reached.
+  // The Server's two planes (SEC-tls13-two-planes-bounded-input), published the way each one is meant to be reached.
   //
   // The Agent plane (4320, OpAMP + package downloads) is where the fleet connects, so `appPort`
   // publishes it through Docker itself (`-p 0.0.0.0:4320:4320`) and the Server is reachable from

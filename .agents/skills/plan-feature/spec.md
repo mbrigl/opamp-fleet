@@ -5,7 +5,8 @@
      is disposable: the design revision deletes it once its tickets have merged, and whatever has
      to last moves into docs/SPECIFICATION.md, an ADR, docs/ARCHITECTURE.md, docs/GLOSSARY.md, or
      docs/CONVENTIONS.md first. No file paths or code; they go stale. How it is written is the
-     plan-feature skill under .agents/skills/. Decided in docs/adr/0006-feature-layer.md. -->
+     plan-feature skill under .agents/skills/. Its sections are the parts a spec carries, as
+     docs/adr/NUC-large-work-is-planned.md decides (clause 3). -->
 
 ## Problem
 
@@ -40,7 +41,8 @@
 <!-- Modules touched and the interfaces that change, schema and contract changes, clarifications
      from the human, in the project vocabulary, without file paths or code snippets. Any decision
      that is architecture-relevant is an ADR, not a bullet here
-     (AGENTS.md [§3](../../../AGENTS.md#3-adr-rules)). -->
+     ([NUC-decisions-are-proposed-then-accepted §1](../../../docs/adr/NUC-decisions-are-proposed-then-accepted.md)).
+     -->
 
 -
 
@@ -59,6 +61,8 @@
 
 ## ADR impact
 
-<!-- Which ADRs in force bind this work (by number, from the Binding table of
-     docs/adr/README.md), and whether it needs a new `proposed` ADR before implementation starts
-     (AGENTS.md [§3](../../../AGENTS.md#3-adr-rules)). "None" is an answer; write why. -->
+<!-- Which ADRs in force bind this work (by identifier, the `NUC-` ones included, as
+     scripts/sensor-binding-adrs.sh lists them), and whether it needs a new `proposed` ADR before
+     implementation starts
+     ([NUC-decisions-are-proposed-then-accepted §2](../../../docs/adr/NUC-decisions-are-proposed-then-accepted.md)).
+     "None" is an answer; write why. -->

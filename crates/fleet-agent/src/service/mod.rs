@@ -1,4 +1,4 @@
-//! Everything that makes the Client an OS service (ADR-0021) lives in this module: the daemon
+//! Everything that makes the Client an OS service (CLT-installed-service-and-state) lives in this module: the daemon
 //! runtime with graceful shutdown ([`runtime`]), the versioned install layout ([`layout`]), and
 //! the cross-platform service lifecycle ([`manager`]), and the questionnaire's enrolment
 //! ([`enrol`]). The Windows SCM runtime shim joins as a `cfg(windows)` submodule.
@@ -50,7 +50,7 @@ impl ServiceState {
     }
 }
 
-/// The narrow lifecycle seam (ADR-0021): everything a future updater needs, and nothing more.
+/// The narrow lifecycle seam (CLT-installed-service-and-state): everything a future updater needs, and nothing more.
 pub trait ServiceControl {
     /// Start the installed service.
     ///

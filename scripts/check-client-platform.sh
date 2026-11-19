@@ -3,10 +3,10 @@
 # Lints and tests the Client on the platform it runs on: the 'client-windows' and 'client-macos'
 # jobs of .github/workflows/checks.yml run it on Windows and macOS. The Client carries
 # platform-specific service paths, the Windows SCM shim and launchd's semantics, that a lint on
-# Linux never compiles (ADR-0021). fleet-tools is linted too: every Client archive carries
-# `opamp-fleetctl`, Windows included (ADR-0036). fleet-util is linted and tested with them: its
+# Linux never compiles (CLT-installed-service-and-state). fleet-tools is linted too: every Client archive carries
+# `opamp-fleetctl`, Windows included (OPS-operator-program-fleetctl). fleet-util is linted and tested with them: its
 # no-follow file operations and unpackers have a Unix and a Windows path, and both the Client and
-# the tool run them (ADR-0008). On Linux, scripts/check-rust.sh lints and tests
+# the tool run them (DEV-six-crates-tokio-axum). On Linux, scripts/check-rust.sh lints and tests
 # the Client for Linux, so this one lints it for Windows through cargo-xwin, as README.md → "Build,
 # Test & Run" writes it, and a Windows-only compile error shows before a push rather than in CI.
 # Without cargo-xwin or its target it says so and skips; no CI job runs it on Linux.
@@ -15,12 +15,19 @@
 # x86_64-pc-windows-msvc as well.
 #
 # Usage:
-#     scripts/check-client-platform.sh
+#     scripts/check-client-platform.sh [--root <dir>]
 # Exit code 0 when everything passes; the first failing command ends the run.
+# It exits 2 on an argument it does not read or a root that is no directory.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+# A macOS runner runs this under its bash 3.2, where an empty "${ARGS[@]}" under 'set -u' is an
+# unbound variable: ${ARGS[@]+"${ARGS[@]}"} expands to nothing instead.
+usage="scripts/check-client-platform.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 ${ARGS[@]+"${ARGS[@]}"}
 
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 

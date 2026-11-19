@@ -3,6 +3,13 @@
 # Fail on any error, an unset variable, or a failure anywhere in a pipeline.
 set -euo pipefail
 
+# It reads its own repository, or another one only as --root <dir>, and takes no other argument.
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/install_tools.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
+
 # Pinned versions, and the SHA-256 of every artifact this script downloads. Each download is
 # verified against its pinned digest before it is extracted or run — this installs to /usr/local/bin
 # and runs an installer, both as root via sudo, so a compromised release asset, a poisoned mirror, or
@@ -44,7 +51,7 @@ verify_sha256 "$core_tgz" "$OTELCOL_CORE_SHA256"
 echo "Extracting otelcol to /usr/local/bin..."
 sudo tar -xvf "$core_tgz" -C /usr/local/bin otelcol
 
-# 3. Stage the minimal example Configurations (ADR-0031) for the two Collectors into
+# 3. Stage the minimal example Configurations (SRV-configurations-compose-one-map) for the two Collectors into
 # fleet-data/configurations/, so the Server offers them from its next start (see the seed script for
 # the Selector mapping and usage notes).
 echo "Staging example test Configurations..."

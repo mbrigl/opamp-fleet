@@ -6,8 +6,7 @@
 **Who reads this.** Whoever changes how a wrapped agent is packed, and whoever changes what its kind
 knows. Every wrapped kind has a document here, `<agent>.md`, the one place both sides state the
 same facts about its artifact, so a release that moves something can be answered on both at once
-([ADR-0019](../adr/0019-supervisor-mode-and-its-kinds.md)
-clause 20).
+([CLT-supervisor-mode-and-kinds §20](../adr/CLT-supervisor-mode-and-kinds.md)).
 
 Each document has the same eight sections: the source (repository, tag form, version reading); the
 assets per platform and their naming; integrity (checksum form and location); the treatment (as

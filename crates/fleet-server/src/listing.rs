@@ -1,5 +1,5 @@
 //! The lists that grow with the fleet, read a page at a time
-//! (ADR-0030):
+//! (API-lists-paged-by-cursor):
 //! the filters, the order, the opaque cursor, and what an Agent's record gives the queries to
 //! search and sort by.
 //!
@@ -223,7 +223,7 @@ pub struct Derived {
     pub service_name: String,
     /// Every reported key outside the Server's `fleet.` space, with the value a Selector matches,
     /// `None` where the first value reported is no string or an empty one: the key is taken, and
-    /// no label can stand in for it (ADR-0029 clause 18).
+    /// no label can stand in for it (SRV-fleet-record-agents-hosts §18).
     pub reported: BTreeMap<String, Option<String>>,
     /// `host.id=…` or `host.name=…`, empty when neither is reported.
     pub machine: String,
@@ -250,18 +250,18 @@ pub struct DisplayValues {
     pub instance_name: String,
     /// The `service.version` the Agent reported.
     pub build: String,
-    /// The version a reader is shown (ADR-0037).
+    /// The version a reader is shown (OPS-cargo-decides-product-version).
     pub version: String,
     /// `os.description`, or `os.type` where no description is reported.
     pub os: String,
-    /// The Platform the offer reads (ADR-0033 clause 14), empty where none is reported.
+    /// The Platform the offer reads (PKG-signed-packages-and-delivery §14), empty where none is reported.
     pub platform: String,
     /// The name of the remote configuration status, `UNSET` where none is reported.
     pub config: &'static str,
 }
 
-/// An Agent's service name and instance name, each read only from the attribute set ADR-0018
-/// clauses 1 and 2 give it: `service.name` from the identifying attributes,
+/// An Agent's service name and instance name, each read only from the attribute set CLT-what-an-agent-reports §1 and §2
+/// give it: `service.name` from the identifying attributes,
 /// `service.instance.name` from the non-identifying ones. Empty where it is not reported there.
 #[must_use]
 pub fn names(
@@ -492,7 +492,7 @@ pub struct Candidate<'a> {
     pub holder: Option<&'a str>,
     /// The Host it last arrived over.
     pub host: Option<&'a str>,
-    /// What a Selector is matched against (ADR-0029 clause 18).
+    /// What a Selector is matched against (SRV-fleet-record-agents-hosts §18).
     pub effective: Option<&'a AgentDescription>,
     pub own: &'a BTreeMap<String, String>,
     pub inherited: &'a BTreeMap<String, String>,
@@ -562,7 +562,7 @@ mod tests {
 
     /// Pages follow each other without a gap or a repeat, ties broken by the tiebreak, in either
     /// direction, and the last page names no next one.
-    /// Verifies: ADR-0030
+    /// Verifies: API-lists-paged-by-cursor
     #[test]
     fn pages_follow_each_other_in_a_stable_order() {
         let entries = || {
@@ -601,7 +601,7 @@ mod tests {
 
     /// The search text carries the platform the offer reads: folded through the core's table, and
     /// read from the identifying attributes where the non-identifying ones do not carry it.
-    /// Verifies: ADR-0030, ADR-0033
+    /// Verifies: API-lists-paged-by-cursor, PKG-signed-packages-and-delivery
     #[test]
     fn the_search_finds_an_agent_under_its_canonical_platform() {
         let search = |identifying: &[(&str, &str)], non_identifying: &[(&str, &str)]| {

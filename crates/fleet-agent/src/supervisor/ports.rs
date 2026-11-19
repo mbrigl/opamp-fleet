@@ -1,4 +1,4 @@
-//! The Managed-Process-facing Port (ADR-0019): the boundary the supervision domain defines and
+//! The Managed-Process-facing Port (CLT-supervisor-mode-and-kinds): the boundary the supervision domain defines and
 //! depends on. A Plugin is an adapter behind it — a factory that validates its block's settings
 //! and starts a task driving one Managed Process.
 //!
@@ -18,12 +18,11 @@ use tokio::sync::mpsc;
 
 use crate::shutdown::Shutdown;
 
-/// The health status a Supervisor reports while the second service cannot be reached (ADR-0022
-/// clause 17).
+/// The health status a Supervisor reports while the second service cannot be reached (CLT-accounts-service-runs-under §17).
 pub const UNREACHABLE: &str = "the second service cannot be reached";
 
 /// What a Supervisor reports while the second service is reached and refused: another account
-/// serves its socket, it is another build, or it refuses the Client (ADR-0022 clauses 19 and 20).
+/// serves its socket, it is another build, or it refuses the Client (CLT-accounts-service-runs-under §19 and §20).
 /// Not an outage that ends by itself, so it is told apart from [`UNREACHABLE`].
 pub const REFUSED: &str =
     "the second service is refused: another account, another build, or it refuses this Client";
@@ -31,7 +30,7 @@ pub const REFUSED: &str =
 /// Why `health` says that the second service is not reached — [`UNREACHABLE`] or [`REFUSED`] —
 /// or `None` where it says nothing of the kind. While it says so, a configuration that is
 /// `APPLYING` and a package that is `Installing` wait for the service, and the Agent names it as the
-/// reason (ADR-0022 clause 17).
+/// reason (CLT-accounts-service-runs-under §17).
 #[must_use]
 pub fn waiting_reason(health: &ComponentHealth) -> Option<&str> {
     let waits = !health.healthy && (health.status == UNREACHABLE || health.status == REFUSED);
@@ -45,15 +44,15 @@ pub enum ProcessCommand {
     /// to the adapter's [`config_dir`](SupervisorContext::config_dir). Apply it, which for a
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`] — where the start does not reach the second service, once
-    /// a start does (ADR-0022 clause 17).
+    /// a start does (CLT-accounts-service-runs-under §17).
     ApplyConfig {
         config: AgentRemoteConfig,
-        /// The span of the apply this command is one half of (ADR-0018). The core opens it when the
+        /// The span of the apply this command is one half of (CLT-what-an-agent-reports). The core opens it when the
         /// configuration is handed over and the adapter's phases hang off it, so one trace covers
         /// the restart and its health gate rather than ending where the message does.
         span: tracing::Span,
     },
-    /// A package was downloaded and verified (content hash and signature; ADR-0033): swap its
+    /// A package was downloaded and verified (content hash and signature; PKG-signed-packages-and-delivery): swap its
     /// bytes over the Managed Process's binary, restart, and health-gate exactly as `ApplyConfig`
     /// does — a binary that will not stay up is rolled back to the previous one. Answered with
     /// [`ProcessEvent::PackageApplied`]. `staged` is the path of the verified artifact — a file,
@@ -61,12 +60,12 @@ pub enum ProcessCommand {
     /// hash the status refers to; `version` is what the Agent then reports it has. While the
     /// second service cannot be reached, the package is staged and kept, never swapped in, and
     /// the answer follows its swap once a start reaches the service; a newer package replaces it
-    /// unanswered (ADR-0022 clause 17).
+    /// unanswered (CLT-accounts-service-runs-under §17).
     ApplyPackage {
         staged: PathBuf,
         version: String,
         hash: Vec<u8>,
-        /// The span of the install (ADR-0018), opened where the download started. Carried rather
+        /// The span of the install (CLT-what-an-agent-reports), opened where the download started. Carried rather
         /// than reopened here: staging, preflight, swap, gate and rollback happen in the adapter's
         /// task, and a trace that ended at the hand-over would stop one phase before the failures
         /// worth tracing.
@@ -78,11 +77,11 @@ pub enum ProcessCommand {
     Restart,
     /// Stop the Managed Process gracefully.
     Shutdown,
-    /// The Supervisor is retired for good (ADR-0019): stop the Managed Process, undo whatever
+    /// The Supervisor is retired for good (CLT-supervisor-mode-and-kinds): stop the Managed Process, undo whatever
     /// installing it left *outside* the Supervisor's directory — the generic implementation has
     /// nothing there, so its uninstall is exactly the graceful stop — answer with
     /// [`ProcessEvent::Uninstalled`], and exit. The directory itself is the core's to purge
-    /// (ADR-0019), after the answer.
+    /// (CLT-supervisor-mode-and-kinds), after the answer.
     Uninstall,
 }
 
@@ -92,10 +91,10 @@ pub enum ProcessEvent {
     /// The process's own description (reported through the Supervisor Endpoint), folded into
     /// the Agent's — its identity (`service.instance.id`) stays the Supervisor's.
     Description(AgentDescription),
-    /// The pid of the running Managed Process, or `None` once it is gone (ADR-0018). It is what
+    /// The pid of the running Managed Process, or `None` once it is gone (CLT-what-an-agent-reports). It is what
     /// lets this Client sample the process's own CPU and memory from the outside, which is the
     /// only honest reading of "own telemetry" for a process whose configuration it must not touch
-    /// (ADR-0019).
+    /// (CLT-supervisor-mode-and-kinds).
     Pid(Option<u32>),
     /// Health — derived from the outside (spawned, exited, spawn failed) or self-reported.
     Health(ComponentHealth),
@@ -111,12 +110,12 @@ pub enum ProcessEvent {
         result: Result<(), String>,
     },
     /// Outcome of an [`ProcessCommand::ApplyPackage`]: `Ok(version)` reports `Installed` at that
-    /// version, `Err` reports `InstallFailed` with the error after rolling back (ADR-0033).
+    /// version, `Err` reports `InstallFailed` with the error after rolling back (PKG-signed-packages-and-delivery).
     PackageApplied {
         hash: Vec<u8>,
         result: Result<String, String>,
     },
-    /// Outcome of a [`ProcessCommand::Uninstall`] (ADR-0019), the adapter's last event. The
+    /// Outcome of a [`ProcessCommand::Uninstall`] (CLT-supervisor-mode-and-kinds), the adapter's last event. The
     /// Agent's goodbye carries no status, so the outcome is a log line — but an `Err` names what
     /// the retired kind could not undo, which the operator otherwise learns from nothing.
     Uninstalled { result: Result<(), String> },
@@ -147,7 +146,7 @@ impl EventSender {
 /// The two shapes share their whole lifecycle — set the old one aside, install the new one, prove
 /// it starts, put the old one back if it does not — and differ only in what "it" is. Keeping that
 /// difference in this type rather than inside the process adapter's swap is what lets the health
-/// gate and the rollback stay one piece of code for both (ADR-0033). How each shape is set aside,
+/// gate and the rollback stay one piece of code for both (PKG-signed-packages-and-delivery). How each shape is set aside,
 /// installed and put back is the adapter's, in [`process`](super::process).
 #[derive(Debug, Clone)]
 pub enum InstallTarget {
@@ -156,7 +155,7 @@ pub enum InstallTarget {
         /// Where the program lives.
         path: PathBuf,
         /// Where its archive holds it, where its kind knows the place
-        /// (ADR-0033 clause 55): the one member whose trailing
+        /// (PKG-signed-packages-and-delivery §55): the one member whose trailing
         /// path components are this, `/`-separated and without the archive's wrapping directory
         /// (`usr/bin/agent`), so a release that carries further files of the program's name
         /// installs the program and not one of those. `None` finds the member by the program's
@@ -172,7 +171,7 @@ pub enum InstallTarget {
         /// Where the program sits inside the tree, as written in the configuration.
         program_path: PathBuf,
         /// The absolute links the kind's tree keeps, the only links the install creates
-        /// (ADR-0033 clause 57).
+        /// (PKG-signed-packages-and-delivery §57).
         links: &'static [fleet_util::tree::KeptLink],
     },
 }
@@ -185,24 +184,24 @@ impl InstallTarget {
     }
 }
 
-/// The process account's primary group, where a process account is registered (ADR-0022 clause 21).
+/// The process account's primary group, where a process account is registered (CLT-accounts-service-runs-under §21).
 /// What the Client shares with the Managed Processes belongs to this group, and nothing else does.
 ///
 /// Resolved from the `--process-uid` of the Client's command line when it starts, never from the
 /// configuration file: the registration that names the process account is the only place it is
-/// stated (ADR-0022 clause 6).
+/// stated (CLT-accounts-service-runs-under §6).
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub u32);
 
 /// On Windows the process account itself, by its SID, from the `--process-sid` of the Client's
 /// command line: what the Client shares with the Managed Processes is granted to it by ACL, where
-/// Unix gives it to the account's group (ADR-0022 clause 21). Made once per run.
+/// Unix gives it to the account's group (CLT-accounts-service-runs-under §21). Made once per run.
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub &'static str);
 
-/// The package this Supervisor's Managed Process currently runs (ADR-0033), persisted so a
+/// The package this Supervisor's Managed Process currently runs (PKG-signed-packages-and-delivery), persisted so a
 /// restarted Client reports the version it has and is not re-offered it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstalledPackage {
@@ -212,13 +211,13 @@ pub struct InstalledPackage {
 }
 
 /// The highest package version this Client has installed for each Agent type — its **high-water
-/// mark** (ADR-0034 clause 8). Shared by every Supervisor of the Client and kept where no purge of
+/// mark** (PKG-versions-high-water-mark-floor §8). Shared by every Supervisor of the Client and kept where no purge of
 /// a Supervisor's directory reaches it. The filesystem adapter is
 /// [`HighWaterFile`](crate::storage::HighWaterFile).
 pub trait HighWaterMarks: Send + Sync {
     /// The mark of `agent_type`: `Ok(None)` when this Client has installed nothing of the type,
     /// and `Err` with a reason naming the file when the marks cannot be read — which refuses every
-    /// Supervisor package (ADR-0034 clause 11).
+    /// Supervisor package (PKG-versions-high-water-mark-floor §11).
     ///
     /// # Errors
     /// Returns the reason the marks cannot be read.
@@ -229,22 +228,22 @@ pub trait HighWaterMarks: Send + Sync {
     fn raise(&self, agent_type: &str, version: &str);
 }
 
-/// The floor of each Agent type this Client keeps (ADR-0034 clause 17): the highest version below
+/// The floor of each Agent type this Client keeps (PKG-versions-high-water-mark-floor §17): the highest version below
 /// which the operator signed that nothing of the type is taken. Shared by every Agent of the
 /// Client and kept where no purge reaches it. The filesystem adapter, which also fetches them, is
 /// [`FloorFile`](crate::floors::FloorFile).
 pub trait PackageFloors: Send + Sync {
     /// The floor of `agent_type`: `Ok(None)` when none is kept, and `Err` with a reason naming the
     /// file when the floors cannot be read — which refuses every package offer, the Client's own
-    /// included (ADR-0034 clause 17).
+    /// included (PKG-versions-high-water-mark-floor §17).
     ///
     /// # Errors
     /// Returns the reason the floors cannot be read.
     fn floor(&self, agent_type: &str) -> Result<Option<String>, String>;
 }
 
-/// What an Agent persists across restarts (ADR-0009): its identity, the remote configuration it
-/// last applied, and the package its Managed Process runs (ADR-0033). The filesystem adapter is
+/// What an Agent persists across restarts (DEV-ports-and-adapters): its identity, the remote configuration it
+/// last applied, and the package its Managed Process runs (PKG-signed-packages-and-delivery). The filesystem adapter is
 /// [`Storage`](crate::storage::Storage).
 pub trait AgentStorage: Send + Sync {
     /// The persisted `instance_uid`, or a new one, persisted, when there is none.
@@ -302,7 +301,7 @@ pub struct OsInfo {
     pub build_id: Option<String>,
 }
 
-/// What the host says about itself — the Baseline's `os.*` and `host.*` (ADR-0018) — and the
+/// What the host says about itself — the Baseline's `os.*` and `host.*` (CLT-what-an-agent-reports) — and the
 /// time by its clock. Each fact is best effort: what the platform cannot answer is `None` and is
 /// then not reported at all. The platform adapter is [`SystemHost`](crate::host::SystemHost).
 pub trait HostFacts: Send + Sync {
@@ -327,38 +326,38 @@ pub trait HostFacts: Send + Sync {
 pub struct SupervisorContext {
     /// The Supervisor's name (the TOML `name`; the Agent's `service.name`).
     pub name: String,
-    /// What the Supervisor Endpoint asks the Managed Process to present (ADR-0016); handed to the
+    /// What the Supervisor Endpoint asks the Managed Process to present (CLT-modes-and-gateway); handed to the
     /// process as [`ENDPOINT_TOKEN_ENV`](crate::supervisor::process::ENDPOINT_TOKEN_ENV). Wiped
-    /// when it is dropped (ADR-0015).
+    /// when it is dropped (SEC-secrets-wiped-on-drop).
     pub endpoint_token: zeroize::Zeroizing<String>,
     /// Everything this Supervisor owns: its state, its `program/`, its package staging
-    /// (ADR-0019). Placed by `supervisor_dir`, so nothing may assume where it is.
+    /// (CLT-supervisor-mode-and-kinds). Placed by `supervisor_dir`, so nothing may assume where it is.
     pub supervisor_dir: PathBuf,
     /// Where the received remote configuration's entry files are written — what the Managed
     /// Process is pointed at.
     pub config_dir: PathBuf,
     /// The Managed Process itself, already resolved inside this Supervisor's own `program/`
-    /// directory (ADR-0019). The plugin spawns this rather than reading its own
+    /// directory (CLT-supervisor-mode-and-kinds). The plugin spawns this rather than reading its own
     /// `binary`/`command` key, so the path rule lives in one place instead of once per plugin.
     pub program: PathBuf,
-    /// What an offered package replaces (ADR-0033) — resolved beside `program` and for
+    /// What an offered package replaces (PKG-signed-packages-and-delivery) — resolved beside `program` and for
     /// the same reason: a plugin that decided this for itself could disagree with where the core
     /// put the program.
     pub install: InstallTarget,
     /// Graceful-stop budget before the Managed Process is killed.
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
-    /// `Ok` — the health-gated acknowledgement (ADR-0019). Zero acknowledges on start.
+    /// `Ok` — the health-gated acknowledgement (CLT-supervisor-mode-and-kinds). Zero acknowledges on start.
     pub apply_grace: Duration,
-    /// How long the version a successful update supersedes is kept before deletion (ADR-0033),
+    /// How long the version a successful update supersedes is kept before deletion (PKG-signed-packages-and-delivery),
     /// resolved from the per-Supervisor override or the global `[updates]` default. Zero deletes on
     /// success.
     pub retain_previous: Duration,
-    /// The key that opens an encrypted `.7z` package artifact (ADR-0033); `None` when none is
+    /// The key that opens an encrypted `.7z` package artifact (PKG-signed-packages-and-delivery); `None` when none is
     /// configured. Client-wide, like the package verification key.
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// The process account's primary group, where a process account is registered: what the
-    /// Supervisor shares with its Managed Process belongs to it (ADR-0022 clause 21).
+    /// Supervisor shares with its Managed Process belongs to it (CLT-accounts-service-runs-under §21).
     pub process_account_group: Option<ProcessAccountGroup>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
@@ -369,7 +368,7 @@ pub struct SupervisorContext {
 }
 
 impl SupervisorContext {
-    /// Expands the placeholders naming this Supervisor's own directories (ADR-0019):
+    /// Expands the placeholders naming this Supervisor's own directories (CLT-supervisor-mode-and-kinds):
     /// `${supervisor_dir}` and `${config_dir}`.
     ///
     /// They exist because a Custom Supervisor is told where its configuration is *through its own
@@ -383,7 +382,7 @@ impl SupervisorContext {
     /// is the two names below; everything else is the process's business.
     ///
     /// Never applied to the program itself: that key is a bare file name the core resolves inside
-    /// this Supervisor's own `program/` directory (ADR-0019), so there is no directory in it for a
+    /// this Supervisor's own `program/` directory (CLT-supervisor-mode-and-kinds), so there is no directory in it for a
     /// placeholder to name.
     #[must_use]
     pub fn expand(&self, value: &str) -> String {
@@ -393,7 +392,7 @@ impl SupervisorContext {
     }
 }
 
-/// What a kind knows about its own agent, so a block does not have to say it (ADR-0019).
+/// What a kind knows about its own agent, so a block does not have to say it (CLT-supervisor-mode-and-kinds).
 ///
 /// Every field is a `&'static str` resolved **per platform** at compile time, which is the point:
 /// a constant can be asserted against the artifact this project packs, where a path written in a
@@ -405,37 +404,36 @@ impl SupervisorContext {
 /// quietly differs from what the fleet believes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KindDefaults {
-    /// The program's file name in this Supervisor's own `program/` directory (ADR-0019).
+    /// The program's file name in this Supervisor's own `program/` directory (CLT-supervisor-mode-and-kinds).
     /// `None` leaves it to the block's program key.
     pub program: Option<&'static str>,
-    /// Where the program sits inside an unpacked package tree (ADR-0033); `None` is a single-file
+    /// Where the program sits inside an unpacked package tree (PKG-signed-packages-and-delivery); `None` is a single-file
     /// package, or a kind that leaves the question to the block.
     pub program_path: Option<&'static str>,
     /// Where a single-file package's archive holds the program, as trailing path components
     /// (`usr/bin/agent`), for an archive that carries more than one file of the program's name.
-    /// `None` finds the member by its file name alone (ADR-0033
-    /// clause 55).
+    /// `None` finds the member by its file name alone (PKG-signed-packages-and-delivery §55).
     pub member: Option<&'static str>,
     /// The absolute links a tree package of this kind keeps as links, each by its exact path in
     /// the tree and its exact target: the only links the tree's install creates, and the only
     /// links leading out that `opamp-fleetctl` packs
-    /// (ADR-0033 clause 57). Empty for nearly every kind.
+    /// (PKG-signed-packages-and-delivery §57). Empty for nearly every kind.
     pub tree_links: &'static [fleet_util::tree::KeptLink],
-    /// The Agent *type* this kind presents (ADR-0018). `None` falls back to the program's file
+    /// The Agent *type* this kind presents (CLT-what-an-agent-reports). `None` falls back to the program's file
     /// name, which is what the block already said.
     pub service_name: Option<&'static str>,
     /// What this kind corrects about the fleet's timing policy, and whether its block may state
-    /// any of it at all (ADR-0019). `None` — an unwrapped kind — leaves the three keys in the
+    /// any of it at all (CLT-supervisor-mode-and-kinds). `None` — an unwrapped kind — leaves the three keys in the
     /// block, because no kind exists there to hold a value; `Some` takes them out of the block and
     /// states the kind's own corrections, each `None` meaning "the fleet's number is right".
     pub timing: Option<KindTiming>,
     /// Whether a block of this kind may pin the Supervisor Endpoint's port. The Endpoint is bound
-    /// for every Supervisor (ADR-0016); pinning it only means something where a Managed Process
+    /// for every Supervisor (CLT-modes-and-gateway); pinning it only means something where a Managed Process
     /// connects to it, which in practice is a Collector carrying the `opampextension`.
     pub endpoint_port: bool,
 }
 
-/// What a wrapped kind says about timing, over the fleet's own policy (ADR-0019).
+/// What a wrapped kind says about timing, over the fleet's own policy (CLT-supervisor-mode-and-kinds).
 ///
 /// Every field is an *agent's* property rather than a host's: how long it needs to shut down, how
 /// long a restart of it has to hold before the fleet may believe it, how long its superseded
@@ -448,7 +446,7 @@ pub struct KindTiming {
     pub stop_timeout: Option<Duration>,
     /// Overrides `[supervisors] apply_grace_secs`.
     pub apply_grace: Option<Duration>,
-    /// Overrides `[updates] retain_previous_secs` (ADR-0033).
+    /// Overrides `[updates] retain_previous_secs` (PKG-signed-packages-and-delivery).
     pub retain_previous: Option<Duration>,
 }
 
@@ -472,8 +470,8 @@ impl KindDefaults {
 pub type Purged<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Result<(), String>>> + Send + 'a>>;
 
-/// The plugins a run starts its Supervisors with (ADR-0019 clause 2), as the composition root
-/// made them: every one starts its Managed Process the way the run does (ADR-0022 clause 18). The
+/// The plugins a run starts its Supervisors with (CLT-supervisor-mode-and-kinds §2), as the composition root
+/// made them: every one starts its Managed Process the way the run does (CLT-accounts-service-runs-under §18). The
 /// Engine keeps it, so a Supervisor that a Supervisor-set apply starts later is started the same
 /// way as those started with the Client.
 pub trait PluginRegistry: Send + Sync {
@@ -482,32 +480,32 @@ pub trait PluginRegistry: Send + Sync {
 
     /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
     /// directory — that the Client cannot remove itself, before the purge deletes the rest
-    /// (ADR-0034 clause 13, ADR-0022 clause 20), all of them within one wait (ADR-0022 clause 17).
+    /// (PKG-versions-high-water-mark-floor §13, CLT-accounts-service-runs-under §20), all of them within one wait (CLT-accounts-service-runs-under §17).
     /// Nothing where the Client starts its programs itself.
     ///
     /// # Errors
     /// Each answer, in the order of `removed`, is why something is left: the purge then leaves an
-    /// orphan, with a warning (ADR-0019 clause 34).
+    /// orphan, with a warning (CLT-supervisor-mode-and-kinds §34).
     fn purge<'a>(&'a self, removed: &'a [(String, std::path::PathBuf)]) -> Purged<'a> {
         Box::pin(std::future::ready(removed.iter().map(|_| Ok(())).collect()))
     }
 }
 
-/// A compiled-in Supervisor Plugin (ADR-0019): the adapter factory on the Managed-Process side.
+/// A compiled-in Supervisor Plugin (CLT-supervisor-mode-and-kinds): the adapter factory on the Managed-Process side.
 /// A new process kind is a new implementation and one line in
 /// [`registry`](crate::supervisor::registry).
 pub trait Plugin {
     /// The TOML `type` value this plugin serves.
     fn kind(&self) -> &'static str;
 
-    /// What this kind knows about its agent, so a block need not repeat it (ADR-0019). Stated by
+    /// What this kind knows about its agent, so a block need not repeat it (CLT-supervisor-mode-and-kinds). Stated by
     /// every plugin rather than defaulted, because "this kind knows nothing" is an answer worth
     /// writing down where a reader of the plugin will see it.
     fn defaults(&self) -> KindDefaults;
 
     /// The block key naming this plugin's Managed Process — `binary` for a Collector, `command`
     /// for the example Custom Supervisor. The core takes that key out of the settings, applies
-    /// ADR-0019's path rule to it, and hands the result back as
+    /// CLT-supervisor-mode-and-kinds's path rule to it, and hands the result back as
     /// [`SupervisorContext::program`]; the plugin never sees the raw value.
     fn program_key(&self) -> &'static str;
 
@@ -518,7 +516,7 @@ pub trait Plugin {
     fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String>;
 
     /// The strict settings parse [`start`](Self::start) performs, without the side effects
-    /// (ADR-0019): what validates an offered Supervisor set *before* any running process is
+    /// (CLT-supervisor-mode-and-kinds): what validates an offered Supervisor set *before* any running process is
     /// touched. `settings` is the block's table with the program key already taken out, exactly
     /// as `start` receives it.
     ///
@@ -527,7 +525,7 @@ pub trait Plugin {
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String>;
 
     /// What a Server-delivered block of this kind may not say beyond the generic rule on `env` and
-    /// `args` (ADR-0019 clause 36): a kind whose settings name files the Supervisor reads confines
+    /// `args` (CLT-supervisor-mode-and-kinds §36): a kind whose settings name files the Supervisor reads confines
     /// them here. `running` is the settings of the running block of the same name, if any. By
     /// default a kind names no such file.
     ///
@@ -543,7 +541,7 @@ pub trait Plugin {
 }
 
 /// The strict second-stage parse of a block's plugin settings, shared by every plugin's
-/// [`start`](Plugin::start) and [`check`](Plugin::check) so the two cannot disagree (ADR-0019).
+/// [`start`](Plugin::start) and [`check`](Plugin::check) so the two cannot disagree (CLT-supervisor-mode-and-kinds).
 ///
 /// A key the kind has `retired` is refused by name first, with what answers it now — a block
 /// carrying one was written against a Client that needed it, and the operator deleting the line
@@ -576,7 +574,7 @@ mod tests {
     use crate::shutdown::shutdown_channel;
 
     /// A per-Supervisor root that is absolute on *this* platform — on Windows that means naming a
-    /// drive (ADR-0019), and it is why nothing below spells a path out with POSIX separators: what
+    /// drive (CLT-supervisor-mode-and-kinds), and it is why nothing below spells a path out with POSIX separators: what
     /// a placeholder expands to is a `PathBuf`, so its separators are the platform's own.
     #[cfg(windows)]
     fn root(place: &str) -> PathBuf {
@@ -611,7 +609,7 @@ mod tests {
         }
     }
 
-    /// The case ADR-0019 exists for: the argument that points a Foreign Agent at its configuration
+    /// The case CLT-supervisor-mode-and-kinds exists for: the argument that points a Foreign Agent at its configuration
     /// is derived from the same value the Client derives it from, so relocating `supervisor_dir`
     /// cannot leave the process reading a file nobody writes to.
     #[test]
@@ -647,7 +645,7 @@ mod tests {
 
     /// Anything else is left exactly as written. Fluent Bit's own configuration language uses
     /// `${…}` too, and a Client that ate or refused those would break a working deployment to
-    /// catch a typo — which is the trade ADR-0019 makes, deliberately and in this direction.
+    /// catch a typo — which is the trade CLT-supervisor-mode-and-kinds makes, deliberately and in this direction.
     #[test]
     fn an_unknown_placeholder_is_passed_through_untouched() {
         let ctx = context(root("opt"));

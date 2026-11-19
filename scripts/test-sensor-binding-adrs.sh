@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-binding-adrs.sh. Verifies: ADR-0001
+# Self-test of scripts/sensor-binding-adrs.sh. Verifies: NUC-decisions-are-proposed-then-accepted
 #
 # Each case builds a throwaway git repository with ADRs under docs/adr/, commits a change on
 # top of a tagged base, runs the sensor against the base, and asserts the exit code and a line a
@@ -11,10 +11,13 @@
 # Paths named with --path stand in for a change, and --sections prints the header, Decision, and
 # Enforcement of each ADR listed, and nothing else of it, under a banner that names the sections
 # ADR_RULE_SECTIONS lists, and the Applies to of each other ADR in force whose Applies to is
-# prose, also where the prose comes before a list longer than a pipe holds.
+# prose, read from the ADR files and never from the index, also where the prose comes before a
+# list longer than a pipe holds. A 'NUC-' ADR of the base binds like any other, read from its file.
+# A change inside one numbered check binds the ADRs that name that check, any other line every ADR
+# that names the file; the numbers the checks of scripts/check-docs.sh carry are its header items.
 #
-# Verifies: ADR-0002
-# Inputs: scripts/sensor-binding-adrs.sh scripts/lib/
+# Verifies: NUC-checks-are-bash
+# Inputs: scripts/sensor-binding-adrs.sh scripts/lib/ scripts/check-docs.sh
 #
 # Usage:
 #     scripts/test-sensor-binding-adrs.sh
@@ -33,15 +36,15 @@ commit() {
   git -C "${1:?}" -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m "$2"
 }
 
-# adr_id <n> — the identifier ADR-000n, assembled so that this file carries no literal one: a
-# normalization rewrites every literal one in the tree.
-adr_id() { printf "ADR-%04d" "$1"; }
+# adr_id <n> — the identifier SEC-fixture-<n>, assembled so that this file carries no literal
+# one: a map rewrites every literal one in the tree.
+adr_id() { printf '%s-fixture-%s' SEC "$((10#$1))"; }
 
 # adr <dir> <number> <status emoji and word> <applies to> — write an ADR header.
 adr() {
   mkdir -p "$1/docs/adr"
-  printf '# ADR-%s: Fixture\n\n- **Status:** %s\n- **Applies to:** %s\n' "$2" "$3" "$4" \
-    > "$1/docs/adr/$2-fixture.md"
+  printf '# %s: Fixture\n\n- **Status:** %s\n- **Applies to:** %s\n' "$(adr_id "$2")" "$3" "$4" \
+    > "$1/docs/adr/$(adr_id "$2").md"
 }
 
 # repo <name> — a repository with three ADRs and some files, its first commit tagged 'base'.
@@ -63,21 +66,9 @@ repo() {
   echo "$dir"
 }
 
-# expect <exit code> <name> <dir> <needle> [base] — run the sensor in the repository against the
-# given base (default 'base'); the output must contain the needle.
-expect() {
-  local want="$1" name="$2" dir="$3" needle="$4" base="${5-base}"
-  local out rc
-  fixture "$dir"
-  out="$(bash "$SENSOR" --root "$dir" "$base" ${HEADREF:+"$HEADREF"} 2>&1)"; rc=$?
-  if [[ $rc -eq "$want" && "$out" == *"$needle"* ]]; then
-    passed=$((passed + 1))
-    return
-  fi
-  failed=$((failed + 1))
-  echo "FAIL: $name (expected exit $want with \"$needle\", got exit $rc)" >&2
-  while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
-}
+# expect <exit code> <name> <dir> <needle> [base] — expect_with against the given base (default
+# 'base') and HEADREF, if set.
+expect() { expect_with "$1" "$2" "$3" "$4" "${5-base}" ${HEADREF:+"$HEADREF"}; }
 
 # expect_with <exit code> <name> <dir> <needle> <argument>... — run the sensor in the repository
 # with the given arguments; the output must contain the needle.
@@ -111,19 +102,8 @@ lacks_with() {
   while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
 }
 
-# reject <name> <dir> <needle> — the sensor's output must not contain the needle.
-reject() {
-  local name="$1" dir="$2" needle="$3" out
-  fixture "$dir"
-  out="$(bash "$SENSOR" --root "$dir" base 2>&1)"
-  if [[ "$out" != *"$needle"* ]]; then
-    passed=$((passed + 1))
-    return
-  fi
-  failed=$((failed + 1))
-  echo "FAIL: $name (\"$needle\" in the output)" >&2
-  while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
-}
+# reject <name> <dir> <needle> — lacks_with against the base.
+reject() { lacks_with "$1" "$2" "$3" base; }
 
 # --- cases -----------------------------------------------------------------------------------
 
@@ -134,13 +114,13 @@ expect 2 "a base that does not resolve fails" "$d" "does not resolve" "no-such-r
 d="$(repo dir)"
 printf 'more\n' >> "$d/docs/plan/README.md"
 commit "$d" "touch the plan"
-expect 0 "a path under a directory of Applies to binds" "$d" "- $(adr_id 1) (docs/adr/0001-fixture.md) — docs/plan/README.md"
+expect 0 "a path under a directory of Applies to binds" "$d" "- $(adr_id 1) (docs/adr/$(adr_id 1).md) — docs/plan/README.md"
 expect 0 "one ADR in force names the change" "$d" "1 ADR(s) in force name one of them"
 
 d="$(repo file)"
 printf 'more\n' >> "$d/README.md"
 commit "$d" "touch the readme"
-expect 0 "a file named in Applies to binds" "$d" "- $(adr_id 1) (docs/adr/0001-fixture.md) — README.md"
+expect 0 "a file named in Applies to binds" "$d" "- $(adr_id 1) (docs/adr/$(adr_id 1).md) — README.md"
 
 d="$(repo rust-module)"
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
@@ -149,7 +129,7 @@ mkdir -p "$d/crates/engine/src/graph"
 printf 'mod\n' > "$d/crates/engine/src/graph/hit.rs"
 commit "$d" "a module of the graph"
 expect 0 "a Rust file binds the modules under the directory of its name" "$d" \
-  "- $(adr_id 4) (docs/adr/0004-fixture.md) — crates/engine/src/graph/hit.rs"
+  "- $(adr_id 4) (docs/adr/$(adr_id 4).md) — crates/engine/src/graph/hit.rs"
 
 # base <dir> — fold what the fixture added into the base commit and tag it again.
 base() {
@@ -190,7 +170,7 @@ expect 0 "a file named in Applies to binds only itself" "$d" "no ADR in force na
 d="$(repo code)"
 printf 'more\n' >> "$d/src/app.sh"
 commit "$d" "touch the code"
-expect 0 "a proposed ADR binds" "$d" "- $(adr_id 3) (docs/adr/0003-fixture.md) — src/app.sh"
+expect 0 "a proposed ADR binds" "$d" "- $(adr_id 3) (docs/adr/$(adr_id 3).md) — src/app.sh"
 reject "a superseded ADR does not bind" "$d" "$(adr_id 2)"
 reject "a backticked phrase with a space is no path" "$d" "pull request"
 
@@ -199,7 +179,7 @@ d="$(repo added)"
 adr "$d" 0004 "🟡 proposed" 'the tools under `tools/`'
 mkdir -p "$d/tools" && printf 'tool\n' > "$d/tools/t.sh"
 commit "$d" "a new ADR with its first tool"
-expect 0 "an ADR the change adds is read as the head has it" "$d" "- $(adr_id 4) (docs/adr/0004-fixture.md) — tools/t.sh"
+expect 0 "an ADR the change adds is read as the head has it" "$d" "- $(adr_id 4) (docs/adr/$(adr_id 4).md) — tools/t.sh"
 
 d="$(repo none)"
 printf 'notes\n' > "$d/NOTES.txt"
@@ -213,7 +193,7 @@ expect 0 "more than three hits are counted, not listed" "$d" "src/f1.sh src/f2.s
 
 d="$(repo worktree)"
 printf 'more\n' >> "$d/src/app.sh"
-expect 0 "an uncommitted change binds before the first commit" "$d" "- $(adr_id 3) (docs/adr/0003-fixture.md) — src/app.sh"
+expect 0 "an uncommitted change binds before the first commit" "$d" "- $(adr_id 3) (docs/adr/$(adr_id 3).md) — src/app.sh"
 printf 'new\n' > "$d/src/new.sh"
 expect 0 "an untracked file is part of the change" "$d" "src/app.sh src/new.sh"
 HEADREF=HEAD expect 0 "with a head, the working tree is not read" "$d" "nothing to compare"
@@ -230,7 +210,7 @@ printf 'ü\n' > "$d/docs/über.md"
 commit "$d" "names"
 git -C "${d:?}" tag -f base >/dev/null
 printf 'more\n' >> "$d/Makefile"
-expect 0 "a file without an extension binds" "$d" "$(adr_id 4) (docs/adr/0004-fixture.md) — Makefile"
+expect 0 "a file without an extension binds" "$d" "$(adr_id 4) (docs/adr/$(adr_id 4).md) — Makefile"
 git -C "${d:?}" checkout -q -- Makefile
 printf 'more\n' >> "$d/.githooks/pre-push"
 expect 0 "a directory written without its slash binds what is under it" "$d" "— .githooks/pre-push"
@@ -239,31 +219,40 @@ printf 'more\n' >> "$d/docs/über.md"
 expect 0 "a path outside ASCII binds" "$d" "— docs/über.md"
 git -C "${d:?}" checkout -q -- docs
 rm "$d/Makefile"
-expect 0 "a deleted file binds" "$d" "$(adr_id 4) (docs/adr/0004-fixture.md) — Makefile"
+expect 0 "a deleted file binds" "$d" "$(adr_id 4) (docs/adr/$(adr_id 4).md) — Makefile"
 
 d="$(repo named)"
 expect_with 0 "a named path binds before anything changed" "$d" \
   "1 path(s) named; 1 ADR(s) in force name one of them" --path src/app.sh
 expect_with 0 "a named path lists the ADR that names it" "$d" \
-  "- $(adr_id 3) (docs/adr/0003-fixture.md) — src/app.sh" --path ./src/app.sh
+  "- $(adr_id 3) (docs/adr/$(adr_id 3).md) — src/app.sh" --path ./src/app.sh
 expect_with 0 "a named directory binds an ADR that names a path under it" "$d" \
-  "- $(adr_id 1) (docs/adr/0001-fixture.md) — docs/" --path docs/
+  "- $(adr_id 1) (docs/adr/$(adr_id 1).md) — docs/" --path docs/
 expect_with 2 "--path without a path fails" "$d" "--path needs a path" --path
+expect_with 2 "--path with a base as well fails, not ignoring the base" "$d" \
+  "unknown argument 'HEAD'" --path src/app.sh HEAD
+
+# A path only an ADR of the base names lists that ADR, read from its file.
+d="$(repo base-adr)"
+nuc=NUC
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+printf '# %s: Base\n\n- **Status:** 🟡 proposed\n- **Applies to:** `scripts/base.sh`\n' "$nuc-base-rule" \
+  > "$d/docs/adr/$nuc-base-rule.md"
+expect_with 0 "a path only a base ADR names lists it" "$d" \
+  "- $nuc-base-rule (docs/adr/$nuc-base-rule.md) — scripts/base.sh" --path scripts/base.sh
 
 d="$(repo sections)"
 {
   printf '\n## Context\n\nWhy it came up.\n\n## Decision\n\nWe will plan in the tree.\n'
   printf '\n## Alternatives considered\n\n- None.\n\n## Enforcement\n\nA sensor lists it.\n'
-} >> "$d/docs/adr/0001-fixture.md"
+} >> "$d/docs/adr/$(adr_id 1).md"
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-{
-  printf '# ADRs\n\n## Mechanics\n\nHow the record is kept.\n\n## Index\n\n### Binding\n\n'
-  printf '| ADR | Title | Applies to | Status |\n|-----|-------|-----|-----|\n'
-  printf '| [0001](0001-fixture.md) | Fixture | the plan under `docs/plan/` and `README.md` | 🟢 |\n'
-  printf '| [0003](0003-fixture.md) | Code | the code under `src/`, and the `pull request` template | 🟡 |\n'
-  printf '| [0005](0005-fixture.md) | Paths | `tools/`, `lib/x.sh`, and `Makefile` | 🟢 |\n'
-  printf '\n### Superseded and rejected\n\n| [0002](0002-fixture.md) | Old | prose too | ⚪ |\n'
-} > "$d/docs/adr/README.md"
+adr "$d" 0005 "🟢 accepted" '`tools/`, `lib/x.sh`, and `Makefile`'
+nuc=NUC
+printf '# %s: Base\n\n- **Status:** 🟡 proposed\n- **Applies to:** every ADR\n' "$nuc-base-rule" \
+  > "$d/docs/adr/$nuc-base-rule.md"
+printf '# ADRs\n\n## Mechanics\n\nHow the record is kept.\n\n### Binding\n\n| [ZZZ-gone-row](ZZZ-gone-row.md) | Gone | a row only |\n' \
+  > "$d/docs/adr/README.md"
 base "$d"
 expect_with 0 "--sections prints the Applies to of an ADR in force with prose" "$d" \
   "- $(adr_id 3): the code under" --sections --path README.md
@@ -277,29 +266,30 @@ lacks_with "--sections leaves out the Context" "$d" "Why it came up." --sections
 lacks_with "--sections leaves out the Alternatives" "$d" "- None." --sections --path README.md
 lacks_with "--sections leaves out the mechanics of the index" "$d" "How the record is kept." \
   --sections --path README.md
-lacks_with "--sections leaves out the rows of dead ADRs" "$d" "prose too" --sections --path README.md
+lacks_with "--sections reads no row of the index" "$d" "a row only" --sections --path README.md
+lacks_with "--sections leaves out a dead ADR" "$d" "everything under" --sections --path README.md
+expect_with 0 "--sections prints the Applies to of a base ADR, read from its file" "$d" \
+  "- $nuc-base-rule: every ADR" --sections --path README.md
 expect_with 0 "--sections points at the ADRs it prints, not at the index" "$d" \
   "Read these, and the ADRs whose Applies to is prose, below:" --sections --path README.md
 lacks_with "--sections sends no session to the index" "$d" "Read the index" --sections --path NOTES.txt
 expect_with 0 "without --sections the index is named" "$d" "Read the index" --path NOTES.txt
 lacks_with "without --sections nothing of an ADR is printed" "$d" "We will plan" --path README.md
-mv "$d/docs/adr/README.md" "$d/README.adr"
-expect_with 0 "--sections says so when it finds no Binding table" "$d" "No row found under '### Binding'" \
+mv "$d/docs/adr" "$d/adr.away"
+expect_with 0 "--sections says so when it finds no ADR in force" "$d" "No ADR in force found in docs/adr/" \
   --sections --path README.md
-mv "$d/README.adr" "$d/docs/adr/README.md"
+mv "$d/adr.away" "$d/docs/adr"
 expect_with 0 "--sections prints the ADRs with prose when nothing changed" "$d" \
   "- $(adr_id 1): the plan under" --sections base
 
 # An Applies to whose prose comes before a list longer than a pipe holds: a grep that exits at
-# the prose before the list is written cuts the writer off, and the ADR goes unlisted.
+# the prose before the list is written cuts the writer off, and the ADR goes unlisted. Each pad
+# of 70,000 characters is longer than a pipe of 64 KiB holds, so the writer is cut off on every
+# run; two pads of 40,000 let it pass with the cut restored. Longer pads only cost time: the
+# field is read by pattern removals that are quadratic in the length of the line.
 d="$(repo sections-long)"
-pad="$(printf '%*s' 200000 '' | tr ' ' z)"
-# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-{
-  printf '# ADRs\n\n## Index\n\n### Binding\n\n'
-  printf '| ADR | Title | Applies to | Status |\n|-----|-------|-----|-----|\n'
-  printf '| [0007](0007-fixture.md) | Long | every document, `%s`, and `%s` | 🟢 |\n' "$pad" "$pad"
-} > "$d/docs/adr/README.md"
+pad="$(printf '%*s' 70000 '' | tr ' ' z)"
+adr "$d" 0007 "🟢 accepted" "every document, \`$pad\`, and \`$pad\`"
 base "$d"
 expect_with 0 "--sections prints prose before a list longer than a pipe holds" "$d" \
   "- $(adr_id 7): every document" --sections --path README.md
@@ -325,7 +315,7 @@ lacks_with "--sections reads no row past Binding" "$d" "- $(adr_id 2):" --sectio
 # sensor whose library lists three of them prints.
 d="$(repo sections-named)"
 printf '\n## Decision\n\nWe will plan.\n\n## Consequences\n\nIt costs.\n\n## Enforcement\n\nA sensor.\n' \
-  >> "$d/docs/adr/0001-fixture.md"
+  >> "$d/docs/adr/$(adr_id 1).md"
 base "$d"
 mkdir -p "$d/scripts" && cp "$SENSOR" "$d/scripts/" && cp -R "$ROOT/scripts/lib" "$d/scripts/"
 lib="$d/scripts/lib/adr.sh"
@@ -337,6 +327,54 @@ SENSOR="$d/scripts/sensor-binding-adrs.sh" expect_with 0 "--sections prints each
   "It costs." --sections --path README.md
 expect_with 0 "--sections names the two sections of the template" "$d" \
   "): the header, the Decision, and the Enforcement ===" --sections --path README.md
+
+d="$(repo checks)"
+checks() {
+  printf 'check_a() {  # t/a\n  :\n}\nh() {\n  %s\n}\ncheck_b() {  # t/b\n  %s\n}\n' \
+    "$2" "$3" > "$1/scripts/c.sh"
+}
+mkdir -p "$d/scripts" && checks "$d" : :
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+adr "$d" 0004 "🟢 accepted" 'the rule `t/a` of `scripts/c.sh`'
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+adr "$d" 0005 "🟢 accepted" 'the rules `t/b` and `t/c` of `scripts/c.sh`'
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+adr "$d" 0006 "🟢 accepted" 'the rules `t/c`, `t/d`, and `t/b` of `scripts/c.sh`'
+base "$d"
+checks "$d" : true
+expect 0 "a change inside one check binds the ADR that names its rule" "$d" "- $(adr_id 5) (docs"
+expect 0 "a rule named last of three binds as one named first" "$d" "- $(adr_id 6) (docs"
+reject "a change inside one check binds no ADR that names only another rule" "$d" "- $(adr_id 4) ("
+checks "$d" true :
+expect 0 "a change between two checks binds every ADR that names the file" "$d" "- $(adr_id 4) ("
+expect 0 "a change between two checks binds the other ADR too" "$d" "- $(adr_id 5) ("
+checks "$d" : : && printf '%s\n' "$(sed '$d' "$d/scripts/c.sh")" > "$d/scripts/c.sh.new"
+mv "$d/scripts/c.sh.new" "$d/scripts/c.sh"
+expect 0 "a deleted last line, its next line past the end, binds every ADR" "$d" "- $(adr_id 4) ("
+checks "$d" : true && sed '2d' "$d/scripts/c.sh" > "$d/c.new" && mv "$d/c.new" "$d/scripts/c.sh"
+expect 0 "a deletion inside a check binds its ADR beside an edit in another" "$d" "- $(adr_id 4) ("
+# A rule key in backticks is no path: a change at a path of its name binds no ADR by it.
+checks "$d" : : && mkdir -p "$d/t" && echo x > "$d/t/b"
+reject "a rule key is no path of its own" "$d" "- $(adr_id 5) ("
+rm -r "$d/t"
+
+# An old key the item of a rule carries in the header names that rule's check.
+d="$(repo old-keys)"
+olds() {
+  printf '#   t/a\n#   t/b (was: t/old, t/older)\nset -u\n' > "$1/scripts/c.sh"
+  printf 'check_a() {  # t/a\n  %s\n}\ncheck_b() {  # t/b\n  %s\n}\n' "$2" "$3" >> "$1/scripts/c.sh"
+}
+mkdir -p "$d/scripts" && olds "$d" : :
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+adr "$d" 0004 "🟢 accepted" 'the rule `t/older` of `scripts/c.sh`'
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+adr "$d" 0005 "🟢 accepted" 'the rule `t/a` of `scripts/c.sh`'
+base "$d"
+olds "$d" : true
+expect 0 "an old key binds the check of the item that carries it" "$d" "- $(adr_id 4) (docs"
+reject "a change in that check binds no ADR that names another rule" "$d" "- $(adr_id 5) ("
+olds "$d" true :
+reject "an old key binds no other check" "$d" "- $(adr_id 4) ("
 
 # --- summary ---------------------------------------------------------------------------------
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Takes up a branch whose pull request into main has merged, and drops it: step 8 of the
-# Integration branches of CONTRIBUTING.md.
+# Integration branches of CONTRIBUTING.md. The local main only takes up the remote's by a
+# fast-forward (NUC-main-only-via-pr §4).
 #
 #   1. Fetches origin, pruning, and refuses unless the branch's head is one origin/main has, so
 #      that dropping it loses no commit.
@@ -26,15 +27,15 @@
 
 set -uo pipefail
 
-# shellcheck source-path=SCRIPTDIR source=lib/git.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
 
-enter_root "drop-merged-branch" "${BASH_SOURCE[0]}" "$@"
-shift "$ROOT_TAKEN"
-if (($#)); then
-  echo "drop-merged-branch: unknown argument '$1' — usage: scripts/drop-merged-branch.sh [--root <dir>]" >&2
-  exit 2
-fi
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/drop-merged-branch.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "$@"
 
 refuse() { echo "drop-merged-branch: refused — $1" >&2; exit 1; }
 
@@ -59,7 +60,7 @@ git merge-base --is-ancestor HEAD origin/main \
 # 2. The remote's main, taken up.
 if git rev-parse -q --verify 'refs/heads/main' > /dev/null; then
   git merge-base --is-ancestor main origin/main \
-    || refuse "the local main has commits origin/main lacks; it only takes up the remote's (AGENTS.md section 6)"
+    || refuse "the local main has commits origin/main lacks; it only takes up the remote's (NUC-main-only-via-pr §4)"
 fi
 git switch -q main || refuse "git switch main failed"
 git merge -q --ff-only origin/main || refuse "git merge --ff-only origin/main failed"

@@ -6,9 +6,10 @@
 # authoritative for that language's files: add a section here that agrees with the formatter's
 # configuration rather than one that contends with it.
 #
-# No 'max_line_length' is set on purpose. Prettier and others read it as a print width and would
-# reflow the hand-wrapped prose in the documentation. Check 15 of scripts/check-docs.sh holds the
-# width of Markdown prose at 100 columns instead, and leaves the wrapping to whoever writes it.
+# No 'max_line_length' is set on purpose. Prettier and others read it as a print width and
+# would reflow the hand-wrapped prose in the documentation. The rule docs/prose-width of
+# scripts/check-docs.sh holds the width of Markdown prose at 100 columns instead, and leaves
+# the wrapping to whoever writes it.
 root = true
 
 [*]

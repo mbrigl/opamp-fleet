@@ -43,7 +43,7 @@ impl Backoff {
 
     /// The delay before the first reconnect after an established connection was lost, drawn
     /// uniformly over `[0, AFTER_LOSS)`; the failures after it start the exponential steps again
-    /// (ADR-0012 clause 4).
+    /// (SEC-tls13-two-planes-bounded-input §4).
     ///
     /// The draw starts at zero, unlike [`advance`](Self::advance): the floor of equal jitter is
     /// what puts a whole fleet into the same half second once its Server goes away, and a fleet
@@ -64,7 +64,7 @@ impl Backoff {
 
     /// The wait after a refusal that named one — a `Retry-After`, or the wait an `Unavailable`
     /// names: what the Server named, or the next step where that is longer, so a wait of zero, or
-    /// one shorter than the step, still waits the step (ADR-0012 clause 4). It takes the step, so
+    /// one shorter than the step, still waits the step (SEC-tls13-two-planes-bounded-input §4). It takes the step, so
     /// refusals in a row grow along the backoff.
     pub(crate) fn at_least_a_step(&mut self, named: Duration) -> Duration {
         named.max(self.advance())
@@ -77,7 +77,7 @@ mod tests {
 
     /// The ceiling still doubles and still caps; each delay lands in the lower-bounded half of its
     /// ceiling. Bounds rather than exact values, because the jitter is the point.
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[test]
     fn backoff_doubles_and_caps_within_its_jittered_bounds() {
         // `half + rand(0, half)` never reaches `half + half`, so the ceiling is exclusive.
@@ -106,7 +106,7 @@ mod tests {
 
     /// The first reconnect after a lost connection is drawn over the whole of `[0, 30 s)`, not its
     /// upper half, and the failures after it start again from the first exponential step.
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[test]
     fn the_first_reconnect_after_a_lost_connection_is_drawn_over_thirty_seconds() {
         let mut backoff = Backoff::new();
@@ -135,7 +135,7 @@ mod tests {
     /// A wait the Server names is waited as named where it is longer than the next step, and the
     /// step is waited where it is longer, so a `Retry-After` of zero still waits a step; each call
     /// takes a step, so refusals in a row grow along the backoff.
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[test]
     fn a_named_wait_is_floored_at_the_next_step() {
         let mut backoff = Backoff::new();
@@ -156,7 +156,7 @@ mod tests {
     /// the same instant. Drawn over enough attempts that an accidental tie is not a flake — with a
     /// nanosecond-resolution draw over half a second, ten matching pairs is not something that
     /// happens.
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[test]
     fn two_backoffs_do_not_produce_the_same_ladder() {
         let mut one = Backoff::new();

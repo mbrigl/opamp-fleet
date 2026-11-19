@@ -3,9 +3,9 @@
 <!-- Copy to docs/plan/<spec>/<NN>-<slug>.md, next to the spec it slices, if it has one. A
      vertical slice: a narrow but complete path through every layer the change touches, demoable
      or verifiable on its own, sized to one fresh agent session. Claim it by creating the branch
-     ticket/<spec>/<NN>-<slug> BEFORE any work, so parallel sessions sharing the repository skip
-     it. The branch that lands it deletes this file. Decided in
-     docs/adr/0006-feature-layer.md. -->
+     ticket/<spec>/<NN>-<slug> BEFORE any work, by the steps of the work-tickets skill, so
+     parallel sessions skip it. The branch that lands it deletes this file. Its sections are the
+     parts a ticket carries, as docs/adr/NUC-large-work-is-planned.md decides (clause 3). -->
 
 ## What to build
 

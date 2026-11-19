@@ -1,6 +1,6 @@
-//! Entry point: parse the CLI (ADR-0021) and hand off — `run` to the daemon runtime, the
+//! Entry point: parse the CLI (CLT-installed-service-and-state) and hand off — `run` to the daemon runtime, the
 //! `service` verbs to the cross-platform lifecycle. The daemon loads `supervisor.toml`, restores the
-//! Agent's identity, and runs the transport the endpoint selects (ADR-0012) until stopped.
+//! Agent's identity, and runs the transport the endpoint selects (SEC-tls13-two-planes-bounded-input) until stopped.
 
 use std::path::{Path, PathBuf};
 
@@ -16,14 +16,14 @@ use fleet_agent::update;
 fn main() {
     // The second service marks itself not dumpable before it does anything else: before its command
     // line is parsed or its log set up, no process of its account may reach into it for longer than
-    // it must (ADR-0022 clause 19). `run_service` does not listen where the mark is not set.
+    // it must (CLT-accounts-service-runs-under §19). `run_service` does not listen where the mark is not set.
     #[cfg(target_os = "linux")]
     if fleet_agent::supervisor::channel::runs_the_second_service(std::env::args_os().skip(1)) {
         fleet_agent::supervisor::channel::mark_not_dumpable();
     }
     // On Windows it closes its process and its threads to the process account first, as Linux
     // marks it: a protected DACL that leaves its account only to ask about it and wait for it
-    // (ADR-0022). `run` does not listen where one differs.
+    // (CLT-accounts-service-runs-under). `run` does not listen where one differs.
     #[cfg(windows)]
     if fleet_agent::supervisor::channel::runs_the_second_service(std::env::args_os().skip(1)) {
         fleet_agent::supervisor::channel::windows::close_this_process(
@@ -32,8 +32,8 @@ fn main() {
         );
     }
     // stderr as always, plus two empty slots the OTLP exporters are dropped into once the Server
-    // names a destination: the log bridge for events (ADR-0018) and the span layer for traces
-    // (ADR-0018). Both have to exist from the start: `tracing` takes one subscriber for the
+    // names a destination: the log bridge for events (CLT-what-an-agent-reports) and the span layer for traces
+    // (CLT-what-an-agent-reports). Both have to exist from the start: `tracing` takes one subscriber for the
     // process, and it is installed long before any destination is known.
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
@@ -57,7 +57,7 @@ fn main() {
             tracing_subscriber::fmt::layer()
                 .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr())),
         )
-        // The log file (ADR-0021), which discards everything until a service run opens it — the
+        // The log file (CLT-installed-service-and-state), which discards everything until a service run opens it — the
         // state directory is not known until the command line is parsed, a few lines below. No
         // colour: this one is read with a pager, not a terminal.
         .with(
@@ -67,13 +67,13 @@ fn main() {
         )
         .init();
 
-    // One TLS provider for the whole process (ADR-0012): ring, never a system library.
+    // One TLS provider for the whole process (SEC-tls13-two-planes-bounded-input): ring, never a system library.
     opamp::tls::install_ring_provider();
 
     let cli::Parsed { cli, config_named } = cli::parse();
     let result = match cli.command {
         // A bare invocation defaults to `run`, preserving the pre-subcommand contract.
-        // A bare invocation is a person at a terminal, so it writes no log file (ADR-0021).
+        // A bare invocation is a person at a terminal, so it writes no log file (CLT-installed-service-and-state).
         None => runtime::run_foreground(RunSpec {
             config_path: cli.config,
             state_dir: cli.state_dir,
@@ -95,7 +95,7 @@ fn main() {
             service_command(&cli.config, config_named, cli.state_dir.as_deref(), &action)
         }
         // Answer for this executable so a self-update can prove it before pointing at it
-        // (ADR-0020). Deliberately does nothing else: it must work on a binary that has no
+        // (CLT-self-update-signed-package). Deliberately does nothing else: it must work on a binary that has no
         // configuration, no state directory, and no Server.
         Some(Command::SelfCheck) => {
             println!(
@@ -113,10 +113,10 @@ fn main() {
 }
 
 /// `run`: the foreground daemon — except under the Windows SCM, where the hidden `--service`
-/// marker set by `service install` routes into the dispatcher shim (ADR-0021). The runtime (or
+/// marker set by `service install` routes into the dispatcher shim (CLT-installed-service-and-state). The runtime (or
 /// the shim) owns the tokio runtime; `main` stays synchronous.
 fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
-    // The second service (ADR-0022): it reads neither the configuration nor the state directory.
+    // The second service (CLT-accounts-service-runs-under): it reads neither the configuration nor the state directory.
     if let Some((socket, client)) = args.agents_service() {
         return agents_service(&socket, client);
     }
@@ -129,13 +129,13 @@ fn run_command(spec: RunSpec, args: cli::RunArgs) -> Result<(), String> {
 }
 
 /// `run --agents`: the second service, which starts the Managed Processes under the process
-/// account (ADR-0022). Its channel is a Unix socket.
+/// account (CLT-accounts-service-runs-under). Its channel is a Unix socket.
 #[cfg(unix)]
 fn agents_service(socket: &Path, client_uid: u32) -> Result<(), String> {
     use fleet_agent::supervisor::channel::{run_service, Served};
     if run_service(socket, client_uid)? == Served::Superseded {
         // Non-zero, as the Client's own exit for an update is: the service manager restarts only
-        // a service that failed (ADR-0021 clause 17).
+        // a service that failed (CLT-installed-service-and-state §17).
         std::process::exit(update::EXIT_RESTART_FOR_UPDATE);
     }
     Ok(())
@@ -147,7 +147,7 @@ fn agents_service(pipe: &Path, client: fleet_agent::win32::Sid) -> Result<(), St
     fleet_agent::service::windows::run_agents_as_service(pipe, client)
 }
 
-/// Dispatch a `service` verb (ADR-0021).
+/// Dispatch a `service` verb (CLT-installed-service-and-state).
 fn service_command(
     config_path: &Path,
     config_named: bool,
@@ -190,7 +190,7 @@ fn service_command(
 }
 
 /// Completes the withdrawal `pending` recorded in `store` but for the accounts `kept`, naming in a
-/// warning what each walk passed over (ADR-0022 clauses 16 and 21).
+/// warning what each walk passed over (CLT-accounts-service-runs-under §16 and §21).
 #[cfg(windows)]
 fn complete_withdrawal(
     store: &dyn fleet_agent::service::withdrawal::Store,
@@ -308,9 +308,9 @@ fn uninstall(level: ServiceLevel) -> Result<(), String> {
     manager::uninstall(level)
 }
 
-/// `service install`: write the configuration if asked to (ADR-0021), validate it, lay out the
+/// `service install`: write the configuration if asked to (CLT-installed-service-and-state), validate it, lay out the
 /// versioned install at the chosen root, and register the service against the `current` pointer
-/// (ADR-0021, ADR-0022).
+/// (CLT-installed-service-and-state, CLT-accounts-service-runs-under).
 fn install(
     config_path: &Path,
     config_named: bool,
@@ -322,16 +322,16 @@ fn install(
     // Ask whether this process may register a service at all, before the first thing is written.
     // On Windows the SCM refuses a non-elevated process and nothing here can raise its own rights,
     // while `%ProgramData%` happily takes the layout — so without this the install staged a version
-    // and swung `current` at it and only then failed (ADR-0021: fail with a clear message).
+    // and swung `current` at it and only then failed (CLT-installed-service-and-state: fail with a clear message).
     windows_rights::ensure_can_register(level)?;
     // One install at a time: two would rewrite the record of what is left to finish over each
     // other.
     #[cfg(windows)]
     let _held = hold_install_lock()?;
 
-    // Two roots and two flags (ADR-0021 clause 12). The executable layout and the data default to
+    // Two roots and two flags (CLT-installed-service-and-state §12). The executable layout and the data default to
     // different places on Linux at system scope — and only there — because systemd may not execute
-    // from `/var/lib` under SELinux. `--root` alone keeps ADR-0021's meaning and collapses both
+    // from `/var/lib` under SELinux. `--root` alone keeps CLT-installed-service-and-state's meaning and collapses both
     // halves into the one directory the operator named, whose labeling and permissions are then
     // the operator's business; `--data-root` names the other half when they must stay apart.
     let (layout_root, data_root) = match (&args.root, &args.data_root) {
@@ -346,8 +346,8 @@ fn install(
             manager::default_root(level)?,
         ),
     };
-    // Where the state directory comes from (ADR-0021 clause 14): `--state-dir`, else the existing
-    // registration — so an upgrade keeps it (ADR-0021 clause 13) — and only then the configuration,
+    // Where the state directory comes from (CLT-installed-service-and-state §14): `--state-dir`, else the existing
+    // registration — so an upgrade keeps it (CLT-installed-service-and-state §13) — and only then the configuration,
     // which the service's account may rewrite, and from that only beneath these roots.
     let roots = layout::Roots {
         named: state_dir_named.map(absolute).transpose()?,
@@ -356,10 +356,10 @@ fn install(
         layout: layout_root.clone(),
     };
 
-    // The account, decided and resolved with the same before-anything-is-written rule (ADR-0022
-    // clause 1): `--run-as`, else the account the existing unit, plist or SCM entry names, else the
+    // The account, decided and resolved with the same before-anything-is-written rule (CLT-accounts-service-runs-under §1):
+    // `--run-as`, else the account the existing unit, plist or SCM entry names, else the
     // owner of a data root that unit lost its account on, else root — on Windows the service's own
-    // virtual account (ADR-0022). A name that does not exist, or a Windows form that would need a
+    // virtual account (CLT-accounts-service-runs-under). A name that does not exist, or a Windows form that would need a
     // password, fails here.
     let registered = manager::registration(level)?;
     let registered_agents = manager::agents_registration(level)?;
@@ -371,7 +371,7 @@ fn install(
         manager::service_name(),
     )?;
     let run_as = account.run_as;
-    // The process account, decided and checked by the same rule (ADR-0022 clause 16):
+    // The process account, decided and checked by the same rule (CLT-accounts-service-runs-under §16):
     // `--process-account`, else the account the second service's unit names, else none — and then
     // no second service, and nothing changes.
     let process = run_as::decide_process_account(
@@ -381,7 +381,7 @@ fn install(
         run_as.as_ref(),
         manager::agents_supported(level),
     )?;
-    // What a former account was granted is withdrawn from it on Windows (ADR-0022 clauses 16 and 21):
+    // What a former account was granted is withdrawn from it on Windows (CLT-accounts-service-runs-under §16 and §21):
     // a process account dropped or replaced, and a Client's account replaced. Each is resolved
     // here, before anything changes — one that cannot be found fails the install now, not after
     // the SCM has forgotten it — and a withdrawal an earlier install left undone is read with
@@ -415,7 +415,7 @@ fn install(
         formers
     };
     // The second service's socket lives in a directory of the process account's, which no root
-    // may be (ADR-0022 clause 7).
+    // may be (CLT-accounts-service-runs-under §7).
     #[cfg(unix)]
     if process.is_some() {
         manager::check_roots_apart(&[&layout_root, &data_root], &manager::agents_socket())?;
@@ -424,7 +424,7 @@ fn install(
     // Everything baked into the unit is absolute: a service's working directory is `/` or
     // `System32`, so a relative path would silently point nowhere. An operator who named no path
     // gets one inside the install root rather than one resolved against this shell's working
-    // directory, which the service manager will not share (ADR-0021).
+    // directory, which the service manager will not share (CLT-installed-service-and-state).
     let config_path = if config_named {
         absolute(config_path)?
     } else {
@@ -432,7 +432,7 @@ fn install(
     };
 
     // The fleet's files the operator put beside this program, before it is staged anywhere else,
-    // or in the directory `--fleet-files` names (ADR-0027 clause 14).
+    // or in the directory `--fleet-files` names (SEC-bootstrap-certificates-and-enrolment §14).
     let beside = match &args.fleet_files {
         Some(dir) => config_init::Beside::in_named_dir(&absolute(dir)?)?,
         None => config_init::Beside::the_program(),
@@ -449,7 +449,7 @@ fn install(
         })
         .transpose()?;
     // Not asked, the bootstrap identity found enrols a Client that holds no issued certificate,
-    // over TLS (ADR-0027 clause 18) — decided, and a `bootstrap.p12` opened, before anything is
+    // over TLS (SEC-bootstrap-certificates-and-enrolment §18) — decided, and a `bootstrap.p12` opened, before anything is
     // written, against the file this install is about to write or keep.
     let unasked = if args.interactive {
         None
@@ -468,7 +468,7 @@ fn install(
         )?
     };
     // Held from the first write to the last, so the account cannot swap the data root for a link
-    // while this privileged run writes into it (ADR-0022).
+    // while this privileged run writes into it (CLT-accounts-service-runs-under).
     let mut held_root = hold_data_root(&data_root)?;
     let mut written = config_init::Written::default();
     if args.interactive {
@@ -479,10 +479,10 @@ fn install(
             password.as_deref().map(String::as_str),
         )?;
     } else if let Some(endpoint) = &args.endpoint {
-        // The same file, from an answer given rather than asked for (ADR-0027): this is the branch
+        // The same file, from an answer given rather than asked for (SEC-bootstrap-certificates-and-enrolment): this is the branch
         // the MSI's custom action and a `%post` script take. The self-update consent travels with
-        // it — standing unless this install was told to withdraw it (ADR-0020) — and so do the CA
-        // and the verification key beside the program (ADR-0027 clause 17).
+        // it — standing unless this install was told to withdraw it (CLT-self-update-signed-package) — and so do the CA
+        // and the verification key beside the program (SEC-bootstrap-certificates-and-enrolment §17).
         let self_update = !args.no_self_update;
         written = config_init::run_with_endpoint(&config_path, endpoint, self_update, &beside)?;
     } else if !config_path.exists() {
@@ -508,7 +508,7 @@ fn install(
     let state_dir = config.service_state_dir(&roots)?;
     let state_dir_source = config.service_state_dir_source(&roots);
     config.state_dir.clone_from(&state_dir);
-    // A registration an earlier install wrote is kept wherever it points (ADR-0021 clause 14), and
+    // A registration an earlier install wrote is kept wherever it points (CLT-installed-service-and-state §14), and
     // that install may have taken it from a file the service's account had rewritten. Said, so an
     // operator who did not choose it sees it on every upgrade.
     if roots.named.is_none()
@@ -528,7 +528,7 @@ fn install(
     let supervisors_root_ours =
         layout::beneath(&supervisors_root, &[&data_root, &layout_root, &state_dir]).is_ok();
     // Nor is it the install's to grant the process account anything in, or to withdraw a former
-    // one's rights from (ADR-0022 clause 21); Windows names it where it plans the restrictions.
+    // one's rights from (CLT-accounts-service-runs-under §21); Windows names it where it plans the restrictions.
     #[cfg(unix)]
     if let Some(warning) = run_as::supervisors_root_left(
         &supervisors_root,
@@ -561,7 +561,7 @@ fn install(
     // Nothing may run under an account whose rights this install changes or takes away, nor under
     // a registration it rewrites: on Windows every install stops both services here, and waits
     // until their processes have ended — the second service's programs with them — before the
-    // restriction, the take-over, the withdrawal and the switch of the SCM (ADR-0022 clauses 16, 19 and 21). What runs is recorded first, with the withdrawal due, in one write: a stop is never
+    // restriction, the take-over, the withdrawal and the switch of the SCM (CLT-accounts-service-runs-under §16, §19 and §21). What runs is recorded first, with the withdrawal due, in one write: a stop is never
     // left unrecorded, and an install that fails after it — or an MSI that rolls back — leaves the
     // next install to start again what ran. A record that cannot be written stops nothing; where
     // the stop fails, what is to run again is set from what the SCM reports then.
@@ -600,7 +600,7 @@ fn install(
     // On Linux and macOS an install that changes an account — the process account named anew or
     // dropped, or another account for the Client — stops the Client and then the second service
     // first, and waits until their processes have ended, so nothing runs under an account whose
-    // files it re-owns (ADR-0022 clause 26). Where one cannot be stopped, what was stopped is
+    // files it re-owns (CLT-accounts-service-runs-under §26). Where one cannot be stopped, what was stopped is
     // started again and nothing more is changed. Unix keeps no record: what ran is started again
     // once the install has succeeded, and an install that fails leaves it stopped, and says so.
     #[cfg(unix)]
@@ -620,7 +620,7 @@ fn install(
         None
     };
     let finished = (|| -> Result<(PathBuf, bool), String> {
-        // What the process account owns there is its own, and left as it is (ADR-0022 clause 1).
+        // What the process account owns there is its own, and left as it is (CLT-accounts-service-runs-under §1).
         #[cfg(windows)]
         let process_sid = process.as_ref().map(|p| p.sid().to_string());
         #[cfg(not(windows))]
@@ -631,12 +631,12 @@ fn install(
             println!("enrolling with {}", bootstrap.describe());
             written.bootstrap = Some(bootstrap);
         }
-        // Before anything is staged or registered (ADR-0021 clause 26): an enrolment that is stopped
+        // Before anything is staged or registered (CLT-installed-service-and-state §26): an enrolment that is stopped
         // leaves the answered file and nothing else.
         enrol::run(&config, &written, &[&data_root, &layout_root])?;
         // And held to what the Client needs at startup. A packaged install registers the service
         // even so — it has an endpoint and no client identity to write — but never starts it, and
-        // the service refuses to run until the file names one (ADR-0021, ADR-0022). Said loudly
+        // the service refuses to run until the file names one (CLT-installed-service-and-state, CLT-accounts-service-runs-under). Said loudly
         // here.
         if let Err(e) = config.check_admission() {
             println!(
@@ -657,13 +657,13 @@ fn install(
             run_as: run_as.as_ref().map(|r| r.account().to_string()),
             agents: agents_spec(process.as_ref(), run_as.as_ref()),
         })?;
-        // Dropped (ADR-0022 clause 16): the Client's unit no longer names the second service, which
+        // Dropped (CLT-accounts-service-runs-under §16): the Client's unit no longer names the second service, which
         // is stopped and deregistered after it.
         let dropped = args.no_process_account && manager::remove_agents(level)?;
 
         // What a former account was granted on Windows is withdrawn from it now that the SCM names
         // it no more, and what it owns given to the Administrators, as a change of owner withdraws
-        // it on Unix (ADR-0022 clauses 16 and 21); it is struck from the record once all of it is
+        // it on Unix (CLT-accounts-service-runs-under §16 and §21); it is struck from the record once all of it is
         // done. Before the hand-over and the share of the layout, which grant what the accounts
         // named now are to hold.
         #[cfg(windows)]
@@ -677,12 +677,12 @@ fn install(
             complete_withdrawal(&withdrawal, &mut pending, &kept)?;
         }
 
-        // The handover (ADR-0022 clause 1), on every registration that runs under an account — a
+        // The handover (CLT-accounts-service-runs-under §1), on every registration that runs under an account — a
         // kept one and root included: both roots belong to it — config and state because the
-        // service reads and rewrites them (ADR-0019), the executable layout because the
-        // self-update that stages into it *is* the service (ADR-0020). The state directory is
+        // service reads and rewrites them (CLT-supervisor-mode-and-kinds), the executable layout because the
+        // self-update that stages into it *is* the service (CLT-self-update-signed-package). The state directory is
         // created first: the daemon must not need rights on its parent to begin. Where a process
-        // account is registered, what it keeps there stays its own (ADR-0022 clause 1): every
+        // account is registered, what it keeps there stays its own (CLT-accounts-service-runs-under §1): every
         // package upgrade re-registers.
         if let Some(run_as) = &run_as {
             layout::create_state_dir(&state_dir, &[&data_root, &layout_root])?;
@@ -690,7 +690,7 @@ fn install(
             let mut skipped =
                 run_as.hand_over(&[&layout_root, &data_root, &state_dir, &config_path], kept)?;
             // A Supervisors' root this install created and cut on Windows is the service's to
-            // write too (ADR-0022 clause 24); none is created on Unix.
+            // write too (CLT-accounts-service-runs-under §24); none is created on Unix.
             skipped.extend(
                 run_as.hand_over(
                     &created_outside
@@ -708,7 +708,7 @@ fn install(
             }
         }
         // The second service runs from the layout, which a root taken over or cut off on Windows
-        // grants the process account nothing of (ADR-0022 clause 17).
+        // grants the process account nothing of (CLT-accounts-service-runs-under §17).
         #[cfg(windows)]
         if let Some(process) = &process {
             process.share_layout(&layout.versions_dir())?;
@@ -799,7 +799,7 @@ fn install(
     Ok(())
 }
 
-/// The second service a registration names, where a process account was decided (ADR-0022): it
+/// The second service a registration names, where a process account was decided (CLT-accounts-service-runs-under): it
 /// serves the Client's account, and the Client accepts the process account as its peer.
 #[cfg(unix)]
 fn agents_spec(
@@ -816,7 +816,7 @@ fn agents_spec(
     })
 }
 
-/// The second service a registration names on Windows (ADR-0022): it serves the Client's SID on
+/// The second service a registration names on Windows (CLT-accounts-service-runs-under): it serves the Client's SID on
 /// its named pipe, and the Client accepts the process account's SID as the pipe's owner.
 #[cfg(windows)]
 fn agents_spec(
@@ -833,7 +833,7 @@ fn agents_spec(
 }
 
 /// `service config`: the questionnaire of `install --interactive` against an installed Client, and
-/// its enrolment when it holds no certificate yet — registering nothing (ADR-0021 clause 23).
+/// its enrolment when it holds no certificate yet — registering nothing (CLT-installed-service-and-state §23).
 fn configure(
     config_path: &Path,
     config_named: bool,
@@ -860,9 +860,9 @@ fn configure(
     } else {
         data_root.join(config_init::FILE_NAME)
     };
-    // Held while this privileged run writes into it, as `install` holds it (ADR-0022).
+    // Held while this privileged run writes into it, as `install` holds it (CLT-accounts-service-runs-under).
     let _held_root = hold_data_root(&data_root)?;
-    // The installed copy runs from the layout, where no fleet files lie (ADR-0021, out of scope).
+    // The installed copy runs from the layout, where no fleet files lie (CLT-installed-service-and-state, out of scope).
     let written = ask(&config_path, &roots, &config_init::Beside::default(), None)?;
 
     let mut config = ClientConfig::load_held(&config_path)?;
@@ -870,7 +870,7 @@ fn configure(
     config.state_dir.clone_from(&state_dir);
     enrol::run(&config, &written, &[&data_root, &roots.layout])?;
     // What this run created belongs to whoever owns the configuration — the service's account when
-    // it runs as one (ADR-0022 clause 1) — not to the administrator who ran it.
+    // it runs as one (CLT-accounts-service-runs-under §1) — not to the administrator who ran it.
     let mut created = enrol::written(&state_dir);
     created.extend(written.ca_copy().map(Path::to_path_buf));
     let skipped = run_as::match_owner(
@@ -899,7 +899,7 @@ fn configure(
 
 /// The questionnaire against the file at `config_path`, offering what it holds and asking for the
 /// bootstrap identity only while the service's state directory holds no issued certificate
-/// (ADR-0021 clause 24 and ADR-0027 clause 16). That directory is decided, and refused, before anything is asked.
+/// (CLT-installed-service-and-state §24 and SEC-bootstrap-certificates-and-enrolment §16). That directory is decided, and refused, before anything is asked.
 fn ask(
     config_path: &Path,
     roots: &layout::Roots,
@@ -923,7 +923,7 @@ fn ask(
 ///
 /// On Windows the service's account holds Modify, delete included, on the data root itself, so it
 /// could rename the root away and put a junction at its name: a root that is a reparse point is
-/// refused, and the held handle keeps it in place (ADR-0022). On Unix the root's name lies
+/// refused, and the held handle keeps it in place (CLT-accounts-service-runs-under). On Unix the root's name lies
 /// in a directory only root writes, and holding it costs nothing.
 fn hold_data_root(data_root: &Path) -> Result<Option<fleet_util::nofollow::HeldDir>, String> {
     match fleet_util::nofollow::HeldDir::open_root(data_root) {

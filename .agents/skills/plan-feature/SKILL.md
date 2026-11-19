@@ -6,10 +6,18 @@ description: Plan work larger than one agent session under docs/plan/ as a featu
 # Plan a feature
 
 The rule is [`AGENTS.md` §4](../../../AGENTS.md#4-working-style); the artifacts and their
-lifecycle are decided in [ADR-0006](../../../docs/adr/0006-feature-layer.md). The shapes are the
-templates [`spec.md`](spec.md) and [`ticket.md`](ticket.md) next to this file. This skill is the
-order of work and states no rule of its own
-([ADR-0003](../../../docs/adr/0003-procedures-as-skills.md)).
+lifecycle are decided in
+[NUC-large-work-is-planned](../../../docs/adr/NUC-large-work-is-planned.md). The shapes are the
+templates [`spec.md`](spec.md) and [`ticket.md`](ticket.md) next to this file; their sections are
+the parts a spec and a ticket carry
+([NUC-large-work-is-planned §3](../../../docs/adr/NUC-large-work-is-planned.md)). This skill is
+the order of work and states no rule of its own
+([NUC-procedures-are-skills §3](../../../docs/adr/NUC-procedures-are-skills.md)).
+
+A project that plans in its host's issues, as its harness ADR records
+([NUC-large-work-is-planned §9](../../../docs/adr/NUC-large-work-is-planned.md)), files the spec
+and each ticket as an issue with the sections of the templates. It names each blocker as an
+issue rather than a path. The steps below hold otherwise.
 
 ## 1. Decide the artifact
 
@@ -25,23 +33,31 @@ spec: chart it with the human in the conversation until the questions run out.
 1. Interrogate the request with the human before drafting: which goal it serves by identifier,
    what was not said, which alternative nobody named, what happens without it. If the questions
    do not run out, the scope is too big: split first.
-2. Copy [`spec.md`](spec.md) to `docs/plan/<spec>/spec.md`, `<spec>` a short kebab-case name, and
-   fill it from that conversation: problem and solution from the user's side; the existing
-   behaviour it changes, what must stay, and which tests pin it; goals served (`G-n`, `Q-n`);
-   user stories; implementation and testing decisions in the project vocabulary, without file
-   paths or code; out of scope; ADR impact. A decision that is architecture-relevant is an ADR,
-   not a bullet: use `propose-adr`.
+2. Copy [`spec.md`](spec.md) to `docs/plan/<spec>/spec.md`, `<spec>` a short kebab-case name.
+   Fill it from that conversation:
+   - problem and solution from the user's side;
+   - the existing behaviour it changes, what must stay, and which tests pin it;
+   - goals served (`G-n`, `Q-n`);
+   - user stories;
+   - implementation and testing decisions in the project vocabulary, without file paths or code;
+   - out of scope;
+   - ADR impact.
+
+   A decision that is architecture-relevant is an ADR, not a bullet: use `propose-adr`.
 3. Cut tickets as vertical slices, each a copy of [`ticket.md`](ticket.md) at
    `docs/plan/<spec>/<NN>-<slug>.md`, numbered in the order they are cut. Each is an end-to-end
    behaviour that is demoable or verifiable on its own, sized to one fresh session. Two that follow
    each other and fit one session together are one ticket, since each pays a session's start and a
-   review, except the tracer bullet, which is proven before more is built on it. Each has
-   Given/When/Then acceptance criteria, the tickets that block it by path, and *Read first*: the
-   paths it touches, from which the sensor finds the ADRs that bind them, the glossary terms and
-   conventions in play, the golden path it copies, the seam its tests go on, each by its section
-   where a section is enough. The first slice through new ground is the tracer bullet. Where it
-   takes a decision the catalogue of `propose-adr` has an entry for and no ADR in force decides,
-   `propose-adr` runs before it.
+   review, except the tracer bullet, which is proven before more is built on it. Each ticket has:
+   - Given/When/Then acceptance criteria;
+   - the tickets that block it, by path;
+   - *Read first*: the paths it touches, from which the sensor finds the ADRs that bind them; the
+     glossary terms and conventions in play; the golden path it copies; the seam its tests go
+     on. Each is named by its section where a section is enough.
+
+   The first slice through new ground is the tracer bullet. Where it takes a decision the
+   catalogue of `propose-adr` has an entry for and no ADR in force decides, `propose-adr` runs
+   before it.
 4. Set each ticket's *Mode*: "unattended" only under the conditions of
    [`AGENTS.md` §4](../../../AGENTS.md#4-working-style), each answered on the ticket; the stop
    is concrete, the attempts, time, or criterion past which the session hands off. Otherwise

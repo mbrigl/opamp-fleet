@@ -1,8 +1,8 @@
-//! Enrolment and certificates (ADR-0039 clause 9, ADR-0026, ADR-0027): the approval of an
+//! Enrolment and certificates (SRV-state-stores-contract-pair §9, SEC-admission-by-client-certificate, SEC-bootstrap-certificates-and-enrolment): the approval of an
 //! enrolment and its take-back, the answer an enrolling Agent is given, the issuing and renewal of
 //! a host certificate on the connection the request arrived over, the records of what was issued
-//! and signed, each written with its decision, and the mark of a host as a Gateway (ADR-0027
-//! clause 11). Its entry points are methods of `AppState`.
+//! and signed, each written with its decision, and the mark of a host as a Gateway (SEC-bootstrap-certificates-and-enrolment §11).
+//! Its entry points are methods of `AppState`.
 
 use opamp::proto::{OpAmpConnectionSettings, ServerCapabilities, ServerToAgent, TlsCertificate};
 use opamp::uid::InstanceUid;
@@ -20,8 +20,8 @@ use super::session::{
 use super::{AppState, CertificateSigner, TelemetryOffer, UseCase};
 
 impl AppState {
-    /// Records a certificate the client CA signed on a renewal, before it is offered (ADR-0039
-    /// clause 9, ADR-0028 clause 1). An approval records through [`Approving`].
+    /// Records a certificate the client CA signed on a renewal, before it is offered (SRV-state-stores-contract-pair §9,
+    /// SEC-append-only-audit-record §1). An approval records through [`Approving`].
     fn record_issued(
         &self,
         signed: &Signed,
@@ -37,7 +37,7 @@ impl AppState {
             .map_err(|e| format!("cannot record the issued certificate: {e}"))
     }
 
-    /// The audit entry of a signature, `issuance.signed` (ADR-0028 clause 1): `predecessor` for a
+    /// The audit entry of a signature, `issuance.signed` (SEC-append-only-audit-record §1): `predecessor` for a
     /// renewal, and for an enrolment the request it approves.
     fn signature_entry(
         &self,
@@ -75,12 +75,12 @@ impl AppState {
             .with("request", request.map(str::to_string))
     }
 
-    /// What a CSR renews, the host the new certificate is for (ADR-0016 clause 18), and the
-    /// subject values it carries on (ADR-0027 clause 12). A renewal proof names the certificate
+    /// What a CSR renews, the host the new certificate is for (CLT-modes-and-gateway §18), and the
+    /// subject values it carries on (SEC-bootstrap-certificates-and-enrolment §12). A renewal proof names the certificate
     /// whose key signed the new one — through a Gateway too — and the host and the values carry
     /// on from it; without one, the certificate the connection presented is renewed, unless its
-    /// host is marked as a Gateway (ADR-0016 clause 18). A bootstrap proof makes the request an
-    /// enrolment, which a member does not make (ADR-0016 clause 25) — unless it proves the very
+    /// host is marked as a Gateway (CLT-modes-and-gateway §18). A bootstrap proof makes the request an
+    /// enrolment, which a member does not make (CLT-modes-and-gateway §25) — unless it proves the very
     /// certificate the connection presented: a Client cannot tell a certificate an operator
     /// provisioned from a bootstrap certificate, and proves whichever it holds. A certificate that
     /// names no host — one an operator provisioned — gets a host derived from its issuer and
@@ -117,7 +117,7 @@ impl AppState {
                     .unwrap_or_else(|| derived(&presented.id));
                 // Behind a Gateway the presented certificate is the Gateway's, and its host carries
                 // the mark: a CSR without a proof would hand the Gateway's powers to whoever sent
-                // it (ADR-0016 clause 18).
+                // it (CLT-modes-and-gateway §18).
                 let gateway = self
                     .revocations
                     .as_ref()
@@ -149,8 +149,8 @@ impl AppState {
         })
     }
 
-    /// Approves one pending enrolment request: the client CA signs it (ADR-0027 clause 10), with
-    /// the subject values of the bootstrap certificate the request came with (ADR-0016 clause 23).
+    /// Approves one pending enrolment request: the client CA signs it (SEC-bootstrap-certificates-and-enrolment §10), with
+    /// the subject values of the bootstrap certificate the request came with (CLT-modes-and-gateway §23).
     ///
     /// # Errors
     /// Returns [`DecisionError::NotFound`] when enrolment is off or the id is unknown,
@@ -161,7 +161,7 @@ impl AppState {
         let signer = self.client_ca.as_deref().ok_or_else(|| {
             DecisionError::Sign("this Server issues no client certificates".into())
         })?;
-        // A new host: its identity is minted here and carried by every renewal (ADR-0027 clause 11).
+        // A new host: its identity is minted here and carried by every renewal (SEC-bootstrap-certificates-and-enrolment §11).
         let host = InstanceUid::default().to_string();
         let revoked = |bootstrap: &CertId| {
             self.revocations
@@ -175,7 +175,7 @@ impl AppState {
             .find(|pending| pending.id == id)
             .and_then(|pending| pending.requester.gateway);
         let serial = enrolment.approve(id, signer, &host, &Approving(self), &revoked)?;
-        // Recorded before the approval is answered (ADR-0039 clause 9). The decision is written
+        // Recorded before the approval is answered (SRV-state-stores-contract-pair §9). The decision is written
         // already, so a record that cannot take it refuses nothing: the register answers for it.
         if let Err(e) = self.audited(
             Entry::new("enrolment.approved", "approved")
@@ -191,7 +191,7 @@ impl AppState {
     /// Takes back every approved request whose certificate the register does not hold, so it
     /// waits again, and records each signature as undecided: what a start does with a store that
     /// writes the decision before the register entry, after a write between the two failed
-    /// (ADR-0039 clause 9). `read` reads what a certificate, PEM, says about itself. Answers how
+    /// (SRV-state-stores-contract-pair §9). `read` reads what a certificate, PEM, says about itself. Answers how
     /// many it took back.
     ///
     /// # Errors
@@ -229,7 +229,7 @@ impl AppState {
         Ok(taken)
     }
 
-    /// What an enrolment connection is told (ADR-0027 clause 9): the capabilities that say it may
+    /// What an enrolment connection is told (SEC-bootstrap-certificates-and-enrolment §9): the capabilities that say it may
     /// send a CSR, and — once its request is approved — the issued certificate, as an ordinary
     /// connection-settings offer with no private key in it.
     pub fn enrolment_answer(
@@ -261,11 +261,11 @@ impl AppState {
         }
     }
 
-    /// Signs and records the certificate a report asked for (ADR-0026): signing it here, on the
+    /// Signs and records the certificate a report asked for (SEC-admission-by-client-certificate): signing it here, on the
     /// connection it arrived over, is the whole of the approval, since admission already required
     /// every proof this endpoint asks of any message, which is what the Baseline's flow means by
     /// awaiting one. A request the Server refuses, or one whose record cannot be written, which
-    /// the Agent retries (ADR-0028 clause 5), is answered here, the report's record persisted.
+    /// the Agent retries (SEC-append-only-audit-record §5), is answered here, the report's record persisted.
     pub(super) fn issue(
         &self,
         csr: Vec<u8>,
@@ -276,7 +276,7 @@ impl AppState {
     ) -> Result<TlsCertificate, Box<Processed>> {
         let uid = ending.uid;
         // `Ok(Err(..))` is a request the Server refuses; `Err(..)` a record it cannot write,
-        // which the Agent retries (ADR-0028 clause 5).
+        // which the Agent retries (SEC-append-only-audit-record §5).
         let outcome: Result<Result<Signed, String>, String> = match &self.client_ca {
             // The Baseline's MUST when the Server cannot act on the request. An Agent reaching
             // here ignored the undeclared capability, so it is a client error.
@@ -284,7 +284,7 @@ impl AppState {
             Some(ca) => match String::from_utf8(csr)
                 .map_err(|_| "the certificate signing request is not PEM".to_string())
                 .and_then(|csr| {
-                    // The message's own instance_uid, before any re-key (ADR-0026).
+                    // The message's own instance_uid, before any re-key (SEC-admission-by-client-certificate).
                     ca.check_claims(&csr, sender)?;
                     let (predecessor, host, subject, use_case) =
                         self.renews(ca.as_ref(), &csr, presented)?;
@@ -326,7 +326,7 @@ impl AppState {
             }
         };
         // The report's updates are already in the record, so they are persisted even though no
-        // certificate is issued (ADR-0029).
+        // certificate is issued (SRV-fleet-record-agents-hosts).
         if !self.persist_if_dirty(&uid, persisted) {
             return Err(Box::new(self.forgotten_elsewhere(&uid, &ending.reported)));
         }
@@ -337,9 +337,9 @@ impl AppState {
         }))
     }
 
-    /// Marks `host` as a Gateway, or not (ADR-0027 clause 11); answers whether this Server knows
+    /// Marks `host` as a Gateway, or not (SEC-bootstrap-certificates-and-enrolment §11); answers whether this Server knows
     /// the host. The mark decides whether the Agents arriving over it carry its values and how
-    /// they group (ADR-0029 clauses 18 and 19), so every Agent is placed again.
+    /// they group (SRV-fleet-record-agents-hosts §18 and §19), so every Agent is placed again.
     ///
     /// # Errors
     /// Returns an error when there is no host register or the change cannot be written.
@@ -356,7 +356,7 @@ impl AppState {
     }
 }
 
-/// What an approval keeps of what it signed (ADR-0039 clause 9): the signature in the audit
+/// What an approval keeps of what it signed (SRV-state-stores-contract-pair §9): the signature in the audit
 /// record before its decision is written, and its register entry and Host, prepared here, written
 /// with the decision and taken up once it is.
 struct Approving<'a>(&'a AppState);
@@ -433,7 +433,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    // ---- An approval records its certificate with its decision (ADR-0039 clause 9) ----
+    // ---- An approval records its certificate with its decision (SRV-state-stores-contract-pair §9) ----
 
     /// A fleet on files in `dir` that enrols: its register, its window and queue, its audit record
     /// in `dir/audit`, and a client CA kept in `dir` across a reopen.
@@ -535,8 +535,8 @@ mod tests {
     /// On files the decision is written before the register entry: a decision that cannot be
     /// written registers nothing, and an entry that cannot be written takes the decision back, so
     /// the request waits again with nothing registered, each signature is recorded as rolled back,
-    /// and approved again it is signed anew (ADR-0039 clause 9).
-    /// Verifies: ADR-0039
+    /// and approved again it is signed anew (SRV-state-stores-contract-pair §9).
+    /// Verifies: SRV-state-stores-contract-pair
     #[cfg(unix)]
     #[test]
     fn an_approval_on_files_whose_register_entry_fails_takes_its_decision_back() {
@@ -616,8 +616,8 @@ mod tests {
 
     /// The audit record of an approval whose decision was not written still verifies, and names
     /// that signature as undecided by its serial and request, beside the signature of the approval
-    /// that was (ADR-0039 clause 9).
-    /// Verifies: ADR-0039
+    /// that was (SRV-state-stores-contract-pair §9).
+    /// Verifies: SRV-state-stores-contract-pair
     #[cfg(unix)]
     #[test]
     fn the_audit_record_of_an_approval_that_did_not_commit_verifies_and_names_it_undecided() {
@@ -650,8 +650,8 @@ mod tests {
     /// A decision found at startup whose certificate the register does not hold, as after a crash
     /// between the two writes, is taken back: the request waits again and its signature is
     /// recorded as undecided, while an approval whose certificate is registered stays decided
-    /// (ADR-0039 clause 9).
-    /// Verifies: ADR-0039
+    /// (SRV-state-stores-contract-pair §9).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_decision_found_at_startup_without_its_register_entry_waits_again() {
         let dir = tempfile::tempdir().expect("tempdir");

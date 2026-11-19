@@ -12,7 +12,8 @@ registration of a renewal).
 
 **Idea.** Each path that exists only for a Server of 0.8.0 beside this one goes, with its comment,
 and a path that also serves 0.8.4 keeps only that reason. Some of them are clauses of the ADR
-that supersedes ADR-0039, or of ADR-0025, ADR-0027 and ADR-0028; those stay until a supersession
-or the next normalization restates them.
+that supersedes SRV-state-stores-contract-pair, or of SRV-instances-share-one-postgresql,
+SEC-bootstrap-certificates-and-enrolment and SEC-append-only-audit-record; those stay until a
+supersession or the next normalization restates them.
 
 **From.** The implementation of release 0.8.5 of the contract pair (2026-11-19).

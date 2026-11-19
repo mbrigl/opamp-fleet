@@ -8,7 +8,7 @@
 # unchanged repository reports nothing; every other case is one thing the sensor reports, or one
 # it must stay silent on, among them the timed waits a change adds to the Rust tests.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 # Inputs: scripts/sensor-tests-kept.sh scripts/lib/ .agents/skills/propose-adr/concepts/toolchain.md
 #
 # Usage:
@@ -415,9 +415,9 @@ expect 0 "2500 sleeps, a list larger than an environment variable holds, are eac
 
 # Called by its path from a subdirectory of another repository, the sensor reads the one it lives
 # in, as the checks do: the tag 'base' exists only there.
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 d="$(repo own-repository)"
-mkdir -p "$d/scripts/lib" && cp "$SENSOR" "$d/scripts/" && cp "$ROOT/scripts/lib/git.sh" "$d/scripts/lib/"
+mkdir -p "$d/scripts/lib" && cp "$SENSOR" "$d/scripts/" && cp "$ROOT/scripts/lib/git.sh" "$ROOT/scripts/lib/root.sh" "$d/scripts/lib/"
 git -C "${d:?}" rm -q tests/a_test.py
 commit "$d" "drop a test"
 other="$work/other"

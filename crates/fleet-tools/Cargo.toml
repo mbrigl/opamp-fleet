@@ -1,6 +1,6 @@
 [package]
 name = "fleet-tools"
-description = "opamp-fleetctl, the OpAMP Fleet operator tool: package artifacts and the fleet's certificates (ADR-0036)"
+description = "opamp-fleetctl, the OpAMP Fleet operator tool: package artifacts and the fleet's certificates (OPS-operator-program-fleetctl)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,71 +8,71 @@ license.workspace = true
 publish.workspace = true
 
 # One binary, `opamp-fleetctl`, and no library: nothing in this workspace depends on this crate —
-# the arrow points the other way (ADR-0036 clause 1, ADR-0008).
+# the arrow points the other way (OPS-operator-program-fleetctl §1, DEV-six-crates-tokio-axum).
 [[bin]]
 name = "opamp-fleetctl"
 path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-# The ring provider every binary installs at startup (ADR-0008, ADR-0012).
+# The ring provider every binary installs at startup (DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input).
 opamp = { workspace = true, features = ["client"] }
-# What the tool shares with the Client, and never the Client itself (ADR-0008 clause 22):
+# What the tool shares with the Client, and never the Client itself (DEV-six-crates-tokio-axum §22):
 # `archive` — the 7z Unix-mode convention, used when packing, and the unpackers, used by the tests
 # to open what these tools produce; `tree`, the links a kind's tree keeps; and the readers of the
 # operator's PKCS#12 and password files. Checking an artifact against the code that will install it
 # is the property worth asserting, and it is why these tools live in the same workspace as the
 # Client rather than beside it.
 fleet-util.workspace = true
-# The PKCS#11 primitives the Server and the operator program share (ADR-0026).
+# The PKCS#11 primitives the Server and the operator program share (SEC-admission-by-client-certificate).
 fleet-core = { workspace = true, features = ["pkcs11"] }
-# ADR-0033: `pack` writes the containers a Client can open, so it needs the *writers* — `compress`
+# PKG-signed-packages-and-delivery: `pack` writes the containers a Client can open, so it needs the *writers* — `compress`
 # for 7z, and the gzip/tar pair for `.tar.gz` and for the tree `opamp-fleetctl package fetch`
 # repacks.
 sevenz-rust2 = { workspace = true, features = ["compress"] }
 flate2.workspace = true
 tar.workspace = true
-# ADR-0033: package signatures are raw Ed25519 over the artifact bytes; `keygen`/`sign` produce
+# PKG-signed-packages-and-delivery: package signatures are raw Ed25519 over the artifact bytes; `keygen`/`sign` produce
 # exactly what the Client verifies.
 ring.workspace = true
 sha2.workspace = true
 # Every hash, key, and signature these tools print is hex — the form the REST API and
 # `supervisor.toml` take them in.
 hex.workspace = true
-# ADR-0008: `opamp-fleetctl package fetch` asks which agent, which version, and which platforms. The
-# Client needs the same crate for its interactive install (ADR-0021), so this is one workspace
+# DEV-six-crates-tokio-axum: `opamp-fleetctl package fetch` asks which agent, which version, and which platforms. The
+# Client needs the same crate for its interactive install (CLT-installed-service-and-state), so this is one workspace
 # dependency serving two crates rather than a second prompt library.
 dialoguer.workspace = true
-# ADR-0036: the `pki` commands make the fleet's certificates with rcgen, on the dates `time` speaks,
+# OPS-operator-program-fleetctl: the `pki` commands make the fleet's certificates with rcgen, on the dates `time` speaks,
 # and read a CA's subject with x509-parser — the crates the Server's client CA uses.
 rcgen.workspace = true
 # `pki token-init` and `pki bootstrap-ca --pkcs11-module` make keys on the Server's PKCS#11 token
 # through the wrapper the Server signs with
-# (ADR-0036 clause 5).
+# (OPS-operator-program-fleetctl §5).
 cryptoki.workspace = true
 time.workspace = true
 x509-parser.workspace = true
 # The paths the fragments name, quoted as TOML strings.
 toml.workspace = true
-# Listing releases and downloading artifacts. TLS is rustls/ring, as everywhere (ADR-0012) — the
+# Listing releases and downloading artifacts. TLS is rustls/ring, as everywhere (SEC-tls13-two-planes-bounded-input) — the
 # provider is installed at startup through the Client's own helper, since `rustls-no-provider`
 # refuses to build a client without one.
 reqwest.workspace = true
 rustls.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
-# ADR-0033: the signing file is read strictly — unknown fields refused — which derive states in
+# PKG-signed-packages-and-delivery: the signing file is read strictly — unknown fields refused — which derive states in
 # one line per type rather than in hand-written checks over a `serde_json::Value`.
 serde.workspace = true
-# ADR-0015: the passwords and keys these tools read and write are held in buffers wiped on drop.
-# No TLS or crypto backend comes with it (ADR-0012).
+# SEC-secrets-wiped-on-drop: the passwords and keys these tools read and write are held in buffers wiped on drop.
+# No TLS or crypto backend comes with it (SEC-tls13-two-planes-bounded-input).
 zeroize.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-# ADR-0036: the end-to-end test runs the real Server and the real Client in-process on what
+# OPS-operator-program-fleetctl: the end-to-end test runs the real Server and the real Client in-process on what
 # `pki init` wrote, reading the fragments as their configuration files are read.
 fleet-server = { path = "../fleet-server" }
-# ADR-0036: the end-to-end test also runs the real Client in-process. A development dependency
+# OPS-operator-program-fleetctl: the end-to-end test also runs the real Client in-process. A development dependency
 # links into no artifact.
 fleet-agent = { path = "../fleet-agent" }

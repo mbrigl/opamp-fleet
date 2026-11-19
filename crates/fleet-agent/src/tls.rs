@@ -1,5 +1,5 @@
-//! Which TLS material the Client uses (ADR-0012, ADR-0026), read from disk and handed to `opamp` as
-//! [`ClientTls`] (ADR-0008).
+//! Which TLS material the Client uses (SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate), read from disk and handed to `opamp` as
+//! [`ClientTls`] (DEV-six-crates-tokio-axum).
 //!
 //! The decisions are the Client's: an optional CA file that *replaces* the built-in roots, and the
 //! identity in force — the one the Server issued, else the one the operator configured. Building a
@@ -14,19 +14,19 @@ use zeroize::Zeroizing;
 use crate::config::ClientConfig;
 
 /// The Server-issued client certificate, in the state directory beside the connection settings —
-/// it belongs to the Client's one upstream connection, not to any single Agent (ADR-0026).
+/// it belongs to the Client's one upstream connection, not to any single Agent (SEC-admission-by-client-certificate).
 pub const ISSUED_CERT_FILE: &str = "client-cert.pem";
 /// The private key of [`ISSUED_CERT_FILE`]. Generated on this host and never sent anywhere: what
 /// leaves is a CSR over its public half.
 pub const ISSUED_KEY_FILE: &str = "client-key.pem";
 /// The key a request in flight asks to be certified, kept apart from [`ISSUED_KEY_FILE`] so the
-/// certificate in force keeps its own key until the new one is proved (ADR-0026 clause 10).
+/// certificate in force keeps its own key until the new one is proved (SEC-admission-by-client-certificate §10).
 pub const PENDING_KEY_FILE: &str = "client-key.pending.pem";
 /// An issued certificate staged beside [`PENDING_KEY_FILE`] while the two are put in force, so a
 /// swap cut short is completed at the next start rather than leaving a mismatched pair.
 pub const PENDING_CERT_FILE: &str = "client-cert.pending.pem";
 /// The request in flight, re-sent unchanged until it is answered — the enrolment queue knows a
-/// request by its public key (ADR-0027 clause 9).
+/// request by its public key (SEC-bootstrap-certificates-and-enrolment §9).
 pub const PENDING_CSR_FILE: &str = "client-csr.pending.pem";
 
 /// The trust and the identity in force.
@@ -38,7 +38,7 @@ pub fn client_tls(config: &ClientConfig) -> Result<ClientTls, String> {
 }
 
 /// The same, for a **candidate** identity: an offered certificate is proved by connecting with it
-/// before it is stored (ADR-0013's MUST, applied to the certificate in ADR-0026), so the
+/// before it is stored (SEC-connection-settings-never-plaintext's MUST, applied to the certificate in SEC-admission-by-client-certificate), so the
 /// certificate under test comes from the offer while its key is the pending one on disk.
 ///
 /// # Errors
@@ -67,14 +67,14 @@ pub fn client_tls_for(
                 ));
             }
             // `opamp` takes the key as its own buffer; the copy is made here and the one read
-            // is wiped (ADR-0015 clause 3).
+            // is wiped (SEC-secrets-wiped-on-drop §3).
             Some(Identity {
                 cert_pem: cert.to_vec(),
                 key_pem: key_in(&key, state_file(&key)?)?.to_vec(),
             })
         }
         // An identity opened from a `bootstrap.p12` stands in for the configured one until the
-        // Server's certificate is stored (ADR-0027 clause 15); the issued one outranks both.
+        // Server's certificate is stored (SEC-bootstrap-certificates-and-enrolment §15); the issued one outranks both.
         None => match (&config.bootstrap_identity, config.is_enrolled()) {
             (Some(bootstrap), false) => Some(Identity {
                 cert_pem: bootstrap.cert_pem.clone(),
@@ -131,7 +131,7 @@ pub(crate) fn certificates_in(path: &Path, pem: Vec<u8>) -> Result<Vec<u8>, Stri
 }
 
 /// A PEM file holding a private key, parsed here so that a bad one is named by its path. The key
-/// is held, and parsed, in buffers wiped when they are dropped (ADR-0015).
+/// is held, and parsed, in buffers wiped when they are dropped (SEC-secrets-wiped-on-drop).
 pub(crate) fn key_file(path: &Path) -> Result<Zeroizing<Vec<u8>>, String> {
     key_in(path, read(path)?)
 }
@@ -146,7 +146,7 @@ pub(crate) fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, St
 
 /// A file `[tls]` names, read by its path: the run-time Client's own files, which its operator
 /// may reach through a link. A privileged enrolment reads them through
-/// [`fleet_util::nofollow::read_privileged`] instead, and never by this path (ADR-0022 clause 11).
+/// [`fleet_util::nofollow::read_privileged`] instead, and never by this path (CLT-accounts-service-runs-under §11).
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     read_bounded(path)
         .map(|mut bytes| std::mem::take(&mut *bytes))
@@ -158,7 +158,7 @@ fn read(path: &Path) -> Result<Vec<u8>, String> {
 pub(crate) const MAX_PEM_BYTES: u64 = 1 << 20;
 
 /// The bytes of the regular file at `path`, of at most [`MAX_PEM_BYTES`], in a buffer wiped when
-/// it is dropped (ADR-0015). The error says why, and leaves naming the file to the caller.
+/// it is dropped (SEC-secrets-wiped-on-drop). The error says why, and leaves naming the file to the caller.
 ///
 /// Anything but a regular file is refused before it is opened, and again by what was opened, so
 /// a FIFO or a device at the name — `/dev/zero` — is never read. On Unix the open does not block,
@@ -190,7 +190,7 @@ fn not_regular() -> String {
 }
 
 /// A file of the state directory, never read through a link: an install reads it as root, and the
-/// directory belongs to the service's account (ADR-0022).
+/// directory belongs to the service's account (CLT-accounts-service-runs-under).
 fn state_file(path: &Path) -> Result<Vec<u8>, String> {
     fleet_util::nofollow::read(path, MAX_PEM_BYTES)
         .map(|mut bytes| std::mem::take(&mut *bytes))
@@ -232,9 +232,9 @@ mod tests {
     }
 
     /// A `bootstrap.p12` opens to PEM in memory and stands in for the configured identity until
-    /// the Server's certificate is stored (ADR-0027 clause 15). The bound its read is held to is
+    /// the Server's certificate is stored (SEC-bootstrap-certificates-and-enrolment §15). The bound its read is held to is
     /// `config_init`'s, tested there.
-    /// Verifies: ADR-0027
+    /// Verifies: SEC-bootstrap-certificates-and-enrolment
     #[test]
     fn an_opened_bootstrap_p12_is_presented_until_the_client_is_enrolled() {
         use fleet_core::pkcs12::file::OpenError;
@@ -300,7 +300,7 @@ mod tests {
     /// bootstrap identity, a key file, a bootstrap password, the Supervisor Endpoint token and
     /// `[packages] archive_key`.
     /// Were any of them a plain buffer again, this would not compile.
-    /// Verifies: ADR-0015
+    /// Verifies: SEC-secrets-wiped-on-drop
     #[test]
     fn the_clients_secrets_are_held_in_zeroizing_buffers() {
         use fleet_util::identity::BootstrapIdentity;

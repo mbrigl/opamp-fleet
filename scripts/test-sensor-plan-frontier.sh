@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-plan-frontier.sh. Verifies: ADR-0006
+# Self-test of scripts/sensor-plan-frontier.sh. Verifies: NUC-large-work-is-planned
 #
 # Each case builds a throwaway git repository under a temporary directory with tickets under
 # docs/plan/, runs the sensor against it, and asserts the exit code and a line a reader would
@@ -11,7 +11,7 @@
 # skill is exercised with it: a claim in one repository, and a claim on a remote that a second
 # clone's claim of the same ticket loses, also when the branch there points at main itself.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 # Inputs: scripts/sensor-plan-frontier.sh .agents/skills/work-tickets/claim.sh scripts/lib/
 #
 # Usage:
@@ -47,7 +47,7 @@ expect() {
   local want="$1" name="$2" dir="$3" needle="$4"
   local out rc
   fixture "$dir"
-  out="$(bash "$SENSOR" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" --root "$dir" 2>&1)"; rc=$?
   if [[ $rc -eq "$want" && "$out" == *"$needle"* ]]; then
     passed=$((passed + 1))
     return
@@ -93,6 +93,7 @@ d="$(repo unreadable)"
 ticket "$d" docs/plan/s/01-first.md "None (can start immediately)" "unattended"
 sed '/^## Mode$/,$d' "$d/docs/plan/s/01-first.md" > "$d/t.tmp" && mv "$d/t.tmp" "$d/docs/plan/s/01-first.md"
 expect 1 "a ticket without a Mode section fails" "$d" "docs/plan/s/01-first.md: no '## Mode' section"
+expect 1 "an unreadable ticket cites the clauses that place it" "$d" "ticket(s) unreadable (NUC-large-work-is-planned §3, §4):"
 
 d="$(repo no-blocked-by)"
 ticket "$d" docs/plan/s/01-first.md "None (can start immediately)" "unattended"
@@ -104,7 +105,7 @@ ticket "$d" docs/plan/s/01-first.md "None (can start immediately)" "unattended"
 ticket "$d" docs/plan/s/02-second.md "[01-first](01-first.md)" "unattended"
 expect 1 "a blocker written as a link fails rather than freeing its ticket" "$d" "docs/plan/s/02-second.md: '## Blocked by' names '- [01-first](01-first.md)'"
 
-# Verifies: ADR-0006
+# Verifies: NUC-large-work-is-planned
 d="$(repo name-with-space)"
 ticket "$d" "docs/plan/x/01-a b.md" "None (can start immediately)" "unattended"
 expect 1 "a ticket whose name the claim refuses fails rather than reaching the frontier" "$d" \

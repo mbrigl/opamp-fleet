@@ -3,12 +3,12 @@
 
 use std::path::Path;
 
-/// The password a password file holds: its first line, without its `\n` or `\r\n` (ADR-0027
-/// clause 18). The file is read once and left as it is: the administrator's path, read as
+/// The password a password file holds: its first line, without its `\n` or `\r\n` (SEC-bootstrap-certificates-and-enrolment §18).
+/// The file is read once and left as it is: the administrator's path, read as
 /// [`crate::nofollow::read_privileged`] reads one with `roots` as the service's account's, and a
-/// file of more than 4 KiB is refused (ADR-0022 clause 11). `flag` is the option that named it,
+/// file of more than 4 KiB is refused (CLT-accounts-service-runs-under §11). `flag` is the option that named it,
 /// such as the Client's `--bootstrap-password-file`, for the error. The file's bytes and the
-/// password are held in buffers wiped when they are dropped (ADR-0015).
+/// password are held in buffers wiped when they are dropped (SEC-secrets-wiped-on-drop).
 ///
 /// # Errors
 /// Returns an error naming the flag when the file cannot be read or its first line is empty.
@@ -44,8 +44,8 @@ mod tests {
     use super::*;
 
     /// The password is the file's first line without its line ending; an empty first line, a
-    /// missing file and a file over 4 KiB are refused, naming the flag (ADR-0027 clause 18).
-    /// Verifies: ADR-0027
+    /// missing file and a file over 4 KiB are refused, naming the flag (SEC-bootstrap-certificates-and-enrolment §18).
+    /// Verifies: SEC-bootstrap-certificates-and-enrolment
     #[test]
     fn a_password_file_gives_its_first_line_and_refuses_the_rest() {
         let dir = tempfile::tempdir().expect("tempdir");

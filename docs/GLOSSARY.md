@@ -2,12 +2,15 @@
 
 > The **vocabulary** of this project: the terms everyone, humans and agents alike, uses in code,
 > comments, documentation, and ADRs. It defines words and decides nothing. Whoever resolves a term
-> adds it here in the same change ([ADR-0001](adr/0001-agent-governance-model.md)).
+> adds it here in the same change ([NUC-documents-are-fixed §5](adr/NUC-documents-are-fixed.md)).
 
 One term per concept, only terms specific to this domain. Say what a term *is* in one or two
 sentences, and list under _Avoid:_ the synonyms it displaces, where there are any. A term the
 specification, an ADR, or the code uses without an entry here is a gap to close, not a convention to
 invent.
+
+List each synonym under _Avoid:_ as one to three words, without prose around them. A synonym
+inside a longer term of this glossary, such as "shape" in **Node shape**, is no synonym there.
 
 ## The protocol
 
@@ -41,15 +44,16 @@ invent.
 - **Server instance** — one running process of the Server. On PostgreSQL every instance holds a
   **lease** under an instance id of its own, a random UUID that is not persisted, and any number of
   them serve one fleet from the shared database and object store; on the filesystem store there is
-  one instance.
-  _Avoid:_ node, replica, Server (for one process of several).
+  one instance. One process of several is a Server instance, not the Server.
+  _Avoid:_ node, replica.
 - **Lease** — a Server instance's claim, renewed in the database, that it is alive and may serve.
   An instance opens its listeners only while it holds a lease it can prove, and a lease that is not
   renewed lapses.
 - **Holder** — the Server instance that holds the connection an Agent is carried on, named in the
   Agent's stored presence by the instance id of its lease. A holder without a live lease holds no
-  connection, and the Agent reads as disconnected.
-  _Avoid:_ owner (the owning connection is one WebSocket, inside one instance).
+  connection, and the Agent reads as disconnected. What owns the Agent is the connection, one
+  WebSocket inside the holder, so the holder is not its owner.
+  _Avoid:_ owner.
 - **Client** — this project's client deployable: the process an operator installs on a machine to
   place it under management. One Client process runs in one or more **Client Modes** and may present
   itself to the Server as several **Agents**. It is the OpAMP Client in the protocol's sense.
@@ -71,19 +75,21 @@ invent.
 - **Fleet** — all Agents managed by the Server.
 - **Client Agent** — the Agent a Client presents for itself, recognised by the `supervisor.kind.*`
   attributes it alone reports; its Labels hold for the Client's other Agents, the Supervisor Agents.
-  _Avoid:_ own agent, main agent.
+  Say Client Agent, not the Client's own agent.
+  _Avoid:_ main agent.
 - **Bootstrap certificate** — the short-lived certificate a host presents to ask for enrolment;
   its subject values describe the Host it becomes.
   _Avoid:_ join token, enrolment token.
 - **Enrolment** — the time-limited, operator-approved exchange in which a host holding a bootstrap
-  certificate obtains its client certificate and becomes a Host.
-  _Avoid:_ registration, onboarding, enrollment.
+  certificate obtains its client certificate and becomes a Host. Say Enrolment, not registration,
+  which names a service registered with the operating system.
+  _Avoid:_ onboarding, enrollment.
 - **Enrolling peer** — a peer of a Gateway whose certificate chains to the bootstrap CA alone; the
   Gateway relays one plain-HTTP enrolment request of it and nothing else.
   _Avoid:_ bootstrap client, enrolling Agent.
 - **Data directory** — the one directory, `data_dir`, under which the Server keeps all of its
-  state, one subdirectory per domain.
-  _Avoid:_ config directory, package directory, state directory (that is the Client's).
+  state, one subdirectory per domain. The state directory is the Client's, not the Server's.
+  _Avoid:_ config directory, package directory.
 
 ## Client Modes
 
@@ -167,13 +173,14 @@ invent.
   Linux and macOS its primary group, the *process account's group*, is its own: the Client's account
   is its one member, and no other account's primary group it is. What the Client shares with the
   Managed Processes belongs to that group, and nothing else does; on Windows the same share is made
-  by grants to the account's SID.
-  _Avoid:_ agent user, run-as account (that is the Client's), process group (that is a Unix
-process group, which a Managed Process may lead).
+  by grants to the account's SID. The run-as account is the Client's, not this one. A process
+  group is a Unix process group, which a Managed Process may lead, not this account's group.
+  _Avoid:_ agent user.
 - **Second service** — the service `<PRODUCT_NAME>-agents`, registered beside the Client where a
   process account is named, which runs under that account and starts, signals and stops those
-  programs on the Client's request, over a channel only the Client's account may use.
-  _Avoid:_ helper, launcher, sidecar.
+  programs on the Client's request, over a channel only the Client's account may use. Say second
+  service, not helper.
+  _Avoid:_ launcher, sidecar.
 - **Tombstone** — the name, `.purge-<name>-<nonce>`, beneath the Supervisors' root that a removed
   Supervisor's directory is moved to before its purge deletes it, a name no Supervisor can carry;
   one the purge could not delete is removed again at the next start and with the next purge.
@@ -218,25 +225,28 @@ process group, which a Managed Process may lead).
   resolved. An Agent in no Deployment is offered nothing.
 
 - **Agent type** — the kind of agent an Agent runs, as the `service.name` it reports; a Package is
-  built for one, a Configuration is written for one.
-  _Avoid:_ service type, product.
+  built for one, a Configuration is written for one. Say Agent type, not product.
+  _Avoid:_ service type.
 - **Effective description** — what a Selector is matched against: its Host's subject values as
-  `fleet.host.*`, an Agent's reported attributes, its Labels, and its Client Agent's Labels.
-  _Avoid:_ attributes (alone), metadata.
+  `fleet.host.*`, an Agent's reported attributes, its Labels, and its Client Agent's Labels. Say
+  effective description, not attributes alone, which are only what the Agent reports, and not
+  metadata.
 - **Rollout** — the explicit act that releases a Deployment to Agents and pins what each receives.
   _Avoid:_ publish, push, deploy.
 - **Entry** — one platform's artifact in a Package: operating system and architecture, content
-  hash, size and signature.
-  _Avoid:_ file, asset, build.
+  hash, size and signature. Say Entry, not file or build.
+  _Avoid:_ asset.
 - **Blob** — the bytes of an Entry's artifact as the Server stores them, named by their SHA-256;
-  identical bytes are one blob, whichever Entries name it.
-  _Avoid:_ artifact file, binary.
+  identical bytes are one blob, whichever Entries name it. Say Blob, not binary.
+  _Avoid:_ artifact file.
 - **High-water mark** — the highest Package version a Client has installed for one Agent type; a
-  Supervisor of that type refuses any offer below it.
-  _Avoid:_ floor (that is the operator's signed one), minimum version.
+  Supervisor of that type refuses any offer below it. It is not the Floor, which the operator
+  signs.
+  _Avoid:_ minimum version.
 - **Floor** — the version the operator signed for one Agent type below which no Client takes a
   package of that type, its own update included; each Client keeps the highest floor it has seen.
-  _Avoid:_ minimum version, revocation, high-water mark (that is what the host installed).
+  It is not a revocation, and not the high-water mark, which is what the host installed.
+  _Avoid:_ minimum version.
 
 ## The installed Client
 
@@ -247,8 +257,8 @@ process group, which a Managed Process may lead).
 - **Withdrawal** — what an install takes from a former account, a process account dropped or
   replaced or a Client's account replaced: on Linux and macOS by giving what it owns, and what is in
   its group, to the Client; on Windows by removing every entry that allows it anything and giving
-  what it owns to the Administrators.
-  _Avoid:_ revocation (that is a certificate's), cleanup.
+  what it owns to the Administrators. Say Withdrawal, not revocation, which is a certificate's.
+  _Avoid:_ cleanup.
 - **Record of what an install left to finish** (*the record*) — on Windows, the value `Pending` of
   `HKLM\SOFTWARE\<PRODUCT_NAME>\WithdrawalPending`: what an install left to finish, the former
   accounts with the roots to withdraw them from and the services to start again.

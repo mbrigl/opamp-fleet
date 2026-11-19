@@ -1,7 +1,7 @@
-//! A Gateway refuses what its Server revoked, end to end (ADR-0016 clause 14, ADR-0026 clause 34):
+//! A Gateway refuses what its Server revoked, end to end (CLT-modes-and-gateway §14, SEC-admission-by-client-certificate §34):
 //! the real Server on mutual TLS with its register, the real Gateway fetching the list from it,
 //! and a downstream peer whose certificate the Server revokes. The floors the Gateway hands down
-//! are held to the same admission (ADR-0034 clause 16).
+//! are held to the same admission (PKG-versions-high-water-mark-floor §16).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -78,7 +78,7 @@ impl Fleet {
         Fleet::start_with(mark, None).await
     }
 
-    /// The same, with the Server's rate limit on the Agent plane armed (ADR-0012).
+    /// The same, with the Server's rate limit on the Agent plane armed (SEC-tls13-two-planes-bounded-input).
     async fn start_with(mark: bool, agent_rate: Option<fleet_server::agent_rate::Limits>) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -141,7 +141,7 @@ impl Fleet {
             assert!(revocations.set_gateway(&gateway_host, true).expect("mark"));
         }
 
-        // One floor stored before the Gateway starts, which fetches it at once (ADR-0034).
+        // One floor stored before the Gateway starts, which fetches it at once (PKG-versions-high-water-mark-floor).
         let floors = fleet_server::floors::PackageFloors::open(Box::new(
             fleet_server::fs::FsFloorStore::open(&pki.join("fleet-configs")),
         ))
@@ -384,7 +384,7 @@ async fn closed_with(
 
 /// A certificate the Server revokes is refused behind the Gateway within one refresh, and the
 /// session it holds there is closed with `1008` and the reason `revoked`; another is unaffected.
-/// Verifies: ADR-0016, ADR-0026, G-15
+/// Verifies: CLT-modes-and-gateway, SEC-admission-by-client-certificate, G-15
 #[tokio::test]
 async fn a_certificate_the_server_revokes_is_refused_behind_the_gateway() {
     let fleet = Fleet::start(true).await;
@@ -434,7 +434,7 @@ async fn a_certificate_the_server_revokes_is_refused_behind_the_gateway() {
 /// A host behind the Gateway is handed the floors the Gateway fetched from its Server, as the
 /// Server serves them; once the Server revokes the host's certificate, the floors are refused to
 /// it as its reports are.
-/// Verifies: ADR-0034
+/// Verifies: PKG-versions-high-water-mark-floor
 #[tokio::test]
 async fn a_host_behind_the_gateway_is_handed_the_floors_it_fetched_behind_the_admission() {
     let fleet = Fleet::start(true).await;
@@ -476,7 +476,7 @@ async fn a_host_behind_the_gateway_is_handed_the_floors_it_fetched_behind_the_ad
 }
 
 /// A Gateway whose host the operator has not marked is handed no list, and so admits nobody.
-/// Verifies: ADR-0016, ADR-0026
+/// Verifies: CLT-modes-and-gateway, SEC-admission-by-client-certificate
 #[tokio::test]
 async fn an_unmarked_gateway_admits_nobody() {
     let fleet = Fleet::start(false).await;
@@ -489,7 +489,7 @@ async fn an_unmarked_gateway_admits_nobody() {
 
 /// A Gateway that cannot renew its list for longer than the maximum age admits nobody, and ends
 /// the sessions it holds with `1008` and the reason `revocation list stale`.
-/// Verifies: ADR-0016
+/// Verifies: CLT-modes-and-gateway
 #[tokio::test]
 async fn a_gateway_whose_list_goes_stale_admits_nobody() {
     let fleet = Fleet::start(true).await;
@@ -514,7 +514,7 @@ async fn a_gateway_whose_list_goes_stale_admits_nobody() {
 /// `Unavailable`, routed back to it by its `instance_uid`; its neighbour's reports keep being
 /// processed, because behind a marked Gateway each Agent has a bucket of its own inside the
 /// Gateway's aggregate.
-/// Verifies: ADR-0012, ADR-0016
+/// Verifies: SEC-tls13-two-planes-bounded-input, CLT-modes-and-gateway
 #[tokio::test]
 async fn a_throttled_agent_behind_a_gateway_hears_unavailable_and_its_neighbour_does_not() {
     let unavailable = |reply: &opamp::proto::ServerToAgent| {

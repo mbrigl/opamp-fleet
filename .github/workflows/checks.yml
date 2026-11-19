@@ -4,27 +4,28 @@ name: Checks
 # toolchain of the Rust jobs, the stores the two store jobs start, and SoftHSM2, the PKCS#11 token
 # the rust job and the PostgreSQL store job test the Server's keys on a token against
 # (ShellCheck, used by the shell job, ships preinstalled on the GitHub-hosted runner image).
-# scripts/check-all.sh is the local equivalent; check 9 of scripts/check-docs.sh holds its list,
-# the jobs of this workflow, and the required checks named in CONTRIBUTING.md together. A job runs
-# each check after its self-test where it has one, and each script's header says what it checks
-# and which ADR it holds, or that the check is the rule.
+# scripts/check-all.sh is the local equivalent; the rule docs/check-lists of scripts/check-docs.sh
+# holds its list, the jobs of this workflow, and the required checks named in CONTRIBUTING.md
+# together. A job runs each check after its self-test where it has one, and each script's header
+# says what it checks and which ADR it holds, or that the check is the rule.
 #
-# The sensors report for the reviewer and fail on nothing they count, except the action
-# references once a project runs that sensor with --require; their self-tests fail like any
-# check's. The sensors job checks out the full history because eight sensors read it. The review
-# binding sensor runs in review-binding.yml, the repository settings sensor on a human's
-# instruction (ADR-0002); this workflow runs the self-test of each.
+# The sensors report for the reviewer and fail on nothing they count, except the plain rules,
+# which this workflow runs with --require, and the action references once a project runs that
+# sensor with --require; their self-tests fail like any check's. The sensors job checks out the
+# full history because eight sensors read it. The review binding sensor runs in
+# review-binding.yml, the repository settings sensor on a human's instruction
+# (NUC-checks-are-bash §7); this workflow runs the self-test of each.
 #
 # The actions job holds the supply chain: every third-party action pinned to a commit SHA whose
 # release tag still points to it, every first-party action on its major tag, Dependabot raising
-# both (ADR-0010), checked by scripts/check-action-refs.sh --resolve, which reads the tags with git
+# both (OPS-actions-pinned-by-sha), checked by scripts/check-action-refs.sh --resolve, which reads the tags with git
 # ls-remote; and scripts/check-build-hardening.sh: no checkout keeps the token, the release is gated
 # on advisories and built uncached with pinned tools, and the compiler, the release profile's
 # overflow checks and the crates that forbid unsafe code are as that script lists. It also runs
 # scripts/check-fuzz-targets.sh: the fuzz matrix, fuzz/Cargo.toml and fuzz/seeds/ name one set.
 #
 # The rust job builds, tests, and lints the Cargo workspace with scripts/check-rust.sh, the commands
-# of README.md → "Build, Test & Run" on the stack of ADR-0008, the same script scripts/check-all.sh
+# of README.md → "Build, Test & Run" on the stack of DEV-six-crates-tokio-axum, the same script scripts/check-all.sh
 # runs, so the build and the tests gate a push as they gate a merge. rustup reads
 # rust-toolchain.toml on first use, and the cache keeps the build within its timeout. The four
 # jobs after it check the Client on Windows and macOS and the stores against a real S3 and
@@ -40,12 +41,10 @@ name: Checks
 
 on:
   pull_request:
-    # ready_for_review runs check 16 of check-docs.sh again on a draft pull request marked ready.
-    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   # Started by hand on a pushed branch that has no pull request yet, such as a feat/ branch
-  # under rework (AGENTS.md, section 6): gh workflow run checks.yml --ref <branch>. GitHub offers
+  # under rework (NUC-main-only-via-pr §5): gh workflow run checks.yml --ref <branch>. GitHub offers
   # it only once this trigger is on the default branch.
   workflow_dispatch:
   # Once a week against main without a change: catches what moves without a commit, the runner
@@ -73,24 +72,22 @@ jobs:
       # Submodules are checked out because the link check resolves relative targets against the
       # working tree: a documentation link into a submodule would otherwise break in CI while
       # working locally. Their *contents* are never read — check-docs.sh enumerates via
-      # `git ls-files`, which lists a submodule as one gitlink entry, not as its files.
+      # `git ls-files`, which lists a submodule as one gitlink entry, not as its files. The whole
+      # history is fetched: the rule docs/adr-identifiers reads the identifiers of deleted ADRs
+      # off it, and the rule docs/template-release the release line at the merge base with main.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
           submodules: recursive
+          fetch-depth: 0
       # The check's own tests run first: a check that is wrong passes nothing worth trusting.
       - name: Self-test the documentation checks
         run: bash scripts/test-check-docs.sh
       - name: Self-test the Protocol Baseline check
         run: bash scripts/test-check-protocol-baseline.sh
-      # Check 16 reads the branch the change lands on from GitHub's own variables: a draft ADR
-      # fails on a pull request into main once it is ready for review, and on a push to main
-      # (ADR-0002). A draft pull request tests a feat/ branch still under rework, and passes.
       - name: Check documentation consistency
         run: bash scripts/check-docs.sh
-        env:
-          PULL_REQUEST_DRAFT: ${{ github.event.pull_request.draft }}
-      # A newer upstream release is a warning, never a failure (ADR-0011).
+      # A newer upstream release is a warning, never a failure (API-protocol-pinned-interop-checked).
       - name: Check the Protocol Baseline
         run: bash scripts/check-protocol-baseline.sh
       - name: Self-test the manual check
@@ -99,8 +96,6 @@ jobs:
         run: bash scripts/check-manual.sh
       - name: Self-test the map script of the normalize skill
         run: bash scripts/test-normalize-remap.sh
-      - name: Self-test the numbering script of the drafts
-        run: bash scripts/test-number-adrs.sh
       - name: Self-test the readiness script of the pull request into main
         run: bash scripts/test-ready-for-main.sh
       - name: Self-test the drop script of a merged branch
@@ -178,8 +173,8 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the plain rules sensor
         run: bash scripts/test-sensor-plain-rules.sh
-      - name: Report long sentences and soft modal verbs the change adds to the rules
-        run: bash scripts/sensor-plain-rules.sh "$BASE"
+      - name: Check the rules the change adds to a project ADR, and report the rest
+        run: bash scripts/sensor-plain-rules.sh --require "$BASE"
         env:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the revision-due sensor
@@ -217,9 +212,19 @@ jobs:
         run: bash scripts/sensor-changelog.sh "$BASE"
         env:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
-      # The repository settings sensor itself runs on a human's instruction (ADR-0002).
+      # The repository settings sensor itself runs on a human's instruction
+      # (NUC-checks-are-bash §7).
       - name: Self-test the repository settings sensor
         run: bash scripts/test-sensor-repo-settings.sh
+      # The work measures sensor itself runs on a human's instruction (NUC-checks-are-bash §7).
+      - name: Self-test the work measures sensor
+        run: bash scripts/test-sensor-work-measures.sh
+      # The release notes sensor itself runs on a human's instruction (NUC-checks-are-bash §7).
+      - name: Self-test the release notes sensor
+        run: bash scripts/test-sensor-release-notes.sh
+      # The red commits sensor itself runs on a human's instruction, for its cost.
+      - name: Self-test the red commits sensor
+        run: bash scripts/test-sensor-red-commits.sh
 
   shell:
     runs-on: ubuntu-latest
@@ -255,7 +260,7 @@ jobs:
       - name: Build, test and lint the workspace
         run: bash scripts/check-rust.sh
 
-  # ADR-0021: the client carries platform-specific service paths (the Windows SCM shim, launchd
+  # CLT-installed-service-and-state: the client carries platform-specific service paths (the Windows SCM shim, launchd
   # semantics) that a Linux-only lint never compiles. Keep them honest: clippy and tests on the
   # real platforms. Actual service registration still needs the manual smoke checklist
   # (README.md → "The service smoke test") — CI runners cannot exercise systemd/launchd/SCM.
@@ -265,7 +270,7 @@ jobs:
   # check by the job's rendered name, and the job id is what scripts/check-docs.sh compares with
   # the contributing guide.
   # fleet-tools too: the release packs every Client archive with `opamp-fleetctl`, Windows
-  # included, and publishes it for macOS (ADR-0036).
+  # included, and publishes it for macOS (OPS-operator-program-fleetctl).
   client-windows:
     runs-on: windows-latest
     timeout-minutes: 60
@@ -290,7 +295,7 @@ jobs:
       - name: Clippy and test
         run: bash scripts/check-client-platform.sh
 
-  # ADR-0039 clause 20: the S3 store's tests, which a plain `cargo test` skips, run here against a
+  # SRV-state-stores-contract-pair §20: the S3 store's tests, which a plain `cargo test` skips, run here against a
   # rustfs service, its image pinned by digest. The key pair is the throwaway one of this job's
   # own container, not a secret. The tests make a prefix of their own and leave the bucket empty.
   s3-store:
@@ -312,7 +317,7 @@ jobs:
         run: bash scripts/test-check-store.sh
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Create the bucket
-        # The Server creates none (ADR-0039 clause 16). curl signs the request itself; the service
+        # The Server creates none (SRV-state-stores-contract-pair §16). curl signs the request itself; the service
         # may still be starting, so the first attempts are allowed to fail.
         run: |
           empty="$(printf '' | sha256sum | cut -d' ' -f1)"
@@ -340,7 +345,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # A bucket beside the database, for the test of a Server on PostgreSQL and S3, which keeps
-    # nothing on its disk (ADR-0039 clause 1).
+    # nothing on its disk (SRV-state-stores-contract-pair §1).
     services:
       rustfs:
         image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
@@ -361,7 +366,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends softhsm2
       - name: Start PostgreSQL with TLS
         # The connection the Server makes: TLS 1.3, the database's certificate verified against
-        # the CA made here and its name checked (ADR-0039 clause 24). Started by `docker run`
+        # the CA made here and its name checked (SRV-state-stores-contract-pair §24). Started by `docker run`
         # rather than as a service, so that it starts after its certificate is made.
         run: |
           set -euo pipefail
@@ -409,7 +414,7 @@ jobs:
       - name: Write the secret key file
         run: (umask 077 && printf '%s' fleet-ci-secret > "$RUNNER_TEMP/s3-secret")
       # The image of packaging/container/Containerfile, around the binary of the tests' own
-      # profile, for the test that runs it read-only and with no volume (ADR-0039 clause 1). Its
+      # profile, for the test that runs it read-only and with no volume (SRV-state-stores-contract-pair §1). Its
       # debug information is stripped, so the image stays small. It stays in the runner's Docker;
       # nothing is pushed.
       - name: Build the Server's image
@@ -422,7 +427,7 @@ jobs:
             "$RUNNER_TEMP/image"
       - name: Test against PostgreSQL
         # Over TLS against the CA above; each test works in a schema of its own
-        # (ADR-0039 clause 25). Skipped is not passed: the database is named, so every PostgreSQL
+        # (SRV-state-stores-contract-pair §25). Skipped is not passed: the database is named, so every PostgreSQL
         # test must reach it.
         env:
           FLEET_TEST_POSTGRES_HOST: 127.0.0.1

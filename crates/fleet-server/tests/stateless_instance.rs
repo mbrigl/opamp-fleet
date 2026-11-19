@@ -1,5 +1,5 @@
 //! A Server on PostgreSQL and S3 keeps nothing on its own disk
-//! (ADR-0039 clause 1): started from a directory it cannot write,
+//! (SRV-state-stores-contract-pair §1): started from a directory it cannot write,
 //! with no data directory, it serves, and writes no file. In the bucket it keeps the staging
 //! objects of every live lease and deletes those of a lease that is no longer live, at startup and
 //! whenever it takes over a lapsed lease (clause 16), and an upload it takes is staged under its
@@ -10,7 +10,7 @@
 //! `FLEET_TEST_POSTGRES_*` variables name and the bucket the `FLEET_TEST_S3_*` ones name, and skips,
 //! saying so, where either is not named. `scripts/check-store.sh postgres` runs it, and fails on a
 //! skip. Beside them, a Server on PostgreSQL alone, its blobs in a data directory, takes its lease
-//! before it opens a listener (ADR-0039 clause 23).
+//! before it opens a listener (SRV-state-stores-contract-pair §23).
 //!
 //! The commands an operator runs against those stores run here as the binary: `server
 //! blobs-to-s3`, its arguments refused without a store, and `server audit-verify --config`. The
@@ -410,7 +410,7 @@ fn instance_id() -> String {
     )
 }
 
-// Verifies: ADR-0039, ADR-0025
+// Verifies: SRV-state-stores-contract-pair, SRV-instances-share-one-postgresql
 #[test]
 fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
     opamp::tls::install_ring_provider();
@@ -576,10 +576,9 @@ fn a_server_on_postgresql_and_s3_serves_from_a_directory_it_cannot_write() {
 /// A bucket that fails at startup, unreachable or holding a key outside the store's layout, stops
 /// the Server before it takes its lease: no lease row and no audit chain is left for another
 /// instance to count as live or to close as lapsed
-/// (ADR-0039 clause 16,
-/// ADR-0025
-/// clause 2).
-// Verifies: ADR-0039, ADR-0025
+/// (SRV-state-stores-contract-pair §16,
+/// SRV-instances-share-one-postgresql §2).
+// Verifies: SRV-state-stores-contract-pair, SRV-instances-share-one-postgresql
 #[test]
 fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
     opamp::tls::install_ring_provider();
@@ -653,9 +652,8 @@ fn a_bucket_that_fails_startup_leaves_no_lease_behind() {
 /// An instance whose lease lapsed while a newer Server migrated the schema stops at its new lease
 /// as at a failed start: it prints the refusal, naming the version the schema needs and its own,
 /// and exits with status 1
-/// (ADR-0025
-/// clause 16).
-// Verifies: ADR-0025
+/// (SRV-instances-share-one-postgresql §16).
+// Verifies: SRV-instances-share-one-postgresql
 #[test]
 fn an_instance_whose_lease_lapsed_on_a_newer_schema_exits_naming_both_versions() {
     opamp::tls::install_ring_provider();
@@ -760,9 +758,9 @@ fn an_instance_whose_lease_lapsed_on_a_newer_schema_exits_naming_both_versions()
 /// A Server on PostgreSQL takes its lease before it opens either listener: while the lock its
 /// lease is taken under is held elsewhere, it waits for it, and neither plane takes a connection;
 /// once the lock is let go it holds a lease and both planes serve
-/// (ADR-0039 clause 23).
+/// (SRV-state-stores-contract-pair §23).
 /// Its blobs lie in a data directory, so no bucket is needed.
-// Verifies: ADR-0039
+// Verifies: SRV-state-stores-contract-pair
 #[test]
 fn an_instance_takes_its_lease_before_it_opens_a_listener() {
     opamp::tls::install_ring_provider();
@@ -950,7 +948,7 @@ fn command(dir: &Path, args: &[&str]) -> (Option<i32>, String, String) {
 /// which names the arguments, and exit status 2; a configuration without a bucket, naming the
 /// keys to set, and a `--data-dir` that holds no `blobs/`, naming `--data-dir`, with status 1.
 /// No store is reached, so it runs everywhere.
-// Verifies: ADR-0039
+// Verifies: SRV-state-stores-contract-pair
 #[test]
 fn blobs_to_s3_names_a_missing_or_wrong_argument() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1013,8 +1011,8 @@ fn blobs_to_s3_names_a_missing_or_wrong_argument() {
 /// artifact of an entry the Server on PostgreSQL kept in its data directory into the bucket and
 /// checks the bucket holds it; run again with the artifact neither in the data directory nor in
 /// the bucket, it exits non-zero naming the entry
-/// (ADR-0039 clause 19).
-// Verifies: ADR-0039
+/// (SRV-state-stores-contract-pair §19).
+// Verifies: SRV-state-stores-contract-pair
 #[test]
 fn blobs_to_s3_copies_an_entrys_artifact_into_the_bucket_and_checks_it() {
     opamp::tls::install_ring_provider();
@@ -1116,8 +1114,8 @@ fn blobs_to_s3_copies_an_entrys_artifact_into_the_bucket_and_checks_it() {
 /// `server audit-verify --config`, with no schema named, reads the record in the schema that is
 /// the role's default, where the Server wrote it: it lists the Server's chain and exits 0 while
 /// the record holds, and exits 1 naming the entry once a line is changed
-/// (ADR-0028 clause 8).
-// Verifies: ADR-0028
+/// (SEC-append-only-audit-record §8).
+// Verifies: SEC-append-only-audit-record
 #[test]
 fn audit_verify_with_no_schema_named_reads_the_default_and_fails_where_the_record_does_not_hold() {
     opamp::tls::install_ring_provider();
@@ -1189,7 +1187,7 @@ impl Drop for Container {
 
 /// The Server's image, run as an orchestrator runs it with `--read-only` and no volume of the
 /// operator's, on PostgreSQL and S3, starts, admits an Agent over mutual TLS, and writes nothing
-/// (ADR-0039 clause 1):
+/// (SRV-state-stores-contract-pair §1):
 /// - its own filesystem stays unchanged, with no writable directory, `$TMPDIR` and `$HOME`
 ///   included;
 /// - the anonymous volume the image's `VOLUME` makes stays empty;
@@ -1198,7 +1196,7 @@ impl Drop for Container {
 /// The image is the one `FLEET_TEST_SERVER_IMAGE` names, built from
 /// `packaging/container/Containerfile`, run by `docker` with the host's network; where no image is
 /// named the test says so and skips.
-// Verifies: ADR-0039
+// Verifies: SRV-state-stores-contract-pair
 #[test]
 fn the_image_read_only_and_without_a_volume_serves_on_postgresql_and_s3() {
     use futures_util::{SinkExt as _, StreamExt as _};

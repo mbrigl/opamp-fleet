@@ -3,23 +3,23 @@
 # Git reference-transaction hook: the local main moves only to what the remote's main has.
 #
 # Changes reach main through a pull request, and the local main only takes up the remote's
-# (AGENTS.md, section 6). pre-commit and pre-merge-commit refuse a commit and a merge on main, but
-# a fast-forward to a local branch, a cherry-pick, a reset, or 'git branch -f' moves main without
-# either, and 'git commit --no-verify' skips them. Every one of these updates refs/heads/main in a
-# reference transaction, and git runs this hook on it before the update is made ('prepared'),
-# where a non-zero exit aborts it; --no-verify does not skip it. An update of main is let through
-# when its new commit is one origin/main has, as the same transaction leaves origin/main, so
-# 'git merge --ff-only origin/main', 'git reset --hard origin/main', and
+# (NUC-main-only-via-pr §4). pre-commit and pre-merge-commit refuse a commit and a merge on main,
+# but a fast-forward to a local branch, a cherry-pick, a reset, or 'git branch -f' moves main
+# without either, and 'git commit --no-verify' skips them. Every one of these updates
+# refs/heads/main in a reference transaction, and git runs this hook on it before the update is
+# made ('prepared'), where a non-zero exit aborts it; --no-verify does not skip it. An update of
+# main is let through when its new commit is one origin/main has, as the same transaction leaves
+# origin/main, so 'git merge --ff-only origin/main', 'git reset --hard origin/main', and
 # 'git fetch origin main:main' pass. So does one that writes main where it already is, as
 # pack-refs and gc do in a clone whose main is ahead of the remote's, and a deletion of the local
 # main. Without origin/main, a repository that has no remote's main yet, nothing is decided.
 # A refused fast-forward has already brought the index and the working tree to its target while
 # main stays: from a clean tree, 'git restore --source=HEAD --staged --worktree .' takes them
-# back. Enabled as CONTRIBUTING.md → "Git hooks" says; it needs git 2.28 or later.
+# back. Enabled as the "Git hooks" of CONTRIBUTING.md says; it needs git 2.28 or later.
 #
 # Bypassable by running git without the hooks ('git -c core.hooksPath=/dev/null'), or by moving
-# origin/main itself ('git update-ref refs/remotes/origin/main'); AGENTS.md, section 6 says who
-# may. A push that runs the hooks still cannot reach the remote's main.
+# origin/main itself ('git update-ref refs/remotes/origin/main'); NUC-main-only-via-pr §6
+# says who may. A push that runs the hooks still cannot reach the remote's main.
 # scripts/test-git-hooks.sh exercises this hook.
 
 set -uo pipefail
@@ -58,7 +58,7 @@ for u in "${updates[@]}"; do
     if [[ -n "$current" ]] && ! git merge-base --is-ancestor "$current" "$remote" 2>/dev/null; then
       hint="main has commits origin/main lacks; keep them on a branch and take main back: git switch -c feat/<topic> main, then git branch -f main origin/main"
     fi
-    echo "reference-transaction: refused — main moves only to what origin/main has, and changes reach it through a pull request (AGENTS.md, section 6). $hint" >&2
+    echo "reference-transaction: refused — main moves only to what origin/main has, and changes reach it through a pull request (NUC-main-only-via-pr §4). $hint" >&2
     exit 1
   fi
 done

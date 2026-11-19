@@ -1,27 +1,27 @@
 name: Release
 
 # Builds the Client for every target it ships on and publishes one `.tar.gz` per target
-# (ADR-0038, the container and the artifact name included), and the operator tool `opamp-fleetctl`
-# for Linux and macOS beside it (ADR-0036).
+# (OPS-releases-attestations-server-image, the container and the artifact name included), and the operator tool `opamp-fleetctl`
+# for Linux and macOS beside it (OPS-operator-program-fleetctl).
 #
 # The version comes from `[workspace.package] version` in Cargo.toml and this workflow creates the
-# `version/*` tag from it (ADR-0037) — *before* it builds, so ADR-0037's `build.rs` finds a tag on
+# `version/*` tag from it (OPS-cargo-decides-product-version) — *before* it builds, so OPS-cargo-decides-product-version's `build.rs` finds a tag on
 # HEAD and bakes the same number into the binary with its commit metadata. The binary learns its
 # version as any build does; this workflow decides the number and types the tag.
 #
 # The artifacts are packed by this project's own `opamp-fleetctl package pack`, so each Client archive
-# is also a valid package artifact for a fleet self-update (ADR-0033, ADR-0020) — the file an operator
+# is also a valid package artifact for a fleet self-update (PKG-signed-packages-and-delivery, CLT-self-update-signed-package) — the file an operator
 # downloads is the file they hand the Server. The operator tool's archives are not packages of the
-# fleet: they are downloaded, never uploaded (ADR-0036 clause 4).
+# fleet: they are downloaded, never uploaded (OPS-operator-program-fleetctl §4).
 #
 # Every published asset is a subject of one build-provenance attestation, made and verified in
 # `publish` before the release exists, and each shipped program has a CycloneDX SBOM per target
-# beside its archive (ADR-0038).
+# beside its archive (OPS-releases-attestations-server-image).
 #
 # The Server ships as a multi-architecture image, `ghcr.io/mbrigl/opamp-fleet-server:<version>`,
 # built from packaging/container/Containerfile by copying the Server binaries the Linux rows built
 # and checked. `image` pushes it untagged; `publish` attests it, verifies it, and only then tags it
-# with the version (ADR-0038).
+# with the version (OPS-releases-attestations-server-image).
 
 on:
   workflow_dispatch:
@@ -41,19 +41,19 @@ permissions:
 
 env:
   # What every published artifact is named after, and the name of the Set an operator uploads them
-  # to (ADR-0021). The same string the Client's own Agent reports as its type, and the name of the
+  # to (CLT-installed-service-and-state). The same string the Client's own Agent reports as its type, and the name of the
   # program inside the archive and of its configuration file.
   # A Set built from these files is `supervisor@<version>@supervisor`.
   #
   # The names that are *not* this are the ones that identify an installation rather than a program:
   # the dpkg/rpm/MSI package, the service, and the `PATH` symlink all carry the **product's** name,
-  # `opamp-fleet` (ADR-0021, ADR-0022). Keeping the program's name off the product's is what lets
+  # `opamp-fleet` (CLT-installed-service-and-state, CLT-accounts-service-runs-under). Keeping the program's name off the product's is what lets
   # one published Set serve every variant build. They live in crates/fleet-agent/Cargo.toml and
   # packaging/windows/supervisor.wxs, not here.
   ARTIFACT: supervisor
-  # The operator tool's program and the stem of its archives (ADR-0036 clause 3).
+  # The operator tool's program and the stem of its archives (OPS-operator-program-fleetctl §3).
   OPERATOR_TOOL: opamp-fleetctl
-  # The Server's image, tagged with the exact version and nothing else (ADR-0038 clause 18).
+  # The Server's image, tagged with the exact version and nothing else (OPS-releases-attestations-server-image §18).
   IMAGE: ghcr.io/mbrigl/opamp-fleet-server
 
 jobs:
@@ -78,7 +78,7 @@ jobs:
     needs: advisories
     runs-on: ubuntu-latest
     permissions:
-      # Pushing the tag (ADR-0037). Read alone would be enough for everything else here.
+      # Pushing the tag (OPS-cargo-decides-product-version). Read alone would be enough for everything else here.
       contents: write
     outputs:
       version: ${{ steps.read.outputs.version }}
@@ -107,7 +107,7 @@ jobs:
           esac
 
           # A hand-pushed tag still releases, but only if the two agree — this is the drift
-          # ADR-0037 accepts and refuses to resolve silently.
+          # OPS-cargo-decides-product-version accepts and refuses to resolve silently.
           if [ "${{ github.event_name }}" = "push" ]; then
             tagged="${GITHUB_REF_NAME#version/}"
             if [ "$tagged" != "$version" ]; then
@@ -124,7 +124,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       # Nothing is built until it is certain this number is still free. A version that already
       # carries a tag or a release has been shipped, and the answer is to bump `Cargo.toml` — never
-      # to move a tag or replace an artifact somebody may already hold (ADR-0037). Both are asked
+      # to move a tag or replace an artifact somebody may already hold (OPS-cargo-decides-product-version). Both are asked
       # because either can exist alone: a draft release reserves a tag name without the tag being
       # pushed, and a tag can be pushed without a release ever being cut. This also runs on a dry
       # run — whether a version can be released does not depend on whether this run intends to.
@@ -157,7 +157,7 @@ jobs:
           fi
 
           if [ -n "$taken" ]; then
-            echo "::error::$version has already been released — raise [workspace.package] version in Cargo.toml and release that (ADR-0037)"
+            echo "::error::$version has already been released — raise [workspace.package] version in Cargo.toml and release that (OPS-cargo-decides-product-version)"
             exit 1
           fi
           echo "$tag is free"
@@ -182,20 +182,20 @@ jobs:
         run: |
           set -euo pipefail
           # `-p fleet-agent` is the package (its name is a build-time identifier); the binary it
-          # produces is the shipped name (ADR-0021).
+          # produces is the shipped name (CLT-installed-service-and-state).
           cargo build -p fleet-agent --bin supervisor --locked
           full=$(./target/debug/supervisor --version | awk '{print $NF}')
           echo "the binary reports $full"
           version='${{ steps.read.outputs.version }}'
           if [ "${{ steps.read.outputs.publish }}" = "true" ] && [ "${full%%+*}" != "$version" ]; then
-            echo "::error::the binary reports ${full%%+*} but the release is $version — the tag is not on this commit (ADR-0037)"
+            echo "::error::the binary reports ${full%%+*} but the release is $version — the tag is not on this commit (OPS-cargo-decides-product-version)"
             exit 1
           fi
           # The name carries the base version; the full string, build metadata and all, is what an
           # operator must type into `?version=` for a self-update to pass its probe.
           echo "full=$full" >> "$GITHUB_OUTPUT"
 
-  # ADR-0038 clause 7: one CycloneDX SBOM per shipped program and target, from the
+  # OPS-releases-attestations-server-image §7: one CycloneDX SBOM per shipped program and target, from the
   # lockfile the build uses — the Server's for each architecture of its image.
   # A job of its own: the dependency graph of a target needs no runner of that target, and the tool
   # is installed once. It runs on a dry run too, with the top-level read-only token, no kept
@@ -264,16 +264,16 @@ jobs:
       matrix:
         include:
           # `operator_tool`: this row also builds and publishes `opamp-fleetctl` for its target
-          # (ADR-0036 clause 2). Every row builds it for its runner as the packer.
+          # (OPS-operator-program-fleetctl §2). Every row builds it for its runner as the packer.
           - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: amd64, suffix: "", native: true, operator_tool: true }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true, operator_tool: true }
           - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true, operator_tool: true }
           # Cross-compiled from the arm64 runner, which Apple's toolchain does natively — steadier
-          # than depending on an Intel macOS runner label (ADR-0038). Nothing here can run it, so
+          # than depending on an Intel macOS runner label (OPS-releases-attestations-server-image). Nothing here can run it, so
           # the version assertions below are skipped for this one row.
           - { target: x86_64-apple-darwin, runner: macos-latest, os: darwin, arch: amd64, suffix: "", native: false, operator_tool: true }
           # No operator tool for Windows: it would need its own way to keep a key readable by its
-          # owner alone (ADR-0036).
+          # owner alone (OPS-operator-program-fleetctl).
           - { target: x86_64-pc-windows-msvc, runner: windows-latest, os: windows, arch: amd64, suffix: ".exe", native: true, operator_tool: false }
     steps:
       - uses: actions/checkout@v7
@@ -291,11 +291,11 @@ jobs:
       # A host build: it runs here, on this runner, to pack the artifacts.
       - name: Build the packer
         run: cargo build --release -p fleet-tools --bin opamp-fleetctl --locked
-      # A target build: the program this row publishes (ADR-0036 clause 2).
+      # A target build: the program this row publishes (OPS-operator-program-fleetctl §2).
       - name: Build the operator tool
         if: matrix.operator_tool
         run: cargo build --release -p fleet-tools --bin opamp-fleetctl --target ${{ matrix.target }} --locked
-      # A target build: the Server, which ships in the image and nowhere else (ADR-0038 clause 14).
+      # A target build: the Server, which ships in the image and nowhere else (OPS-releases-attestations-server-image §14).
       - name: Build the Server
         if: matrix.os == 'linux'
         run: cargo build --release -p fleet-server --bin server --target ${{ matrix.target }} --locked
@@ -342,12 +342,12 @@ jobs:
         id: pack
         run: |
           # `_` between the four fields, because two of them contain `-`: the name grammar is
-          # `[a-z0-9-]` (ADR-0021) and a prerelease version spells itself with a hyphen, so a
-          # hyphen-separated name does not parse back (ADR-0038).
+          # `[a-z0-9-]` (CLT-installed-service-and-state) and a prerelease version spells itself with a hyphen, so a
+          # hyphen-separated name does not parse back (OPS-releases-attestations-server-image).
           name="${ARTIFACT}_${{ needs.version.outputs.version }}_${{ matrix.os }}_${{ matrix.arch }}.tar.gz"
           # The packer names the single member after the program — `supervisor`, which is
           # what a Client looks for in a package it is offered — and prints the SHA-256 on stdout.
-          # The *file* is named after the Set (ADR-0038); the member inside it is the product.
+          # The *file* is named after the Set (OPS-releases-attestations-server-image); the member inside it is the product.
           sha=$(./target/release/opamp-fleetctl${{ matrix.suffix }} package pack \
             --format tar.gz \
             --out "$name" \
@@ -355,10 +355,10 @@ jobs:
           echo "$sha  $name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           # Every artifact of this row shares these four fields; only the extension differs
-          # (ADR-0038 clause 3).
+          # (OPS-releases-attestations-server-image §3).
           echo "STEM=${name%.tar.gz}" >> "$GITHUB_ENV"
 
-      # ---- ADR-0036: the operator tool, one archive per target, named like the Client's. ----
+      # ---- OPS-operator-program-fleetctl: the operator tool, one archive per target, named like the Client's. ----
       - name: Pack the operator tool
         id: pack_tool
         if: matrix.operator_tool
@@ -382,7 +382,7 @@ jobs:
             ${{ steps.pack_tool.outputs.name }}.sha256
           if-no-files-found: error
 
-      # ---- ADR-0021: the native installers, beside the archive and never instead of it. ----
+      # ---- CLT-installed-service-and-state: the native installers, beside the archive and never instead of it. ----
       #
       # All of them package the binary built above rather than building their own, so the bytes an
       # operator installs from a `.deb` are the bytes the `.tar.gz` carries and the checksum published
@@ -422,25 +422,25 @@ jobs:
           echo "$scripts"
           grep -q 'service install' <<<"$scripts"
           grep -q 'service uninstall' <<<"$scripts"
-          # ADR-0022: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
+          # CLT-accounts-service-runs-under: the PATH symlink (%post and %posttrans) and the removal cleanup (%postun)
           # ride the same silently-degrading path mechanism, so they are asserted the same way.
           grep -q 'ln -sfn' <<<"$scripts"
-          # The two halves of ADR-0022's remove/purge distinction, drawn across the two roots by
-          # ADR-0021 clause 12: a removal takes the executable layout under /opt, and only a purge
+          # The two halves of CLT-accounts-service-runs-under's remove/purge distinction, drawn across the two roots by
+          # CLT-installed-service-and-state §12: a removal takes the executable layout under /opt, and only a purge
           # takes the data root with the identity and the credential in it. Asserting both is what
           # makes a scriptlet that silently became its own file name fail here.
           #
-          # Nothing sweeps `$data_root/versions`: an upgrade is never a migration (ADR-0021 clause 13), and no host was ever installed under that path.
+          # Nothing sweeps `$data_root/versions`: an upgrade is never a migration (CLT-installed-service-and-state §13), and no host was ever installed under that path.
           #
           # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
           grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
           grep -qF 'rm -rf "$data_root"' <<<"$scripts"
-          # ADR-0022 clause 3: the account is created, a first registration names it, and the
+          # CLT-accounts-service-runs-under §3: the account is created, a first registration names it, and the
           # package requires what creates it.
           grep -q 'useradd --system' <<<"$scripts"
           grep -q -- '--run-as opamp-fleet' <<<"$scripts"
           rpm -qp --requires "$STEM.rpm" | grep -q '^/usr/sbin/useradd'
-          # And the arch inside the package is the ecosystem's, not the file name's (ADR-0021).
+          # And the arch inside the package is the ecosystem's, not the file name's (CLT-installed-service-and-state).
           test "$(rpm -qp --qf '%{ARCH}' "$STEM.rpm")" = "$([ '${{ matrix.arch }}' = amd64 ] && echo x86_64 || echo aarch64)"
 
       - name: Install the WiX Toolset
@@ -472,7 +472,7 @@ jobs:
         run: |
           set -euo pipefail
           # The archive already has its checksum, from the packer's own stdout — that one is the
-          # content hash an Agent verifies (ADR-0033) and is not recomputed here.
+          # content hash an Agent verifies (PKG-signed-packages-and-delivery) and is not recomputed here.
           for f in "$STEM".deb "$STEM".rpm "$STEM".msi; do
             [ -f "$f" ] || continue
             sha256sum "$f" > "$f.sha256"
@@ -495,7 +495,7 @@ jobs:
           # `error` is guarding here.
           if-no-files-found: error
 
-  # ADR-0038 clause 19: the Server's image, built from the two binaries the Linux rows built and
+  # OPS-releases-attestations-server-image §19: the Server's image, built from the two binaries the Linux rows built and
   # checked, by the Containerfile, which runs nothing — so neither platform needs emulation. The
   # `amd64` image is checked here, on its own architecture; the `arm64` binary's version was
   # asserted on its native runner, and the image copies it unchanged. A dry run stops after the
@@ -523,8 +523,8 @@ jobs:
           path: image
           merge-multiple: true
       # A builder of its own: the default `docker` driver neither builds for two platforms at once
-      # nor pushes an index by digest. Its BuildKit image is pinned by version and digest (ADR-0038
-      # clause 19), the release `buildx-stable-1` named when it was set; Dependabot does not read an
+      # nor pushes an index by digest. Its BuildKit image is pinned by version and digest (OPS-releases-attestations-server-image §19),
+      # the release `buildx-stable-1` named when it was set; Dependabot does not read an
       # image out of a shell step, so a new one arrives by a reviewed commit.
       - name: Build the image
         run: |
@@ -628,11 +628,11 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   publish:
-    # A dry run builds and packs everything and stops here, so it attests nothing (ADR-0038).
+    # A dry run builds and packs everything and stops here, so it attests nothing (OPS-releases-attestations-server-image).
     if: needs.version.outputs.publish == 'true'
     needs: [version, build, sbom, image]
     runs-on: ubuntu-latest
-    # The only job that may attest (ADR-0038 clause 10). It checks out no code
+    # The only job that may attest (OPS-releases-attestations-server-image §10). It checks out no code
     # and builds nothing; its only actions are download-artifact and attest, and every other step,
     # the registry login and the tagging included, is shell and gh.
     permissions:
@@ -658,7 +658,7 @@ jobs:
           cat *.sha256 | sort -k2 > SHA256SUMS
           rm -f *.sha256
           ls -l
-      # ADR-0038: one SLSA build-provenance attestation over every published asset, SHA256SUMS
+      # OPS-releases-attestations-server-image: one SLSA build-provenance attestation over every published asset, SHA256SUMS
       # included, its digests computed from the files themselves.
       - name: Attest the assets
         uses: actions/attest@v4
@@ -675,8 +675,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username '${{ github.actor }}' --password-stdin
-      # ADR-0038 clause 9: the image's own attestation, over the index digest `image` pushed, stored
-      # in the registry beside it. No storage record: that needs a permission ADR-0038 does not grant,
+      # OPS-releases-attestations-server-image §9: the image's own attestation, over the index digest `image` pushed, stored
+      # in the registry beside it. No storage record: that needs a permission OPS-releases-attestations-server-image does not grant,
       # and GitHub keeps one for organisation-owned repositories alone.
       - name: Attest the image
         uses: actions/attest@v4
@@ -685,7 +685,7 @@ jobs:
           subject-digest: ${{ needs.image.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
-      # Nothing is published that does not verify as an operator will verify it (ADR-0038 clause 12).
+      # Nothing is published that does not verify as an operator will verify it (OPS-releases-attestations-server-image §12).
       - name: Every asset verifies
         env:
           GH_TOKEN: ${{ github.token }}
@@ -708,7 +708,7 @@ jobs:
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --deny-self-hosted-runners > /dev/null
           echo "verified ${IMAGE}@${{ needs.image.outputs.digest }}"
-      # ADR-0038 clauses 18 and 19: the exact version, and only after the attestation verified. A single
+      # OPS-releases-attestations-server-image §18 and §19: the exact version, and only after the attestation verified. A single
       # index as the source is copied as it is, so the tag names the attested digest — checked below.
       - name: Tag the image
         run: |
@@ -735,7 +735,7 @@ jobs:
           \`${{ needs.version.outputs.version }}\`, for \`linux/amd64\` and \`linux/arm64\`.
 
           The assets come in five kinds, and picking the wrong one is the only way to get this wrong
-          (ADR-0021, ADR-0036, ADR-0038):
+          (CLT-installed-service-and-state, OPS-operator-program-fleetctl, OPS-releases-attestations-server-image):
 
           | you want to | take |
           |---|---|
@@ -752,7 +752,7 @@ jobs:
           arm64. It is downloaded, never uploaded to a Server: it is not a package of the fleet, and
           no Client installs it. \`${{ env.OPERATOR_TOOL }} pki\` makes the fleet's certificates and
           \`${{ env.OPERATOR_TOOL }} package\` fetches, packs and signs packages; the keys they make belong
-          on this machine, not on the Server host (ADR-0036).
+          on this machine, not on the Server host (OPS-operator-program-fleetctl).
 
           \`\`\`console
           tar xzf ${{ env.OPERATOR_TOOL }}_${{ needs.version.outputs.version }}_linux_amd64.tar.gz
@@ -771,7 +771,7 @@ jobs:
 
           The Server ships as an image and nowhere else: the binary the release built and checked for
           this version, on \`gcr.io/distroless/cc-debian13:nonroot\`, with no shell, running as UID
-          and GID 65532 (ADR-0038). Deploy it by its digest, not by its tag:
+          and GID 65532 (OPS-releases-attestations-server-image). Deploy it by its digest, not by its tag:
 
           \`\`\`console
           docker run -d --name opamp-fleet-server \\
@@ -795,7 +795,7 @@ jobs:
 
           Every asset is a subject of one build-provenance attestation, made by this repository's
           release workflow on a GitHub-hosted runner and recorded in the public Sigstore log
-          (ADR-0038). Verify \`SHA256SUMS\` with the GitHub CLI, then every file you downloaded
+          (OPS-releases-attestations-server-image). Verify \`SHA256SUMS\` with the GitHub CLI, then every file you downloaded
           against it:
 
           \`\`\`console
@@ -824,8 +824,8 @@ jobs:
           themselves — the same install every platform gets, not a second one. \`supervisor\` is the
           **program**; what lands on your \`PATH\` is \`opamp-fleet\`, the **product**, as a symlink
           through the layout's \`current\` pointer, so the command always answers for the version the
-          service runs (ADR-0022). **They register the service and leave it stopped**: a Client with no configuration would dial the development
-          default and manage nothing (ADR-0022), so starting it is the last step and it is yours.
+          service runs (CLT-accounts-service-runs-under). **They register the service and leave it stopped**: a Client with no configuration would dial the development
+          default and manage nothing (CLT-accounts-service-runs-under), so starting it is the last step and it is yours.
 
           \`\`\`console
           # Debian, Ubuntu
@@ -847,7 +847,7 @@ jobs:
 
           On Windows the \`.msi\` asks for the installation folder and the endpoint. That folder
           holds the program; the configuration and the state go to \`%ProgramData%\opamp-fleet\`,
-          which is what an uninstall leaves behind (ADR-0021). The same file installs unattended,
+          which is what an uninstall leaves behind (CLT-installed-service-and-state). The same file installs unattended,
           which is how Intune, Group Policy and SCCM deploy it:
 
           \`\`\`console
@@ -865,17 +865,17 @@ jobs:
           ## Updating a fleet
 
           Hand the \`${{ env.ARTIFACT }}_*.tar.gz\` artifacts to a Server under its release number for a
-          Client self-update (ADR-0020, ADR-0037) — the commit this build carries,
+          Client self-update (CLT-self-update-signed-package, OPS-cargo-decides-product-version) — the commit this build carries,
           \`${{ needs.version.outputs.full }}\`, is provenance and is not compared.
 
           Upload **all** of them into **one** Package, identified by the Agent type \`supervisor\` and
           this release's version, with one entry per platform. The Server offers each Agent the entry
-          built for the machine it reported (ADR-0033), so a mixed fleet updates from one Package.
-          Each file is named \`<name>_<version>_<os>_<arch>.tar.gz\` (ADR-0038), and the last two
+          built for the machine it reported (PKG-signed-packages-and-delivery), so a mixed fleet updates from one Package.
+          Each file is named \`<name>_<version>_<os>_<arch>.tar.gz\` (OPS-releases-attestations-server-image), and the last two
           fields are exactly the pair an Agent reports as \`os.type\` and \`host.arch\`, so the upload
           reads them out of the name. Then put the Package in a Deployment, sign every entry with your
           package signing key, and roll it out; nothing reaches the fleet before that last call
-          (ADR-0033). The Deployment below reaches the hosts whose \`channel\` is \`stable\`: set it in a
+          (PKG-signed-packages-and-delivery). The Deployment below reaches the hosts whose \`channel\` is \`stable\`: set it in a
           host's \`[attributes]\`, or as a Server label with \`PUT /api/v1/agents/<uid>/labels\`. The
           signatures come from the operator tool above:
 
@@ -896,7 +896,7 @@ jobs:
           \`\`\`
 
           Each Client archive holds the Client under the name it is installed as, so it needs no repacking:
-          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (ADR-0033).
+          the SHA-256 in \`SHA256SUMS\` is the one an Agent verifies (PKG-signed-packages-and-delivery).
 
           Unpacking one by hand gives a binary that runs — the Linux and macOS archives carry an
           executable mode, so there is no \`chmod +x\` step. This is also the install path on macOS,
