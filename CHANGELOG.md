@@ -39,6 +39,13 @@ once its tag exists.
   startup and waits for the lock on the Agents at most 5 seconds; a rollout of 0.8.4 that holds
   them longer fails that start, and a second start succeeds once the rollout is done. The build
   holds the Agents' writes while it lasts, under a second at 100 000 Agents.
+- **Each WebSocket reads into a 4 KiB buffer**
+  ([ADR-0012](docs/adr/0012-tls-1-3-two-planes-and-bounded-input.md) clause 3). The Server's
+  Agent-plane endpoint, the Client's upstream connection and the Gateway's pool held a read buffer
+  of 128 KiB for every WebSocket, `tungstenite`'s default, allocated when the connection opened and
+  kept while nothing arrived. They now hold 4 KiB, enough for an Agent's routine messages; a larger
+  message still arrives whole, read 4 KiB at a time. The message size limit is unchanged. What
+  this saves an instance's memory was not measured. **What to do:** nothing.
 
 ## [0.8.4] - 2026-11-18
 

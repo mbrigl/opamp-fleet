@@ -6,14 +6,19 @@ use std::time::Duration;
 
 use axum::http::{header, StatusCode};
 use axum::routing::post;
+use futures_util::{SinkExt, StreamExt};
 use opamp::client::{
     AfterReply, ClientTls, Connection, Ended, ReportSink, Session, StopSignal, Timeouts,
 };
+use opamp::frame;
 use opamp::proto::{AgentToServer, ServerToAgent};
 use opamp::server::listen::{ClientAuth, Handle, Listener, PeerCertificate, ServerTls};
 use opamp::server::{Handler, NoOutbound, Rejection, Reply, RequestInfo, Settings};
 use opamp::tls::Identity;
 use rcgen::{CertificateParams, IsCa, Issuer, KeyPair};
+use tokio_tungstenite::tungstenite::http::HeaderMap;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::Message;
 
 struct Pki {
     ca_pem: String,
@@ -308,4 +313,90 @@ async fn a_tls12_only_server_fails_the_handshake() {
             .expect_err("a TLS 1.2 server was reached");
         assert!(error.starts_with("cannot reach"), "{scheme}: {error}");
     }
+}
+
+/// Answers every report with its own `instance_uid`, whatever its size, on a plain listener.
+struct Mirror;
+
+impl Handler for Mirror {
+    type Connection = ();
+    type Outbound = NoOutbound;
+
+    fn on_connecting(&self, _: &RequestInfo<'_>) -> Result<((), Option<NoOutbound>), Rejection> {
+        Ok(((), None))
+    }
+
+    async fn on_message(&self, _: &mut (), message: AgentToServer) -> Reply {
+        Reply::Send(ServerToAgent {
+            instance_uid: message.instance_uid,
+            ..Default::default()
+        })
+    }
+
+    fn on_outbound(&self, _: &mut (), item: std::convert::Infallible) -> Vec<ServerToAgent> {
+        match item {}
+    }
+}
+
+/// Both ends read into a buffer far smaller than the limit; a message many times that buffer, and
+/// one just under the limit, still cross the Client's socket and the Server's endpoint whole, in
+/// both directions, while one past the limit is still refused.
+/// Verifies: ADR-0012
+#[tokio::test]
+async fn a_websocket_message_larger_than_the_read_buffer_arrives_whole() {
+    const LIMIT: usize = 1 << 20;
+    let router = opamp::server::router(Arc::new(Mirror), Settings::new(LIMIT));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move { axum::serve(listener, router).await });
+
+    let mut socket = opamp::client::ws::connect(
+        &format!("ws://{addr}/v1/opamp"),
+        &HeaderMap::new(),
+        None,
+        LIMIT,
+    )
+    .await
+    .expect("connect");
+    // The framing header and the protobuf tags of the reply take a few bytes of the limit.
+    for size in [64 * 1024, LIMIT - 64] {
+        let uid: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let report = AgentToServer {
+            instance_uid: uid.clone(),
+            ..Default::default()
+        };
+        socket
+            .send(Message::Binary(
+                frame::encode_within(&report, LIMIT).expect("frame").into(),
+            ))
+            .await
+            .expect("send");
+        let reply = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("a reply in time")
+            .expect("the socket is open")
+            .expect("a message");
+        let Message::Binary(data) = reply else {
+            panic!("expected a binary message, got {reply:?}");
+        };
+        let reply: ServerToAgent = frame::decode(&data, LIMIT).expect("a framed ServerToAgent");
+        assert_eq!(
+            reply.instance_uid, uid,
+            "{size} bytes did not come back whole"
+        );
+    }
+
+    socket
+        .send(Message::Binary(vec![0u8; LIMIT + 1].into()))
+        .await
+        .expect("send");
+    let closed = tokio::time::timeout(Duration::from_secs(10), socket.next())
+        .await
+        .expect("a close in time");
+    assert!(
+        matches!(&closed, Some(Ok(Message::Close(Some(close)))) if close.code == CloseCode::Size),
+        "{closed:?}"
+    );
 }
