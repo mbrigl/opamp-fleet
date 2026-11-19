@@ -526,7 +526,7 @@ consolidation "$d" yes
 clauses "$d" 1 3
 clauses "$d" 3 3
 echo "It restates $(adr_id 1) ${S}2." >> "$d/docs/adr/$(adr_id 3).md"
-printf '# Changelog\n\n- Changed as %s ${S}3 and %s, point 1 said.\n' "$(adr_id 1)" "$(adr_id 1)" \
+printf '# Changelog\n\n- Changed as %s %s3 and %s, point 1 said.\n' "$(adr_id 1)" "$S" "$(adr_id 1)" \
   > "$d/CHANGELOG.md"
 echo "The successor's $(adr_id 3) ${S}9." >> "$d/docs/adr/$(adr_id 1).md"
 layout "$d" "CHANGELOG.md"
