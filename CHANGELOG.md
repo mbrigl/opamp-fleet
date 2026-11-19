@@ -46,6 +46,14 @@ once its tag exists.
   kept while nothing arrived. They now hold 4 KiB, enough for an Agent's routine messages; a larger
   message still arrives whole, read 4 KiB at a time. The message size limit is unchanged. What
   this saves an instance's memory was not measured. **What to do:** nothing.
+- **A presence batch is written in pieces of 1 000 Agents**
+  ([ADR-0029](docs/adr/0029-the-fleet-record-of-agents-and-hosts.md) clause 4). On PostgreSQL, an
+  instance wrote the presence of every Agent it holds in one statement, and each database
+  connection kept its buffers at the size of the largest batch it had written: up to about 4.5 KiB
+  for each Agent of the most the instance had held at once, at the default `pool_size`. The batch
+  is now written in pieces of 1 000 Agents, still in one transaction and in the order of
+  `instance_uid`, so the buffers no longer follow the Agents an instance holds. What that saves an
+  instance's memory was not measured. **What to do:** nothing.
 - **The contract pair has defaults, and the Server names it no more**
   ([ADR-draft-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it](docs/adr/draft-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
   clause 22). On PostgreSQL, migration 19 gives the Deployments' `packages` and `configurations`

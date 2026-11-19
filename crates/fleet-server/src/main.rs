@@ -576,7 +576,8 @@ fn bind(address: SocketAddr, plane: &str) -> std::net::TcpListener {
 /// G-20 load test, an instance with 205 MiB in use held 1.3 GiB after 15 minutes, and still grew.
 /// With two arenas it no longer grows with each such read. What still grows under a steady fleet
 /// is memory in use, to a bound: the database connections' buffers, at the size of the largest
-/// presence batch each has written, which follows the most Agents the instance has held at once.
+/// statement each has sent. A presence batch is written in pieces of about 1 000 Agents, so that
+/// bound no longer follows the Agents the instance holds; its size was not measured again.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 const MALLOC_ARENAS: libc::c_int = 2;
 

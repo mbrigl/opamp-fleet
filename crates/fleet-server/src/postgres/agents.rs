@@ -208,6 +208,104 @@ impl PgAgentStore {
         }
     }
 
+    /// One transaction: the rows locked in the order of their `instance_uid`, byte by byte as the
+    /// release orders them, and written, in pieces of at most `piece` Agents taken in that order,
+    /// so every lock is taken in that order and all of them are held until the one commit. A
+    /// connected Agent is named anew only where the row names no instance with a live lease, and
+    /// where it comes with a count only while the row still holds it: another instance took it
+    /// after this one read the batch. A disconnect whose row holds another count of takes than it
+    /// comes with is not written: the Agent was taken since, by this instance or another, and the
+    /// take wrote its presence.
+    fn write_presence_in_pieces(
+        &self,
+        holder: &str,
+        presence: &[(InstanceUid, Presence, Option<u64>)],
+        piece: usize,
+    ) -> Result<HashMap<InstanceUid, u64>, String> {
+        if presence.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let holder = holder.to_string();
+        let mut batch: Vec<(String, bool, i64, Option<i64>)> = presence
+            .iter()
+            .map(|(uid, presence, take)| {
+                (
+                    uid.to_string(),
+                    presence.connected,
+                    signed(presence.last_seen_ms),
+                    take.map(signed),
+                )
+            })
+            .collect();
+        batch.sort_by(|(a, ..), (b, ..)| a.cmp(b));
+        let written = batch.len();
+        let rows = self.database.run_writing(written, move |pool| async move {
+            let mut client = client(&pool).await?;
+            let transaction = client.transaction().await.map_err(sql)?;
+            let mut rows = Vec::new();
+            // The pieces follow one another in the order of the sorted batch, so the rows are
+            // locked in the order of their `instance_uid` across the whole batch, and each lock is
+            // held until the one commit.
+            for piece in batch.chunks(piece) {
+                let uids: Vec<&str> = piece.iter().map(|(uid, ..)| uid.as_str()).collect();
+                let connected: Vec<bool> =
+                    piece.iter().map(|(_, connected, ..)| *connected).collect();
+                let last_seen: Vec<i64> = piece
+                    .iter()
+                    .map(|(_, _, last_seen, _)| *last_seen)
+                    .collect();
+                let takes: Vec<Option<i64>> = piece.iter().map(|(.., take)| *take).collect();
+                transaction
+                    .execute(
+                        "SELECT 1 FROM agents WHERE instance_uid = ANY($1) \
+                         ORDER BY instance_uid COLLATE \"C\" FOR UPDATE",
+                        &[&uids],
+                    )
+                    .await
+                    .map_err(sql)?;
+                rows.extend(
+                    transaction
+                        .query(
+                            "UPDATE agents AS a SET \
+                             last_seen_ms = GREATEST(a.last_seen_ms, p.last_seen_ms), \
+                             connected = CASE WHEN p.connected THEN true \
+                                 WHEN a.holder = $4::text::uuid AND a.takes = p.take THEN false \
+                                 ELSE a.connected END, \
+                             holder = CASE WHEN p.connected THEN $4::text::uuid \
+                                 WHEN a.holder = $4::text::uuid AND a.takes = p.take THEN NULL \
+                                 ELSE a.holder END, \
+                             takes = CASE WHEN p.connected AND a.holder IS DISTINCT FROM $4::text::uuid \
+                                 THEN a.takes + 1 ELSE a.takes END \
+                             FROM unnest($1::text[], $2::boolean[], $3::bigint[], $5::bigint[]) \
+                                 AS p(instance_uid, connected, last_seen_ms, take) \
+                             WHERE a.instance_uid = p.instance_uid \
+                                 AND (NOT p.connected OR a.holder = $4::text::uuid \
+                                     OR ((p.take IS NULL OR a.takes = p.take) \
+                                         AND (a.holder IS NULL \
+                                             OR NOT EXISTS (SELECT 1 FROM leases AS l \
+                                                 WHERE l.instance_id = a.holder \
+                                                     AND l.expires_at > now())))) \
+                             RETURNING a.instance_uid, p.connected, a.takes",
+                            &[&uids, &connected, &last_seen, &holder, &takes],
+                        )
+                        .await
+                        .map_err(sql)?,
+                );
+            }
+            transaction.commit().await.map_err(sql)?;
+            Ok(rows)
+        })?;
+        rows.into_iter()
+            .filter(|row| row.get::<_, bool>(1))
+            .map(|row| {
+                let key: String = row.get(0);
+                let uid = InstanceUid::parse(&key)
+                    .ok_or_else(|| format!("agents: {key} is not an instance_uid"))?;
+                Ok((uid, unsigned(row.get(2))))
+            })
+            .collect()
+    }
+
     /// Runs `writes` in one transaction.
     fn transaction<F>(
         &self,
@@ -594,90 +692,14 @@ impl AgentStore for PgAgentStore {
         Ok(())
     }
 
-    /// One transaction: the rows locked in the order of their `instance_uid`, byte by byte as the
-    /// release orders them, then the batch written in one statement. A connected Agent is named
-    /// anew only where the row names no instance with a live lease, and where it comes with a count
-    /// only while the row still holds it: another instance took it after this one read the batch. A disconnect whose row holds another count of takes than it comes with
-    /// is not written: the Agent was taken since, by this instance or another, and the take wrote
-    /// its presence.
+    /// One transaction, in pieces of [`PRESENCE_PIECE`] Agents: see
+    /// [`write_presence_in_pieces`](PgAgentStore::write_presence_in_pieces).
     fn write_presence(
         &self,
         holder: &str,
         presence: &[(InstanceUid, Presence, Option<u64>)],
     ) -> Result<HashMap<InstanceUid, u64>, String> {
-        if presence.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let holder = holder.to_string();
-        let mut batch: Vec<(String, bool, i64, Option<i64>)> = presence
-            .iter()
-            .map(|(uid, presence, take)| {
-                (
-                    uid.to_string(),
-                    presence.connected,
-                    signed(presence.last_seen_ms),
-                    take.map(signed),
-                )
-            })
-            .collect();
-        batch.sort_by(|(a, ..), (b, ..)| a.cmp(b));
-        let written = batch.len();
-        let rows = self.database.run_writing(written, move |pool| async move {
-            let mut client = client(&pool).await?;
-            let transaction = client.transaction().await.map_err(sql)?;
-            let uids: Vec<&str> = batch.iter().map(|(uid, ..)| uid.as_str()).collect();
-            let connected: Vec<bool> = batch.iter().map(|(_, connected, ..)| *connected).collect();
-            let last_seen: Vec<i64> = batch
-                .iter()
-                .map(|(_, _, last_seen, _)| *last_seen)
-                .collect();
-            let takes: Vec<Option<i64>> = batch.iter().map(|(.., take)| *take).collect();
-            transaction
-                .execute(
-                    "SELECT 1 FROM agents WHERE instance_uid = ANY($1) \
-                     ORDER BY instance_uid COLLATE \"C\" FOR UPDATE",
-                    &[&uids],
-                )
-                .await
-                .map_err(sql)?;
-            let rows = transaction
-                .query(
-                    "UPDATE agents AS a SET \
-                     last_seen_ms = GREATEST(a.last_seen_ms, p.last_seen_ms), \
-                     connected = CASE WHEN p.connected THEN true \
-                         WHEN a.holder = $4::text::uuid AND a.takes = p.take THEN false \
-                         ELSE a.connected END, \
-                     holder = CASE WHEN p.connected THEN $4::text::uuid \
-                         WHEN a.holder = $4::text::uuid AND a.takes = p.take THEN NULL \
-                         ELSE a.holder END, \
-                     takes = CASE WHEN p.connected AND a.holder IS DISTINCT FROM $4::text::uuid \
-                         THEN a.takes + 1 ELSE a.takes END \
-                     FROM unnest($1::text[], $2::boolean[], $3::bigint[], $5::bigint[]) \
-                         AS p(instance_uid, connected, last_seen_ms, take) \
-                     WHERE a.instance_uid = p.instance_uid \
-                         AND (NOT p.connected OR a.holder = $4::text::uuid \
-                             OR ((p.take IS NULL OR a.takes = p.take) \
-                                 AND (a.holder IS NULL \
-                                     OR NOT EXISTS (SELECT 1 FROM leases AS l \
-                                         WHERE l.instance_id = a.holder \
-                                             AND l.expires_at > now())))) \
-                     RETURNING a.instance_uid, p.connected, a.takes",
-                    &[&uids, &connected, &last_seen, &holder, &takes],
-                )
-                .await
-                .map_err(sql)?;
-            transaction.commit().await.map_err(sql)?;
-            Ok(rows)
-        })?;
-        rows.into_iter()
-            .filter(|row| row.get::<_, bool>(1))
-            .map(|row| {
-                let key: String = row.get(0);
-                let uid = InstanceUid::parse(&key)
-                    .ok_or_else(|| format!("agents: {key} is not an instance_uid"))?;
-                Ok((uid, unsigned(row.get(2))))
-            })
-            .collect()
+        self.write_presence_in_pieces(holder, presence, PRESENCE_PIECE)
     }
 
     /// One transaction: the row under its lock and the holder it names read, then the row written,
@@ -1057,6 +1079,12 @@ async fn hold_released_through(client: &impl GenericClient, name: &str) -> Resul
         .map(drop)
         .ok_or_else(|| format!("no deployment {name:?}"))
 }
+
+/// The most Agents one statement of a presence batch binds. A batch is written in pieces of this
+/// many, so the buffers a pool connection keeps grow to one piece's statement, not to the largest
+/// batch the connection ever carried; the pieces share one transaction and keep the order of
+/// `instance_uid`.
+const PRESENCE_PIECE: usize = 1_000;
 
 /// What a creation's transaction runs first: its commit does not wait for the database to flush
 /// it, and no other transaction on the connection is affected (ADR-0023 clause 21).
@@ -3775,6 +3803,20 @@ mod tests {
     /// Verifies: ADR-0029
     #[test]
     fn two_presence_batches_over_the_same_agents_in_opposite_orders_both_commit() {
+        presence_batches_in_opposite_orders_both_commit(PRESENCE_PIECE);
+    }
+
+    /// As above, each batch written in pieces of one Agent: the pieces follow the order of
+    /// `instance_uid`, so the rows are still locked in that order across the batch.
+    /// Verifies: ADR-0029
+    #[test]
+    fn presence_batches_in_pieces_over_the_same_agents_in_opposite_orders_both_commit() {
+        presence_batches_in_opposite_orders_both_commit(1);
+    }
+
+    /// Two presence batches over the same two Agents, given them in opposite orders and written
+    /// in pieces of `piece` Agents, both commit, the second writing last.
+    fn presence_batches_in_opposite_orders_both_commit(piece: usize) {
         let Some(test) = TestDatabase::named() else {
             return;
         };
@@ -3810,7 +3852,7 @@ mod tests {
         let batch = |holder: &'static str, order: [InstanceUid; 2]| {
             let database = database.clone();
             std::thread::spawn(move || {
-                PgAgentStore::new(database).write_presence(
+                PgAgentStore::new(database).write_presence_in_pieces(
                     holder,
                     &order.map(|uid| {
                         (
@@ -3822,6 +3864,7 @@ mod tests {
                             None,
                         )
                     }),
+                    piece,
                 )
             })
         };
@@ -3848,6 +3891,96 @@ mod tests {
             test.rows("SELECT DISTINCT holder::text FROM agents WHERE holder IS NOT NULL"),
             [[Some(second_holder.to_string())]],
             "the second, which waited, wrote last"
+        );
+    }
+
+    /// A presence batch larger than a piece writes the presence of every Agent in it, each named
+    /// anew and answered with its count of takes.
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_presence_batch_larger_than_a_piece_writes_every_agent() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgAgentStore::new(test.open());
+        let uids: Vec<InstanceUid> = (1..=7).map(|n| InstanceUid([n; 16])).collect();
+        for uid in &uids {
+            store.put(uid, &record()).expect("put");
+        }
+        let holder = "00000000-0000-4000-8000-000000000001";
+        let batch: Vec<_> = uids
+            .iter()
+            .rev()
+            .map(|uid| {
+                (
+                    *uid,
+                    Presence {
+                        connected: true,
+                        last_seen_ms: 5_000,
+                    },
+                    None,
+                )
+            })
+            .collect();
+        let takes = store
+            .write_presence_in_pieces(holder, &batch, 3)
+            .expect("batch");
+        assert_eq!(
+            takes,
+            uids.iter().map(|uid| (*uid, 1)).collect::<HashMap<_, _>>(),
+            "every piece answered"
+        );
+        assert_eq!(
+            test.rows(
+                "SELECT count(*)::text FROM agents WHERE connected AND last_seen_ms = 5000 \
+                 AND holder = '00000000-0000-4000-8000-000000000001'"
+            ),
+            [[Some("7".to_string())]],
+            "every Agent written"
+        );
+    }
+
+    /// A presence batch that fails in a later piece writes nothing: its pieces share one
+    /// transaction, so the earlier pieces roll back with it.
+    /// Verifies: ADR-0029
+    #[test]
+    fn a_presence_batch_failing_in_a_later_piece_writes_nothing() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let store = PgAgentStore::new(test.open());
+        let uids: Vec<InstanceUid> = (1..=5).map(|n| InstanceUid([n; 16])).collect();
+        for uid in &uids {
+            store.put(uid, &record()).expect("put");
+        }
+        let last = uids[4];
+        test.sql(&format!(
+            "CREATE FUNCTION fleet_test_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN \
+             RAISE EXCEPTION 'refused'; END $$; \
+             CREATE TRIGGER fleet_test_refuse BEFORE UPDATE ON agents FOR EACH ROW \
+             WHEN (NEW.instance_uid = '{last}') EXECUTE FUNCTION fleet_test_refuse();"
+        ));
+        let batch: Vec<_> = uids
+            .iter()
+            .map(|uid| {
+                (
+                    *uid,
+                    Presence {
+                        connected: true,
+                        last_seen_ms: 5_000,
+                    },
+                    None,
+                )
+            })
+            .collect();
+        let refused = store
+            .write_presence_in_pieces("00000000-0000-4000-8000-000000000001", &batch, 2)
+            .expect_err("the last piece is refused");
+        assert!(refused.contains("refused"), "{refused}");
+        assert_eq!(
+            test.rows("SELECT count(*)::text FROM agents WHERE connected OR holder IS NOT NULL"),
+            [[Some("0".to_string())]],
+            "the earlier pieces rolled back"
         );
     }
 

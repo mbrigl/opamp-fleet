@@ -69,13 +69,11 @@ read of the whole fleet, as a rollout makes; the environment variable `MALLOC_AR
 another count.
 
 Under a steady fleet an instance's memory levels off at what its Agents and its database pool hold.
-Each of the pool's connections keeps its buffers at the size of the largest presence batch it has
-written, so over the first hours they grow to up to about 4.5 KiB for each Agent of the most the
-instance has held at once, at the default `pool_size` of 16 and in proportion to `pool_size`: about
-70 MiB at 16 700 Agents an instance and 150 MiB at 33 000. They follow that most, not the Agents
-held now, and not time: an instance that carried a larger share of the fleet while another was
-down keeps buffers of that size after the fleet spreads out again, until it restarts. The
-operator's acts keep little beyond their answer:
+Each of the pool's connections keeps its buffers at the size of the largest statement it has
+sent. A presence batch is written in pieces of about 1 000 Agents, so its statements no longer grow
+with the Agents an instance holds, nor with the larger share it carries while another instance is
+down. What the buffers come to at that bound has not been measured yet. The operator's acts keep
+little beyond their answer:
 
 | Act | What an instance keeps |
 |---|---|
