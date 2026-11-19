@@ -18,13 +18,16 @@ once its tag exists.
 
 ### Changed
 
-- **A delete counts the Agents that pin what it deletes by index**
+- **A delete counts what pins it by index**
   ([ADR-0023](docs/adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-  clause 22). On PostgreSQL, deleting a Package, a Deployment or a Configuration that no Agent is
-  assigned counted the Agents pinning it by reading every Agent, under the row lock of what it
-  deletes. Migration 18 adds an index for each of the three counts; it names 0.8.0 as the oldest
-  Server, so the instances of 0.8.4 serve beside it. **What to do:** nothing; the first instance of
-  0.8.5 builds the indexes at startup, which on a large fleet holds the Agents' writes for as long.
+  clause 22). On PostgreSQL, every delete of a Package, a Deployment or a Configuration counts,
+  under the row lock of what it deletes, the Agents that pin it, or for a Configuration their
+  assignments, and the count read the whole table. Migration 18 adds an index for each of the three
+  counts; it names 0.8.0 as the oldest Server, so the instances of 0.8.4 serve beside it. **What
+  to do:** start the first instance of 0.8.5 while no rollout runs. It builds the indexes at
+  startup and waits for the lock on the Agents at most 5 seconds; a rollout of 0.8.4 that holds
+  them longer fails that start, and a second start succeeds once the rollout is done. The build
+  holds the Agents' writes while it lasts, under a second at 100 000 Agents.
 
 ## [0.8.4] - 2026-11-18
 

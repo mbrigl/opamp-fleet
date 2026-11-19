@@ -29,7 +29,6 @@ read and the swap. `retain_only` collects outside the lock, and the list is shar
 copied. Reading the register by what a notice names contradicts ADR-0025 clause 12 ("Caches are
 read again, not updated"), so that part needs a superseding ADR through `propose-adr` first.
 
-
 **Not now.** The human deferred it on 2026-11-19: no criterion asks for it, and the G-20 load test
 meets its target without it. It comes back when the timing of each kind of act
 (`docs/backlog/each-operator-act-is-timed-in-the-g20-test.md`) or another measurement shows it.
