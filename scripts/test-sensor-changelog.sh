@@ -2,7 +2,7 @@
 #
 # Self-test of scripts/sensor-changelog.sh.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 #
 # Each case builds a throwaway git repository under a temporary directory with a crate and a
 # CHANGELOG.md on main, adds commits on a branch, runs the sensor against the branch, and asserts

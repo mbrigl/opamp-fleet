@@ -9,7 +9,7 @@ The rule is [`AGENTS.md` §4](../../../AGENTS.md#4-working-style); the artifacts
 lifecycle are decided in [ADR-0006](../../../docs/adr/0006-feature-layer.md). The shapes are the
 templates [`spec.md`](spec.md) and [`ticket.md`](ticket.md) next to this file. This skill is the
 order of work and states no rule of its own
-([ADR-0003](../../../docs/adr/0003-procedures-as-skills.md)).
+([NUC-procedures-are-skills](../../../docs/adr/NUC-procedures-are-skills.md)).
 
 ## 1. Decide the artifact
 

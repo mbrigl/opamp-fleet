@@ -7,7 +7,7 @@ description: Develop and submit an Architecture Decision Record, with a catalogu
 
 The rule is [`AGENTS.md` §3](../../../AGENTS.md#3-adr-rules); the mechanics of the record are in
 [`docs/adr/README.md`](../../../docs/adr/README.md). This skill is the order of work. It states no
-rule of its own ([ADR-0003](../../../docs/adr/0003-procedures-as-skills.md)).
+rule of its own ([NUC-procedures-are-skills](../../../docs/adr/NUC-procedures-are-skills.md)).
 
 ## 1. Calibrate
 

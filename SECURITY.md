@@ -75,23 +75,23 @@ A third-party action the workflows run is pinned to a full commit SHA, with the 
 taken from in a `# vX.Y.Z` comment on the same line, and CI resolves that release's tag to check it
 still points to the pinned commit. A first-party action (`actions/*`) stays on its major version
 tag, a mutable reference accepted with its risk in
-[ADR-0010](docs/adr/0010-actions-are-pinned-and-kept-current-by-dependabot.md). Both are held by
+[OPS-actions-pinned-by-sha](docs/adr/OPS-actions-pinned-by-sha.md). Both are held by
 [`scripts/check-action-refs.sh`](scripts/check-action-refs.sh), and Dependabot raises both.
 
 ## Fleet trust model
 
 **Admission is a fleet-wide trust boundary; within it the host is the only bound between Agents**
-([ADR-0027 §11](docs/adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md),
-[ADR-0026 §12](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
+([SEC-bootstrap-certificates-and-enrolment §11](docs/adr/SEC-bootstrap-certificates-and-enrolment.md),
+[SEC-admission-by-client-certificate §12](docs/adr/SEC-admission-by-client-certificate.md),
 and
-[ADR-0016 §18](docs/adr/0016-client-modes-and-the-gateway.md)). A peer reaches the OpAMP
+[CLT-modes-and-gateway §18](docs/adr/CLT-modes-and-gateway.md)). A peer reaches the OpAMP
 endpoint by proving *fleet membership* with a client certificate
 in the TLS handshake, the one proof the Agent plane admits by. The certificate also names the
 **host** it was issued to, and an
 `instance_uid` first reported with one host's certificate is not spoken for by another's: such a
 reporter is re-keyed to an identity of its own. A certificate is not bound to one `instance_uid`,
 which is self-asserted and which the Server may re-key, and a Gateway
-([ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md)) forwards many
+([CLT-modes-and-gateway](docs/adr/CLT-modes-and-gateway.md)) forwards many
 Agents' reports under its own certificate.
 
 The consequence, which is a design property rather than a defect: **a host marked as a Gateway, or
@@ -100,7 +100,7 @@ a peer behind one, can report under any `instance_uid`** and update that Agent's
 *not* a cross-fleet or unauthenticated exposure: it is bounded by admission.
 
 **A host receives from the Server only what is released to an Agent it speaks for**
-([ADR-0033](docs/adr/0033-packages-signatures-and-delivery.md)).
+([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)).
 A composed configuration travels
 only to the Agent it was released to,
 and the package download serves an uploaded artifact only to a host one of whose Agents is
@@ -120,7 +120,7 @@ partition's next rollout, and the fleet view shows such an Agent waiting before 
 **What this means for operators:** treat one fleet (one Server, one shared admission) as a single
 trust domain, mark only real Gateways as such (`PUT /api/v1/hosts/{host}/gateway`), and do not
 place mutually distrusting Agents behind one Gateway or in one fleet; isolate them by separate
-Server instance or network segment. The alternatives that were weighed are in ADR-0026.
+Server instance or network segment. The alternatives that were weighed are in SEC-admission-by-client-certificate.
 
 ## Supported versions
 

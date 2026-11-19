@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Runs the tests of one of the Server's external stores against a real one: 's3' against an
-# S3-compatible object store (ADR-0039), 'postgres' against PostgreSQL over TLS (ADR-0039). A
+# S3-compatible object store (SRV-state-stores-contract-pair), 'postgres' against PostgreSQL over TLS (SRV-state-stores-contract-pair). A
 # plain `cargo test` skips them; the 's3-store' and 'postgres-store' jobs of
 # .github/workflows/checks.yml start the store and run this. Locally, the development stack of
 # observability/compose.yaml provides both; without a store named the check says so and skips,

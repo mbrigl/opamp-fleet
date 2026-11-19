@@ -2,7 +2,7 @@
 #
 # Self-test of scripts/sensor-cited-commits.sh.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 #
 # Each case builds a throwaway git repository under a temporary directory, writes hashes into a
 # ticket under docs/plan/ or an entry under docs/backlog/, runs the sensor against it, and

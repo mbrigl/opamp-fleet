@@ -20,7 +20,7 @@ impl Drop for ServerUnderTest {
     }
 }
 
-// Verifies: ADR-0012, ADR-0029, ADR-0039
+// Verifies: SEC-tls13-two-planes-bounded-input, SRV-fleet-record-agents-hosts, SRV-state-stores-contract-pair
 #[test]
 fn sigterm_shuts_the_server_down_gracefully() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -110,7 +110,7 @@ fn sigterm_shuts_the_server_down_gracefully() {
         "the server ended with {status:?} instead of shutting down"
     );
 
-    // Started on an empty data_dir, the Server laid out every directory of ADR-0034 §23,
+    // Started on an empty data_dir, the Server laid out every directory of PKG-versions-high-water-mark-floor §23,
     // each owner-only, and nothing else.
     let data = dir.path().join("data");
     let mut found: Vec<String> = std::fs::read_dir(&data)

@@ -1,4 +1,4 @@
-//! The dependency direction of ADR-0009: a module of the core depends on no adapter and on no
+//! The dependency direction of DEV-ports-and-adapters: a module of the core depends on no adapter and on no
 //! technology. Every source file of the workspace's library crates has a role in `ROLES`; the core
 //! files are read and every path they name is held to the rule. A new module fails until it is
 //! given a role, so where it belongs is decided when it is written, and a role whose module is
@@ -64,11 +64,11 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("host", Core),
             ("naming", Core),
             ("package", Core),
-            // The bootstrap PKCS#12 file (ADR-0027): its rule, and its binding to `p12-keystore`.
+            // The bootstrap PKCS#12 file (SEC-bootstrap-certificates-and-enrolment): its rule, and its binding to `p12-keystore`.
             ("pkcs12", Core),
             ("pkcs12::file", Adapter),
             // What the Server and the operator program do alike on a PKCS#11 token, with
-            // `cryptoki` (ADR-0026).
+            // `cryptoki` (SEC-admission-by-client-certificate).
             ("pkcs11", Adapter),
             ("platform", Core),
             ("rate", Core),
@@ -217,7 +217,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("gateway::floors", Adapter),
             ("gateway::policy", Core),
             ("gateway::pool", Adapter),
-            // The downstream hosts' buckets, read against the Gateway's clock (ADR-0017).
+            // The downstream hosts' buckets, read against the Gateway's clock (CLT-gateway-rate-limits-hosts).
             ("gateway::rate", Adapter),
             ("gateway::registry", Adapter),
             ("gateway::revocations", Adapter),
@@ -256,7 +256,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
     (
         "fleet-tools",
         &[
-            // One command-line program and no library (ADR-0036): nothing here is core, and a
+            // One command-line program and no library (OPS-operator-program-fleetctl): nothing here is core, and a
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),
@@ -270,17 +270,17 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
 ];
 
 /// The external crates the core may name: data formats, codecs, the logging facade, and the buffer
-/// a secret is wiped from on drop (ADR-0015) — none of them reaches a file, a socket, a process, or
+/// a secret is wiped from on drop (SEC-secrets-wiped-on-drop) — none of them reaches a file, a socket, a process, or
 /// a clock.
 const CORE_CRATES: &[&str] = &[
     "prost", "serde", "sha2", "hex", "base64", "uuid", "flate2", "tracing", "zeroize",
 ];
 
 /// What the core may name of a technology, by path prefix. `tokio::sync` is channels, which need
-/// no runtime and do no I/O — and ADR-0019 makes a Port a message pair over them; `tokio::select`
+/// no runtime and do no I/O — and CLT-supervisor-mode-and-kinds makes a Port a message pair over them; `tokio::select`
 /// and `tokio::pin` are how the core waits on several of them, control flow over futures that
 /// starts no task and touches nothing outside the process. `toml::Table` and
-/// `toml::Value` are the configuration's values (ADR-0024 §1), which ADR-0019 hands a
+/// `toml::Value` are the configuration's values (SRV-configuration-toml-and-environment §1), which CLT-supervisor-mode-and-kinds hands a
 /// Plugin as its block; reading and parsing the file stays at the edge. An address is a value, and
 /// `env::consts` is fixed at compile time.
 const CORE_PREFIXES: &[&[&str]] = &[
@@ -822,7 +822,7 @@ fn reexports() -> Reexports {
     found
 }
 
-/// Verifies: ADR-0009, G-8
+/// Verifies: DEV-ports-and-adapters, G-8
 #[test]
 fn the_core_depends_on_no_adapter_and_no_technology() {
     let locked = locked_crates();
@@ -1061,7 +1061,7 @@ fn module_of(krate: &str, segments: &[String]) -> (&'static str, Role) {
     best
 }
 
-/// Verifies: ADR-0009
+/// Verifies: DEV-ports-and-adapters
 #[test]
 fn no_adapter_names_the_composition_roots_kept_from_adapters() {
     let mut found = Vec::new();

@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # A SoftHSM2 token directory for the tests of the keys on a PKCS#11 token
-# (ADR-0026 §39).
+# (SEC-admission-by-client-certificate §39).
 # Sourced by scripts/check-rust.sh and scripts/check-store.sh.
 
 # The text a test that needs a token prints when none is named.

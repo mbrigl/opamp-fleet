@@ -105,7 +105,7 @@ The procedures those rules name (proposing an ADR, planning a feature, working i
 alone or in parallel, reviewing a change, revising the design, normalizing the record) are Agent
 Skills under [`.agents/skills/`](.agents/skills/), the open format and the directory Codex,
 Gemini CLI, and Cursor read
-([ADR-0003](docs/adr/0003-procedures-as-skills.md)). An agent invokes one by name (`/review`) or
+([NUC-procedures-are-skills](docs/adr/NUC-procedures-are-skills.md)). An agent invokes one by name (`/review`) or
 picks it up when the task matches its description. Claude Code reads `.claude/skills/` only, so
 that directory holds one symlink per skill into `.agents/skills/`; a directory-level symlink is
 not followed. The symlinks are pointers of the same kind as `CLAUDE.md`, tracked upstream as
@@ -226,14 +226,14 @@ configured once by a maintainer and worth re-checking after a repository move or
   [`.github/CODEOWNERS`](.github/CODEOWNERS); it allows the merge method merge commit only, and
   the admin role bypasses it for pull requests only, so the maintainer merges their own reviewed
   pull request without an approval GitHub would refuse them
-  ([ADR-0007 §4](docs/adr/0007-the-harness.md));
+  ([DEV-maintainer-decides-agents-implement §4](docs/adr/DEV-maintainer-decides-agents-implement.md));
 - enable **secret scanning with push protection**, the only mechanical backstop behind the secrets
   rule ([`AGENTS.md` §7](AGENTS.md#7-secrets)), which is otherwise carried by review alone;
 - enable **private vulnerability reporting** (see [`SECURITY.md`](SECURITY.md)).
 - after the first release that pushes the Server's image, set the package
   **`opamp-fleet-server`** on `ghcr.io` to **public** and linked to this repository: a package a
   workflow publishes for the first time is private, and operators pull the image without an account
-  ([ADR-0038](docs/adr/0038-releases-attestations-and-the-server-image.md)).
+  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)).
 
 [`scripts/sensor-repo-settings.sh`](scripts/sensor-repo-settings.sh) reads these settings
 through `gh` and reports each one that differs from this list. It runs on a human's

@@ -1,7 +1,7 @@
 # Interop against opamp-go
 
 This directory holds the Go side of the conformance check of
-[ADR-0011](../docs/adr/0011-the-protocol-is-pinned-and-checked-against-opamp-go.md): a small program
+[API-protocol-pinned-interop-checked](../docs/adr/API-protocol-pinned-interop-checked.md): a small program
 that puts
 [`opamp-go`](https://github.com/open-telemetry/opamp-go), the OpAMP reference implementation, at the
 far end of a connection with this project's Server or Client. It decides nothing. It reports what

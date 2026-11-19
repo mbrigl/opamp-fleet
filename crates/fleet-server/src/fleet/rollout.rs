@@ -1,4 +1,4 @@
-//! Configurations, Deployments and rollouts (ADR-0031, ADR-0032): the catalogue of
+//! Configurations, Deployments and rollouts (SRV-configurations-compose-one-map, SRV-deployments-and-pinned-rollouts): the catalogue of
 //! Configurations, the Configurations and Packages a Deployment releases, the rollout acts that
 //! assign them to an Agent, what waits for an Agent's next press, the offer of a remote
 //! configuration, labels, and the restart an operator requests. Its entry points are methods of
@@ -26,7 +26,7 @@ use super::{
 impl AppState {
     /// Reads the Configurations and, where package delivery is armed, the Deployments and the
     /// Packages again from their stores, as another instance changed them
-    /// (ADR-0025 §12).
+    /// (SRV-instances-share-one-postgresql §12).
     /// Each one whose flag is set is dropped and read again whole.
     ///
     /// # Errors
@@ -57,7 +57,7 @@ impl AppState {
     }
 
     /// Creates a Configuration or replaces its saved revision, and persists it. **Saving only
-    /// saves** (ADR-0032): nothing is offered and no WebSocket loop wakes — every Agent keeps
+    /// saves** (SRV-deployments-and-pinned-rollouts): nothing is offered and no WebSocket loop wakes — every Agent keeps
     /// the revision its assignment pins, and the fleet view shows the newer save waiting.
     pub fn save_configuration(
         &self,
@@ -69,7 +69,7 @@ impl AppState {
         Ok(config)
     }
 
-    /// The Deployment claiming one Agent (ADR-0033), or the conflict that says why none does.
+    /// The Deployment claiming one Agent (PKG-signed-packages-and-delivery), or the conflict that says why none does.
     fn deployment_of(&self, record: &AgentRecord) -> Result<Option<Deployment>, String> {
         let Some(store) = self.deployment_store() else {
             return Ok(None);
@@ -78,16 +78,16 @@ impl AppState {
         deployment_for(&all, record.effective_description().as_deref()).map(|found| found.cloned())
     }
 
-    /// What a press of `deployment` would release to this Agent (ADR-0032 §9) — the
+    /// What a press of `deployment` would release to this Agent (SRV-deployments-and-pinned-rollouts §9) — the
     /// assignment it would write, or `None` when it has nothing for the Agent.
     ///
     /// Two parts, each as of now: the Package the Deployment holds for the Agent's type when it is
-    /// a candidate (ADR-0034 §5 and ADR-0032 §14, §15, §16 and §17), and every Configuration it holds that fits the Agent's
+    /// a candidate (PKG-versions-high-water-mark-floor §5 and SRV-deployments-and-pinned-rollouts §14, §15, §16 and §17), and every Configuration it holds that fits the Agent's
     /// type, at its saved revision. Where the Deployment holds a Package for the Agent's type that
     /// is no candidate — the Agent already runs it, or it would move the Agent backwards — the
     /// press cannot move the package part, so the Package the assignment pins stays pinned: the
     /// release is replaced whole, and a part the press does not move must not fall out of it
-    /// (ADR-0032 §20). A Package or Configuration the Deployment no longer holds leaves the
+    /// (SRV-deployments-and-pinned-rollouts §20). A Package or Configuration the Deployment no longer holds leaves the
     /// release.
     ///
     /// The rollout acts, the reach counts and the fleet view's waiting changes all ask this one
@@ -123,7 +123,7 @@ impl AppState {
         })
     }
 
-    /// Writes releases (ADR-0032 §6, ADR-0039 §2): each Configuration's saved revision
+    /// Writes releases (SRV-deployments-and-pinned-rollouts §6, SRV-state-stores-contract-pair §2): each Configuration's saved revision
     /// is pinned — copied into the store's retained revisions, its hash the one the assignment
     /// keeps — and the revisions and the records carrying the new assignments go to the store as
     /// one operation. Only once it succeeded are they the fleet's. A failure leaves the fleet's
@@ -197,7 +197,7 @@ impl AppState {
     }
 
     /// Collects every retained revision of `names` no stored assignment references any more — a
-    /// question the store answers (ADR-0039 §2).
+    /// question the store answers (SRV-state-stores-contract-pair §2).
     pub(super) fn collect_revisions(&self, names: impl IntoIterator<Item = String>) {
         for name in names.into_iter().collect::<BTreeSet<_>>() {
             let referenced = self.agent_store.referenced_revisions(&name);
@@ -207,7 +207,7 @@ impl AppState {
         }
     }
 
-    /// The per-Agent rollout act (ADR-0032 §9): releases the Deployment that claims this
+    /// The per-Agent rollout act (SRV-deployments-and-pinned-rollouts §9): releases the Deployment that claims this
     /// Agent to it, replacing its assignment, and wakes the WebSocket loops so a connected Agent
     /// hears it now.
     ///
@@ -286,7 +286,7 @@ impl AppState {
         Ok((deployment.name, release))
     }
 
-    /// The rollout act for a Deployment (ADR-0032 §9): releases it to every Agent it claims
+    /// The rollout act for a Deployment (SRV-deployments-and-pinned-rollouts §9): releases it to every Agent it claims
     /// and would move, replacing each one's assignment, and returns how many Agents that was.
     ///
     /// An Agent some *other* Deployment also claims is skipped rather than counted — the conflict
@@ -348,7 +348,7 @@ impl AppState {
     ///
     /// The request is written to its own column of the record before this answers, and on a shared
     /// store announced to the instance that carries the Agent, which decides from what is stored
-    /// (ADR-0029 §2).
+    /// (SRV-fleet-record-agents-hosts §2).
     pub fn request_restart(&self, uid: &InstanceUid) -> Result<(), RestartError> {
         // A request, a delivery, a try and a forget of one Agent each hold its own lock.
         let _agent = self.agent_lock(uid);
@@ -368,7 +368,7 @@ impl AppState {
         if capabilities & opamp::proto::AgentCapabilities::AcceptsRestartCommand as u64 == 0 {
             return Err(RestartError::NoCapability);
         }
-        // Operator intent survives a Server restart like any other durable state (ADR-0029).
+        // Operator intent survives a Server restart like any other durable state (SRV-fleet-record-agents-hosts).
         self.agent_store
             .set_restart_pending(uid, true)
             .map_err(RestartError::Storage)?
@@ -385,20 +385,20 @@ impl AppState {
         Ok(())
     }
 
-    /// Replaces an Agent's labels (ADR-0029), which changes what Selectors match it.
+    /// Replaces an Agent's labels (SRV-fleet-record-agents-hosts), which changes what Selectors match it.
     ///
     /// A key the Agent already reports is **refused**, not applied: `os.type` and `host.arch`
-    /// choose which artifact it is offered (ADR-0033) and `service.name` decides which packages fit
-    /// it at all (ADR-0033), so a label that outranked them would let a slip here offer this Agent
+    /// choose which artifact it is offered (PKG-signed-packages-and-delivery) and `service.name` decides which packages fit
+    /// it at all (PKG-signed-packages-and-delivery), so a label that outranked them would let a slip here offer this Agent
     /// an artifact built for another machine. Labels annotate; they do not correct.
     ///
-    /// A label move changes only what the fleet view **proposes** (ADR-0032): the Agent's
+    /// A label move changes only what the fleet view **proposes** (SRV-deployments-and-pinned-rollouts): the Agent's
     /// candidates follow its new channel, and nothing is distributed until a rollout act says so.
     ///
-    /// The labels are part of the Agent's record (ADR-0029 §21) and are written to their own
+    /// The labels are part of the Agent's record (SRV-fleet-record-agents-hosts §21) and are written to their own
     /// column of it before this answers; on a shared store the Agent is read from the store, and
     /// the change announced to the instance that carries it. A Client Agent's labels hold for its
-    /// Client's other Agents (ADR-0029 §19), so its group is placed again.
+    /// Client's other Agents (SRV-fleet-record-agents-hosts §19), so its group is placed again.
     pub fn set_labels(
         &self,
         uid: &InstanceUid,
@@ -457,7 +457,7 @@ impl AppState {
     }
 
     /// Which Deployments hold each Package, keyed by `<agent type>@<version>` — how a Package
-    /// answers "whom would this reach", since it does not aim by itself (ADR-0033).
+    /// answers "whom would this reach", since it does not aim by itself (PKG-signed-packages-and-delivery).
     pub fn deployments_holding(&self) -> BTreeMap<String, Vec<String>> {
         let mut holding: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let Some(store) = self.deployment_store() else {
@@ -475,7 +475,7 @@ impl AppState {
         holding
     }
 
-    /// Which Deployments hold each Configuration, by name (ADR-0032 §23) — how a
+    /// Which Deployments hold each Configuration, by name (SRV-deployments-and-pinned-rollouts §23) — how a
     /// Configuration answers "whom would this reach", since it does not aim by itself.
     pub fn deployments_holding_configurations(&self) -> BTreeMap<String, Vec<String>> {
         let mut holding: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -560,7 +560,7 @@ impl AppState {
     /// queued again through [`unsent`](Self::unsent). It is handed out only to `conn`, the
     /// WebSocket connection asking, where that connection carries the Agent: an older connection
     /// of its host that still names it leaves the restart to the newer one
-    /// (ADR-0025 §8).
+    /// (SRV-instances-share-one-postgresql §8).
     ///
     /// A delivery holds the Agent's own lock, and clears the restart in the store with the fleet
     /// lock let go.
@@ -587,7 +587,7 @@ impl AppState {
     /// Clears the queued restart of `record` in the store first, and answers whether it was still
     /// queued there, so it is delivered: one another instance delivered already is not delivered
     /// twice, and a request made after the clear stays queued
-    /// (ADR-0029 §2). One that cannot be cleared is
+    /// (SRV-fleet-record-agents-hosts §2). One that cannot be cleared is
     /// kept for the next exchange, and one cleared whose command is not sent is put back by
     /// [`unsent`](Self::unsent).
     ///
@@ -624,7 +624,7 @@ impl AppState {
         self.agent_store.set_restart_pending(uid, false)
     }
 
-    /// Deletes a Configuration (ADR-0032 §12); `false` when none of that name exists.
+    /// Deletes a Configuration (SRV-deployments-and-pinned-rollouts §12); `false` when none of that name exists.
     /// **Refused while any Agent's assignment pins it** — the message says how many — because a
     /// deletion must not change what a running Agent receives: those Agents are rolled out through
     /// a Deployment without it first, or forgotten. A deleted Configuration leaves every Deployment
@@ -632,7 +632,7 @@ impl AppState {
     ///
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between. A store that other Servers write too counts the stored assignments again
-    /// in the act that deletes (ADR-0039 §2), so a pin
+    /// in the act that deletes (SRV-state-stores-contract-pair §2), so a pin
     /// written through another instance refuses it as well, and takes it out of every Deployment
     /// in that act too.
     pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
@@ -668,7 +668,7 @@ impl AppState {
         Ok(deleted)
     }
 
-    /// Puts a Configuration into a Deployment (ADR-0032 §5); a Configuration the Server
+    /// Puts a Configuration into a Deployment (SRV-deployments-and-pinned-rollouts §5); a Configuration the Server
     /// does not hold is `Missing`. Distributes nothing. Under the fleet lock, so a Configuration
     /// cannot be deleted between the check and the write. A store that other Servers write too
     /// reads the Configuration again in the act that adds it, so one deleted through another
@@ -687,7 +687,7 @@ impl AppState {
     }
 
     /// Takes a Configuration out of a Deployment. Not gated: nothing a Deployment holds is frozen
-    /// (ADR-0032 §11), and an Agent already released keeps its pinned revision until the next
+    /// (SRV-deployments-and-pinned-rollouts §11), and an Agent already released keeps its pinned revision until the next
     /// press, which drops it from the Agent's map.
     pub fn remove_deployment_configuration(
         &self,
@@ -720,7 +720,7 @@ impl AppState {
         })
     }
 
-    /// Deletes a Deployment — **refused while an Agent's assignment names it** (ADR-0032 §12).
+    /// Deletes a Deployment — **refused while an Agent's assignment names it** (SRV-deployments-and-pinned-rollouts §12).
     ///
     /// An assignment points at the channel it was released through, and the fleet view names it.
     /// So the operator ends that first, by an act that says so: rolling those Agents out through
@@ -758,7 +758,7 @@ pub(super) struct Waiting {
     pub(super) deployment: String,
 }
 
-/// What waits for an Agent's next press (ADR-0032 §6, §8 and §9): the
+/// What waits for an Agent's next press (SRV-deployments-and-pinned-rollouts §6, §8 and §9): the
 /// difference between what the claiming Deployment would release and what the assignment pins,
 /// per Configuration, for the Package, and for the Deployment the release goes through — so
 /// whatever makes a press move this Agent shows here, and the reach count agrees with the view.
@@ -767,7 +767,7 @@ pub(super) struct Waiting {
 /// pinned and leaves the release — the Deployment no longer holds it, or no longer fits it to this
 /// Agent — while the release keeps something else, so the smaller assignment is applied. `kept` is
 /// pinned while the release holds nothing for the Agent at all: the press leaves it with no
-/// assignment, it is offered nothing, and it keeps running what it runs (ADR-0032 §9).
+/// assignment, it is offered nothing, and it keeps running what it runs (SRV-deployments-and-pinned-rollouts §9).
 pub(super) fn waiting(
     assigned: Option<&Assignment>,
     release: Option<&Assignment>,
@@ -832,7 +832,7 @@ pub(super) fn waiting(
 
 /// The remote-config offer for one Agent, or `None` when the hash comparison says it already has
 /// it — the "no redundant reconfiguration" goal in one place. Every assigned Configuration is one
-/// named entry; the Managed Process does its own merging (ADR-0031).
+/// named entry; the Managed Process does its own merging (SRV-configurations-compose-one-map).
 pub(super) fn offer(
     record: &AgentRecord,
     desired: Option<&DesiredConfig>,
@@ -860,7 +860,7 @@ pub(super) fn offer(
                         AgentConfigObject {
                             body: entry.body.clone().into_bytes(),
                             content_type: String::new(),
-                            // The operator's role, verbatim (ADR-0031). Empty — the default —
+                            // The operator's role, verbatim (SRV-configurations-compose-one-map). Empty — the default —
                             // leaves the field unset, which is top-level configuration and what
                             // every Configuration predating that decision carries.
                             role: entry.role.clone(),
@@ -887,7 +887,7 @@ pub(super) fn restart_command(uid: &InstanceUid, capabilities: u64) -> ServerToA
 
 /// Refuses a per-Agent press that would move nothing because the Package the Deployment holds for
 /// the Agent's type is not released to it — no upgrade, no entry for its platform — and says why,
-/// naming the version it compared against (ADR-0032 §19). A press that moves nothing for any
+/// naming the version it compared against (SRV-deployments-and-pinned-rollouts §19). A press that moves nothing for any
 /// other reason is not refused: it is the same request arriving twice.
 fn refuse_a_package_left_out(
     store: &crate::packages::PackageStore,
@@ -911,7 +911,7 @@ fn refuse_a_package_left_out(
 }
 
 /// Refuses a rollout of a Deployment that holds nothing, or a Package with an unsigned entry —
-/// naming each such Package and its platforms; nothing is released (ADR-0032 §9, ADR-0033).
+/// naming each such Package and its platforms; nothing is released (SRV-deployments-and-pinned-rollouts §9, PKG-signed-packages-and-delivery).
 fn refuse_unreleasable(
     store: &crate::packages::PackageStore,
     deployment: &Deployment,
@@ -979,7 +979,7 @@ mod tests {
     /// There is no seed. A record carrying no assignment loads as **assigned nothing** — the Server
     /// never invents a rollout at startup — and what its Deployment would release shows up as
     /// waiting instead, which is the one thing an operator has to act on.
-    /// Verifies: ADR-0033, ADR-0032
+    /// Verifies: PKG-signed-packages-and-delivery, SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_record_without_assignments_loads_assigned_to_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -1008,13 +1008,13 @@ mod tests {
         );
         assert_eq!(
             view.pending_configurations[0].change, "new",
-            "what it could receive waits for an explicit act (ADR-0032)"
+            "what it could receive waits for an explicit act (SRV-deployments-and-pinned-rollouts)"
         );
     }
 
-    /// ADR-0032: saving proposes, the acts assign — and an Agent that appears after the
+    /// SRV-deployments-and-pinned-rollouts: saving proposes, the acts assign — and an Agent that appears after the
     /// Deployment's act waits for one of its own (point 6).
-    /// Verifies: ADR-0032
+    /// Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn rollout_acts_assign_and_a_late_agent_waits() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -1063,7 +1063,7 @@ mod tests {
     /// first is put back as it was, the fleet keeps its assignments, the revision those still pin
     /// stays, and the one nothing pins is collected. The next press, once the store writes again,
     /// releases to both.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_rollout_that_fails_part_way_leaves_disk_and_memory_as_they_were() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1126,7 +1126,7 @@ mod tests {
         assert_eq!(state.rollout_deployment("stable").expect("rollout"), 2);
     }
 
-    /// ADR-0029: a queued restart is operator intent and survives the Server restarting.
+    /// SRV-fleet-record-agents-hosts: a queued restart is operator intent and survives the Server restarting.
     #[test]
     fn a_queued_restart_survives_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -1146,7 +1146,7 @@ mod tests {
     /// A restart is delivered only while the store still holds it queued: one another Server
     /// delivered and cleared already is not sent twice, and one requested after a delivery is sent
     /// again.
-    /// Verifies: ADR-0029
+    /// Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn a_restart_is_sent_only_while_the_store_holds_it_queued() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1179,7 +1179,7 @@ mod tests {
         assert!(state.restart_command_for(&uid, 1).is_none(), "once");
     }
 
-    // ---- A Deployment carries Configurations beside its Packages (ADR-0032) ----
+    // ---- A Deployment carries Configurations beside its Packages (SRV-deployments-and-pinned-rollouts) ----
 
     /// One report of an `otelcol` Agent on linux/amd64 over a certificate naming `h1` that takes
     /// both remote configuration and packages, echoing the hashes it holds.
@@ -1264,7 +1264,7 @@ mod tests {
     /// A Deployment holding a Package and two Configurations, one typed for another Agent type,
     /// releases to an Agent the Package and the one Configuration that fits it — one act, one
     /// assignment.
-    /// Verifies: ADR-0032
+    /// Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_deployment_releases_its_package_and_the_fitting_configurations() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1296,7 +1296,7 @@ mod tests {
     /// The hash gates send only what changed: a new body re-sends the config map and no package
     /// offer, and a new Package re-sends the package offer and no config map — though each is
     /// one press of the whole Deployment.
-    /// Verifies: ADR-0032
+    /// Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_second_press_sends_only_the_part_that_changed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1336,7 +1336,7 @@ mod tests {
 
     /// A press of a Deployment that no longer holds a Configuration drops it from the Agent's map;
     /// until the press, the view shows the drop waiting.
-    /// Verifies: ADR-0032
+    /// Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_configuration_the_deployment_dropped_leaves_the_map_on_the_next_press() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1386,7 +1386,7 @@ mod tests {
     /// and the Agent keeps running what it runs: the view shows what it was given as `kept`, never
     /// as `remove`, and the press makes no offer that would take it away. A Package pinned with no
     /// Configuration sends no config map either, so nothing empty ever replaces a running one.
-    /// Verifies: ADR-0032
+    /// Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_release_holding_nothing_for_an_agent_keeps_what_it_runs() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1463,7 +1463,7 @@ mod tests {
     /// A Deployment that newly claims an Agent with the content its assignment already pins still
     /// moves that assignment on a press, so the view shows the Deployment waiting — the count
     /// beside the press, the per-Agent press and the view agree.
-    /// Verifies: ADR-0032
+    /// Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_new_claiming_deployment_with_the_same_content_waits_in_the_view() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1510,7 +1510,7 @@ mod tests {
     /// Editing a Deployment after a rollout — a Configuration's body, a Configuration added, the
     /// Package swapped — changes no Agent's offer until the next press, and the view shows each
     /// change waiting.
-    /// Verifies: ADR-0032
+    /// Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn editing_a_deployment_changes_no_offer_until_the_next_press() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1569,7 +1569,7 @@ mod tests {
     /// The per-Agent act releases only the Deployment that claims the Agent: one in no Deployment,
     /// one two Deployments claim, and naming another Deployment are each refused, as is a
     /// Deployment that holds nothing — and nothing is assigned.
-    /// Verifies: ADR-0032
+    /// Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn the_per_agent_act_refuses_without_exactly_one_claiming_deployment() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1637,7 +1637,7 @@ mod tests {
     /// Nothing an assignment pins can be deleted — a Configuration, a Package, a Deployment — and
     /// the refusal says how many Agents pin it. After a press without it the deletion succeeds,
     /// and a deleted Configuration or Package leaves every Deployment that held it.
-    /// Verifies: ADR-0032
+    /// Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn nothing_an_assignment_pins_can_be_deleted() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1759,7 +1759,7 @@ mod tests {
     /// B's memory too, and A, which has not taken up the deletions and still holds both in
     /// memory, is refused when it adds either to a Deployment: the add reads the member it adds
     /// in its own transaction and finds it gone, so no Deployment names it.
-    /// Verifies: ADR-0025, ADR-0032
+    /// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_member_deleted_through_one_instance_is_refused_by_another_that_has_not_taken_it_up() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -1814,7 +1814,7 @@ mod tests {
     /// row too, so the deletion waits for its commit, and then takes the member out of every
     /// Deployment in the transaction that deletes it. Whichever commits first, no Deployment names
     /// the deleted member once both have — for a Configuration and for a Package.
-    /// Verifies: ADR-0025, ADR-0032
+    /// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
     #[test]
     fn an_add_held_while_another_instance_deletes_the_member_leaves_no_deployment_naming_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

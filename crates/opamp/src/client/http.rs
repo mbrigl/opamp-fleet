@@ -47,7 +47,7 @@ pub async fn run<S: Session, X: StopSignal>(
     let mut reports = session.connected();
     let mut ended = Ended::Stopped;
     // Refusals in a row, `Unavailable` and throttling alike, wait at least the next step, so a
-    // Server that names no wait, or zero, is not polled at once (ADR-0012 §4); an exchange
+    // Server that names no wait, or zero, is not polled at once (SEC-tls13-two-planes-bounded-input §4); an exchange
     // that is answered starts the steps again.
     let mut refused = Backoff::new();
     'poll: loop {
@@ -305,7 +305,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// The workspace builds reqwest without a TLS provider of its own (ADR-0012); install the one
+    /// The workspace builds reqwest without a TLS provider of its own (SEC-tls13-two-planes-bounded-input); install the one
     /// every binary installs, even though these exchanges are plaintext.
     fn install_ring_provider() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -451,7 +451,7 @@ mod tests {
     /// A Server that refuses every poll and names no wait is not polled at once: the waits grow
     /// along the backoff, 0.5 to 1 s, then 1 to 2 s, so 2.5 s hold three polls at most, where
     /// polling at once would send hundreds. Likewise after `503` with `Retry-After: 0`.
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[tokio::test]
     async fn refusals_that_name_no_wait_are_polled_at_growing_intervals() {
         let unavailable = {

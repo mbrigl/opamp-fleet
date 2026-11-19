@@ -1,7 +1,7 @@
 name: CI
 
 # Release builds of the Client on every platform it ships on — Linux, Windows, and macOS — and of
-# the Server on Linux only (docs/SPECIFICATION.md), on the stack of ADR-0008. The Client checked
+# the Server on Linux only (docs/SPECIFICATION.md), on the stack of DEV-six-crates-tokio-axum. The Client checked
 # and tested on Windows and macOS, and the stores' tests against a real store, are jobs of
 # checks.yml, required checks like the rest of it. The commands MUST match README.md →
 # "Build, Test & Run", the single source of truth.

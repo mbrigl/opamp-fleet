@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 #
 # Builds, tests and lints the Cargo workspace: the commands of README.md → "Build, Test & Run",
-# with the lockfile held as it is (ADR-0008 §15). scripts/check-all.sh runs it as the local
+# with the lockfile held as it is (DEV-six-crates-tokio-axum §15). scripts/check-all.sh runs it as the local
 # gate, and the 'rust' job of .github/workflows/checks.yml runs it in CI, so the build and the
 # tests are part of what a push and a merge wait for (AGENTS.md §5).
 #
 # The opamp crate is linted once per feature as well: inside the workspace Cargo builds it with
 # every feature any crate asks for, so only a build of each feature on its own shows that it
-# stands alone (ADR-0008).
+# stands alone (DEV-six-crates-tokio-axum).
 #
 # fleet-agent is linted without any wrapped Supervisor kind and with each one alone, and tested
 # without any: the default build carries every kind, so only these show that a build leaving one
-# out still compiles and refuses the kind as unknown (ADR-0019 §2).
+# out still compiles and refuses the kind as unknown (CLT-supervisor-mode-and-kinds §2).
 #
 # The fuzz targets of fuzz/ are a workspace of their own, so --workspace never compiles them. They
 # are checked here on the stable toolchain, into the workspace's target directory, so a change to a
 # function a target calls fails the required checks and not only the Fuzz workflow (specification
-# Q-2, ADR-0008 §15). The check compiles libFuzzer's C++ sources, which needs a C++ compiler;
+# Q-2, DEV-six-crates-tokio-axum §15). The check compiles libFuzzer's C++ sources, which needs a C++ compiler;
 # the fuzzing itself needs nightly and runs in .github/workflows/fuzz.yml.
 #
 # Needs the Rust toolchain of rust-toolchain.toml, and SoftHSM2 for the tests of the keys on a

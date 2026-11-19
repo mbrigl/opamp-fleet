@@ -1,8 +1,8 @@
-//! What a package signature covers (ADR-0033): not the artifact's bytes alone, but which Agent type
+//! What a package signature covers (PKG-signed-packages-and-delivery): not the artifact's bytes alone, but which Agent type
 //! the artifact is for, at which version, and its SHA-256 — so a signed artifact cannot be offered
 //! as another type's program, or under another version.
 //!
-//! Beside it, what a floor's signature covers (ADR-0034 §14): an Agent type and the version
+//! Beside it, what a floor's signature covers (PKG-versions-high-water-mark-floor §14): an Agent type and the version
 //! below which nothing of that type is taken. The two statements open with different prefixes, so
 //! no package signature verifies as a floor and no floor as a package.
 
@@ -19,7 +19,7 @@ pub fn statement(agent_type: &str, version: &str, content_hash: &[u8]) -> Vec<u8
     format!("opamp-fleet-package-v1\n{agent_type}\n{version}\n{hex}\n").into_bytes()
 }
 
-/// The bytes an operator signs and a Client verifies for one floor (ADR-0034 §14):
+/// The bytes an operator signs and a Client verifies for one floor (PKG-versions-high-water-mark-floor §14):
 /// `opamp-fleet-floor-v1`, the Agent type and the version, one per line, each line ended by a
 /// newline.
 #[must_use]
@@ -31,7 +31,7 @@ pub fn floor_statement(agent_type: &str, version: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn the_statement_names_type_version_and_hash() {
         assert_eq!(
@@ -52,7 +52,7 @@ mod tests {
 
     /// The floor statement is the prefix, the type and the version, one per line; the type and
     /// the version are covered.
-    /// Verifies: ADR-0034
+    /// Verifies: PKG-versions-high-water-mark-floor
     #[test]
     fn the_floor_statement_is_the_prefix_the_type_and_the_version() {
         assert_eq!(

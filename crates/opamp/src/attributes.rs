@@ -1,10 +1,10 @@
-//! The Baseline's attribute keys, and reading a string out of a set of them (ADR-0008).
+//! The Baseline's attribute keys, and reading a string out of a set of them (DEV-six-crates-tokio-axum).
 //!
 //! An `AgentDescription` carries its identity as `KeyValue` pairs, and the keys are fixed strings
 //! the Baseline names. Both ends match on the same ones —
-//! [ADR-0018](../../../docs/adr/0018-what-an-agent-reports-about-itself.md)
+//! [CLT-what-an-agent-reports](../../../docs/adr/CLT-what-an-agent-reports.md)
 //! gives `service.name` and `service.instance.name` their meaning, and
-//! [ADR-0033](../../../docs/adr/0033-packages-signatures-and-delivery.md) makes them
+//! [PKG-signed-packages-and-delivery](../../../docs/adr/PKG-signed-packages-and-delivery.md) makes them
 //! decide *which binary a host is offered*.
 //!
 //! Spelled as literals at each use, a typo in one of them is not a compile error: it is a Selector
@@ -14,14 +14,14 @@
 use crate::proto::{any_value, AnyValue, ArrayValue, KeyValue};
 
 /// The Agent *type* — a Collector distribution, this Client — never an operator's name for one
-/// (ADR-0018). A package is matched against it (ADR-0033).
+/// (CLT-what-an-agent-reports). A package is matched against it (PKG-signed-packages-and-delivery).
 pub const SERVICE_NAME: &str = "service.name";
 /// The namespace a Managed Process may state its own attributes in, and the only one it may
-/// (ADR-0018): every key it reports outside it is dropped.
+/// (CLT-what-an-agent-reports): every key it reports outside it is dropped.
 pub const SERVICE_PREFIX: &str = "service.";
-/// The Agent's identity — the Supervisor's uid, never a Managed Process's word (ADR-0018).
+/// The Agent's identity — the Supervisor's uid, never a Managed Process's word (CLT-what-an-agent-reports).
 pub const SERVICE_INSTANCE_ID: &str = "service.instance.id";
-/// The operator's name for one Agent (ADR-0018).
+/// The operator's name for one Agent (CLT-what-an-agent-reports).
 pub const SERVICE_INSTANCE_NAME: &str = "service.instance.name";
 /// The namespace an Agent runs in, reported only where the environment uses one.
 pub const SERVICE_NAMESPACE: &str = "service.namespace";
@@ -29,29 +29,29 @@ pub const SERVICE_NAMESPACE: &str = "service.namespace";
 pub const SERVICE_VERSION: &str = "service.version";
 /// The namespace that is the Supervisor's own statement — the kinds a Client carries, the version
 /// of the Package a Supervisor installed — which neither a Managed Process nor an operator's
-/// `[attributes]` may state (ADR-0018 §8 and §10).
+/// `[attributes]` may state (CLT-what-an-agent-reports §8 and §10).
 pub const SUPERVISOR_PREFIX: &str = "supervisor.";
 /// The prefix of the kinds a Client's own Agent reports, one `supervisor.kind.<kind> = "true"` per
-/// kind its build carries (ADR-0019 §18). Only the Client Agent reports a key under it, and
-/// the Server recognises the Client Agent by it (ADR-0029 §19).
+/// kind its build carries (CLT-supervisor-mode-and-kinds §18). Only the Client Agent reports a key under it, and
+/// the Server recognises the Client Agent by it (SRV-fleet-record-agents-hosts §19).
 pub const SUPERVISOR_KIND_PREFIX: &str = "supervisor.kind.";
 /// The version of the Package a Supervisor installed for its Managed Process — the Supervisor's
-/// statement, never the process's (ADR-0018 §8) — and what a Package is held against
-/// where it is reported (ADR-0032 §14 and §25).
+/// statement, never the process's (CLT-what-an-agent-reports §8) — and what a Package is held against
+/// where it is reported (SRV-deployments-and-pinned-rollouts §14 and §25).
 pub const SUPERVISOR_PACKAGE_VERSION: &str = "supervisor.package.version";
 /// The operating system in the semantic-convention spelling (`linux`, `darwin`, `windows`) — half
-/// of the platform a package artifact is chosen by (ADR-0033).
+/// of the platform a package artifact is chosen by (PKG-signed-packages-and-delivery).
 pub const OS_TYPE: &str = "os.type";
 /// The human-readable operating system description, e.g. `Ubuntu 26.04 LTS`.
 pub const OS_DESCRIPTION: &str = "os.description";
 /// The architecture in the semantic-convention spelling (`amd64`, `arm64`) — the other half of the
-/// platform (ADR-0033).
+/// platform (PKG-signed-packages-and-delivery).
 pub const HOST_ARCH: &str = "host.arch";
 
 /// The string value of `key`, or `None` when the attribute is absent, holds another type, or is
 /// empty.
 ///
-/// **An empty string is not a value.** That rule is load-bearing rather than tidy: ADR-0033 refuses
+/// **An empty string is not a value.** That rule is load-bearing rather than tidy: PKG-signed-packages-and-delivery refuses
 /// to offer a package to an Agent of another type, and an Agent reporting `service.name = ""` must
 /// therefore match no package at all rather than match every untyped one. Stating it here is the
 /// point of the module — one of the two copies this replaces enforced it and the other did not.
@@ -147,9 +147,9 @@ mod tests {
         assert_eq!(string_value(&attrs, SERVICE_INSTANCE_NAME), Some("edge-01"));
     }
 
-    /// The rule ADR-0033 leans on: an Agent that reports its type as an empty string reports no
+    /// The rule PKG-signed-packages-and-delivery leans on: an Agent that reports its type as an empty string reports no
     /// type, so it matches no package rather than every untyped one.
-    /// Verifies: ADR-0008
+    /// Verifies: DEV-six-crates-tokio-axum
     #[test]
     fn an_empty_string_is_not_a_value() {
         assert_eq!(string_value(&attrs(), SERVICE_VERSION), None);
@@ -187,8 +187,8 @@ mod tests {
 
     /// The kind prefix is the wire spelling both ends share, and it sits inside the Supervisor's
     /// namespace, so refusing every `supervisor.*` key of `[attributes]` also refuses a forged kind
-    /// (ADR-0018 §10, ADR-0029 §19).
-    // Verifies: ADR-0018
+    /// (CLT-what-an-agent-reports §10, SRV-fleet-record-agents-hosts §19).
+    // Verifies: CLT-what-an-agent-reports
     #[test]
     fn the_kind_prefix_lies_in_the_supervisors_namespace() {
         assert_eq!(SUPERVISOR_KIND_PREFIX, "supervisor.kind.");

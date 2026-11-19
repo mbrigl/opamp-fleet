@@ -1,6 +1,6 @@
-//! The views of the fleet: the Agents each Host carries (ADR-0029 §24), the views of an
-//! Agent and of the whole fleet, the list of Agents a page at a time (ADR-0030 §3–§8), and
-//! the version a reader of the fleet table is shown (ADR-0037). Its entry points are methods of
+//! The views of the fleet: the Agents each Host carries (SRV-fleet-record-agents-hosts §24), the views of an
+//! Agent and of the whole fleet, the list of Agents a page at a time (API-lists-paged-by-cursor §3–§8), and
+//! the version a reader of the fleet table is shown (OPS-cargo-decides-product-version). Its entry points are methods of
 //! `AppState`.
 
 use std::collections::{BTreeMap, HashMap};
@@ -19,7 +19,7 @@ use super::rollout::{waiting, Waiting};
 use super::{is_stale, AgentRecord, AppState};
 
 impl AppState {
-    /// The Agents each Host carries (ADR-0029 §24) — those whose record names it as the Host
+    /// The Agents each Host carries (SRV-fleet-record-agents-hosts §24) — those whose record names it as the Host
     /// they last arrived over — and the name it is displayed by: the `host.name` its Client Agent
     /// reports, when it has exactly one on a direct connection. Shown only; it decides nothing.
     ///
@@ -46,7 +46,7 @@ impl AppState {
                     .unwrap_or_default()
                     .to_string()
             };
-            // The names as the list derives them (ADR-0018 §1 and §2), so the two cannot
+            // The names as the list derives them (CLT-what-an-agent-reports §1 and §2), so the two cannot
             // differ.
             let (service_name, service_instance_name) = match &record.description {
                 Some(d) => crate::listing::names(
@@ -97,7 +97,7 @@ impl AppState {
 
     /// The REST view of the fleet (`GET /api/v1/agents`), read as [`read_fleet`](Self::read_fleet)
     /// reads it: on a shared store from the database, each Agent connected as its stored presence
-    /// says (ADR-0025 §13).
+    /// says (SRV-instances-share-one-postgresql §13).
     ///
     /// # Errors
     /// Returns an error when the shared store cannot be read.
@@ -125,13 +125,13 @@ impl AppState {
 
     /// Whether the Agents have a holder to filter by: on a shared store, where each presence
     /// names one
-    /// (ADR-0030 §6).
+    /// (API-lists-paged-by-cursor §6).
     pub fn keeps_holders(&self) -> bool {
         self.agent_store.is_shared()
     }
 
     /// One page of the list of Agents
-    /// (ADR-0030 §3–§6 and §8):
+    /// (API-lists-paged-by-cursor §3–§6 and §8):
     /// on a store this Server alone writes, cut from what it holds; on a
     /// shared store read through
     /// [`AgentStore::query_page`](crate::agent_store::AgentStore::query_page), each Agent placed
@@ -238,7 +238,7 @@ impl AppState {
 
     /// The distinct reported `key=value` pairs and `service_name` values of the fleet, each sorted,
     /// at most 1000 of each
-    /// (ADR-0030 §7):
+    /// (API-lists-paged-by-cursor §7):
     /// from memory on a store this Server alone writes, through the port on a shared one.
     ///
     /// # Errors
@@ -303,10 +303,10 @@ impl AppState {
         let package_conflict = Self::package_conflict(&claim);
         let claimed = claim.ok().flatten();
         // Which channel claims it *now* — the other half of the answer, so "no channel" and
-        // "a channel with nothing for me" are not the same empty row (ADR-0033 §27).
+        // "a channel with nothing for me" are not the same empty row (PKG-signed-packages-and-delivery §27).
         let claiming_deployment = claimed.map(|d| d.name.clone()).unwrap_or_default();
 
-        // What a press would release to it now (ADR-0032 §9). A conflict, or no
+        // What a press would release to it now (SRV-deployments-and-pinned-rollouts §9). A conflict, or no
         // channel at all, proposes nothing — `package_conflict` says why.
         let proposed = self
             .packages()
@@ -338,7 +338,7 @@ impl AppState {
 }
 
 /// The version a reader of the fleet table wants: the release, without the commit the build came
-/// from (ADR-0037).
+/// from (OPS-cargo-decides-product-version).
 ///
 /// A value that is not a version is returned as it stands. `service.version` is whatever an Agent
 /// puts there, and a Foreign Agent numbers itself however its own project does — trimming a string
@@ -350,7 +350,7 @@ pub(crate) fn display_version(reported: &str) -> String {
 }
 
 /// What the list of Agents is asked
-/// (ADR-0030 §3–§6).
+/// (API-lists-paged-by-cursor §3–§6).
 #[derive(Clone, Debug, Default)]
 pub struct AgentQuery {
     pub filter: crate::listing::AgentFilter,
@@ -370,7 +370,7 @@ pub struct AgentListing {
     pub next: Option<crate::listing::Position>,
 }
 
-/// The Agents one Host carries, and the name it is shown by (ADR-0029 §24).
+/// The Agents one Host carries, and the name it is shown by (SRV-fleet-record-agents-hosts §24).
 #[derive(Default)]
 pub struct HostAgents {
     /// The `host.name` its Client Agent reports; `None` for a Gateway, and while it has no single
@@ -379,7 +379,7 @@ pub struct HostAgents {
     pub agents: Vec<HostAgentView>,
 }
 
-/// One Agent under the Host it arrived over (ADR-0029 §24): enough to group it by its
+/// One Agent under the Host it arrived over (SRV-fleet-record-agents-hosts §24): enough to group it by its
 /// Client Agent.
 pub struct HostAgentView {
     pub instance_uid: String,
@@ -404,23 +404,23 @@ pub struct HostAgentView {
 pub struct AgentView {
     pub instance_uid: String,
     /// The Agent *type* — the Baseline's "reverse FQDN that uniquely identifies the Agent type"
-    /// (ADR-0018). For a Supervisor-backed Agent this is the type its Supervisor states, never one
+    /// (CLT-what-an-agent-reports). For a Supervisor-backed Agent this is the type its Supervisor states, never one
     /// its Managed Process reports, so every Agent of one configured type reports the same value.
     /// It answers "what is this", never "which one is this": that is
     /// [`service_instance_name`](Self::service_instance_name).
     pub service_name: String,
-    /// The operator's name for this Agent — the `[[supervisor]]` block's `name` (ADR-0018). Empty
+    /// The operator's name for this Agent — the `[[supervisor]]` block's `name` (CLT-what-an-agent-reports). Empty
     /// for a foreign OpAMP client that reports no `service.instance.name`, which is why the UI
     /// falls back through the type to the UID rather than showing a blank row.
     pub service_instance_name: String,
     /// The release the Agent reports — `MAJOR.MINOR.PATCH`, with the pre-release when it is not a
-    /// release build (ADR-0037). This is what belongs in a column headed "Version"; the commit the
+    /// release build (OPS-cargo-decides-product-version). This is what belongs in a column headed "Version"; the commit the
     /// build came from is [`service_build`](Self::service_build). A reported value that is not a
     /// version at all is passed through unchanged, since a Foreign Agent numbers itself however it
     /// likes.
     pub service_version: String,
     /// Exactly what the Agent reported, commit metadata and all — the answer to "which build is on
-    /// that host", which is a question a fleet exists to answer (ADR-0037).
+    /// that host", which is a question a fleet exists to answer (OPS-cargo-decides-product-version).
     pub service_build: String,
     /// The reported `os.description` (e.g. "Ubuntu 24.04.2 LTS"), falling back to `os.type`.
     pub os: String,
@@ -429,39 +429,39 @@ pub struct AgentView {
     /// empty when it reports neither, so it is offered no package. The fleet search finds the
     /// Agent by this value.
     pub platform: String,
-    /// Every reported identifying attribute — what a Selector can match on (ADR-0031).
+    /// Every reported identifying attribute — what a Selector can match on (SRV-configurations-compose-one-map).
     pub identifying_attributes: BTreeMap<String, String>,
     /// Every reported non-identifying attribute — Selectors match these too.
     pub non_identifying_attributes: BTreeMap<String, String>,
     /// The Configurations a press of the Deployment claiming this Agent would release to it — the
-    /// ones it holds that fit this Agent's type (ADR-0032), in name order. Never what it runs;
+    /// ones it holds that fit this Agent's type (SRV-deployments-and-pinned-rollouts), in name order. Never what it runs;
     /// that is [`assigned_configurations`](Self::assigned_configurations).
     pub matched_configurations: Vec<String>,
-    /// The Configurations rolled out to this Agent (ADR-0032 §6), in name order — what its
+    /// The Configurations rolled out to this Agent (SRV-deployments-and-pinned-rollouts §6), in name order — what its
     /// offer is composed from.
     pub assigned_configurations: Vec<String>,
     /// The Deployment that claims this Agent **now** — whose Selector matches it — or empty when
     /// none does.
     ///
     /// This is not [`assigned_deployment`](Self::assigned_deployment), and the difference is what
-    /// tells four states apart that would otherwise look alike (ADR-0033 §27). Empty here
+    /// tells four states apart that would otherwise look alike (PKG-signed-packages-and-delivery §27). Empty here
     /// with no conflict means the host is in **no channel**: label it, or give it a `channel`
     /// attribute. Set here with nothing assigned and nothing pending means the channel holds
     /// nothing this Agent can take — no Package for its type, or none for its platform. The
     /// operator's next move differs in each case, which is why the Server says which one it is
     /// rather than showing an empty row three ways.
     pub deployment: String,
-    /// The Deployment this Agent's release went **through** (ADR-0032 §6), or empty when
+    /// The Deployment this Agent's release went **through** (SRV-deployments-and-pinned-rollouts §6), or empty when
     /// nothing has been rolled out to it. Pinned as of that act, so it may name a channel that no
     /// longer claims this Agent.
     pub assigned_deployment: String,
-    /// The Package rolled out to this Agent (ADR-0032), as `<agent type>@<version>`, or empty.
+    /// The Package rolled out to this Agent (SRV-deployments-and-pinned-rollouts), as `<agent type>@<version>`, or empty.
     ///
     /// It is pinned as of the act that released it: re-aiming its Deployment afterwards, or
     /// putting a newer Package in that channel, changes what is *proposed* and never what this Agent
     /// was already given.
     pub assigned_package: String,
-    /// The Configurations waiting for a rollout act toward this Agent (ADR-0032 §8):
+    /// The Configurations waiting for a rollout act toward this Agent (SRV-deployments-and-pinned-rollouts §8):
     /// one its Deployment holds and it is not assigned (`change: "new"`), one whose
     /// saved revision differs from the assigned one (`change: "update"`), one assigned that the
     /// next press drops from a release that keeps something else (`change: "remove"`), or one
@@ -469,13 +469,13 @@ pub struct AgentView {
     /// assignment and it keeps running what it runs (`change: "kept"`). The Server never acts on
     /// this by itself.
     pub pending_configurations: Vec<PendingConfigurationView>,
-    /// The Package waiting for a rollout act toward this Agent (ADR-0032 §8) — at most one:
+    /// The Package waiting for a rollout act toward this Agent (SRV-deployments-and-pinned-rollouts §8) — at most one:
     /// the candidate of the Deployment that claims it, when that is not what it is assigned, or
     /// the assigned one the next press drops (`change: "remove"`, or `"kept"` as for a
     /// Configuration).
     pub pending_packages: Vec<PendingPackageView>,
     /// The Deployment the next press releases through, when the assignment names another one or
-    /// none (ADR-0032 §9); empty otherwise. A release whose content is unchanged still moves
+    /// none (SRV-deployments-and-pinned-rollouts §9); empty otherwise. A release whose content is unchanged still moves
     /// the assignment to the claiming Deployment.
     pub pending_deployment: String,
     /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
@@ -486,16 +486,16 @@ pub struct AgentView {
     pub capabilities: Vec<String>,
     /// The Agent's available components (top-level names, sorted); empty until reported.
     pub available_components: Vec<String>,
-    /// The Agent's package installations (ADR-0033), in name order; empty until reported.
+    /// The Agent's package installations (PKG-signed-packages-and-delivery), in name order; empty until reported.
     pub packages: Vec<PackageStatusView>,
     /// Why this Agent is proposed nothing — more than one Deployment claims it, and an Agent
-    /// belongs to at most one (ADR-0033 §28). The message names every Deployment in the way.
+    /// belongs to at most one (PKG-signed-packages-and-delivery §28). The message names every Deployment in the way.
     /// Absent when at most one claims it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_conflict: Option<String>,
     /// What the Agent said about the *offer* rather than about a package it holds — an offer it
     /// refuses outright has no package status to carry the reason, and the Client's own Agent
-    /// refusing a package it was not configured to take (ADR-0020) is exactly that case. Empty
+    /// refusing a package it was not configured to take (CLT-self-update-signed-package) is exactly that case. Empty
     /// when the Agent has nothing to complain about.
     pub package_error: String,
     pub transport: String,
@@ -511,7 +511,7 @@ pub struct AgentView {
     pub in_sync: bool,
     pub sequence_num: u64,
     pub last_seen_ms: u64,
-    /// Nothing has been heard from this Agent for longer than its staleness budget (ADR-0029).
+    /// Nothing has been heard from this Agent for longer than its staleness budget (SRV-fleet-record-agents-hosts).
     ///
     /// Beside [`connected`](Self::connected), never instead of it: that one says a connection
     /// carrying this Agent is open — behind a Gateway, the *Gateway's* — and this one says whether
@@ -521,24 +521,24 @@ pub struct AgentView {
     /// Only an Agent declaring `ReportsHeartbeat` can be stale: that capability is the promise that
     /// makes silence mean something. Derived on read, never stored.
     pub stale: bool,
-    /// The operator's labels on this Agent (ADR-0029) — matched by Selectors exactly like a
+    /// The operator's labels on this Agent (SRV-fleet-record-agents-hosts) — matched by Selectors exactly like a
     /// reported attribute, but set here rather than in `supervisor.toml` on the host, so moving a host
     /// between rollout channels is an API call instead of an edit and a restart.
     pub labels: BTreeMap<String, String>,
     /// Labels this Agent's own reports shadow: set, matching nothing, and therefore doing nothing.
     ///
-    /// Reported attributes always win (ADR-0029) — they decide which artifact fits this machine.
+    /// Reported attributes always win (SRV-fleet-record-agents-hosts) — they decide which artifact fits this machine.
     /// A collision is refused when the label is set, so this fills only when an Agent *starts*
     /// reporting a key that was labelled earlier. Shown rather than dropped in silence.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed_labels: Vec<String>,
     /// Labels stored with a key in `fleet.` or `supervisor.`, which no label may speak in
-    /// (ADR-0029 §20): ignored by every Selector and by
+    /// (SRV-fleet-record-agents-hosts §20): ignored by every Selector and by
     /// package matching, and inherited by no Agent. Listed rather than dropped in silence; the next
     /// label set put without them removes them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored_labels: Vec<String>,
-    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0029 §19);
+    /// The labels of this Agent's Client Agent, which hold for it below its own (SRV-fleet-record-agents-hosts §19);
     /// empty for the Client Agent itself, for an Agent whose Client the Server cannot
     /// tell, and for an ambiguous one.
     pub inherited_labels: BTreeMap<String, String>,
@@ -546,27 +546,27 @@ pub struct AgentView {
     /// when the Server cannot tell.
     pub client_agent: String,
     /// The group this Agent's Client is recognised in holds more than one Client Agent, so it
-    /// inherits nothing (ADR-0029 §19).
+    /// inherits nothing (SRV-fleet-record-agents-hosts §19).
     pub ambiguous: bool,
-    /// The Host this Agent last arrived over (ADR-0029 §16), or empty. Behind a Gateway, the
+    /// The Host this Agent last arrived over (SRV-fleet-record-agents-hosts §16), or empty. Behind a Gateway, the
     /// Gateway's.
     pub host: String,
     /// The instance id of the instance that holds it under a live lease
-    /// (ADR-0025 §13);
+    /// (SRV-instances-share-one-postgresql §13);
     /// empty without one, and always on the filesystem store.
     pub holder: String,
     /// The host name that instance's lease records; empty when `holder` is.
     pub holder_host: String,
-    /// The `fleet.host.*` values its effective description takes from that Host (ADR-0029 §18);
+    /// The `fleet.host.*` values its effective description takes from that Host (SRV-fleet-record-agents-hosts §18);
     /// empty behind a Gateway.
     pub host_attributes: BTreeMap<String, String>,
     /// Reported attributes in the Server's `fleet.` space, left out of what Selectors match
-    /// (ADR-0029 §20).
+    /// (SRV-fleet-record-agents-hosts §20).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored_attributes: Vec<String>,
 }
 
-/// One Configuration waiting for a rollout act toward one Agent (ADR-0032).
+/// One Configuration waiting for a rollout act toward one Agent (SRV-deployments-and-pinned-rollouts).
 #[derive(Serialize)]
 pub struct PendingConfigurationView {
     pub name: String,
@@ -577,22 +577,22 @@ pub struct PendingConfigurationView {
     pub change: String,
 }
 
-/// Whom one Deployment reaches in the fleet as reported so far (ADR-0033): the Agents it claims,
+/// Whom one Deployment reaches in the fleet as reported so far (PKG-signed-packages-and-delivery): the Agents it claims,
 /// the subset a rollout act would actually change, and those another Deployment also claims.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DeploymentReach {
     /// Agents this Deployment claims — and no other does. Zero is the aim mistake worth hunting.
     pub claiming: usize,
     /// Of those, the Agents a press would actually move — what it would release differs from what
-    /// their assignment pins (ADR-0032 §9). Zero with a non-zero `claiming` means everyone is
+    /// their assignment pins (SRV-deployments-and-pinned-rollouts §9). Zero with a non-zero `claiming` means everyone is
     /// up to date.
     pub targeted: usize,
     /// Agents this Deployment matches that **another one matches too**. They are offered nothing
-    /// new until an operator narrows a Selector (ADR-0033 §28).
+    /// new until an operator narrows a Selector (PKG-signed-packages-and-delivery §28).
     pub conflicting: usize,
 }
 
-/// The Package waiting for a rollout act toward one Agent (ADR-0032).
+/// The Package waiting for a rollout act toward one Agent (SRV-deployments-and-pinned-rollouts).
 #[derive(Serialize)]
 pub struct PendingPackageView {
     /// The Deployment that would release it — the channel this Agent belongs to.
@@ -608,7 +608,7 @@ pub struct PendingPackageView {
     pub change: String,
 }
 
-/// One package's installation state as the REST API and UI see it (ADR-0033).
+/// One package's installation state as the REST API and UI see it (PKG-signed-packages-and-delivery).
 #[derive(Serialize)]
 pub struct PackageStatusView {
     pub name: String,
@@ -700,7 +700,7 @@ pub(crate) fn capability_names(mask: u64) -> Vec<String> {
 }
 
 /// Reported attributes as the API shows them: string values as-is, string arrays (the shape the
-/// conventions give `host.ip` and `host.mac`, ADR-0018) joined with a comma, other value kinds in
+/// conventions give `host.ip` and `host.mac`, CLT-what-an-agent-reports) joined with a comma, other value kinds in
 /// their debug form — the view is for reading, the wire keeps the typed original.
 pub(crate) fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
     fn text(value: &any_value::Value) -> String {
@@ -754,7 +754,7 @@ impl AgentView {
             instance_uid: uid.to_string(),
             service_name: shown.service_name,
             service_instance_name: shown.instance_name,
-            // What the Agent said, and what a reader of a table wants out of it (ADR-0037).
+            // What the Agent said, and what a reader of a table wants out of it (OPS-cargo-decides-product-version).
             service_version: shown.version,
             service_build: shown.build,
             os: shown.os,
@@ -864,7 +864,7 @@ mod tests {
     use std::sync::Arc;
 
     /// The view of an array-valued attribute — the shape `host.ip` and `host.mac` arrive in
-    /// (ADR-0018): joined for reading, not dumped in debug form.
+    /// (CLT-what-an-agent-reports): joined for reading, not dumped in debug form.
     #[test]
     fn the_view_joins_a_string_array_attribute() {
         let attrs = vec![
@@ -879,7 +879,7 @@ mod tests {
         assert_eq!(map["host.ip"], "10.0.0.7, 192.168.1.140");
     }
 
-    /// ADR-0037: the fleet table shows the release, and the build stays reachable beside it. A
+    /// OPS-cargo-decides-product-version: the fleet table shows the release, and the build stays reachable beside it. A
     /// Foreign Agent that numbers itself in its own way is shown as it reported.
     #[test]
     fn the_displayed_version_drops_the_commit_and_keeps_the_pre_release() {
@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     /// The list of Agents on the filesystem store, cut from memory.
-    /// Verifies: ADR-0030
+    /// Verifies: API-lists-paged-by-cursor
     #[test]
     fn the_list_of_agents_filters_sorts_and_pages_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1230,7 +1230,7 @@ mod tests {
     /// filesystem store answers; a row the release before wrote, without its derived columns, is
     /// derived again before it is read; and a label set on a Client Agent writes that one row and
     /// narrows a Selector to the Agents that inherit it.
-    /// Verifies: ADR-0030
+    /// Verifies: API-lists-paged-by-cursor
     #[test]
     fn the_list_of_agents_filters_sorts_and_pages_alike_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -1382,8 +1382,8 @@ mod tests {
 
     /// The view names the platform an Agent is offered packages for as the offer reads it: folded
     /// to the canonical tokens, an identifying copy standing in, empty when it reports neither. The
-    /// Agents tab shows it and the fleet search finds the Agent by it (ADR-0030, ADR-0031).
-    /// Verifies: ADR-0030, ADR-0031
+    /// Agents tab shows it and the fleet search finds the Agent by it (API-lists-paged-by-cursor, SRV-configurations-compose-one-map).
+    /// Verifies: API-lists-paged-by-cursor, SRV-configurations-compose-one-map
     #[test]
     fn the_view_names_the_platform_the_offer_reads() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1428,9 +1428,9 @@ mod tests {
 
     /// What an Agent's listed record is sorted, filtered and searched by and what its view shows
     /// are one derivation: the service name, the instance name, the version, the OS (its
-    /// description, else its type), the platform and the configuration status agree (ADR-0030,
-    /// ADR-0037).
-    /// Verifies: ADR-0030, ADR-0037
+    /// description, else its type), the platform and the configuration status agree (API-lists-paged-by-cursor,
+    /// OPS-cargo-decides-product-version).
+    /// Verifies: API-lists-paged-by-cursor, OPS-cargo-decides-product-version
     #[test]
     fn an_agents_listed_record_and_its_view_show_the_same_values() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1507,9 +1507,9 @@ mod tests {
 
     /// The Hosts view shows an Agent's service name and instance name as its listed record does:
     /// the service name only from the identifying attributes, the instance name only from the
-    /// non-identifying ones (ADR-0018 §1 and §2), so an Agent that reports either in the
+    /// non-identifying ones (CLT-what-an-agent-reports §1 and §2), so an Agent that reports either in the
     /// other set shows it in neither view.
-    /// Verifies: ADR-0018, ADR-0029
+    /// Verifies: CLT-what-an-agent-reports, SRV-fleet-record-agents-hosts
     #[test]
     fn the_hosts_view_shows_an_agents_names_as_its_listed_record() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1562,7 +1562,7 @@ mod tests {
     /// On PostgreSQL an Agent's view and a rollout to it read the Agent and the Agents bound to its
     /// Host, not the whole fleet, and the view inherits the labels of its Client Agent, which this
     /// instance does not hold either.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[test]
     fn an_agents_view_and_a_rollout_to_it_read_its_host_and_not_the_fleet() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

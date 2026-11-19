@@ -1,4 +1,4 @@
-//! One upstream connection built from its description (ADR-0008): the client's TLS, credential and
+//! One upstream connection built from its description (DEV-six-crates-tokio-axum): the client's TLS, credential and
 //! transport against the server's listener, through the probe and through a full run.
 
 use std::sync::Arc;
@@ -147,7 +147,7 @@ fn report() -> Option<AgentToServer> {
 
 /// The probe proves a connection over either transport with the trust, the identity and the
 /// credential the description names — and fails without the identity the server asks for.
-/// Verifies: ADR-0008
+/// Verifies: DEV-six-crates-tokio-axum
 #[tokio::test]
 async fn the_probe_connects_with_the_described_material_on_both_transports() {
     let pki = Pki::new();
@@ -169,7 +169,7 @@ async fn the_probe_connects_with_the_described_material_on_both_transports() {
 }
 
 /// An OpAMP endpoint never legitimately redirects, so the client does not follow one.
-/// Verifies: ADR-0008
+/// Verifies: DEV-six-crates-tokio-axum
 #[tokio::test]
 async fn a_redirect_is_not_followed() {
     let pki = Pki::new();
@@ -187,7 +187,7 @@ async fn a_redirect_is_not_followed() {
 
 /// The one builder of a Client's HTTPS clients follows no redirect either: the answer to the
 /// request is the redirect itself, whoever builds the client.
-/// Verifies: ADR-0008
+/// Verifies: DEV-six-crates-tokio-axum
 #[tokio::test]
 async fn an_https_client_follows_no_redirect() {
     let pki = Pki::new();
@@ -277,7 +277,7 @@ async fn a_run_carries_the_session_over_the_transport_the_scheme_names() {
 /// A server that speaks TLS 1.2 alone never completes the handshake with this client, on either
 /// transport: the client offers TLS 1.3 and nothing older. The server is built from the full ring
 /// provider, so the refusal is the client's.
-/// Verifies: ADR-0012, Q-3
+/// Verifies: SEC-tls13-two-planes-bounded-input, Q-3
 #[tokio::test]
 async fn a_tls12_only_server_fails_the_handshake() {
     opamp::tls::install_ring_provider();
@@ -341,7 +341,7 @@ impl Handler for Mirror {
 /// Both ends read into a buffer far smaller than the limit; a message many times that buffer, and
 /// one just under the limit, still cross the Client's socket and the Server's endpoint whole, in
 /// both directions, while one past the limit is still refused.
-/// Verifies: ADR-0012
+/// Verifies: SEC-tls13-two-planes-bounded-input
 #[tokio::test]
 async fn a_websocket_message_larger_than_the_read_buffer_arrives_whole() {
     const LIMIT: usize = 1 << 20;

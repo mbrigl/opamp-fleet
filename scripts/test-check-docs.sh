@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 ADR-0003 ADR-0005
+# Self-test of scripts/check-docs.sh. Verifies: ADR-0001 NUC-procedures-are-skills ADR-0005
 #
 # Each case builds a throwaway git repository under a temporary directory — a rule file with
 # numbered sections, a README with the Template release line, a CONTRIBUTING.md with a Project

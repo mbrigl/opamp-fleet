@@ -1,5 +1,5 @@
 //! One OpAMP server endpoint, for every surface that speaks the Server side of the protocol
-//! (ADR-0008). Behind the `server` feature.
+//! (DEV-six-crates-tokio-axum). Behind the `server` feature.
 //!
 //! This crate carries the communication and nothing else: it tells a WebSocket upgrade from a
 //! plain-HTTP exchange as the specification describes, applies the media type, gzip and the
@@ -268,7 +268,7 @@ fn peer_of(extensions: &Extensions) -> Option<SocketAddr> {
 }
 
 /// The WebSocket upgrade, answered here and taken over through hyper, so that `opamp` reads the
-/// frames itself and can judge a message by its data (ADR-0008 §5).
+/// frames itself and can judge a message by its data (DEV-six-crates-tokio-axum §5).
 async fn upgrade<H: Handler>(
     State(endpoint): State<Arc<Endpoint<H>>>,
     mut request: Request,
@@ -396,7 +396,7 @@ async fn serve_socket<H: Handler, S>(
 {
     let handler: &H = &endpoint.handler;
     let limit = endpoint.limit;
-    // A listener that holds its connections to a floor (ADR-0012 §18) is judged once a window.
+    // A listener that holds its connections to a floor (SEC-tls13-two-planes-bounded-input §18) is judged once a window.
     let mut check = messages.as_ref().map(|messages| {
         let mut check = tokio::time::interval_at(
             tokio::time::Instant::now() + messages.window(),
@@ -1173,7 +1173,7 @@ mod tests {
 
     /// A ping that arrives while a message of the same connection is being handled is answered
     /// at once, before the message's reply.
-    /// Verifies: ADR-0014
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn a_ping_is_answered_while_a_message_is_handled() {
         let (handler, mut client, _read, _served) = gated().await;
@@ -1190,7 +1190,7 @@ mod tests {
 
     /// Messages read while one is handled wait for it: one call at a time, in the order they
     /// arrived, and their replies in that order.
-    /// Verifies: ADR-0014
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn the_messages_of_one_connection_are_handled_one_at_a_time_and_answered_in_order() {
         let (handler, mut client, _read, _served) = gated().await;
@@ -1222,7 +1222,7 @@ mod tests {
 
     /// Behind the message being handled, the connection is read until eight more wait; then not
     /// again until one is handled, so a ping after the eighth is answered only after a reply.
-    /// Verifies: ADR-0014
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn a_connection_with_eight_messages_waiting_is_read_no_further_until_one_is_handled() {
         let (handler, mut client, _read, _served) = gated().await;
@@ -1262,7 +1262,7 @@ mod tests {
 
     /// Messages waiting behind the one handled hold no more bytes than the message limit: once
     /// they reach it the connection is read no further until one is handled.
-    /// Verifies: ADR-0014
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn a_connection_with_the_limit_in_bytes_waiting_is_read_no_further_until_one_is_handled()
     {
@@ -1303,7 +1303,7 @@ mod tests {
     /// The peer closes while a message is handled: that message and the ones it sent before the
     /// close are still handled in order, and their replies, which can no longer go out, are
     /// reported unsent before the session ends.
-    /// Verifies: ADR-0014
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn messages_before_a_peers_close_are_handled_and_their_replies_reported_unsent() {
         let (handler, mut client, mut read, served) = gated().await;

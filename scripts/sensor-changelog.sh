@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Sensor: a change a deployment sees, without a CHANGELOG.md entry (ADR-0002, the sensors the
+# Sensor: a change a deployment sees, without a CHANGELOG.md entry (NUC-checks-are-bash §4, the sensors the
 # template ships).
 #
 # Lists the commits between a base and a head that a running deployment may have to be told

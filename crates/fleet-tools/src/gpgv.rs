@@ -1,5 +1,5 @@
 //! An upstream's OpenPGP signature, verified with `gpgv` against a keyring this tool carries
-//! (ADR-0036 §29): a detached signature beside an
+//! (OPS-operator-program-fleetctl §29): a detached signature beside an
 //! artifact, or a clear-signed repository index.
 //!
 //! `gpgv` runs in a home of this process's own, owner-only, holding nothing but the carried keyring
@@ -235,7 +235,7 @@ mod tests {
     /// altered byte is refused as a bad signature, a signature by a key the keyring does not hold
     /// is refused, and so is one by a key the keyring holds beside the pinned one. What a server
     /// answers in place of a signature verifies nothing.
-    /// Verifies: ADR-0036
+    /// Verifies: OPS-operator-program-fleetctl
     #[cfg(target_os = "linux")]
     #[test]
     fn a_detached_signature_verifies_only_by_a_pinned_key_over_its_bytes() {
@@ -279,7 +279,7 @@ mod tests {
     /// the signature covers, without its armour: an altered byte inside the signed part, a
     /// signature by a key the keyring does not hold, and one by a key it holds but does not pin
     /// are each refused.
-    /// Verifies: ADR-0036
+    /// Verifies: OPS-operator-program-fleetctl
     #[cfg(target_os = "linux")]
     #[test]
     fn a_clear_signed_text_yields_only_what_a_pinned_key_signed() {
@@ -315,7 +315,7 @@ mod tests {
     /// or a subkey of it is needed, a subkey that has expired since it signed still counts, a bad
     /// signature anywhere refuses, and one by a key the keyring does not hold decides nothing.
     /// The lines are `gpgv`'s status lines for an upstream's and Debian's signatures.
-    /// Verifies: ADR-0036
+    /// Verifies: OPS-operator-program-fleetctl
     #[test]
     fn a_signature_verdict_needs_a_pinned_primary_and_no_bad_signature() {
         let upstream = "24C975CBA61A024EE1B631787C3D57159FC2F927";
@@ -352,7 +352,7 @@ mod tests {
     /// carry a pinned `VALIDSIG` and no `BADSIG` are refused when `gpgv` failed, while a
     /// clear-signed text, which an archive signs with several keys at once, is judged by the lines
     /// alone.
-    /// Verifies: ADR-0036
+    /// Verifies: OPS-operator-program-fleetctl
     #[test]
     fn a_detached_signature_needs_a_run_gpgv_calls_a_success() {
         let upstream = "24C975CBA61A024EE1B631787C3D57159FC2F927";

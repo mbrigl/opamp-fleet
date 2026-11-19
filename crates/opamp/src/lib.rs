@@ -1,4 +1,4 @@
-//! The OpAMP communication layer (ADR-0011, ADR-0008). Without features it is the wire layer: the
+//! The OpAMP communication layer (API-protocol-pinned-interop-checked, DEV-six-crates-tokio-axum). Without features it is the wire layer: the
 //! protobuf types generated from the specification, the WebSocket framing, the endpoint's body
 //! rules, `InstanceUid`, and the attribute keys an `AgentDescription` is read by.
 //!
@@ -52,9 +52,9 @@ pub const BASELINE: &str = env!("OPAMP_BASELINE");
 
 #[cfg(test)]
 mod tests {
-    /// The crate's `MAJOR.MINOR` is the Baseline's (ADR-0008), so the dependency a user declares
+    /// The crate's `MAJOR.MINOR` is the Baseline's (DEV-six-crates-tokio-axum), so the dependency a user declares
     /// says which OpAMP it speaks. Moving the Baseline without moving the version fails here.
-    /// Verifies: ADR-0008
+    /// Verifies: DEV-six-crates-tokio-axum
     #[test]
     fn the_crate_version_is_the_baselines() {
         let minor_of = |v: &str| {

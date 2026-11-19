@@ -1,4 +1,4 @@
-//! The floors on the filesystem (ADR-0034 §15): the default adapter behind
+//! The floors on the filesystem (PKG-versions-high-water-mark-floor §15): the default adapter behind
 //! [`FloorStore`](crate::floors::FloorStore).
 
 use std::collections::BTreeMap;

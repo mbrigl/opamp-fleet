@@ -1,4 +1,4 @@
-//! The round of an Agent's report (ADR-0025, ADR-0029): a report processed under the Agent's
+//! The round of an Agent's report (SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts): a report processed under the Agent's
 //! lock, its record created, taken or settled, the reply it is answered with, the connection
 //! settings it is offered, the persist path that writes what changed, a goodbye and a forget, and
 //! the answers every refused report gets. Its entry points are methods of `AppState`.
@@ -41,13 +41,13 @@ impl AppState {
         self.push.subscribe()
     }
 
-    /// Forgets everything this Server knows about one Agent (ADR-0029): the record is dropped and
+    /// Forgets everything this Server knows about one Agent (SRV-fleet-record-agents-hosts): the record is dropped and
     /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
     /// certificate revoked, since a certificate here proves fleet membership and its host, never
-    /// which Agent is speaking (ADR-0027 §11). A Client still running therefore reappears on its next
+    /// which Agent is speaking (SEC-bootstrap-certificates-and-enrolment §11). A Client still running therefore reappears on its next
     /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
     /// The `instance_uid` is released from the Host it was bound to, so that report binds it to
-    /// the host whose certificate carries it (ADR-0029 §10).
+    /// the host whose certificate carries it (SRV-fleet-record-agents-hosts §10).
     ///
     /// Refused while the Agent is still reporting: the record holds the hashes that gate
     /// re-offering, so forgetting a live Agent has it offered its configuration again — and the
@@ -71,10 +71,10 @@ impl AppState {
             }
         }
         // Forgetting that left a stored record behind would be the "remembering under another
-        // name" ADR-0029 rejected: the record leaves the store with the row, its labels with it
-        // (ADR-0029 §21). On a shared store the instance that carries the Agent may be
+        // name" SRV-fleet-record-agents-hosts rejected: the record leaves the store with the row, its labels with it
+        // (SRV-fleet-record-agents-hosts §21). On a shared store the instance that carries the Agent may be
         // another, so what decides is the presence stored, read and removed in one step
-        // (ADR-0029 §11).
+        // (SRV-fleet-record-agents-hosts §11).
         // On a shared store the record's removal answers what its stored assignment named, read
         // under the row's lock in the same step, so the revisions only it pinned are collected
         // whatever another instance released meanwhile.
@@ -106,14 +106,14 @@ impl AppState {
         let removed = fleet.remove(uid);
         self.kept.forget(uid);
         // Its `instance_uid` leaves the Host it was bound to: whichever host reports it next binds
-        // it (ADR-0029 §10).
+        // it (SRV-fleet-record-agents-hosts §10).
         if let Some(revocations) = &self.revocations {
             if let Err(e) = revocations.release(uid.as_bytes()) {
                 warn!(agent = %uid, error = %e, "cannot write the released host binding");
             }
         }
         if let Some(record) = removed {
-            // A session that still carries it ends (ADR-0029 §10).
+            // A session that still carries it ends (SRV-fleet-record-agents-hosts §10).
             self.end_session(uid, &record);
             // A Client Agent forgotten takes its labels from the Agents that inherited them.
             self.unplace(
@@ -122,7 +122,7 @@ impl AppState {
                 record.placement.group.clone(),
                 &mut Elsewhere::Now,
             );
-            // A pinned revision only this Agent referenced is unreferenced now (ADR-0032): what
+            // A pinned revision only this Agent referenced is unreferenced now (SRV-deployments-and-pinned-rollouts): what
             // it held, and what the store named, which a release through another instance may
             // have changed before its notification arrived here.
             let mut configurations: BTreeSet<String> =
@@ -139,7 +139,7 @@ impl AppState {
     }
 
     /// Persists one record when — and only when — its durable content changed since it was last
-    /// written (ADR-0029). `last_seen_ms` and `sequence_num` are outside the comparison and ride
+    /// written (SRV-fleet-record-agents-hosts). `last_seen_ms` and `sequence_num` are outside the comparison and ride
     /// along on whatever write happens, so the common heartbeat reaches no storage backend at
     /// all; [`flush_agents`](Self::flush_agents) is what makes them current on a graceful stop.
     /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
@@ -158,22 +158,22 @@ impl AppState {
     /// Writes one record when its durable content changed since it was last written, and says
     /// whether the write failed — for an operator's act that must not be answered unwritten — or
     /// found no record to write, as of an Agent forgotten through another instance. The record was
-    /// created or read before (ADR-0029 §14), so only what a report decides is written of
+    /// created or read before (SRV-fleet-record-agents-hosts §14), so only what a report decides is written of
     /// it, and nothing creates it again.
     ///
     /// `persisted` is what the record held when the report let the fleet lock go, and it is
     /// written after: no other report waits for the write. Two writes of one record do not race,
     /// so an older state never lands after a newer one, since the Agent's own lock, which every
     /// report of it holds from its start to its answer, is held across the write; and a report is
-    /// answered only once its record is written (ADR-0029 §4). What a store's write may take
-    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0039 §24).
+    /// answered only once its record is written (SRV-fleet-record-agents-hosts §4). What a store's write may take
+    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (SRV-state-stores-contract-pair §24).
     ///
     /// On a shared store, an Agent this instance was answered no count of takes for, its take not
     /// written or its answer lost, has its record written at every report and no digest kept: a
     /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
     /// again, may have written over it, and the next report writes it again. Once a count is
     /// answered, a report that changes nothing durable writes nothing again
-    /// (ADR-0025 §8).
+    /// (SRV-instances-share-one-postgresql §8).
     fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
         let digest = persisted.durable_digest();
         let counted = !self.agent_store.is_shared()
@@ -202,7 +202,7 @@ impl AppState {
     }
 
     /// Drops one record from the store and the dirty-check ledger — the storage half of
-    /// forgetting (ADR-0029) and of an identity reassignment.
+    /// forgetting (SRV-fleet-record-agents-hosts) and of an identity reassignment.
     fn unpersist(&self, uid: &InstanceUid) {
         if let Err(e) = self.agent_store.remove(uid) {
             warn!(agent = %uid, error = %e, "cannot remove the agent record from the store");
@@ -224,11 +224,11 @@ impl AppState {
     }
 
     /// Writes every record's current state, timestamps and sequence numbers included — the
-    /// graceful-shutdown flush (ADR-0029) that lets the ordinary restart restore a fleet whose
+    /// graceful-shutdown flush (SRV-fleet-record-agents-hosts) that lets the ordinary restart restore a fleet whose
     /// `last_seen` is current and whose next compressed report is accepted without a gap. On a
     /// shared store only the records of the Agents this instance heard from are written: of the
     /// others it holds what it loaded, and another instance carries them
-    /// (ADR-0029 §2). Of those, only the ones no other
+    /// (SRV-fleet-record-agents-hosts §2). Of those, only the ones no other
     /// instance holds the connection of: an Agent heard here that moved to another instance keeps
     /// what that instance wrote of it. Whether one moved is told by the count of takes this
     /// instance was last answered, never by comparing its clock with another's.
@@ -265,13 +265,13 @@ impl AppState {
         }
     }
 
-    /// The control loop for one report, shared by both transports (ADR-0012): update what we know,
+    /// The control loop for one report, shared by both transports (SEC-tls13-two-planes-bounded-input): update what we know,
     /// then answer with what the Agent still lacks — the config offer gated by the hash comparison.
     /// `conn` identifies the WebSocket connection that carried the report; `None` for plain HTTP.
     ///
     /// The reported `instance_uid` is taken at face value: admission proved fleet membership, not
     /// which Agent is speaking, so within an admitted fleet a report's identity is self-asserted and
-    /// not authorized against any other Agent (ADR-0026). The plain-HTTP path in particular offers
+    /// not authorized against any other Agent (SEC-admission-by-client-certificate). The plain-HTTP path in particular offers
     /// nothing to tell two pollers apart; the WebSocket duplicate-`instance_uid` rekey below is
     /// collision handling, not authorization.
     pub fn process(
@@ -285,7 +285,7 @@ impl AppState {
 
     /// [`process`](Self::process) for a connection that presented a certificate: the host it was
     /// issued to binds the Agents it reports for, and a CSR without a renewal proof renews it
-    /// unless its host is a Gateway's (ADR-0027 §11, ADR-0016).
+    /// unless its host is a Gateway's (SEC-bootstrap-certificates-and-enrolment §11, CLT-modes-and-gateway).
     pub fn process_presented(
         &self,
         msg: AgentToServer,
@@ -356,7 +356,7 @@ impl AppState {
         let mut reply_flags = 0u64;
         let mut identification = None;
 
-        // An instance_uid belongs to the host whose certificate first reported it (ADR-0027 §11):
+        // An instance_uid belongs to the host whose certificate first reported it (SEC-bootstrap-certificates-and-enrolment §11):
         // a certificate of another host does not speak for it, nor re-keys it. Such a
         // reporter is re-keyed — it gets an identity of its own, never the one it claimed. The
         // binding is made only once the report is admitted below.
@@ -426,7 +426,7 @@ impl AppState {
             });
         }
         if moves {
-            // The stored record follows the identity in one step (ADR-0029 §14), before what
+            // The stored record follows the identity in one step (SRV-fleet-record-agents-hosts §14), before what
             // is held does; what this report changes is written by the dirty check at this
             // exchange's end. A move that fails leaves the Agent under the identity it has, and
             // the reply assigns none, so the Agent asks again with its next report. Until what is
@@ -493,7 +493,7 @@ impl AppState {
         // comes back on a new connection of the host whose certificate its old connection
         // presented is not a duplicate of itself: the newest connection takes it, and the older
         // one's reports no longer take it back
-        // (ADR-0025 §8).
+        // (SRV-instances-share-one-postgresql §8).
         let arrived_over = self
             .revocations
             .as_ref()
@@ -549,10 +549,10 @@ impl AppState {
         };
 
         // Admitting a genuinely new Agent past the ceiling would let a peer cycling self-asserted
-        // UIDs (ADR-0026) grow the in-memory map and its per-Agent disk mirror without bound. Known
+        // UIDs (SEC-admission-by-client-certificate) grow the in-memory map and its per-Agent disk mirror without bound. Known
         // Agents keep reporting; only a *new* UID at capacity is refused, `Unavailable` so a Client
         // that legitimately raced in retries rather than gives up. The real gate is admission
-        // (ADR-0026); this bounds the damage while the endpoint is open. On a shared store the
+        // (SEC-admission-by-client-certificate); this bounds the damage while the endpoint is open. On a shared store the
         // ceiling bounds the records stored, counted by the store as it creates this one, so it
         // holds for the fleet and not for one instance. A record stored already passes none: it
         // is another instance's, which the read before the lock missed, and this report goes on
@@ -675,7 +675,7 @@ impl AppState {
                     });
                 }
             }
-            // A re-key an Agent asks for keeps its host (ADR-0027 §11).
+            // A re-key an Agent asks for keeps its host (SEC-bootstrap-certificates-and-enrolment §11).
             if let Some((old, new)) = rekeyed {
                 if let Err(e) = revocations.rebind(old.as_bytes(), new.as_bytes()) {
                     warn!(error = %e, "cannot move the host binding to the new instance_uid");
@@ -695,7 +695,7 @@ impl AppState {
             Took::Nothing
         };
 
-        // What places it in its Client and under its Host may have changed (ADR-0029): a new
+        // What places it in its Client and under its Host may have changed (SRV-fleet-record-agents-hosts): a new
         // record, a new Host, a new description, or a new identity — a re-key took the old one
         // out of its group, and a compressed message carries no description to place it by. The
         // Client Agents of the groups it leaves and joins that another instance carries are read
@@ -773,7 +773,7 @@ impl AppState {
             reply_flags |= ServerToAgentFlags::ReportFullState as u64;
         }
 
-        // The Host it arrived over (ADR-0029 §16) — none without a host register.
+        // The Host it arrived over (SRV-fleet-record-agents-hosts §16) — none without a host register.
         let moved = record.host != arrived_over;
         record.host = arrived_over;
 
@@ -839,7 +839,7 @@ impl AppState {
         }
         let record = fleet.get_mut(&uid).expect("the record was just written");
 
-        // The Agent asked to be issued a client certificate (ADR-0026); it is signed once the
+        // The Agent asked to be issued a client certificate (SEC-admission-by-client-certificate); it is signed once the
         // fleet lock is let go.
         let request = msg
             .connection_settings_request
@@ -1001,7 +1001,7 @@ impl AppState {
         ending: &Ending,
         issued: Option<TlsCertificate>,
     ) -> Processed {
-        // The config offer — composed from this Agent's assignments (ADR-0032), gated by the
+        // The config offer — composed from this Agent's assignments (SRV-deployments-and-pinned-rollouts), gated by the
         // hash comparison, and only toward an Agent that both said goodbye ≠ true and declared
         // AcceptsRemoteConfig (capability negotiation is binding). Matching proposes; only an
         // operator's rollout act made anything an assignment.
@@ -1012,7 +1012,7 @@ impl AppState {
             offer(record, desired.as_ref())
         };
 
-        // The connection-settings offer (ADR-0013), gated the same way: by capability and by
+        // The connection-settings offer (SEC-connection-settings-never-plaintext), gated the same way: by capability and by
         // the hash the Agent last reported — the Baseline's own "compare and include" MUST.
         let connection_settings = if ending.disconnected {
             None
@@ -1020,7 +1020,7 @@ impl AppState {
             self.settings_offer(record, issued)
         };
 
-        // The package offer (ADR-0033), gated by capability and the reported
+        // The package offer (PKG-signed-packages-and-delivery), gated by capability and the reported
         // server_provided_all_packages_hash — the Baseline's "compare and include" for packages.
         let packages_available = if ending.disconnected {
             None
@@ -1046,7 +1046,7 @@ impl AppState {
 
     /// The end of a report once its record is taken into memory, with the fleet lock let go: a
     /// certificate it asked for is signed and recorded, a queued restart cleared, and everything
-    /// the report changed is persisted if it moved the durable state (ADR-0029) — a heartbeat did
+    /// the report changed is persisted if it moved the durable state (SRV-fleet-record-agents-hosts) — a heartbeat did
     /// not, and writes nothing — before the Agent is answered.
     fn finish(
         &self,
@@ -1130,7 +1130,7 @@ impl AppState {
             owner: conn,
             carried_ms: self.clock.now_ms(),
             heard: true,
-            // A new Agent waits (ADR-0032 §10): it is assigned nothing until an operator's
+            // A new Agent waits (SRV-deployments-and-pinned-rollouts §10): it is assigned nothing until an operator's
             // rollout act says so, and the fleet view shows what it could get.
             assignment: None,
         }
@@ -1139,7 +1139,7 @@ impl AppState {
     /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
     /// at an Agent's first report here: another instance may have written it, and its labels, its
     /// assignment and its queued restart are what this report goes on from
-    /// (ADR-0025 §8).
+    /// (SRV-instances-share-one-postgresql §8).
     /// Read before the fleet lock is taken, so no other report waits for it. Answers
     /// whether it loaded one; one that cannot be read is logged, and the report goes on as an
     /// Agent's first.
@@ -1172,7 +1172,7 @@ impl AppState {
     /// The connection-settings offer for one Agent, or `None` when it cannot accept one or its
     /// reported hash says it already runs (or refused) exactly this offer.
     ///
-    /// `issued` is a certificate just signed for this Agent (ADR-0026). It overrides the hash gate
+    /// `issued` is a certificate just signed for this Agent (SEC-admission-by-client-certificate). It overrides the hash gate
     /// — the Agent asked for it in this very exchange — and rides whatever else the standing offer
     /// carries, so one message can hand over a certificate and the endpoint or heartbeat that go
     /// with it, exactly as the Baseline describes.
@@ -1181,7 +1181,7 @@ impl AppState {
         record: &AgentRecord,
         issued: Option<TlsCertificate>,
     ) -> Option<ConnectionSettingsOffers> {
-        // The own-telemetry destinations (ADR-0018), offered only for the signals this Agent says
+        // The own-telemetry destinations (CLT-what-an-agent-reports), offered only for the signals this Agent says
         // it can report — the protocol's negotiation rule, and an offer for a capability the peer
         // lacks is one nobody will ever act on.
         let telemetry = TelemetryOffer {
@@ -1363,7 +1363,7 @@ pub(super) struct Ending {
     disconnected: bool,
     /// It came on an older connection of the host whose newer one carries the Agent, which its
     /// goodbye does not end and a queued restart is not sent on
-    /// (ADR-0025 §8).
+    /// (SRV-instances-share-one-postgresql §8).
     superseded: bool,
     identification: Option<AgentIdentification>,
     reply_flags: u64,
@@ -1421,12 +1421,12 @@ pub fn bad_request(message: &str) -> ServerToAgent {
     }
 }
 
-/// What a CSR with a bootstrap proof over a member's certificate is answered (ADR-0016 §25).
+/// What a CSR with a bootstrap proof over a member's certificate is answered (CLT-modes-and-gateway §25).
 pub const MEMBER_DOES_NOT_ENROL: &str =
     "a certificate signing request with a bootstrap proof is an enrolment, and a member does not \
      enrol";
 
-/// What a CSR with neither proof over a Gateway's certificate is answered (ADR-0016 §18).
+/// What a CSR with neither proof over a Gateway's certificate is answered (CLT-modes-and-gateway §18).
 pub const NEEDS_A_PROOF: &str =
     "a certificate requested through a Gateway needs a renewal proof or a bootstrap proof";
 
@@ -1436,7 +1436,7 @@ pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 /// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
 /// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
 /// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
-/// field a Client and a Gateway route a reply by (ADR-0012 §27).
+/// field a Client and a Gateway route a reply by (SEC-tls13-two-planes-bounded-input §27).
 pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
     ServerToAgent {
         instance_uid: instance_uid.to_vec(),
@@ -1491,7 +1491,7 @@ mod tests {
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Duration;
 
-    /// ADR-0029. The tidy-up case: a host that was decommissioned, its Agent gone with it.
+    /// SRV-fleet-record-agents-hosts. The tidy-up case: a host that was decommissioned, its Agent gone with it.
     #[test]
     fn a_disconnected_agent_is_forgotten() {
         let state = forgettable_state();
@@ -1528,7 +1528,7 @@ mod tests {
         assert!(state.forget_agent(&uid).is_ok());
     }
 
-    /// The case that made the rule test silence rather than staleness (ADR-0029): an Agent that
+    /// The case that made the rule test silence rather than staleness (SRV-fleet-record-agents-hosts): an Agent that
     /// promised no heartbeat is never *stale*, and plain-HTTP polling never clears `connected` —
     /// so gating on the flag would have left this row on a dead host permanently unremovable.
     #[test]
@@ -1574,9 +1574,9 @@ mod tests {
         record
     }
 
-    /// ADR-0029: the fleet survives a restart — the record is restored with everything the Agent
+    /// SRV-fleet-record-agents-hosts: the fleet survives a restart — the record is restored with everything the Agent
     /// reported, shown honestly as disconnected until live evidence says otherwise.
-    // Verifies: ADR-0029
+    // Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn the_fleet_is_restored_disconnected_after_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -1597,8 +1597,8 @@ mod tests {
 
     /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
     /// be written — tells the Agent when to ask again, so it retries instead of giving up or
-    /// hammering (ADR-0027 §9, ADR-0028 §5).
-    /// Verifies: ADR-0026, ADR-0028, ADR-0012
+    /// hammering (SEC-bootstrap-certificates-and-enrolment §9, SEC-append-only-audit-record §5).
+    /// Verifies: SEC-admission-by-client-certificate, SEC-append-only-audit-record, SEC-tls13-two-planes-bounded-input
     #[test]
     fn unavailable_tells_the_agent_when_to_retry() {
         let reply = unavailable(&[7; 16], "busy");
@@ -1614,7 +1614,7 @@ mod tests {
     }
 
     /// A new `instance_uid` past the record ceiling is refused `Unavailable` and leaves no record,
-    /// so a peer minting fresh self-asserted UIDs (ADR-0026) cannot grow the fleet — and its
+    /// so a peer minting fresh self-asserted UIDs (SEC-admission-by-client-certificate) cannot grow the fleet — and its
     /// in-memory map and per-Agent disk mirror — without bound. Agents already known keep reporting.
     #[test]
     fn a_new_agent_past_the_ceiling_is_refused() {
@@ -1655,7 +1655,7 @@ mod tests {
         assert_eq!(state.snapshot().len(), 2);
     }
 
-    /// ADR-0029: a restored sequence number means the next compressed heartbeat is accepted in
+    /// SRV-fleet-record-agents-hosts: a restored sequence number means the next compressed heartbeat is accepted in
     /// place of a fleet-wide ReportFullState stampede.
     #[test]
     fn a_restored_agent_is_not_demanded_a_full_report() {
@@ -1680,9 +1680,9 @@ mod tests {
         );
     }
 
-    /// ADR-0029: a heartbeat exists to change nothing, and it reaches no storage backend — the
+    /// SRV-fleet-record-agents-hosts: a heartbeat exists to change nothing, and it reaches no storage backend — the
     /// stored record still carries the durable state's write, not the heartbeat's.
-    // Verifies: ADR-0029
+    // Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn a_heartbeat_writes_nothing() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -1701,7 +1701,7 @@ mod tests {
         assert_eq!(written, after, "the heartbeat performed no write");
     }
 
-    /// ADR-0029: forgetting removes the stored record with the row — nothing
+    /// SRV-fleet-record-agents-hosts: forgetting removes the stored record with the row — nothing
     /// remembers under another name.
     #[test]
     fn forgetting_an_agent_removes_its_stored_record() {
@@ -1722,7 +1722,7 @@ mod tests {
         assert!(!path.exists(), "forgetting frees the store too");
     }
 
-    /// ADR-0029: the persisted record follows a reassigned identity — one record, one file.
+    /// SRV-fleet-record-agents-hosts: the persisted record follows a reassigned identity — one record, one file.
     #[test]
     fn a_rekeyed_agent_moves_its_stored_record() {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -1744,7 +1744,7 @@ mod tests {
 
     /// A certificate of one host does not speak for another host's Agent: the reporter is re-keyed
     /// to an identity of its own, and the Agent it claimed keeps its record.
-    /// Verifies: ADR-0026, G-17
+    /// Verifies: SEC-admission-by-client-certificate, G-17
     #[test]
     fn a_host_cannot_report_for_another_hosts_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1833,7 +1833,7 @@ mod tests {
 
     /// Forgetting an Agent releases its binding: another host's report for it binds it, under the
     /// identity it reported, where before it would have been re-keyed.
-    /// Verifies: ADR-0029
+    /// Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn forgetting_an_agent_releases_its_binding() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1892,7 +1892,7 @@ mod tests {
 
     /// A report refused at the record ceiling binds no `instance_uid` to the host that sent it,
     /// so it cannot speak for that Agent once there is room — nor lock out the host it belongs to.
-    /// Verifies: ADR-0026, ADR-0029
+    /// Verifies: SEC-admission-by-client-certificate, SRV-fleet-record-agents-hosts
     #[test]
     fn a_report_refused_at_the_ceiling_binds_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1948,7 +1948,7 @@ mod tests {
     /// An Agent bound to a direct Host that reports over a Gateway since is placed by the Gateway
     /// it arrived over: the list, its view and a rollout to it all inherit the labels of the
     /// Client Agent behind that Gateway.
-    /// Verifies: ADR-0025, ADR-0029
+    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
     #[test]
     fn an_agent_bound_to_a_direct_host_and_arriving_over_a_gateway_is_placed_by_the_gateway() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2010,7 +2010,7 @@ mod tests {
     /// A record that does not decode, which every read that meets it fails, can still be
     /// forgotten through an instance that does not hold it, and is gone after, with what its
     /// assignment pinned: the Deployment it was released through may be deleted then.
-    /// Verifies: ADR-0039, ADR-0029
+    /// Verifies: SRV-state-stores-contract-pair, SRV-fleet-record-agents-hosts
     #[test]
     fn a_record_that_does_not_decode_can_be_forgotten() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2055,7 +2055,7 @@ mod tests {
 
     /// Forgetting an Agent this instance on PostgreSQL does not hold collects the revision only its
     /// assignment pinned, as forgetting one it holds does.
-    /// Verifies: ADR-0032, ADR-0039
+    /// Verifies: SRV-deployments-and-pinned-rollouts, SRV-state-stores-contract-pair
     #[test]
     fn forgetting_an_agent_held_nowhere_collects_the_revision_only_it_pinned() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2115,7 +2115,7 @@ mod tests {
     /// A queued restart pushed to every connection that named the Agent goes out only on the one
     /// that carries it: an older connection of its host that still names it, its peer likely
     /// gone, is handed none, and the restart stays queued for the newer one.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[test]
     fn a_pushed_restart_goes_out_only_on_the_connection_that_carries_the_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2149,7 +2149,7 @@ mod tests {
     /// A re-key whose move of the stored record fails leaves the Agent under the identity it has:
     /// the reply assigns no new one, the record stays stored and held under the old uid, and the
     /// session is not ended as one of an Agent forgotten.
-    /// Verifies: ADR-0029
+    /// Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn a_rekey_whose_move_fails_keeps_the_agent_under_its_identity() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2186,7 +2186,7 @@ mod tests {
     /// marked closed meanwhile, goes on under the identity it assigned rather than start again
     /// from the message: a next round would mint a second identity and leave the first record
     /// behind. The Agent stays disconnected, as the closed connection left it.
-    /// Verifies: ADR-0025, ADR-0029
+    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
     #[test]
     fn a_report_that_rekeyed_its_agent_does_not_start_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2276,7 +2276,7 @@ mod tests {
     /// its group's Client Agents another instance carries, the write of what it reported, and a
     /// re-key it asks for with the move of its binding are each made with the lock free, so no
     /// other report waits for them.
-    /// Verifies: ADR-0025, ADR-0029
+    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
     #[test]
     fn a_report_holds_the_fleet_lock_across_no_call_to_the_database() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2360,7 +2360,7 @@ mod tests {
 
     /// While one Agent's report waits for a call to its store, another Agent's report is answered:
     /// what the fleet lock guards is applied before and after the call, never across it.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[test]
     fn another_agents_report_is_answered_while_one_agents_write_waits() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2416,7 +2416,7 @@ mod tests {
     /// A new Agent forgotten through another instance between its creation here and the end of
     /// the report that created it is created anew by a next round of that report, so what is held
     /// is stored.
-    /// Verifies: ADR-0025, ADR-0029
+    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
     #[test]
     fn a_new_agent_forgotten_while_its_report_runs_is_created_anew() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2458,7 +2458,7 @@ mod tests {
     /// A restart requested while a delivery of the one queued before clears it is not lost: the
     /// request waits for the delivery, which holds the Agent's own lock across its clear, and is
     /// queued after it, so the Agent is sent it next.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[test]
     fn a_restart_requested_while_a_delivery_clears_one_stays_queued() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2521,7 +2521,7 @@ mod tests {
     /// delivers, but before it took the clear into memory, is not lost: the take-up of its
     /// announcement waits for the delivery, which holds the Agent's own lock, and then holds the
     /// request, which is sent next.
-    /// Verifies: ADR-0029, ADR-0025
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
     #[test]
     fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_next() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2582,7 +2582,7 @@ mod tests {
     /// The same request taken up after a missed notification, which names no Agent, is not lost
     /// either: the catch-up reads the restart the store queues under the Agent's own lock, waits
     /// for the delivery, and holds the request, which is sent next.
-    /// Verifies: ADR-0029, ADR-0025
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
     #[test]
     fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_after_a_missed_notification(
     ) {
@@ -2643,7 +2643,7 @@ mod tests {
     /// delivers the one queued before is not lost, however the two meet: where the request came
     /// before the delivery's clear, the restart sent is both; where it came after, it stays queued
     /// and is sent next, once the carrying instance takes the announcement up.
-    /// Verifies: ADR-0029, ADR-0025
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
     #[test]
     fn a_restart_requested_through_one_instance_while_another_delivers_one_stays_until_sent() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2723,7 +2723,7 @@ mod tests {
     /// A label set while a report reads the Agent's record from the store, before it holds it, is
     /// not undone by what the read found: the label waits for the report, which holds the Agent's
     /// own lock, and is then taken into the record held.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[test]
     fn a_label_set_while_a_report_reads_the_record_is_not_undone() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2771,7 +2771,7 @@ mod tests {
     /// A report whose Agent leaves memory while it reads and writes the store — forgotten through
     /// another instance — starts again from what the store holds then, and the Agent is held
     /// under a record created anew.
-    /// Verifies: ADR-0025, ADR-0029
+    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
     #[test]
     fn a_report_whose_agent_leaves_memory_meanwhile_starts_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2814,7 +2814,7 @@ mod tests {
 
     /// A report whose Agent leaves memory in each of its rounds is answered `Unavailable`, so the
     /// Agent retries, rather than starting again without end.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[test]
     fn a_report_whose_agent_leaves_memory_in_every_round_is_answered_unavailable() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2868,7 +2868,7 @@ mod tests {
 
     /// Labels are part of the Agent's record: a re-keyed Agent keeps them, on disk too, and
     /// forgetting it removes them — it comes back unlabelled.
-    /// Verifies: ADR-0029
+    /// Verifies: SRV-fleet-record-agents-hosts
     #[test]
     fn forgetting_an_agent_removes_its_labels_and_a_rekey_keeps_them() {
         let dir = tempfile::tempdir().expect("tempdir").keep();

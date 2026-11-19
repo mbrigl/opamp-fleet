@@ -1,11 +1,11 @@
-//! The package store (ADR-0033): the Server's software artifacts, held as **Packages**.
+//! The package store (PKG-signed-packages-and-delivery): the Server's software artifacts, held as **Packages**.
 //! A Package is identified by *(Agent type, version)* and holds **one entry per Platform**
-//! (ADR-0033) — an uploaded artifact with its SHA-256 content hash, its size and the operator's
-//! signature over it (ADR-0033). It aims at nobody: that belongs to the Deployment that holds it
-//! (ADR-0033). A stored Package reaches nobody by itself (ADR-0032): what an Agent is offered is
+//! (PKG-signed-packages-and-delivery) — an uploaded artifact with its SHA-256 content hash, its size and the operator's
+//! signature over it (PKG-signed-packages-and-delivery). It aims at nobody: that belongs to the Deployment that holds it
+//! (PKG-signed-packages-and-delivery). A stored Package reaches nobody by itself (SRV-deployments-and-pinned-rollouts): what an Agent is offered is
 //! composed from the assignment the operator's rollout act wrote; [`resolve`] only computes the
 //! **candidate** such an act would release. A Package reaches an Agent only as an **upgrade**
-//! over what it reports (ADR-0032), beside the type and platform tests. The
+//! over what it reports (SRV-deployments-and-pinned-rollouts), beside the type and platform tests. The
 //! immutability of an assigned Package's entries is enforced by the fleet, which knows the
 //! assignments, and again by a backend that other Servers write too, from the assignments it
 //! stores.
@@ -14,7 +14,7 @@
 //! business (the specification forbids the Server abstracting over it). The Server's job is to
 //! store, hash, offer, and serve — and to hand each Agent the artifact built for the machine it
 //! runs on, never another one. It checks a signature against the operator's public key when it
-//! holds one, and only reports what it found: the Agent's own check decides (ADR-0033).
+//! holds one, and only reports what it found: the Agent's own check decides (PKG-signed-packages-and-delivery).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -27,7 +27,7 @@ use opamp::proto::{
 };
 use sha2::{Digest, Sha256};
 
-/// The operating system and architecture an artifact is built for (ADR-0033) — and the pair an
+/// The operating system and architecture an artifact is built for (PKG-signed-packages-and-delivery) — and the pair an
 /// Agent reports about itself, so the two can be compared.
 ///
 /// Both tokens are **canonical**: the semantic conventions' `os.type` and `host.arch` values, which
@@ -60,7 +60,7 @@ impl Platform {
 
     /// The Platform an Agent reports, from the two attributes the Baseline names for it: `os.type`
     /// and `host.arch`. `None` when it reports neither — such an Agent fits no artifact, and is
-    /// offered none rather than being guessed at (ADR-0033).
+    /// offered none rather than being guessed at (PKG-signed-packages-and-delivery).
     ///
     /// The reported values go through the same canonicalisation as an uploaded one, which is what
     /// makes a Collector reporting `amd64` and a Supervisor reporting `x86_64` the same machine.
@@ -142,9 +142,9 @@ pub(crate) fn warn_stored_spelling(
     }
 }
 
-/// A Package's Agent type or version as it may appear in its identity (ADR-0033): a bounded token
+/// A Package's Agent type or version as it may appear in its identity (PKG-signed-packages-and-delivery): a bounded token
 /// that embeds losslessly in file names and URLs. `@` is excluded so the Package directory name —
-/// `<agent_type>@<version>` — parses back unambiguously, exactly the trick ADR-0033 played for
+/// `<agent_type>@<version>` — parses back unambiguously, exactly the trick PKG-signed-packages-and-delivery played for
 /// variants; path separators are excluded because the value becomes half a directory name.
 pub fn validate_identity_token(value: &str, what: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 64 {
@@ -161,7 +161,7 @@ pub fn validate_identity_token(value: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The refusal of a Package version that is a token but not SemVer (ADR-0034 §1): it names
+/// The refusal of a Package version that is a token but not SemVer (PKG-versions-high-water-mark-floor §1): it names
 /// the version and the rule. It starts with `the ` so the REST API answers it `400`.
 pub fn not_semver(version: &str) -> String {
     format!(
@@ -170,7 +170,7 @@ pub fn not_semver(version: &str) -> String {
     )
 }
 
-/// A Package's identity (ADR-0033): the Agent type it is built for and its version, stated at
+/// A Package's identity (PKG-signed-packages-and-delivery): the Agent type it is built for and its version, stated at
 /// creation and never edited. A new version is a **new Package**, and the type is as constitutive
 /// of "what is this artifact" as the version — an attribute would be editable, and retyping stored
 /// bytes to another kind of Agent is exactly the mistake an immutable identity forecloses.
@@ -181,7 +181,7 @@ pub fn not_semver(version: &str) -> String {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PackageId {
     /// The Agent type this Package is built for, matched **raw** against the `service.name` an
-    /// Agent reports (ADR-0033) — there is no canonical set of Agent types to normalise against.
+    /// Agent reports (PKG-signed-packages-and-delivery) — there is no canonical set of Agent types to normalise against.
     /// It is also the **wire name**: the `PackagesAvailable` map key and the key an Agent reports
     /// its `PackageStatuses` under, which is why it must not carry the version.
     pub agent_type: String,
@@ -191,7 +191,7 @@ pub struct PackageId {
 }
 
 impl PackageId {
-    /// Validates both parts, and that the version is SemVer (ADR-0034 §1): the gate every
+    /// Validates both parts, and that the version is SemVer (PKG-versions-high-water-mark-floor §1): the gate every
     /// write goes through — creating a Package, an entry, a signature, adding it to a Deployment.
     ///
     /// # Errors
@@ -207,7 +207,7 @@ impl PackageId {
 
     /// Validates both parts as tokens only: the gate for what the store already holds and for a
     /// route that only reads or deletes. A Package an older Server stored under a version that is
-    /// not SemVer loads through here, inert (ADR-0034 §3).
+    /// not SemVer loads through here, inert (PKG-versions-high-water-mark-floor §3).
     ///
     /// # Errors
     /// Returns an error when either part breaks the token rule of [`validate_identity_token`].
@@ -220,7 +220,7 @@ impl PackageId {
         })
     }
 
-    /// Whether the version is SemVer (ADR-0034 §2). A Package for which it is not was stored
+    /// Whether the version is SemVer (PKG-versions-high-water-mark-floor §2). A Package for which it is not was stored
     /// by an older Server: it is no candidate, and nothing is written to it.
     pub fn is_semver(&self) -> bool {
         fleet_core::version::is_semver(&self.version)
@@ -234,7 +234,7 @@ impl PackageId {
     }
 
     /// Parses the `<agent_type>@<version>` form the [`Display`] impl writes — the Package's
-    /// directory name, and the persisted shape of a package assignment (ADR-0032).
+    /// directory name, and the persisted shape of a package assignment (SRV-deployments-and-pinned-rollouts).
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut parts = text.split('@');
         match (parts.next(), parts.next(), parts.next()) {
@@ -255,14 +255,14 @@ impl fmt::Display for PackageId {
     }
 }
 
-/// A stored Package (ADR-0033): its identity, and one entry per Platform. Nothing else.
+/// A stored Package (PKG-signed-packages-and-delivery): its identity, and one entry per Platform. Nothing else.
 ///
-/// **The Platform fits, the Deployment aims** — the split ADR-0033 named, with the aiming half
-/// moved out (ADR-0033). What a Package is has nothing to say about who gets it, which is why
+/// **The Platform fits, the Deployment aims** — the split PKG-signed-packages-and-delivery named, with the aiming half
+/// moved out (PKG-signed-packages-and-delivery). What a Package is has nothing to say about who gets it, which is why
 /// there is no Selector here and no kind flag: an Agent's Deployment holds one Package for its
 /// type, and that is the whole of the decision.
 ///
-/// Artifacts stay in the blob store, named by their hash (ADR-0039), and are streamed to whoever
+/// Artifacts stay in the blob store, named by their hash (SRV-state-stores-contract-pair), and are streamed to whoever
 /// asks — a program weighs hundreds of megabytes, and a fleet server holding every one of them in
 /// memory, plus a copy per download, is the shape this deliberately avoids.
 #[derive(Clone)]
@@ -274,7 +274,7 @@ pub struct Package {
 }
 
 /// One platform's artifact of a Package: an uploaded file, the hash that identifies what an Agent
-/// installs, and the operator's signature over it (ADR-0033). The signature lives here because what
+/// installs, and the operator's signature over it (PKG-signed-packages-and-delivery). The signature lives here because what
 /// it covers — `fleet_core::package::statement` — names the Agent type, the version and this hash,
 /// and no Deployment: one signature serves every Deployment that holds the Package.
 #[derive(Clone, Debug)]
@@ -286,11 +286,11 @@ pub struct Entry {
     pub size: u64,
     /// The operator's Ed25519 signature over the statement for this entry, as `opamp-fleetctl
     /// package sign` makes it. `None` until one is written; new bytes remove it, because a
-    /// signature covers the hash (ADR-0033). An entry without one is offered to nobody.
+    /// signature covers the hash (PKG-signed-packages-and-delivery). An entry without one is offered to nobody.
     pub signature: Option<Vec<u8>>,
 }
 
-/// What the Server found when it checked an entry's signature (ADR-0033) — feedback for the
+/// What the Server found when it checked an entry's signature (PKG-signed-packages-and-delivery) — feedback for the
 /// operator, never a gate: the Agent's own verification is the one that decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignatureState {
@@ -320,7 +320,7 @@ impl SignatureState {
 /// The length of an Ed25519 signature (RFC 8032).
 pub(crate) const ED25519_SIGNATURE_LEN: usize = 64;
 
-/// The signature check's port (ADR-0009, ADR-0033): whether `signature` is the operator's over
+/// The signature check's port (DEV-ports-and-adapters, PKG-signed-packages-and-delivery): whether `signature` is the operator's over
 /// `statement`. The Ed25519 adapter over `[packages] verification_key`
 /// ([`Ed25519Verifier`](crate::config::Ed25519Verifier)) is what the composition root wires.
 pub trait SignatureVerifier: Send + Sync {
@@ -328,8 +328,8 @@ pub trait SignatureVerifier: Send + Sync {
 }
 
 /// Checks one entry's signature over the statement a Client verifies
-/// (`fleet_core::package::statement`, ADR-0033 §52) with `verifier`, the operator's public
-/// key when the Server holds it (ADR-0033).
+/// (`fleet_core::package::statement`, PKG-signed-packages-and-delivery §52) with `verifier`, the operator's public
+/// key when the Server holds it (PKG-signed-packages-and-delivery).
 pub fn signature_state(
     verifier: Option<&dyn SignatureVerifier>,
     id: &PackageId,
@@ -366,8 +366,8 @@ impl Package {
     /// One entry as a wire `PackageAvailable`.
     ///
     /// Every artifact is offered from this Server, as a path the Agent resolves against its own
-    /// OpAMP endpoint (ADR-0033): there is no other host to name. `signature` is the entry's own,
-    /// for these exact bytes (ADR-0033); the wire is unchanged.
+    /// OpAMP endpoint (PKG-signed-packages-and-delivery): there is no other host to name. `signature` is the entry's own,
+    /// for these exact bytes (PKG-signed-packages-and-delivery); the wire is unchanged.
     fn to_available(&self, entry: &Entry, signature: &[u8]) -> PackageAvailable {
         let file = DownloadableFile {
             download_url: format!(
@@ -381,7 +381,7 @@ impl Package {
         PackageAvailable {
             // Always top-level. An Agent has one binary to replace, its Deployment holds one
             // Package for its type, and no Client this project ships installs an addon — so the
-            // kind is structural rather than a flag anyone could set (ADR-0033 §11).
+            // kind is structural rather than a flag anyone could set (PKG-signed-packages-and-delivery §11).
             r#type: PackageType::TopLevel as i32,
             version: self.id.version.clone(),
             file: Some(file),
@@ -390,7 +390,7 @@ impl Package {
     }
 }
 
-/// One Package as the REST API lists it (ADR-0033): its identity and what it holds for each
+/// One Package as the REST API lists it (PKG-signed-packages-and-delivery): its identity and what it holds for each
 /// platform — never the artifact bytes.
 pub struct PackageSummary {
     pub id: PackageId,
@@ -408,9 +408,9 @@ pub struct EntrySummary {
     /// The per-package hash this entry is offered under, hex — what an Agent echoes back once it
     /// is in sync, and what gates re-offering.
     pub package_hash: String,
-    /// The entry's signature, hex, when it carries one (ADR-0033).
+    /// The entry's signature, hex, when it carries one (PKG-signed-packages-and-delivery).
     pub signature: Option<String>,
-    /// What the Server found when it checked that signature (ADR-0033).
+    /// What the Server found when it checked that signature (PKG-signed-packages-and-delivery).
     pub signature_state: SignatureState,
 }
 
@@ -435,14 +435,14 @@ impl PackageSummary {
     }
 }
 
-/// The package store's port (ADR-0009, ADR-0039): where Packages persist — each one's identity
+/// The package store's port (DEV-ports-and-adapters, SRV-state-stores-contract-pair): where Packages persist — each one's identity
 /// and entries, every entry naming its artifact by the hash of its bytes. The bytes are the
-/// [`BlobStore`]'s. It speaks in parts (ADR-0039 §2): a Package's entries are written and
+/// [`BlobStore`]'s. It speaks in parts (SRV-state-stores-contract-pair §2): a Package's entries are written and
 /// removed by platform, and no call writes an entry it does not name. The filesystem adapter
 /// ([`FsPackageBackend`](crate::fs::FsPackageBackend)) is what the composition root wires.
 pub trait PackageBackend: Send + Sync {
     /// Every persisted Package, once, when the store opens. Anything unreadable, unparsable, or in
-    /// a layout this Server does not write fails the open and names where it is (ADR-0033).
+    /// a layout this Server does not write fails the open and names where it is (PKG-signed-packages-and-delivery).
     fn load(&self) -> Result<Vec<Package>, String>;
 
     /// Creates a Package without entries; one that is stored already is left as it is.
@@ -452,14 +452,14 @@ pub trait PackageBackend: Send + Sync {
     /// blob it names stored: an upload's entry, never one naming a blob a sweep deleted. A
     /// backend that other Servers write too asks `stored` inside the entry's transaction, holding
     /// the blob store's lock shared, so no sweep runs between the answer and the commit
-    /// (ADR-0039 §14). A Package the store does not hold
+    /// (SRV-state-stores-contract-pair §14). A Package the store does not hold
     /// is an error, and so is a blob `stored` does not find, or one a sweep marked
     /// ([`mark`](Self::mark)): removed while it was uploaded.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), PackageError>;
 
     /// Writes or, with `None`, clears the signature of the entry for `platform` — only while the
     /// stored entry still names the bytes `content_hash`, since a signature covers that hash
-    /// (ADR-0033). Another instance may have replaced or removed the entry since this one read
+    /// (PKG-signed-packages-and-delivery). Another instance may have replaced or removed the entry since this one read
     /// it: then nothing is written, and the entry as stored is answered.
     fn sign(
         &self,
@@ -477,7 +477,7 @@ pub trait PackageBackend: Send + Sync {
     /// transaction; on the filesystem the fleet takes it out of the Deployments after.
     fn remove(&self, id: &PackageId) -> Result<(), PackageError>;
 
-    /// Holds the blob store's lock alone (ADR-0039 §14)
+    /// Holds the blob store's lock alone (SRV-state-stores-contract-pair §14)
     /// until the hold is dropped: what a sweep holds. A backend that other Servers write too
     /// holds it in the database; one whose one Server is its only writer holds nothing, which the
     /// default does.
@@ -489,7 +489,7 @@ pub trait PackageBackend: Send + Sync {
     }
 
     /// Marks, under the hold of a sweep, each of `hashes` that no stored entry names, and answers
-    /// those it marked: the only blobs the sweep deletes (ADR-0039 §13 and §14). A backend
+    /// those it marked: the only blobs the sweep deletes (SRV-state-stores-contract-pair §13 and §14). A backend
     /// that other Servers write too decides from what it stores, so a blob an entry written
     /// through another Server names is kept, and marks on the hold's own session, so that nothing
     /// is marked once the lock is gone; an upload refuses a marked blob. Its marks are known by
@@ -572,7 +572,7 @@ struct Life {
     deleting: HashSet<String>,
 }
 
-/// The package store (ADR-0033, ADR-0039): every Package, held in memory for the control loop to
+/// The package store (PKG-signed-packages-and-delivery, SRV-state-stores-contract-pair): every Package, held in memory for the control loop to
 /// read, its metadata persisted through a [`PackageBackend`] and its artifacts through a
 /// [`BlobStore`].
 pub struct PackageStore {
@@ -593,18 +593,18 @@ pub struct PackageStore {
     /// The clock a sweep reads between the renewal of a blob's mark and that blob's deletion: one
     /// that counts a suspend, as the binary hands it.
     clock: crate::fleet::Elapsed,
-    /// The check against the operator's public key, `[packages] verification_key` (ADR-0033).
+    /// The check against the operator's public key, `[packages] verification_key` (PKG-signed-packages-and-delivery).
     /// Each entry's signature is reported by it; `None` reports every signature `unchecked`.
     key: Option<Box<dyn SignatureVerifier>>,
 }
 
 impl PackageStore {
     /// Opens the store on `backend` and `blobs`, loading every persisted Package. Every blob is
-    /// read once (and the filesystem adapter hashes it again on the way, ADR-0039 §13); an
+    /// read once (and the filesystem adapter hashes it again on the way, SRV-state-stores-contract-pair §13); an
     /// entry naming a blob that is not stored, or of another size, fails the open, and a blob no
     /// entry names is deleted, as are the staging objects of every lease that is not live. The
     /// blobs are listed, the Packages read and the sweep made under the blob store's lock, held
-    /// alone, and the sweep deletes only what it marked, while the lock holds (ADR-0039 §14).
+    /// alone, and the sweep deletes only what it marked, while the lock holds (SRV-state-stores-contract-pair §14).
     /// Every sweep measures the time between the renewal of a mark and its deletion on `clock`, the
     /// one that counts a suspend.
     ///
@@ -643,7 +643,7 @@ impl PackageStore {
                     }
                 }
             }
-            // Kept and read, never a candidate and never written to (ADR-0034 §3).
+            // Kept and read, never a candidate and never written to (PKG-versions-high-water-mark-floor §3).
             if !package.id.is_semver() {
                 tracing::warn!(
                     package = %package.id,
@@ -664,7 +664,7 @@ impl PackageStore {
             clock,
             key: None,
         };
-        // A blob no entry names is deleted at startup (ADR-0039 §13): an upload whose entry
+        // A blob no entry names is deleted at startup (SRV-state-stores-contract-pair §13): an upload whose entry
         // was never written, or an entry whose deletion stopped short of its blob.
         let unnamed: Vec<String> = stored
             .keys()
@@ -677,7 +677,7 @@ impl PackageStore {
         Ok(store)
     }
 
-    /// Arms the signature check with the operator's public key (ADR-0033), and checks every
+    /// Arms the signature check with the operator's public key (PKG-signed-packages-and-delivery), and checks every
     /// stored signature against it now, as the store is loaded: an `invalid` one is logged and
     /// kept, because the Server only reports — the Agent's own verification decides.
     #[must_use]
@@ -742,7 +742,7 @@ impl PackageStore {
         self.sets.read().expect("sets lock").is_empty()
     }
 
-    /// The total bytes of the stored blobs (ADR-0039 §13): bytes two entries share count
+    /// The total bytes of the stored blobs (SRV-state-stores-contract-pair §13): bytes two entries share count
     /// once. An upload still in flight is deliberately not counted — it is not yet an artifact,
     /// and the per-upload limit already bounds it.
     pub fn total_bytes(&self) -> u64 {
@@ -756,7 +756,7 @@ impl PackageStore {
 
     /// Reads every Package again from the backend, as another instance created, deleted or
     /// changed one
-    /// (ADR-0025 §12):
+    /// (SRV-instances-share-one-postgresql §12):
     /// what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap. The blobs
     /// are not read: they are the blob store's, which every instance shares.
@@ -775,7 +775,7 @@ impl PackageStore {
         Ok(())
     }
 
-    /// Creates a Package. **Saving never distributes** (ADR-0032), and there is nothing to update:
+    /// Creates a Package. **Saving never distributes** (SRV-deployments-and-pinned-rollouts), and there is nothing to update:
     /// a Package is its identity and its entries, so creating one that exists is the same request
     /// arriving twice.
     pub fn create(&self, id: &PackageId) -> Result<(), PackageError> {
@@ -796,7 +796,7 @@ impl PackageStore {
     }
 
     /// The gate every entry write passes: the Package must exist. The immutability of an
-    /// assigned Package (ADR-0032) is the fleet's to enforce — only it knows the assignments —
+    /// assigned Package (SRV-deployments-and-pinned-rollouts) is the fleet's to enforce — only it knows the assignments —
     /// and a database backend's, which counts the stored ones in the write.
     ///
     /// # Errors
@@ -834,7 +834,7 @@ impl PackageStore {
                 // The backend asks whether the blob is stored as it writes the entry: on a store
                 // other Servers write too, in the entry's transaction under the blob store's lock,
                 // so no sweep of another Server deletes the blob between the answer and the commit
-                // (ADR-0039 §14). No deletion of this
+                // (SRV-state-stores-contract-pair §14). No deletion of this
                 // blob starts here while the upload holds it, and one that ran before has answered.
                 let unanswered = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let stored: Stored = {
@@ -857,7 +857,7 @@ impl PackageStore {
                         content_hash: hex::decode(&sha256).expect("a blob's hash is hex"),
                         size,
                         // New bytes take the old signature with them: it covered the old hash
-                        // (ADR-0033).
+                        // (PKG-signed-packages-and-delivery).
                         signature: None,
                     },
                     stored,
@@ -898,7 +898,7 @@ impl PackageStore {
         self.put_entry_from(id, platform, &mut artifact.as_slice())
     }
 
-    /// Writes the operator's signature onto one entry (ADR-0033), and answers what the Server found
+    /// Writes the operator's signature onto one entry (PKG-signed-packages-and-delivery), and answers what the Server found
     /// when it checked it. An `invalid` signature is stored all the same: the Server only reports.
     ///
     /// # Errors
@@ -945,7 +945,7 @@ impl PackageStore {
         }
     }
 
-    /// Takes one entry's signature away (ADR-0033); `Ok(false)` when the entry carries none.
+    /// Takes one entry's signature away (PKG-signed-packages-and-delivery); `Ok(false)` when the entry carries none.
     ///
     /// # Errors
     /// `no package set …` or `no entry …` when the entry does not exist (a `404`).
@@ -988,7 +988,7 @@ impl PackageStore {
         // Under the lock of the writes, as every write of a Package is: the store must hold what
         // memory holds, in the order it changed. Not under `sets`: the backend asks the blob
         // store, which may take as long as the store answers. A PostgreSQL call is bounded
-        // (ADR-0039 §24).
+        // (SRV-state-stores-contract-pair §24).
         let _writes = self.writes.lock().expect("writes lock");
         if !self.sets.read().expect("sets lock").contains_key(id) {
             return Err(no_set(id));
@@ -1006,10 +1006,10 @@ impl PackageStore {
     }
 
     /// Deletes one entry; `Ok(false)` when the Package or the entry does not exist. The fleet
-    /// refuses this before calling here when the Package is assigned to an Agent (ADR-0032). The
+    /// refuses this before calling here when the Package is assigned to an Agent (SRV-deployments-and-pinned-rollouts). The
     /// last entry taken away leaves an **empty Package**, kept: a Package being reassembled is a
     /// normal state, and deleting the Package is its own act. Its blob goes with the last entry
-    /// that names it (ADR-0039 §13).
+    /// that names it (SRV-state-stores-contract-pair §13).
     pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, PackageError> {
         let writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
@@ -1033,7 +1033,7 @@ impl PackageStore {
     /// Deletes a whole Package — entries, metadata, and every blob no other entry names;
     /// `Ok(false)` when none of that identity exists. The fleet removes every assignment that
     /// referenced it, which withdraws the offer; Agents that installed it keep running it
-    /// (ADR-0033).
+    /// (PKG-signed-packages-and-delivery).
     pub fn delete_set(&self, id: &PackageId) -> Result<bool, PackageError> {
         Ok(match self.remove_set(id)? {
             Some(sweep) => {
@@ -1047,7 +1047,7 @@ impl PackageStore {
     /// [`delete_set`](Self::delete_set) without its sweep, which it answers instead, `None` when
     /// no Package of that identity exists: for a caller that holds a lock of its own, which the
     /// sweep must not wait under, as it may wait for the blob store's lock
-    /// (ADR-0039 §14). The caller hands the sweep to
+    /// (SRV-state-stores-contract-pair §14). The caller hands the sweep to
     /// [`sweep_after`](Self::sweep_after) once it has let its lock go.
     ///
     /// # Errors
@@ -1098,7 +1098,7 @@ impl PackageStore {
     }
 
     /// Chooses the blob `sha256` for deletion when no entry of `sets` names it and no upload
-    /// holds it (ADR-0039 §13); [`sweep`](Self::sweep) deletes it once the lock on `sets`
+    /// holds it (SRV-state-stores-contract-pair §13); [`sweep`](Self::sweep) deletes it once the lock on `sets`
     /// is released. Decided under that lock, so no entry naming it can be recorded meanwhile.
     fn doom(&self, sets: &BTreeMap<PackageId, Package>, sha256: &str) -> Option<String> {
         if referenced(sets, sha256) {
@@ -1111,10 +1111,10 @@ impl PackageStore {
         Some(sha256.to_string())
     }
 
-    /// The sweep after an act (ADR-0039 §13): deletes the blobs [`doom`](Self::doom) chose
+    /// The sweep after an act (SRV-state-stores-contract-pair §13): deletes the blobs [`doom`](Self::doom) chose
     /// that no stored entry names either, and the staging objects of every lease that is not
     /// live, under the blob store's lock held alone and with no lock on the Packages held
-    /// (ADR-0039 §14 and §16). The backend marks under the hold what no stored entry names,
+    /// (SRV-state-stores-contract-pair §14 and §16). The backend marks under the hold what no stored entry names,
     /// so a blob that an entry written through another Server names is kept, and only what it
     /// marked is deleted, while the lock holds ([`delete_under`](Self::delete_under)).
     /// A failure is logged and left to the next startup, which deletes every blob no entry names.
@@ -1138,7 +1138,7 @@ impl PackageStore {
 
     /// Deletes, under `hold`, each of `unnamed` that the backend marks as named by no stored entry,
     /// and then the staging objects of every lease that is not live, and takes the marks away
-    /// once it is done, or once its marking failed (ADR-0039 §13, §14 and §16). Before each
+    /// once it is done, or once its marking failed (SRV-state-stores-contract-pair §13, §14 and §16). Before each
     /// deletion it asks whether the lock still holds, and the backend whether the blob is still
     /// marked, renewing the marks: once the lock is lost or the backend cannot answer, the sweep
     /// deletes nothing more and says so, and what it would have deleted stays for a later sweep.
@@ -1177,7 +1177,7 @@ impl PackageStore {
                     }
                 }
                 // Past the bound of the renewal's call, a suspend perhaps, the time a mark outlives
-                // its renewal no longer covers the deletion (ADR-0039 §14).
+                // its renewal no longer covers the deletion (SRV-state-stores-contract-pair §14).
                 if self.clock.now().saturating_sub(asked) > DELETED_WITHIN {
                     tracing::warn!(
                         blob = %sha256,
@@ -1225,7 +1225,7 @@ impl PackageStore {
 
     /// Tries again to take away the marks of every sweep of this store that is done and could not
     /// take them away: what each sweep does first, and the instance every lease renewal interval
-    /// (ADR-0039 §14).
+    /// (SRV-state-stores-contract-pair §14).
     pub fn retry_unmarks(&self) {
         let left = std::mem::take(&mut *self.unmarked.lock().expect("unmarked lock"));
         for sweep in left {
@@ -1234,7 +1234,7 @@ impl PackageStore {
     }
 
     /// Every entry of every Package `deployment` holds that carries no signature, as
-    /// "display name (os/arch, …)" per Package — what a refused rollout names (ADR-0033).
+    /// "display name (os/arch, …)" per Package — what a refused rollout names (PKG-signed-packages-and-delivery).
     /// Empty when every entry is signed.
     pub fn unsigned_in(&self, deployment: &Deployment) -> Vec<String> {
         let sets = self.sets.read().expect("sets lock");
@@ -1255,11 +1255,11 @@ impl PackageStore {
             .collect()
     }
 
-    /// One Agent's offer, composed from its **assignment** (ADR-0032): the entry [`offered_entry`]
+    /// One Agent's offer, composed from its **assignment** (SRV-deployments-and-pinned-rollouts): the entry [`offered_entry`]
     /// names, plus the `all_packages_hash` over it (the Baseline's per-Agent aggregate). `None`
     /// when the Agent is offered nothing — it keeps running what it runs. An assignment whose
     /// Package is gone composes nothing rather than failing: a pinned Package cannot be deleted
-    /// (ADR-0032 §12), so the case is a race, not a state.
+    /// (SRV-deployments-and-pinned-rollouts §12), so the case is a race, not a state.
     pub fn offer_for_assigned(
         &self,
         assigned: Option<&PackageId>,
@@ -1292,7 +1292,7 @@ impl PackageStore {
     }
 
     /// The artifact `(id, platform)`, when this Server holds it and it carries a signature — the
-    /// half of the download route's test that needs no Agent (ADR-0033 §35).
+    /// half of the download route's test that needs no Agent (PKG-signed-packages-and-delivery §35).
     pub fn offerable(&self, id: &PackageId, platform: &Platform) -> Option<Offerable> {
         let sets = self.sets.read().expect("sets lock");
         let entry = sets.get(id)?.entries.get(platform)?;
@@ -1316,11 +1316,11 @@ impl PackageStore {
             .is_some_and(|artifact| artifact.offered_to(assigned, description))
     }
 
-    /// The Package a rollout act would release to this Agent — the **candidate** (ADR-0032),
+    /// The Package a rollout act would release to this Agent — the **candidate** (SRV-deployments-and-pinned-rollouts),
     /// never an offer.
     ///
-    /// One Deployment claims the Agent (ADR-0033); the Package it holds for the Agent's type has
-    /// to fit its platform and be an **upgrade** over what the Agent reports (ADR-0032). `None`
+    /// One Deployment claims the Agent (PKG-signed-packages-and-delivery); the Package it holds for the Agent's type has
+    /// to fit its platform and be an **upgrade** over what the Agent reports (SRV-deployments-and-pinned-rollouts). `None`
     /// where any of those is missing — including the ordinary case of an Agent no channel claims yet.
     pub fn candidate(
         &self,
@@ -1334,14 +1334,14 @@ impl PackageStore {
 
     /// Whether an explicit rollout act may release this Package to this Agent: it must exist,
     /// hold an entry for the platform the Agent reports, be built for its type, and be an
-    /// **upgrade** over what the Agent reports installed under that type (ADR-0032).
+    /// **upgrade** over what the Agent reports installed under that type (SRV-deployments-and-pinned-rollouts).
     ///
-    /// Aim is not checked here: whom a Package reaches is its Deployment's business (ADR-0033),
+    /// Aim is not checked here: whom a Package reaches is its Deployment's business (PKG-signed-packages-and-delivery),
     /// and the act names the Deployment, so the channel has already been decided by the time this
     /// is asked.
     ///
     /// The upgrade test is the one [`resolve`] applies, so the act and the candidate agree: what
-    /// ADR-0032 forbids is aiming an act at an Agent it would move backwards, or not move at all —
+    /// SRV-deployments-and-pinned-rollouts forbids is aiming an act at an Agent it would move backwards, or not move at all —
     /// the count beside the button and the button itself answer the same question.
     pub fn fits_agent(
         &self,
@@ -1351,7 +1351,7 @@ impl PackageStore {
     ) -> Result<(), String> {
         let sets = self.sets.read().expect("sets lock");
         let set = sets.get(id).ok_or_else(|| no_set(id).message)?;
-        // Nobody's candidate, whatever the Agent reports (ADR-0034 §5).
+        // Nobody's candidate, whatever the Agent reports (PKG-versions-high-water-mark-floor §5).
         if !set.id.is_semver() {
             return Err(format!(
                 "set {id} is no candidate for any Agent: {}",
@@ -1382,7 +1382,7 @@ impl PackageStore {
             ));
         }
         if !upgrades(set, installed, description) {
-            // *Which* of the two versions decided is the operator's first question here (ADR-0032 §19):
+            // *Which* of the two versions decided is the operator's first question here (SRV-deployments-and-pinned-rollouts §19):
             // the running one wherever it can be ordered, the claim only where it
             // cannot. A refusal naming a number without saying which of the two it was would read
             // like the wrong rule applied — and where both are reported and they disagree, saying
@@ -1422,10 +1422,10 @@ impl PackageStore {
 }
 
 /// The entry one Agent is offered, with the signature it travels with — the one test of "offered"
-/// that the offer and the download share (ADR-0033 §35). The Agent's assignment names the
-/// Package; the Package must be built for the Agent type the Agent reports (ADR-0033 §14) and
+/// that the offer and the download share (PKG-signed-packages-and-delivery §35). The Agent's assignment names the
+/// Package; the Package must be built for the Agent type the Agent reports (PKG-signed-packages-and-delivery §14) and
 /// hold an entry for the Platform it reports; and that entry must carry a signature, because the
-/// Server never offers a Package unsigned (ADR-0033). Whether the Agent accepts packages at all is
+/// Server never offers a Package unsigned (PKG-signed-packages-and-delivery). Whether the Agent accepts packages at all is
 /// its record's, and the fleet asks that first.
 ///
 /// An assignment pins *which* release the operator released; which artifact of it this host takes
@@ -1475,12 +1475,12 @@ enum Deletion {
 
 /// How long after it sent the renewal of a blob's mark a sweep may still call the blob store to
 /// delete that blob, on the clock that counts a suspend: the bound of the renewal's own call, which
-/// the time a mark outlives its renewal allows for (ADR-0039 §14). The PostgreSQL adapter's
+/// the time a mark outlives its renewal allows for (SRV-state-stores-contract-pair §14). The PostgreSQL adapter's
 /// bound of a call, which its tests hold equal to this.
 pub(crate) const DELETED_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Says that a sweep lost the blob store's lock, or could not ask whether it still holds it,
-/// before its deletions were done (ADR-0039 §14).
+/// before its deletions were done (SRV-state-stores-contract-pair §14).
 fn lost_while_sweeping(error: Option<&str>) {
     tracing::warn!(
         error,
@@ -1496,7 +1496,7 @@ fn referenced(sets: &BTreeMap<PackageId, Package>, sha256: &str) -> bool {
         .any(|entry| hex::encode(&entry.content_hash) == sha256)
 }
 
-/// The refusal every write to the entries of an assigned Package answers with (ADR-0032 §13),
+/// The refusal every write to the entries of an assigned Package answers with (SRV-deployments-and-pinned-rollouts §13),
 /// whether the Server found the assignment in what it holds or in what is stored.
 #[must_use]
 pub fn assigned(id: &PackageId) -> PackageError {
@@ -1574,7 +1574,7 @@ pub fn no_set(id: &PackageId) -> PackageError {
 }
 
 /// The refusal of the deletion of a Package that the assignments of `pinning` Agents pin
-/// (ADR-0032 §12).
+/// (SRV-deployments-and-pinned-rollouts §12).
 #[must_use]
 pub fn pinned(id: &PackageId, pinning: usize) -> PackageError {
     PackageError::refused(
@@ -1626,7 +1626,7 @@ fn changed_entry(id: &PackageId, platform: &Platform) -> PackageError {
 }
 
 /// A signed artifact this Server holds, as [`PackageStore::offerable`] found it: what the download
-/// route tests each Agent of a host against (ADR-0033 §35).
+/// route tests each Agent of a host against (PKG-signed-packages-and-delivery §35).
 pub struct Offerable {
     id: PackageId,
     platform: Platform,
@@ -1646,13 +1646,13 @@ impl Offerable {
 }
 
 /// What an Agent reports it has installed, per package name: `PackageStatuses.packages[name]
-/// .agent_has_version` as the Agent last sent it (ADR-0033). A name that is absent — and a name
+/// .agent_has_version` as the Agent last sent it (PKG-signed-packages-and-delivery). A name that is absent — and a name
 /// whose reported version is empty, which is how an Agent that has installed nothing reports a
 /// package it was offered — means *nothing is installed under that name*.
 pub type InstalledVersions = BTreeMap<String, String>;
 
-/// The fourth matching test: a Package reaches an Agent only as an **upgrade** (ADR-0032 §14
-/// to 16, ADR-0032 §14 and §25).
+/// The fourth matching test: a Package reaches an Agent only as an **upgrade** (SRV-deployments-and-pinned-rollouts §14
+/// to 16, SRV-deployments-and-pinned-rollouts §14 and §25).
 ///
 /// An Agent reports up to three versions, and they can contradict each other. **What it runs
 /// decides** — the version of the Package its Supervisor installed, where the Supervisor reports
@@ -1669,7 +1669,7 @@ pub type InstalledVersions = BTreeMap<String, String>;
 /// that the Agent has"*, which a record naming a version the program denies running is not.
 ///
 /// Where no `service.version` can be ordered — a program numbering itself `1.19` or `24.04.1`, or
-/// an Agent reporting none at all — the claim is the whole test (ADR-0032): strictly greater to
+/// an Agent reporting none at all — the claim is the whole test (SRV-deployments-and-pinned-rollouts): strictly greater to
 /// match, and a claim that cannot itself be ordered **refuses** outright. That is the safe
 /// direction for a claim about that very package, and the Client's own
 /// (`update::installer::install`): what cannot be ordered must not be installed over what is
@@ -1694,7 +1694,7 @@ fn upgrades(
     match runs {
         // What runs, by the Supervisor's word or the program's own, in both directions.
         Some(running) => greater(running),
-        // No statement about the present: fall back to the record (ADR-0032). An unorderable claim
+        // No statement about the present: fall back to the record (SRV-deployments-and-pinned-rollouts). An unorderable claim
         // refuses, which `greater` already does by yielding `None`.
         None => match claimed_version(set, installed) {
             Some(claimed) => greater(claimed),
@@ -1704,7 +1704,7 @@ fn upgrades(
 }
 
 /// The version of the Package an Agent's Supervisor reports it installed, as the non-identifying
-/// `supervisor.package.version` (ADR-0032 §25), where it can be
+/// `supervisor.package.version` (SRV-deployments-and-pinned-rollouts §25), where it can be
 /// ordered. One that cannot says nothing, as an unorderable `service.version` says nothing.
 fn installed_package_version(description: Option<&AgentDescription>) -> Option<&str> {
     opamp::attributes::string_value(
@@ -1715,7 +1715,7 @@ fn installed_package_version(description: Option<&AgentDescription>) -> Option<&
 }
 
 /// What an Agent claims to have installed under this Package's Agent type, if it claims anything:
-/// a package status reported with an empty version is no claim (ADR-0032).
+/// a package status reported with an empty version is no claim (SRV-deployments-and-pinned-rollouts).
 fn claimed_version<'a>(set: &Package, installed: &'a InstalledVersions) -> Option<&'a str> {
     installed
         .get(&set.id.agent_type)
@@ -1724,7 +1724,7 @@ fn claimed_version<'a>(set: &Package, installed: &'a InstalledVersions) -> Optio
 }
 
 /// The version an Agent reports as `service.version` — its program's own number, and what a Package
-/// is held against when the Agent reports no version for the package itself (ADR-0032). It is also
+/// is held against when the Agent reports no version for the package itself (SRV-deployments-and-pinned-rollouts). It is also
 /// read beside a reported one, as what the Agent actually runs.
 fn reported_service_version(description: Option<&AgentDescription>) -> Option<&str> {
     opamp::attributes::string_value(
@@ -1737,13 +1737,13 @@ fn reported_service_version(description: Option<&AgentDescription>) -> Option<&s
 /// What one Agent's Deployment would release to it, if an operator rolled out now.
 ///
 /// Five tests, and every one of them is a hard gate: the Agent reports a platform and a type
-/// (ADR-0033), its Deployment holds a Package for that type (ADR-0033) whose version is SemVer
-/// (ADR-0034), that Package holds an entry for the platform, and it is an **upgrade** over what
-/// the Agent runs (ADR-0032). Neither
+/// (PKG-signed-packages-and-delivery), its Deployment holds a Package for that type (PKG-signed-packages-and-delivery) whose version is SemVer
+/// (PKG-versions-high-water-mark-floor), that Package holds an entry for the platform, and it is an **upgrade** over what
+/// the Agent runs (SRV-deployments-and-pinned-rollouts). Neither
 /// report has an "unknown, so anything goes" case — an Agent reporting neither fits nothing. The
 /// type needs no second comparison: a Deployment holds each Package under its own Agent type.
 ///
-/// There is no ranking. The Deployment holds at most one Package per Agent type (ADR-0033 §25), so a specificity comparison or a version tie-break would have nothing to choose between — an
+/// There is no ranking. The Deployment holds at most one Package per Agent type (PKG-signed-packages-and-delivery §25), so a specificity comparison or a version tie-break would have nothing to choose between — an
 /// ambiguous state is one a write refuses to create.
 fn resolve<'a>(
     sets: &'a BTreeMap<PackageId, Package>,
@@ -1754,7 +1754,7 @@ fn resolve<'a>(
     let platform = Platform::reported(description)?;
     let set = sets.get(deployment.package_for(reported_agent_type(description)?)?)?;
     // A Package an older Server stored under a version that is not SemVer is nobody's candidate
-    // (ADR-0034 §5).
+    // (PKG-versions-high-water-mark-floor §5).
     if !set.id.is_semver() {
         return None;
     }
@@ -1762,11 +1762,11 @@ fn resolve<'a>(
     upgrades(set, installed, description).then_some((set, entry))
 }
 
-/// The Agent type an Agent reports, as `service.name` (ADR-0018) — the identifying attribute the
+/// The Agent type an Agent reports, as `service.name` (CLT-what-an-agent-reports) — the identifying attribute the
 /// Baseline reserves for "a reverse FQDN that uniquely identifies the Agent type".
 ///
 /// `None` for an Agent that has not described itself or reports no type, which fits no Package
-/// (ADR-0033). An empty value is `None` too: it is not a type.
+/// (PKG-signed-packages-and-delivery). An empty value is `None` too: it is not a type.
 pub fn reported_agent_type(description: Option<&AgentDescription>) -> Option<&str> {
     opamp::attributes::string_value(
         &description?.identifying_attributes,
@@ -1791,8 +1791,8 @@ mod tests {
 
     /// An entry stored under a spelling the table now folds is named with the way out, and one a
     /// second spelling hides says so; one stored under its canonical tokens is not named
-    /// (ADR-0033 §6).
-    /// Verifies: ADR-0033
+    /// (PKG-signed-packages-and-delivery §6).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn an_entry_stored_under_an_older_spelling_is_named() {
         let id = PackageId::new("otelcol", "0.140.0").expect("id");
@@ -1837,7 +1837,7 @@ mod tests {
     }
 
     /// An Agent that reports what its program is, as a Client does: `service.version`, identifying,
-    /// beside the type (ADR-0018).
+    /// beside the type (CLT-what-an-agent-reports).
     fn running_agent(version: &str) -> AgentDescription {
         let mut description = agent("linux", "amd64", &[]);
         description
@@ -1847,7 +1847,7 @@ mod tests {
     }
 
     /// A Set with one uploaded linux entry — stored, which reaches nobody until an assignment names
-    /// it (ADR-0032).
+    /// it (SRV-deployments-and-pinned-rollouts).
     fn stored_set(store: &PackageStore, name: &str, version: &str, artifact: &[u8]) -> PackageId {
         let id = id(name, version);
         store.create(&id).expect("create");
@@ -1857,7 +1857,7 @@ mod tests {
         id
     }
 
-    /// What an Agent reports installed, as the record hands it to the store (ADR-0032).
+    /// What an Agent reports installed, as the record hands it to the store (SRV-deployments-and-pinned-rollouts).
     fn installed(versions: &[(&str, &str)]) -> InstalledVersions {
         versions
             .iter()
@@ -1866,7 +1866,7 @@ mod tests {
     }
 
     /// A Deployment holding one Package and aiming at everything the tests describe. Aim lives
-    /// there now (ADR-0033), so a store test that wants a candidate has to say which channel the
+    /// there now (PKG-signed-packages-and-delivery), so a store test that wants a candidate has to say which channel the
     /// Agent is in — which is the model, not scaffolding.
     fn channel(id: &PackageId) -> Deployment {
         Deployment {
@@ -1878,7 +1878,7 @@ mod tests {
     }
 
     /// Signs every entry the Package holds — what an operator does before anything of it is offered
-    /// (ADR-0033). The bytes are a stand-in: the store offers a signature it has not checked.
+    /// (PKG-signed-packages-and-delivery). The bytes are a stand-in: the store offers a signature it has not checked.
     fn sign_all(store: &PackageStore, id: &PackageId) {
         let platforms: Vec<Platform> = store
             .sets
@@ -1945,9 +1945,9 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// ADR-0033: the identity is the pair and entries are per platform; ADR-0033: each entry's
+    /// PKG-signed-packages-and-delivery: the identity is the pair and entries are per platform; PKG-signed-packages-and-delivery: each entry's
     /// signature is its own, and the whole Package — entries and signatures — survives a reopen.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn a_set_survives_a_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1982,7 +1982,7 @@ mod tests {
         );
     }
 
-    /// ADR-0032: a saved Set reaches nobody by itself. It is a visible candidate, and only an
+    /// SRV-deployments-and-pinned-rollouts: a saved Set reaches nobody by itself. It is a visible candidate, and only an
     /// assignment — the operator's rollout act — composes an offer from it.
     #[test]
     fn a_saved_set_reaches_nobody_without_an_assignment() {
@@ -2005,8 +2005,8 @@ mod tests {
     }
 
     /// An entry that carries no signature is offered to nobody, and a Deployment holding it names
-    /// it as what keeps it from being rolled out (ADR-0033).
-    /// Verifies: ADR-0033
+    /// it as what keeps it from being rolled out (PKG-signed-packages-and-delivery).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn an_entry_without_a_signature_is_offered_to_nobody() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2028,8 +2028,8 @@ mod tests {
 
     /// A signature is written on an entry, offered to an Agent of that Platform with exactly those
     /// bytes, and removed when new bytes are uploaded to the entry — a signature covers the hash
-    /// (ADR-0033 §18). Removing it takes the offer away.
-    /// Verifies: ADR-0033
+    /// (PKG-signed-packages-and-delivery §18). Removing it takes the offer away.
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn a_signature_lives_on_its_entry_and_new_bytes_remove_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2079,7 +2079,7 @@ mod tests {
     /// entry as stored, so the Package read again through it shows the new bytes, and a signature
     /// written again through it is stored. Two stores on one data directory stand in for two
     /// instances.
-    /// Verifies: ADR-0025, ADR-0033
+    /// Verifies: SRV-instances-share-one-postgresql, PKG-signed-packages-and-delivery
     #[test]
     fn a_signature_on_bytes_another_instance_replaced_is_refused_and_signed_anew() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2128,8 +2128,8 @@ mod tests {
     }
 
     /// A signature has to name an entry the Package holds (`no entry`, a `404`), and has to be
-    /// one: empty or not 64 bytes is refused (a `400`) and nothing is stored (ADR-0033 §18).
-    /// Verifies: ADR-0033
+    /// one: empty or not 64 bytes is refused (a `400`) and nothing is stored (PKG-signed-packages-and-delivery §18).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn a_signature_needs_an_entry_and_the_shape_of_one() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2172,8 +2172,8 @@ mod tests {
 
     /// With the operator's public key the Server reports a signature over the statement `valid` and
     /// any other `invalid` — and stores both; without the key every signature is `unchecked`
-    /// (ADR-0033 §19). The state is checked again when the store is reopened.
-    /// Verifies: ADR-0033
+    /// (PKG-signed-packages-and-delivery §19). The state is checked again when the store is reopened.
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn the_server_checks_a_signature_against_its_key_and_only_reports() {
         let rng = ring::rand::SystemRandom::new();
@@ -2247,7 +2247,7 @@ mod tests {
         );
     }
 
-    /// The gate an explicit rollout act runs (ADR-0032): the Package must hold entries and fit the
+    /// The gate an explicit rollout act runs (SRV-deployments-and-pinned-rollouts): the Package must hold entries and fit the
     /// Agent's type and platform. **Aim is not among them** — whom a Package reaches is its
     /// Deployment's, and the act names the channel. The version *ranking* stays out too: an Agent
     /// that has installed nothing takes the older Package as readily as the newer one.
@@ -2287,7 +2287,7 @@ mod tests {
                 )
                 .is_ok(),
             "an Agent outside any channel still *fits* this Package — whom it reaches is the \
-             Deployment's question, and the act has already answered it by naming one (ADR-0033)"
+             Deployment's question, and the act has already answered it by naming one (PKG-signed-packages-and-delivery)"
         );
         assert!(store
             .fits_agent(
@@ -2317,7 +2317,7 @@ mod tests {
             .contains("no package set"));
     }
 
-    /// ADR-0032's fourth test at the gate: an act may only be aimed at an Agent the Set would
+    /// SRV-deployments-and-pinned-rollouts's fourth test at the gate: an act may only be aimed at an Agent the Set would
     /// move *forward*. Equal is not greater — a Set the Agent already runs changes nothing — and
     /// a reported version that cannot be ordered is refused rather than guessed at.
     #[test]
@@ -2363,7 +2363,7 @@ mod tests {
         );
     }
 
-    /// The same test on the way in (ADR-0032): a Set the Agent already runs is no candidate, so
+    /// The same test on the way in (SRV-deployments-and-pinned-rollouts): a Set the Agent already runs is no candidate, so
     /// nothing proposes it and no count includes it. The Set the Agent is *behind* still is one.
     #[test]
     fn a_set_that_is_no_upgrade_is_no_candidate() {
@@ -2387,7 +2387,7 @@ mod tests {
         );
     }
 
-    /// ADR-0032: an Agent that reports no version for the package is held against the version it
+    /// SRV-deployments-and-pinned-rollouts: an Agent that reports no version for the package is held against the version it
     /// reports *running*. This is what reaches the Clients released before the one that reports its
     /// own package version — they cannot state it, and they all state `service.version`.
     #[test]
@@ -2397,7 +2397,7 @@ mod tests {
         stored_set(&store, "otelcol", "2.0.0", b"v2");
         let nothing = InstalledVersions::new();
 
-        // The build metadata every Client appends takes no part in it (ADR-0037).
+        // The build metadata every Client appends takes no part in it (OPS-cargo-decides-product-version).
         for running in ["2.0.0", "2.0.0+a1b2c3d", "3.0.0"] {
             assert!(
                 candidates_for(&store, &running_agent(running), &nothing).is_empty(),
@@ -2424,14 +2424,14 @@ mod tests {
         );
     }
 
-    /// ADR-0032 §14 and §15: **what an Agent runs decides, in both directions**, and the
+    /// SRV-deployments-and-pinned-rollouts §14 and §15: **what an Agent runs decides, in both directions**, and the
     /// claim is not consulted beside it. The record a package status comes from outlives the binary
     /// it describes; the program's own number is the statement about the present.
     ///
     /// Both halves of the trade are asserted here rather than only the convenient one — including
     /// that a Managed Process numbered below its Set can be moved backwards, which is the cost the
     /// ADR records under Consequences.
-    // Verifies: ADR-0032
+    // Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn the_version_an_agent_runs_wins_over_the_version_it_claims() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2465,7 +2465,7 @@ mod tests {
                 ("otelcol".to_string(), "2.0.0".to_string())
             ],
             "both clear 0.98.0 — the claim of 2.0.0 is not consulted while the Agent says what it \
-             runs (ADR-0032)"
+             runs (SRV-deployments-and-pinned-rollouts)"
         );
         assert!(
             store
@@ -2476,11 +2476,11 @@ mod tests {
                 )
                 .is_ok(),
             "and the act admits the lower Set too: 1.5.0 is ahead of what the program reports, so \
-             the claim of 2.0.0 does not refuse it — the downgrade ADR-0032 admits as its cost"
+             the claim of 2.0.0 does not refuse it — the downgrade SRV-deployments-and-pinned-rollouts admits as its cost"
         );
     }
 
-    /// ADR-0032: a claim the Agent's own program denies does not hold the Set back. A Client that
+    /// SRV-deployments-and-pinned-rollouts: a claim the Agent's own program denies does not hold the Set back. A Client that
     /// reports `supervisor 0.4.1` installed while reporting that it runs 0.4.0 has a record about a
     /// binary that is gone — and held to that record it would be offered nothing, for good.
     #[test]
@@ -2524,14 +2524,14 @@ mod tests {
         );
 
         // A program that cannot be ordered says nothing, and the claim becomes the whole test
-        // (ADR-0032 §16) — which here refuses the Set the claim already names.
+        // (SRV-deployments-and-pinned-rollouts §16) — which here refuses the Set the claim already names.
         assert!(
             candidates_for(&store, &running_agent("nightly"), &claims_041).is_empty(),
             "an unorderable program version says nothing, and the claim stands"
         );
     }
 
-    /// The other face of the one above (ADR-0032): a claim *above* the Set, over a program that
+    /// The other face of the one above (SRV-deployments-and-pinned-rollouts): a claim *above* the Set, over a program that
     /// denies running it. A self-update that staged 0.4.2 and did not take leaves
     /// `supervisor 0.4.2` recorded on a host whose program still reports 0.4.0 — and refusing
     /// 0.4.1 to it as a downgrade would keep the host where it is for good.
@@ -2566,7 +2566,7 @@ mod tests {
         );
     }
 
-    /// ADR-0032 §16: a running version that cannot be ordered says nothing, rather than
+    /// SRV-deployments-and-pinned-rollouts §16: a running version that cannot be ordered says nothing, rather than
     /// refusing, and the claim becomes the whole test. One agent numbers itself `1.19` and an
     /// appliance `24.04.1`; failing closed on those would make a program's numbering habit into a
     /// fleet that cannot deliver to it at all.
@@ -2585,20 +2585,20 @@ mod tests {
             );
         }
 
-        // And an Agent reporting no version at all is the first rollout (ADR-0032).
+        // And an Agent reporting no version at all is the first rollout (SRV-deployments-and-pinned-rollouts).
         assert_eq!(
             candidates_for(&store, &agent("linux", "amd64", &[]), &nothing),
             [("otelcol".to_string(), "2.0.0".to_string())],
         );
     }
 
-    /// ADR-0032 §14 and §25: where a Supervisor reports the version
+    /// SRV-deployments-and-pinned-rollouts §14 and §25: where a Supervisor reports the version
     /// of the Package it installed, a Package is held against that, and the program's own number
     /// and the claim are not read. A repack's Package carries a version its program does not
     /// report — the second repack of 2.14.3 is `2.14.4-0.r.2`, and the program it installs still
     /// says `2.14.3` — so held against the program, a host that installed it stays a candidate on
     /// every press.
-    // Verifies: ADR-0032
+    // Verifies: SRV-deployments-and-pinned-rollouts
     #[test]
     fn the_installed_package_version_decides_over_the_program_version() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2668,9 +2668,9 @@ mod tests {
     }
 
     /// Only the Package its channel holds is a candidate. A Deployment holds one Package per type
-    /// (ADR-0033), so there is no second contender to rank or refuse: the store answers what the
+    /// (PKG-signed-packages-and-delivery), so there is no second contender to rank or refuse: the store answers what the
     /// channel points at, or nothing.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn only_the_package_its_ring_holds_is_a_candidate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2695,14 +2695,14 @@ mod tests {
                 &installed(&[("otelcol", "2.0.0")])
             ),
             None,
-            "and what is no upgrade is still no candidate (ADR-0032)"
+            "and what is no upgrade is still no candidate (SRV-deployments-and-pinned-rollouts)"
         );
     }
 
     /// A store an older Server wrote, holding `otelcol@1.19`: it opens and warns naming the
     /// Package, the Package is nobody's candidate, and a rollout act aimed at it is refused naming
-    /// the version and the SemVer rule (ADR-0034 §3 and §5).
-    /// Verifies: ADR-0034
+    /// the version and the SemVer rule (PKG-versions-high-water-mark-floor §3 and §5).
+    /// Verifies: PKG-versions-high-water-mark-floor
     #[test]
     fn a_stored_package_whose_version_is_not_semver_loads_and_is_no_candidate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2750,7 +2750,7 @@ mod tests {
             refusal.contains("\"1.19\"") && refusal.contains("SemVer"),
             "the refusal names the version and the rule: {refusal}"
         );
-        // An assignment that already pins it is still offered (ADR-0032 §20): the Client
+        // An assignment that already pins it is still offered (SRV-deployments-and-pinned-rollouts §20): the Client
         // refuses the offer, and reports why.
         assert!(store
             .offer_for_assigned(Some(&legacy), Some(&host))
@@ -2771,9 +2771,9 @@ mod tests {
         }
     }
 
-    /// Fit before aim (ADR-0033): an entry for another platform, or a Set for another
+    /// Fit before aim (PKG-signed-packages-and-delivery): an entry for another platform, or a Set for another
     /// Agent type, is never a candidate — and an Agent reporting neither fits nothing.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn fit_is_mandatory_platform_and_type() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2802,9 +2802,9 @@ mod tests {
         );
     }
 
-    /// Both sides of the platform comparison are canonicalised (ADR-0033): an artifact uploaded
+    /// Both sides of the platform comparison are canonicalised (PKG-signed-packages-and-delivery): an artifact uploaded
     /// as `macos`/`x86_64` reaches an Agent reporting `darwin`/`amd64`.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn both_sides_of_the_comparison_are_canonicalised() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2824,9 +2824,9 @@ mod tests {
         );
     }
 
-    /// The offered download URL is a path the Agent resolves against its own Server (ADR-0033),
+    /// The offered download URL is a path the Agent resolves against its own Server (PKG-signed-packages-and-delivery),
     /// and it names the whole identity, so two versions of one name never serve each other's bytes.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn the_offer_carries_a_download_url_naming_the_identity() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2847,7 +2847,7 @@ mod tests {
         );
     }
 
-    /// The aggregate hash is per Agent and follows its assignments (ADR-0032): it changes when
+    /// The aggregate hash is per Agent and follows its assignments (SRV-deployments-and-pinned-rollouts): it changes when
     /// the assigned Set changes, and is empty for an Agent assigned nothing it fits.
     #[test]
     fn the_aggregate_hash_is_per_agent_and_follows_the_assignment() {
@@ -2874,7 +2874,7 @@ mod tests {
     }
 
     /// Deleting an entry frees its artifact; deleting the Set takes its metadata with it.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn deletion_frees_entries_and_sets() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2894,11 +2894,11 @@ mod tests {
         assert!(!store.delete_set(&set).expect("gone already"));
     }
 
-    /// The blobs under one entry's bytes (ADR-0039 §13): two entries with identical bytes
+    /// The blobs under one entry's bytes (SRV-state-stores-contract-pair §13): two entries with identical bytes
     /// store one blob, counted once against the store's size; it stays while an entry names it and
     /// goes with the last one — replaced or deleted — and a blob no entry names is deleted when
     /// the store opens.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn identical_bytes_are_one_blob_that_goes_with_its_last_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2955,8 +2955,8 @@ mod tests {
     }
 
     /// A corrupt artifact fails the reopen loudly, naming its blob — a corrupt distribution
-    /// artifact must never ship (ADR-0033 §8, ADR-0039 §13).
-    /// Verifies: ADR-0033, ADR-0039
+    /// artifact must never ship (PKG-signed-packages-and-delivery §8, SRV-state-stores-contract-pair §13).
+    /// Verifies: PKG-signed-packages-and-delivery, SRV-state-stores-contract-pair
     #[test]
     fn a_corrupt_artifact_fails_reopen() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2985,9 +2985,9 @@ mod tests {
         assert!(err.contains("not stored"), "{err}");
     }
 
-    /// The store's directories, each Package's metadata and each blob are owner-only (ADR-0033,
-    /// ADR-0039 §1).
-    /// Verifies: ADR-0033
+    /// The store's directories, each Package's metadata and each blob are owner-only (PKG-signed-packages-and-delivery,
+    /// SRV-state-stores-contract-pair §1).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[cfg(unix)]
     #[test]
     fn the_store_and_its_metadata_are_owner_only() {
@@ -3016,14 +3016,14 @@ mod tests {
     }
 
     /// There is no legacy reader: a store holding what an older layout wrote is **named at
-    /// startup**, never skipped (ADR-0039 §6). Skipping is the dangerous
+    /// startup**, never skipped (SRV-state-stores-contract-pair §6). Skipping is the dangerous
     /// half — a store that merely looks empty offers nothing and says nothing about why, which an
     /// operator reads as "nothing uploaded yet".
     ///
     /// The shapes an older Server left behind are covered: a loose file, a
     /// `<name>@<version>@<type>/set.json` directory, and the `<type>@<version>/package.json`
-    /// directory of the layout before ADR-0039.
-    /// Verifies: ADR-0033, ADR-0039
+    /// directory of the layout before SRV-state-stores-contract-pair.
+    /// Verifies: PKG-signed-packages-and-delivery, SRV-state-stores-contract-pair
     #[test]
     fn a_store_in_an_older_layout_refuses_to_open_and_names_what_is_in_the_way() {
         let older = |relative: &str, contents: &str| {
@@ -3048,9 +3048,9 @@ mod tests {
         );
     }
 
-    /// Every artifact is uploaded (ADR-0033 §3): an entry an older Server stored as a
+    /// Every artifact is uploaded (PKG-signed-packages-and-delivery §3): an entry an older Server stored as a
     /// reference to a source is not read as something else — the open fails naming the file.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn a_referenced_entry_from_an_older_server_fails_the_open_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3082,7 +3082,7 @@ mod tests {
 
     /// A stored signature is held to the length a write is held to: one that is not 64 bytes fails
     /// the open naming the file, rather than being offered for every Client to refuse.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn a_stored_signature_of_the_wrong_length_fails_the_open_naming_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3114,7 +3114,7 @@ mod tests {
 
     /// The identity grammar keeps the triple a safe directory name and an unambiguous parse:
     /// `@` and path separators are refused.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn identity_tokens_are_bounded() {
         assert!(PackageId::new("otelcol", "1.2.3-rc.1+abc").is_ok());
@@ -3126,8 +3126,8 @@ mod tests {
     }
 
     /// A write takes only a SemVer version, while what the store holds loads as a token
-    /// (ADR-0034 §1 and §3) — an assignment that pins an older Package parses back.
-    /// Verifies: ADR-0034
+    /// (PKG-versions-high-water-mark-floor §1 and §3) — an assignment that pins an older Package parses back.
+    /// Verifies: PKG-versions-high-water-mark-floor
     #[test]
     fn a_write_takes_a_semver_version_and_a_load_any_token() {
         for not_semver in ["1.19", "24.04.1", "nightly", "1.0.0-01"] {
@@ -3149,7 +3149,7 @@ mod tests {
         assert!(PackageId::load("a@b", "1.0.0").is_err());
     }
 
-    // ---- What is offered, for the offer and the download alike (ADR-0033) ----
+    // ---- What is offered, for the offer and the download alike (PKG-signed-packages-and-delivery) ----
 
     /// The artifact an offer names, as `(type, version, platform)`, read off its `download_url`.
     fn named_by(offer: &PackagesAvailable) -> (String, String, Platform) {
@@ -3179,9 +3179,9 @@ mod tests {
 
     /// Every artifact `offer_for_assigned` names is one `offers` answers yes for, and nothing else
     /// is — across assignments, Agent types, Platforms, signed and unsigned entries, and artifacts
-    /// the store does not hold (ADR-0033 §35). Whether the Agent accepts packages is the
+    /// the store does not hold (PKG-signed-packages-and-delivery §35). Whether the Agent accepts packages is the
     /// record's, asked by the fleet before either; `fleet` tests that half.
-    /// Verifies: ADR-0033
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn the_download_and_the_offer_test_one_predicate() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3243,8 +3243,8 @@ mod tests {
     }
 
     /// An Agent that reports another Agent type than its assigned Package's is offered nothing, and
-    /// cannot fetch it (ADR-0033 §14).
-    /// Verifies: ADR-0033
+    /// cannot fetch it (PKG-signed-packages-and-delivery §14).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn an_agent_reporting_another_type_is_offered_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3268,8 +3268,8 @@ mod tests {
     }
 
     /// An entry that carries no signature is neither offered nor fetched, though another entry of
-    /// the same Package is signed (ADR-0033 §18).
-    /// Verifies: ADR-0033
+    /// the same Package is signed (PKG-signed-packages-and-delivery §18).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn an_unsigned_entry_is_not_offered_though_another_is_signed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3434,7 +3434,7 @@ mod tests {
     /// A sweep whose host is suspended after it renewed a blob's mark, for longer than the bound
     /// of that renewal's call, deletes nothing more, that blob included: the time a mark outlives
     /// its renewal no longer covers the deletion. It takes its marks away all the same.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_sweep_suspended_after_it_renewed_a_mark_deletes_nothing_more() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3465,7 +3465,7 @@ mod tests {
     }
 
     /// A pause no longer than the bound of the renewal's call deletes as before.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_sweep_paused_within_the_bound_of_its_renewal_deletes_as_before() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3480,7 +3480,7 @@ mod tests {
 
     /// Before each deletion a sweep asks the backend whether the blob is still marked, which
     /// renews its mark, and passes over a blob whose mark another sweep took away.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_sweep_asks_before_each_deletion_and_passes_over_a_blob_no_longer_marked() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3510,7 +3510,7 @@ mod tests {
 
     /// A sweep whose marking fails deletes nothing, and takes its marks away all the same: the
     /// statement may have landed though its answer was lost, and its marks would refuse uploads.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_sweep_whose_marking_fails_takes_its_marks_away() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3529,7 +3529,7 @@ mod tests {
 
     /// Marks a sweep could not take away are taken away by the next try, and only until they are
     /// gone: what the instance runs every lease renewal interval.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn marks_that_could_not_be_taken_away_are_taken_away_by_the_next_try() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3647,8 +3647,8 @@ mod tests {
 
     /// No request to the blob store runs under the lock every offer and listing waits for: while
     /// an upload asks whether its blob is stored, and while a deletion deletes one, the Packages
-    /// are still read (ADR-0039 §13).
-    /// Verifies: ADR-0039
+    /// are still read (SRV-state-stores-contract-pair §13).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_slow_blob_store_holds_no_reader_of_the_packages() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3693,8 +3693,8 @@ mod tests {
 
     /// An upload of bytes whose blob is being deleted — the last entry naming it went just
     /// before — is refused rather than recorded on a blob the deletion then takes; no entry ever
-    /// names a blob that is not stored (ADR-0039 §13).
-    /// Verifies: ADR-0039
+    /// names a blob that is not stored (SRV-state-stores-contract-pair §13).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn an_upload_never_records_a_blob_a_deletion_takes() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3735,8 +3735,8 @@ mod tests {
 
     /// A store that cannot say whether it holds an uploaded blob fails the upload with its own
     /// error, and the blob stays: neither "removed while it was uploaded" nor a deletion on a
-    /// guess (ADR-0039 §13).
-    /// Verifies: ADR-0039
+    /// guess (SRV-state-stores-contract-pair §13).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_store_that_cannot_be_asked_fails_the_upload_and_keeps_the_blob() {
         let dir = tempfile::tempdir().expect("tempdir");

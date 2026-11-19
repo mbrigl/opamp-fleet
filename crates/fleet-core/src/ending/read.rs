@@ -1,5 +1,5 @@
 //! A certificate's end read with `x509-parser` and `time`
-//! (ADR-0036 §6): what the Server's and the operator
+//! (OPS-operator-program-fleetctl §6): what the Server's and the operator
 //! tool's `pki status` list, and what the running Server watches, read and put in words once.
 //! Each program reads the file and takes its first certificate through `opamp::tls`; this module
 //! reads the end of that certificate.
@@ -91,7 +91,7 @@ mod tests {
     /// One reading of a certificate's end, and one line for it: what both `pki status` commands
     /// print over the same certificate. `now` is a whole second, as a certificate's times are,
     /// so the days left are the days the certificate was made to have.
-    /// Verifies: ADR-0036
+    /// Verifies: OPS-operator-program-fleetctl
     #[test]
     fn a_certificate_s_end_is_read_and_put_in_one_line() {
         let now = OffsetDateTime::now_utc()

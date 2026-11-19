@@ -1,4 +1,4 @@
-//! The remote configuration channel (ADR-0019): a received configuration applied or handed to
+//! The remote configuration channel (CLT-supervisor-mode-and-kinds): a received configuration applied or handed to
 //! the process adapter, and its outcome reported.
 
 use opamp::proto::{AgentRemoteConfig, RemoteConfigStatus, RemoteConfigStatuses};
@@ -13,12 +13,12 @@ impl AgentState {
     }
 
     /// The verdict on an apply — the process adapter's for a Supervisor-backed Agent, the
-    /// Engine's Supervisor-set apply for the self-Agent (ADR-0019): closes the `APPLYING` →
+    /// Engine's Supervisor-set apply for the self-Agent (CLT-supervisor-mode-and-kinds): closes the `APPLYING` →
     /// `APPLIED`/`FAILED` lifecycle (goal 4, end to end).
     ///
     /// A verdict on a hash other than the one the status holds is on an offer the status has
     /// moved past, to one applying or one that failed before its hand-over: it leaves the status
-    /// as it is, so the Server's offer of the held hash again stays a repeat (ADR-0019 §56).
+    /// as it is, so the Server's offer of the held hash again stays a repeat (CLT-supervisor-mode-and-kinds §56).
     pub fn config_applied(&mut self, hash: Vec<u8>, result: Result<(), String>) {
         let held = self.protocol.remote_config_status();
         if held.is_some_and(|held| held.last_remote_config_hash != hash) {
@@ -26,7 +26,7 @@ impl AgentState {
             return;
         }
         // The self-Agent's offer is persisted only now, on success: its hash is what a restarted
-        // Client reports as applied, and that must never get ahead of the file (ADR-0019).
+        // Client reports as applied, and that must never get ahead of the file (CLT-supervisor-mode-and-kinds).
         if let Some(applying) = self.applying.take() {
             if result.is_ok() && applying.config_hash == hash {
                 match self.storage.store_remote_config(&applying) {
@@ -42,7 +42,7 @@ impl AgentState {
     }
 
     /// A configuration still `APPLYING` names `reason` as what it waits for, the second service,
-    /// or nothing once `reason` is empty (ADR-0022 §17). Any other status stays as it is.
+    /// or nothing once `reason` is empty (CLT-accounts-service-runs-under §17). Any other status stays as it is.
     pub(super) fn config_waits(&mut self, reason: &str) {
         let Some(status) = self.protocol.remote_config_status() else {
             return;
@@ -60,7 +60,7 @@ impl AgentState {
     }
 
     /// An offer of the hash this Agent is applying or has applied is a report, not an apply
-    /// (ADR-0019 §56):
+    /// (CLT-supervisor-mode-and-kinds §56):
     /// the status it holds is owed again and nothing is stored, handed over or restarted. A Server answers a heartbeat that crossed its push with the offer again, so
     /// one offer arriving twice is the normal case. A hash whose apply `FAILED` is not held this
     /// way and is applied again. Returns whether `hash` was such a repeat.
@@ -85,7 +85,7 @@ impl AgentState {
     ///
     /// For a Supervisor-backed Agent the entry files are stored now — the process adapter is
     /// pointed at them — and the apply is handed over as pending. The self-Agent's configuration
-    /// is its Supervisor set (ADR-0019): it is left pending for the Engine's apply and stored
+    /// is its Supervisor set (CLT-supervisor-mode-and-kinds): it is left pending for the Engine's apply and stored
     /// only once that succeeded, so a restart mid-apply reports nothing as applied and the
     /// Server offers again.
     pub(super) fn apply(&mut self, config: &AgentRemoteConfig) {

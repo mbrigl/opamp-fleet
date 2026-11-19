@@ -2,7 +2,7 @@
 #
 # Self-test of scripts/sensor-implements-adrs.sh.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 #
 # Each case builds a throwaway git repository under a temporary directory with ADRs under
 # docs/adr/, adds commits on a branch whose messages say what they implement, runs the sensor

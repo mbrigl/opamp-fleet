@@ -1,5 +1,5 @@
 //! The parameters and the headers of the four lists that grow with the fleet
-//! (ADR-0030 §3, §4 and §6):
+//! (API-lists-paged-by-cursor §3, §4 and §6):
 //! `limit` and `cursor`, a `400` for a parameter a route does not name, and
 //! the `Link` and `X-Total-Count` headers of the answer.
 
@@ -285,7 +285,7 @@ mod tests {
 
     /// A cursor comes back as the position it was made of, and only for the sort and filters it
     /// was made for; one that does not parse names nothing.
-    /// Verifies: ADR-0030
+    /// Verifies: API-lists-paged-by-cursor
     #[test]
     fn a_cursor_names_its_position_for_its_own_sort_and_filters_alone() {
         let made_for = listing::digest(&[("sort", "name"), ("q", "edge")]);

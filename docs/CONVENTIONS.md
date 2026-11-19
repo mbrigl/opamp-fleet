@@ -18,7 +18,7 @@ skimmed. The design revision drops what prevented nothing
 - **A self-test asserts what it builds** — it takes its fixtures from the tree it copies or writes
   them itself, never from the template's own ADRs, scripts, or numbers, so it holds in a derived
   project and after a normalization.
-- **A comment that relies on a decision names its clause** — `ADR-0022 §25`, not the ADR
+- **A comment that relies on a decision names its clause** — `CLT-accounts-service-runs-under §25`, not the ADR
   alone, so that a normalization can re-cite it by its clause table. Several clauses take a
   section sign each, joined as the template's own text joins them: `§3, §5`, `§3 and §5`,
   `§3, §4, and §5`, a range `§3–§5`.

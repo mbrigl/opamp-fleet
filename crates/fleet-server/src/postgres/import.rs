@@ -1,4 +1,4 @@
-//! `server migrate-to-postgres` (ADR-0039 §27): an existing `data_dir` copied into
+//! `server migrate-to-postgres` (SRV-state-stores-contract-pair §27): an existing `data_dir` copied into
 //! PostgreSQL while the Server is stopped.
 //!
 //! The database is checked first: it must hold none of the Server's tables, and nothing is created
@@ -152,7 +152,7 @@ impl Records {
     }
 }
 
-/// Where the copy puts the blobs (ADR-0039 §27).
+/// Where the copy puts the blobs (SRV-state-stores-contract-pair §27).
 #[derive(Clone, Copy)]
 pub enum Blobs<'a> {
     /// The filesystem blob store: `blobs/` is copied into this new, empty `data_dir`.
@@ -163,7 +163,7 @@ pub enum Blobs<'a> {
 }
 
 /// Copies the `data_dir` `from` into the database `config` names, and its blobs where `blobs`
-/// says (ADR-0039 §27).
+/// says (SRV-state-stores-contract-pair §27).
 ///
 /// # Errors
 /// Returns an error naming what could not be read or copied, when the new `data_dir` is not
@@ -182,7 +182,7 @@ pub(crate) fn run_in(
     schema: Option<&str>,
 ) -> Result<Report, String> {
     // Nothing is created or changed before the database has been found without the Server's
-    // tables, and the old data_dir is only ever read (ADR-0039 §27).
+    // tables, and the old data_dir is only ever read (SRV-state-stores-contract-pair §27).
     if !from.is_dir() {
         return Err(format!("{} is not a data directory", from.display()));
     }
@@ -271,7 +271,7 @@ fn copy(from: &Path, target: Target<'_>, database: &Database) -> Result<Report, 
     let mut report = Report::default();
     // No audit entry is copied: the files stay where they are as the closed archive, and its last
     // entry is recorded for the first chain to name as its predecessor
-    // (ADR-0028 §9).
+    // (SEC-append-only-audit-record §9).
     let audit = from.join(fs::AUDIT);
     let archive = super::audit::archive_checked(&audit)?;
     let archive_end = archive.map(|archive| {
@@ -351,7 +351,7 @@ fn copy(from: &Path, target: Target<'_>, database: &Database) -> Result<Report, 
     Ok(report)
 }
 
-/// `server blobs-to-s3 --data-dir <data_dir>` (ADR-0039 §19):
+/// `server blobs-to-s3 --data-dir <data_dir>` (SRV-state-stores-contract-pair §19):
 /// the blobs of a Server already on PostgreSQL with the filesystem blob store, uploaded into
 /// the bucket `bucket` names. It runs while no instance holds a live lease, under the database's
 /// exclusive lock, and only reads `data_dir`; the database is read and not changed, its schema
@@ -418,7 +418,7 @@ pub(crate) fn blobs_to_s3_in(
     }
     // The blob store's lock, alone, for the whole run: an instance that starts meanwhile waits at
     // its startup sweep rather than deleting this command's staging objects
-    // (ADR-0039 §19).
+    // (SRV-state-stores-contract-pair §19).
     let hold = database.hold_blobs_within(sweep_wait)?;
     let packages = crate::Records::Postgres(database.clone())
         .packages()?
@@ -543,7 +543,7 @@ mod tests {
     /// The final check of `blobs-to-s3` refuses an object of another length under an artifact's
     /// name, naming the artifact and both sizes, as it refuses one missing; the right length
     /// passes.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn an_object_of_the_wrong_size_under_an_artifact_fails_the_check_naming_it() {
         let platform = crate::packages::Platform::new("linux", "amd64").expect("platform");
@@ -804,8 +804,8 @@ mod tests {
     /// The copy over a fixture `data_dir` carries every record into the database and the blobs
     /// into the new `data_dir`, leaves the audit record where it is as the archive and records its
     /// last entry, leaves the old `data_dir` unchanged, and refuses a database that holds the Server's tables and a
-    /// `--data-dir` that is not empty (ADR-0039 §27).
-    /// Verifies: ADR-0039
+    /// `--data-dir` that is not empty (SRV-state-stores-contract-pair §27).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn migrate_to_postgres_carries_every_record_and_leaves_the_old_data_dir() {
         let Some(test) = TestDatabase::named() else {
@@ -949,8 +949,8 @@ mod tests {
     /// `data_dir` unchanged, and a Server on PostgreSQL and S3 then opens every entry's blob. A
     /// Package entry whose blob neither the old `data_dir` nor the bucket holds fails the copy,
     /// naming the entry, and leaves the database without the Server's tables
-    /// (ADR-0039 §27).
-    /// Verifies: ADR-0039
+    /// (SRV-state-stores-contract-pair §27).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn migrate_to_postgres_with_s3_uploads_the_referenced_blobs_and_takes_no_data_dir() {
         use crate::s3::tests::{again, clear, keys, named_store};
@@ -1048,8 +1048,8 @@ mod tests {
     /// entry references and nothing else, leaves the data directory as it was, and a Server on
     /// PostgreSQL and S3 then opens every entry's blob; a second run uploads nothing. An entry whose
     /// blob the bucket does not hold afterwards fails it, naming the entry
-    /// (ADR-0039 §19).
-    /// Verifies: ADR-0039
+    /// (SRV-state-stores-contract-pair §19).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn blobs_to_s3_uploads_the_referenced_blobs_and_checks_every_entry() {
         use crate::s3::tests::{again, clear, keys, named_store};
@@ -1169,8 +1169,8 @@ mod tests {
 
     /// `server blobs-to-s3` holds the blob store's lock alone for its whole run: while it uploads,
     /// no sweep has the lock, and with the lock held elsewhere it fails naming the lock
-    /// (ADR-0039 §19).
-    /// Verifies: ADR-0039
+    /// (SRV-state-stores-contract-pair §19).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn blobs_to_s3_holds_the_blob_lock_alone_and_fails_naming_it_when_held() {
         use crate::s3::tests::{clear, named_store};
@@ -1252,8 +1252,8 @@ mod tests {
 
     /// The database is checked before anything is touched: one that cannot be reached leaves the
     /// old `data_dir` as it was — no directory created, no mode changed, no leftover removed — and
-    /// creates no new one (ADR-0039 §27). Needs no database.
-    /// Verifies: ADR-0039
+    /// creates no new one (SRV-state-stores-contract-pair §27). Needs no database.
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_copy_checks_the_database_before_it_touches_anything() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1294,7 +1294,7 @@ mod tests {
     /// Server's tables and the new `data_dir` empty. The failure is an object in the way of the
     /// schema's last table — no table, so the copy starts, and the first tables are created before
     /// the statement fails.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_copy_that_fails_leaves_the_database_without_the_servers_tables() {
         let Some(test) = TestDatabase::named() else {
@@ -1329,7 +1329,7 @@ mod tests {
     /// as its predecessor; `audit-verify --archive` checks the link over the untouched archive and
     /// fails, naming the predecessor, once the archive's last entry was changed or removed;
     /// without `--archive` the predecessor is reported as not checked.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn the_first_chain_names_the_archive_and_audit_verify_checks_the_link() {
         let Some(test) = TestDatabase::named() else {
@@ -1459,7 +1459,7 @@ mod tests {
 
     /// A file record that ends in a torn line stops the copy, naming the file, before anything is
     /// written: its end could never be verified as the first chain's predecessor.
-    /// Verifies: ADR-0028
+    /// Verifies: SEC-append-only-audit-record
     #[test]
     fn a_copy_refuses_an_audit_record_that_ends_in_a_torn_line() {
         let Some(test) = TestDatabase::named() else {

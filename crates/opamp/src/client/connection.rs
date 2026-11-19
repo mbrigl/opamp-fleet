@@ -1,4 +1,4 @@
-//! One upstream connection, described once and built here (ADR-0008).
+//! One upstream connection, described once and built here (DEV-six-crates-tokio-axum).
 //!
 //! The application says *what* to connect with: the endpoint, the credential, the trust anchors and
 //! the identity, the limit and the intervals. Everything else is built in this module: the rustls
@@ -65,7 +65,7 @@ pub struct ClientTls {
 impl ClientTls {
     /// The rustls configuration for `wss://`, always built here — never the transport's default,
     /// which would take whatever provider the process happens to have, TLS 1.2 included
-    /// (ADR-0008). Nothing configured means the web roots and no client certificate. Always
+    /// (DEV-six-crates-tokio-axum). Nothing configured means the web roots and no client certificate. Always
     /// `Some`; the `Option` keeps the callers' shape.
     ///
     /// # Errors
@@ -277,7 +277,7 @@ impl Connection {
     /// that drives the socket itself. The name's resolution gets one silence bound, and each
     /// address it resolves to, in turn, one for the TCP connection, the TLS handshake and the
     /// upgrade together, so an endpoint that accepts and never answers fails the call
-    /// (ADR-0014 §3).
+    /// (API-silent-websocket-is-ended §3).
     ///
     /// # Errors
     /// Returns an error when the material cannot be used, no address of the server can be
@@ -365,7 +365,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0008
+    /// Verifies: DEV-six-crates-tokio-axum
     #[test]
     fn the_scheme_picks_the_transport_and_anything_else_is_refused() {
         assert_eq!(Scheme::of("wss://h/v1/opamp"), Ok(Scheme::WebSocket));
@@ -376,7 +376,7 @@ mod tests {
         assert!(Scheme::of("h/v1/opamp").is_err());
     }
 
-    /// Verifies: ADR-0008, ADR-0012
+    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input
     #[test]
     fn plaintext_is_refused_off_the_loopback_literals() {
         let allowed = |endpoint| connection(endpoint, Some("Bearer t")).scheme();
@@ -405,11 +405,11 @@ mod tests {
             .is_err());
     }
 
-    /// Verifies: ADR-0008, ADR-0012
+    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input
     /// The probe of an offered endpoint that accepts the TCP connection and never answers fails
     /// once the bound has passed, rather than holding the session that asked for it
-    /// (ADR-0014 §3).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §3).
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn a_probe_of_an_endpoint_that_never_answers_fails_within_the_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -441,7 +441,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[tokio::test]
     async fn plaintext_off_the_loopback_is_refused_before_connecting() {
         let refused = connection("ws://192.0.2.1:9/v1/opamp", None);
@@ -469,7 +469,7 @@ mod tests {
         assert!(!shown.contains("secret"), "{shown}");
     }
 
-    /// Verifies: ADR-0008
+    /// Verifies: DEV-six-crates-tokio-axum
     #[test]
     fn no_tls_material_still_offers_tls_1_3_alone() {
         let config = ClientTls::default()

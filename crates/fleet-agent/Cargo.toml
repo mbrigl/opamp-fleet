@@ -1,8 +1,8 @@
 [package]
 name = "fleet-agent"
-description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (ADR-0016)"
+description = "OpAMP Fleet Client: the process an operator installs to place a machine under management (CLT-modes-and-gateway)"
 # The test stubs (src/bin/stub_*.rs) are further binaries; `cargo run -p fleet-agent` means this one.
-# The operator tools are not here at all: they are `crates/fleet-tools` (ADR-0008).
+# The operator tools are not here at all: they are `crates/fleet-tools` (DEV-six-crates-tokio-axum).
 default-run = "supervisor"
 version.workspace = true
 edition.workspace = true
@@ -10,14 +10,14 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# ADR-0021: the package keeps its build-time name, the shipped binary does
+# CLT-installed-service-and-state: the package keeps its build-time name, the shipped binary does
 # not. A Cargo package name never leaves the repository; this is the name on the host, in `ps`, and
 # in the unit file.
 [[bin]]
 name = "supervisor"
 path = "src/main.rs"
 
-# ADR-0019 §2: each wrapped Supervisor kind is a feature named after its `type`, all of them
+# CLT-supervisor-mode-and-kinds §2: each wrapped Supervisor kind is a feature named after its `type`, all of them
 # in the published build. `collector` and `command` are the core's own and always compiled in.
 [features]
 default = []
@@ -28,11 +28,11 @@ clap.workspace = true
 opamp = { workspace = true, features = ["client", "server"] }
 fleet-core.workspace = true
 # What the Client shares with the operator tool: the unpackers, the reads that follow no link, the
-# password-file reader and the bootstrap identity (ADR-0008).
+# password-file reader and the bootstrap identity (DEV-six-crates-tokio-axum).
 fleet-util.workspace = true
-# ADR-0021, ADR-0022: service lifecycle and the content hash in the install layout's manifest.
+# CLT-installed-service-and-state, CLT-accounts-service-runs-under: service lifecycle and the content hash in the install layout's manifest.
 service-manager.workspace = true
-# ADR-0021: the questionnaire `service install --interactive` and `service config` run.
+# CLT-installed-service-and-state: the questionnaire `service install --interactive` and `service config` run.
 dialoguer.workspace = true
 sha2.workspace = true
 tokio.workspace = true
@@ -40,9 +40,9 @@ prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-# ADR-0019: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
+# CLT-supervisor-mode-and-kinds: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
 # the file — comments, ordering, formatting — exactly as written; the questionnaire's edit of an
-# existing file does the same (ADR-0021 §24).
+# existing file does the same (CLT-installed-service-and-state §24).
 toml_edit.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
@@ -56,7 +56,7 @@ ring.workspace = true
 rcgen.workspace = true
 time.workspace = true
 # `verify`: a Gateway with a bootstrap CA tells a member from an enrolling peer by whether a CA of
-# its client CA file signed the certificate, as the Server does (ADR-0016).
+# its client CA file signed the certificate, as the Server does (CLT-modes-and-gateway).
 x509-parser = { workspace = true, features = ["verify"] }
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
@@ -67,35 +67,35 @@ tracing-opentelemetry.workspace = true
 opentelemetry-http.workspace = true
 async-trait.workspace = true
 # `network` on top of the workspace's `system`: the interface enumeration behind `host.ip` and
-# `host.mac` (ADR-0018).
+# `host.mac` (CLT-what-an-agent-reports).
 sysinfo = { workspace = true, features = ["network"] }
-# The downstream OpAMP endpoint of Gateway Mode (ADR-0016) is `opamp::server`'s, an axum router;
-# its WebSocket upgrade is `opamp`'s own (ADR-0008). The HTTP engine under it — hyper, tower,
+# The downstream OpAMP endpoint of Gateway Mode (CLT-modes-and-gateway) is `opamp::server`'s, an axum router;
+# its WebSocket upgrade is `opamp`'s own (DEV-six-crates-tokio-axum). The HTTP engine under it — hyper, tower,
 # http-body — is already linked through reqwest; this adds the routing layer.
 axum.workspace = true
-# ADR-0015: the Client's keys, the password and bytes of a `bootstrap.p12` and the Supervisor
+# SEC-secrets-wiped-on-drop: the Client's keys, the password and bytes of a `bootstrap.p12` and the Supervisor
 # Endpoint token are held in buffers wiped on drop. No TLS or crypto backend comes with it
-# (ADR-0012).
+# (SEC-tls13-two-planes-bounded-input).
 zeroize.workspace = true
 
-# ADR-0019: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
+# CLT-supervisor-mode-and-kinds: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
 # which has no SIGTERM equivalent (there, kill is the stop).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
-# ADR-0021: the SCM runtime shim, so the daemon runs under the Windows Service Control Manager.
+# CLT-installed-service-and-state: the SCM runtime shim, so the daemon runs under the Windows Service Control Manager.
 # Not compiled on Linux/macOS.
 [target.'cfg(windows)'.dependencies]
 windows-service.workspace = true
 
-# ADR-0021: the native installers. Both tools read the fields above rather than restating them, and
+# CLT-installed-service-and-state: the native installers. Both tools read the fields above rather than restating them, and
 # both package the binary the release job already built (`--no-build` / a plain `--target`), so the
 # bytes in a `.deb` are the bytes in its sibling `.7z`.
 #
 # Neither ships a systemd unit — deliberately. `cargo-deb`'s `systemd-units` integration would write
-# a second registration knowing nothing of ADR-0022's service name or ADR-0021's restart policy; the
-# maintainer scripts call `service install` instead, which is the one install path (ADR-0022).
-# The package carries the **product's** name (ADR-0021 §9), not the program's: a second
+# a second registration knowing nothing of CLT-accounts-service-runs-under's service name or CLT-installed-service-and-state's restart policy; the
+# maintainer scripts call `service install` instead, which is the one install path (CLT-accounts-service-runs-under).
+# The package carries the **product's** name (CLT-installed-service-and-state §9), not the program's: a second
 # instance is a second build, and two variants that shared a package name could not be installed
 # side by side. `cargo-deb`'s `[package.metadata.deb.variants.<name>]` is the seam a variant build
 # would use to override it without templating this manifest.
@@ -114,23 +114,23 @@ packages the Server offers.
 The package delivers the binary only. `supervisor service install`, which the post-install \
 runs, lays out the versioned install root and registers the systemd service."""
 # Derived from what the binary actually links, rather than a floor somebody typed — and `passwd`,
-# which ships the `useradd` the post-install creates the account with (ADR-0022 §3).
+# which ships the `useradd` the post-install creates the account with (CLT-accounts-service-runs-under §3).
 depends = "$auto, passwd"
 # Always spelled `target/release/`, whatever the real target directory is: cargo-deb rewrites the
 # prefix itself for a cross build, and a hand-adjusted path defeats that.
 #
-# `usr/libexec`, not `usr/bin` (ADR-0022): what an operator invokes on PATH is the symlink the
+# `usr/libexec`, not `usr/bin` (CLT-accounts-service-runs-under): what an operator invokes on PATH is the symlink the
 # maintainer scripts lay through the layout's `current` pointer, so the CLI always answers for the
 # binary the service runs. The payload itself stays off PATH.
 #
-# A directory named after the product, holding a file named after the program (ADR-0021 §3 and §13): two variant builds ship the same program under different products, so a bare
+# A directory named after the product, holding a file named after the program (CLT-installed-service-and-state §3 and §13): two variant builds ship the same program under different products, so a bare
 # `usr/libexec/supervisor` would be one file two packages both claim to own.
 assets = [["target/release/supervisor", "usr/libexec/opamp-fleet/", "755"]]
 maintainer-scripts = "../../packaging/linux"
 
 [package.metadata.generate-rpm]
 name = "opamp-fleet"
-# One `Release`, forever: ADR-0037 releases a version once, so there is never a second build of one.
+# One `Release`, forever: OPS-cargo-decides-product-version releases a version once, so there is never a second build of one.
 release = "1"
 assets = [
     { source = "target/release/supervisor", dest = "/usr/libexec/opamp-fleet/supervisor", mode = "755" },
@@ -139,7 +139,7 @@ assets = [
 # taken as the scriptlet body itself — so the release job asserts with `rpm -qp --scripts` that what
 # landed in the package is the script and not its file name.
 #
-# `%posttrans` re-lays the `/usr/bin` symlink (ADR-0022): on an upgrade, rpm erases the *old*
+# `%posttrans` re-lays the `/usr/bin` symlink (CLT-accounts-service-runs-under): on an upgrade, rpm erases the *old*
 # package's files after the new `%post` has run, which deletes the link `%post` just created — the
 # transaction scriptlet runs after that erasure, so its link is the one that survives.
 post_install_script = "../../packaging/linux/postinst"
@@ -147,7 +147,7 @@ pre_uninstall_script = "../../packaging/linux/prerm"
 post_uninstall_script = "../../packaging/linux/postrm"
 post_trans_script = "../../packaging/linux/posttrans"
 
-# The post-install creates the account `opamp-fleet` with `useradd` (ADR-0022 §3). A file
+# The post-install creates the account `opamp-fleet` with `useradd` (CLT-accounts-service-runs-under §3). A file
 # dependency, because the package that ships it is `shadow-utils` on Fedora and RHEL and `shadow`
 # on SUSE. cargo-generate-rpm writes a plain `Requires:`; it has no `Requires(post):` form.
 [package.metadata.generate-rpm.requires]
@@ -157,17 +157,17 @@ post_trans_script = "../../packaging/linux/posttrans"
 # Virtual time, so a bound measured in minutes is tested in milliseconds.
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
-# ADR-0022: a test reads the process account back from a plist as `service-manager` writes it,
+# CLT-accounts-service-runs-under: a test reads the process account back from a plist as `service-manager` writes it,
 # through the crate it writes with.
 plist = "1"
 # A test holds a TLS connection open mid-headers on the Gateway (H18), below what a client library
 # would let it do.
 rustls.workspace = true
 # Tests build the `.tar.gz` fixtures the Client then installs; the unpackers themselves are
-# `fleet-util`'s (ADR-0008).
+# `fleet-util`'s (DEV-six-crates-tokio-axum).
 flate2.workspace = true
 tar.workspace = true
-# ADR-0019: the end-to-end test runs the real Server in-process against the real Client binary.
+# CLT-supervisor-mode-and-kinds: the end-to-end test runs the real Server in-process against the real Client binary.
 fleet-server = { path = "../fleet-server" }
 # The test of the Client's two homes for `*at` system calls reads its sources and `fleet-util`'s
 # as a syntax tree.

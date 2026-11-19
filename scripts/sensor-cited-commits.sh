@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Sensor: the commits the plan and the backlog cite (ADR-0002, the sensors the template ships).
+# Sensor: the commits the plan and the backlog cite (NUC-checks-are-bash §4, the sensors the template ships).
 #
 # Lists the commit hashes written in the files under docs/plan/ and docs/backlog/ that the head
 # does not reach. A rework that rewrites a branch leaves the old hashes in a ticket or an entry;

@@ -4,7 +4,7 @@
 //!
 //! The code is read as a syntax tree, without the items under a `cfg` that cannot hold without
 //! `test`. The cut is a copy of the one in `crates/fleet-util/tests/who_shares.rs`: sharing it
-//! across crates would take a crate of its own (ADR-0008).
+//! across crates would take a crate of its own (DEV-six-crates-tokio-axum).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

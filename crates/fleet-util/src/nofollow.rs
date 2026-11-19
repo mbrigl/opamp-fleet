@@ -1,5 +1,5 @@
 //! File operations in a directory the Client's service account can write, which never follow a
-//! link that account could have planted (ADR-0022).
+//! link that account could have planted (CLT-accounts-service-runs-under).
 //!
 //! `service install` and `service config` run as root or as an Administrator, and they write into
 //! the state directory and the executable layout, which belong to the service's account. A plain
@@ -24,7 +24,7 @@
 //! writes. A directory below it is reached through [`HeldDir::dir`], one held name at a time.
 //!
 //! Every file is read one way: opened as a regular file, through no link at its name, and read
-//! within a bound into a buffer sized before it reads and wiped when it is dropped (ADR-0015), so
+//! within a bound into a buffer sized before it reads and wiped when it is dropped (SEC-secrets-wiped-on-drop), so
 //! a privileged step never reads more than it expects, and no grown copy of a secret is left
 //! behind. A path a privileged step did not choose itself is resolved by [`read_privileged`].
 
@@ -217,7 +217,7 @@ pub fn read(path: &Path, limit: u64) -> io::Result<Zeroizing<Vec<u8>>> {
 
 /// What the opened `file` holds, where it is a regular file of at most `limit` bytes: the one read
 /// of this module. The buffer is sized before it reads, so it is never grown and a copy left
-/// behind, and it is wiped when it is dropped (ADR-0015). A file that grew past the bound since
+/// behind, and it is wiped when it is dropped (SEC-secrets-wiped-on-drop). A file that grew past the bound since
 /// is refused.
 ///
 /// # Errors
@@ -274,7 +274,7 @@ const MAX_LINKS: usize = 40;
 ///
 /// - **A root or the state directory** that the walk reaches must hold the file directly: the
 ///   name after it is opened in that directory, held, and a link at the name is refused. A root
-///   is held as [`HeldDir::open_root`] holds it (ADR-0022 §13), the state directory without
+///   is held as [`HeldDir::open_root`] holds it (CLT-accounts-service-runs-under §13), the state directory without
 ///   following a link at its own name (clauses 11 and 12). The state directory directly in a root
 ///   is reached by that name too, and counts as the account's where it is missing.
 /// - **A path that goes on beneath one of them** is refused: a directory there could be a link
@@ -480,7 +480,7 @@ fn refused_link(path: &Path) -> io::Error {
 /// The `*at` system calls this module and the Client share on Unix, each wrapped once here: a
 /// directory held by its handle, and an entry in it named and never followed where the flags say
 /// so. The rest of this module and the Client's state, its reconfiguration and its service manager
-/// work by directory handle through these (ADR-0022 §11–§15).
+/// work by directory handle through these (CLT-accounts-service-runs-under §11–§15).
 #[cfg(unix)]
 pub mod at {
     use std::ffi::CStr;
@@ -1018,7 +1018,7 @@ mod tests {
 
     /// A link at the file's own name is refused for a path the account's file offered, and
     /// followed for the administrator's; a file over the bound is refused, naming the bound.
-    /// Verifies: ADR-0022
+    /// Verifies: CLT-accounts-service-runs-under
     #[test]
     fn a_privileged_read_holds_a_link_at_the_name_to_whose_word_the_path_is() {
         let dir = tempfile::tempdir().expect("tempdir");

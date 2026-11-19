@@ -7,7 +7,7 @@ description: Review a change in a fresh context before its hand-off. Use when a 
 
 The rule is [`AGENTS.md` §5](../../../AGENTS.md#5-quality-bar--definition-of-done). This skill is
 what the reviewer is given and the order in which it reports; it states no rule of its own
-([ADR-0003](../../../docs/adr/0003-procedures-as-skills.md)).
+([NUC-procedures-are-skills](../../../docs/adr/NUC-procedures-are-skills.md)).
 
 ## 1. Inputs — and nothing else
 

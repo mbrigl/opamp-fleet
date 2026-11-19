@@ -1,5 +1,5 @@
 //! The WebSocket transport: one connection, reconnected with backoff, carrying every Agent of the
-//! session — the *n* over one of ADR-0016.
+//! session — the *n* over one of CLT-modes-and-gateway.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -46,7 +46,7 @@ const CLOSE_ANSWER: Duration = Duration::from_millis(1500);
 
 /// How long a connection may stay silent: a WebSocket ping goes out once nothing has arrived for
 /// `ping_after`, and the connection ends once nothing has arrived for `end_after`
-/// (ADR-0014).
+/// (API-silent-websocket-is-ended).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Silence {
     pub ping_after: Duration,
@@ -180,7 +180,7 @@ pub async fn run_from<S: Session, X: StopSignal>(
                     "admission failed: the server refused this client (HTTP 401)"
                 );
             }
-            // Throttled (ADR-0012 §4): the Server asked
+            // Throttled (SEC-tls13-two-planes-bounded-input §4): the Server asked
             // to be given this long, and is given at least that.
             Err(Connect::Refused(WsError::Http(response)))
                 if response.status() == StatusCode::SERVICE_UNAVAILABLE
@@ -228,7 +228,7 @@ pub async fn run_from<S: Session, X: StopSignal>(
 /// the endpoint's name is resolved within one silence bound, and its addresses are tried in turn
 /// by [`open_each`], so an endpoint that accepts and never answers is a failed attempt rather than
 /// a wait without end, and one dead address does not hide the next
-/// (ADR-0014 §3).
+/// (API-silent-websocket-is-ended §3).
 pub(crate) async fn open(settings: &Settings, local: Option<IpAddr>) -> Result<Socket, Connect> {
     let bound = Silence::of(settings.heartbeat).end_after;
     let (_, host, port) = target(&settings.endpoint, &settings.headers)?;
@@ -484,7 +484,7 @@ async fn serve<S: Session, X: StopSignal>(
     // A Server that sends nothing for a heartbeat interval, not even the pong to a ping sent
     // half-way, is taken for lost: frozen, without power or cut off, it closes nothing, and TCP
     // would hold the connection for many minutes
-    // (ADR-0014).
+    // (API-silent-websocket-is-ended).
     let silence = Silence::of(settings.heartbeat);
     let mut heard = tokio::time::Instant::now();
     let mut pinged = None;
@@ -536,7 +536,7 @@ async fn serve<S: Session, X: StopSignal>(
                         };
                         if let Some(delay) = session.on_reply(&reply) {
                             // The server is throttling: drop the connection and come back after
-                            // the wait it named (ADR-0012's *Context*).
+                            // the wait it named (SEC-tls13-two-planes-bounded-input's *Context*).
                             let _ = socket.close(None).await;
                             return Served::Throttled {
                                 wait: delay,
@@ -555,7 +555,7 @@ async fn serve<S: Session, X: StopSignal>(
                                 // The Server's close, its frame or the connection's end, before
                                 // the next connection reports: else the Server may still hold the
                                 // Agents carried here and take the next one for another peer
-                                // (ADR-0025 §8). A Server that does not answer within the
+                                // (SRV-instances-share-one-postgresql §8). A Server that does not answer within the
                                 // bound does not hold the Client back.
                                 let _ = tokio::time::timeout(CLOSE_ANSWER, async {
                                     while let Some(Ok(message)) = socket.next().await {
@@ -681,7 +681,7 @@ mod tests {
     /// A refused upgrade waits its `Retry-After` or the next exponential step, whichever is
     /// longer, and one of zero or without the header waits the step; a connection that stood and
     /// was lost draws its first reconnect over `[0, 30 s)`.
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[test]
     fn a_refused_upgrade_waits_its_retry_after_or_the_next_step() {
         let mut backoff = Backoff::new();
@@ -744,8 +744,8 @@ mod tests {
     }
 
     /// A connection opened from a named local address reaches the server from that address
-    /// (ADR-0025 §20).
-    /// Verifies: ADR-0025
+    /// (SRV-instances-share-one-postgresql §20).
+    /// Verifies: SRV-instances-share-one-postgresql
     #[tokio::test]
     async fn a_connection_from_a_named_address_reaches_the_server_from_it() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -789,8 +789,8 @@ mod tests {
     }
 
     /// A lost connection logs the delay it drew, and the next connection comes no earlier
-    /// (ADR-0025 §20).
-    /// Verifies: ADR-0025
+    /// (SRV-instances-share-one-postgresql §20).
+    /// Verifies: SRV-instances-share-one-postgresql
     #[tokio::test]
     async fn a_lost_connection_logs_the_delay_it_drew_and_waits_it() {
         let written = Written::default();
@@ -930,7 +930,7 @@ mod tests {
     /// On verified connection settings the Client leaves the connection only once the Server
     /// answered its close, here 300 ms after it: the next connection is dialled after that, so the
     /// Server has ended the session before the next one reports.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[tokio::test]
     async fn a_reconnect_on_verified_settings_waits_for_the_servers_close() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -952,7 +952,7 @@ mod tests {
     }
 
     /// A Server that never answers the close holds the Client back no longer than the bound.
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-instances-share-one-postgresql
     #[tokio::test]
     async fn a_reconnect_waits_no_longer_than_the_bound_for_a_silent_server() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1008,10 +1008,10 @@ mod tests {
     /// An `Unavailable` the Client honours keeps it away the wait the Server named, or the next
     /// backoff step when that is longer, and no draw over the window after a lost connection is
     /// added on top: the Client closed the connection itself, the Server did not lose it, so the
-    /// wait is the one a refused upgrade waits (ADR-0012's *Context* and clause 4's refused upgrade). Twice in a
+    /// wait is the one a refused upgrade waits (SEC-tls13-two-planes-bounded-input's *Context* and clause 4's refused upgrade). Twice in a
     /// row, so a draw over `[0, 30 s)` on top cannot pass by landing low; each connection handles
     /// a reply first, so each starts the steps again.
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[tokio::test]
     async fn an_honoured_unavailable_waits_the_named_wait_and_draws_nothing_on_top() {
         const WAIT: Duration = Duration::from_secs(1);
@@ -1080,8 +1080,8 @@ mod tests {
     /// Consecutive `Unavailable`s grow along the backoff: a named wait of zero, as a Server that
     /// leaves `retry_after_nanoseconds` unset sends, is not a reconnect a second for ever. A named
     /// wait longer than the step is waited, not added to it. A connection whose reply was handled
-    /// before the next `Unavailable` starts the steps again (ADR-0012 §4).
-    /// Verifies: ADR-0012
+    /// before the next `Unavailable` starts the steps again (SEC-tls13-two-planes-bounded-input §4).
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[tokio::test]
     async fn consecutive_unavailables_grow_along_the_backoff_until_a_reply_is_handled() {
         const NAMED: Duration = Duration::from_millis(2500);
@@ -1172,8 +1172,8 @@ mod tests {
 
     /// The bounds follow the heartbeat: a ping after half an interval of silence, the end after a
     /// whole one; without a heartbeat, the default interval of 30 seconds
-    /// (ADR-0014 §2).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §2).
+    /// Verifies: API-silent-websocket-is-ended
     #[test]
     fn the_bounds_follow_the_heartbeat_and_are_thirty_seconds_without_one() {
         let thirty = Silence {
@@ -1238,8 +1238,8 @@ mod tests {
 
     /// A session busy with each reply for longer than an interval keeps a connection to a server
     /// that answers everything: its own delay is not the server's silence
-    /// (ADR-0014 §1).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §1).
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn a_session_busy_for_longer_than_an_interval_keeps_a_live_connection() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1294,8 +1294,8 @@ mod tests {
     /// The exact window: without a ping the next act is the ping, half an interval after the last
     /// sign of life; with one, the end comes a whole interval after the last sign of life, or the
     /// rest of the interval after the ping when the ping went out late
-    /// (ADR-0014 §1).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §1).
+    /// Verifies: API-silent-websocket-is-ended
     #[test]
     fn the_pong_is_given_the_rest_of_the_interval_from_its_ping() {
         let silence = Silence::of(Some(Duration::from_secs(30)));
@@ -1348,9 +1348,9 @@ mod tests {
 
     /// A connection on which nothing arrives for one heartbeat interval is ended as a lost one,
     /// with a log line naming the bound, and no sooner than the bound
-    /// (ADR-0014 §1,
+    /// (API-silent-websocket-is-ended §1,
     /// 4).
-    /// Verifies: ADR-0014
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn a_connection_on_which_nothing_arrives_for_a_heartbeat_interval_is_ended() {
         let written = Written::default();
@@ -1391,9 +1391,9 @@ mod tests {
 
     /// A server that answers pings and sends nothing else keeps the connection over many bounds:
     /// the pongs are signs of life
-    /// (ADR-0014 §1,
+    /// (API-silent-websocket-is-ended §1,
     /// 2).
-    /// Verifies: ADR-0014
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn a_server_that_answers_only_pings_keeps_the_connection() {
         const PINGS: usize = 8;
@@ -1443,8 +1443,8 @@ mod tests {
 
     /// An upgrade that is never answered — a TCP connection accepted by a kernel whose process
     /// is frozen — fails once the bound has passed
-    /// (ADR-0014 §3).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §3).
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn an_upgrade_that_is_never_answered_fails_within_the_bound() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1473,8 +1473,8 @@ mod tests {
     /// A name whose first address accepts a TCP connection and never answers, as a frozen
     /// process's kernel does, still connects: that address gives way to the next once its own
     /// interval has passed, and the upgrade to the next carries the name, not the address
-    /// (ADR-0014 §3).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §3).
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn an_address_not_reached_within_its_interval_gives_way_to_the_next() {
         // The kernel completes the TCP connection into the backlog; nothing ever answers it.
@@ -1579,8 +1579,8 @@ mod tests {
     /// An HTTP answer to the upgrade is the Server's verdict, not an address that was not
     /// reached: a refusal on the first address ends the attempt as it is, and the next address is
     /// not tried
-    /// (ADR-0014 §3).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §3).
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn an_http_answer_on_the_first_address_ends_the_attempt() {
         let (opened, tried) =
@@ -1596,8 +1596,8 @@ mod tests {
 
     /// An address that answers the upgrade with something that is not HTTP was reached all the
     /// same: its answer ends the attempt, and the next address is not tried
-    /// (ADR-0014 §3).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §3).
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn an_answer_that_is_no_http_on_the_first_address_ends_the_attempt() {
         let (opened, tried) = first_answers(b"this is no HTTP at all\r\n\r\n").await;
@@ -1612,8 +1612,8 @@ mod tests {
 
     /// A first address that refuses the connection, as `::1` does to a Server listening on
     /// `127.0.0.1` only, gives way to the next at once
-    /// (ADR-0014 §3).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §3).
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn a_first_address_that_refuses_gives_way_to_the_next() {
         // A port that was bound and is free again: nothing listens on it, so it refuses.
@@ -1649,8 +1649,8 @@ mod tests {
 
     /// A `wss` endpoint opened to an address carries the endpoint's name as the TLS server name,
     /// so the certificate is checked against the name, not the address
-    /// (ADR-0014 §3).
-    /// Verifies: ADR-0014
+    /// (API-silent-websocket-is-ended §3).
+    /// Verifies: API-silent-websocket-is-ended
     #[tokio::test]
     async fn the_tls_server_name_is_the_endpoints_name() {
         crate::tls::install_ring_provider();

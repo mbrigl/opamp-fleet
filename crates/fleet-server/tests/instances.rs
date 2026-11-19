@@ -1,5 +1,5 @@
 //! Several Server instances on one PostgreSQL database, each through its real listeners
-//! (ADR-0025):
+//! (SRV-instances-share-one-postgresql):
 //! both hold a lease and serve, a revocation committed on one ends the session it concerns on the
 //! other, and an instance whose database stops answering closes its listeners until it holds a new
 //! lease.
@@ -359,7 +359,7 @@ impl Pki {
 
 /// The CAs of instances whose client CA key is on a token: that CA's certificate, its key named
 /// by its label, a bootstrap CA in a file, and the token's settings
-/// (ADR-0026).
+/// (SEC-admission-by-client-certificate).
 struct Signing<'a> {
     token: &'a token::TestToken,
     client_ca_pem: String,
@@ -980,7 +980,7 @@ async fn eventually(within: Duration, condition: impl Fn() -> bool) -> bool {
 /// by its notification or at the latest by the next renewal, and no other session. The wait is
 /// bounded at three renewal intervals, as for a notification missed, leaving a loaded host its
 /// delays.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: SRV-instances-share-one-postgresql, SEC-admission-by-client-certificate
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_on_one_instance_ends_the_session_on_the_other() {
     let Some(schema) = Schema::named() else {
@@ -1063,7 +1063,7 @@ fn freezable_proxy(target: SocketAddr) -> (u16, Arc<AtomicBool>) {
 /// An instance whose database stops answering past its lease closes both listeners, so the probe
 /// fails; once the database answers again it takes a new lease under a new instance id and opens
 /// them again.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_one() {
     let Some(schema) = Schema::named() else {
@@ -1111,7 +1111,7 @@ async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_o
 /// An instance that lost its lease takes a new one, and that take removes its lapsed lease: the
 /// take has the cleanup of the staging objects run, as the binary wires it to the lease, though no
 /// renewal took over a lease.
-/// Verifies: ADR-0025, ADR-0039
+/// Verifies: SRV-instances-share-one-postgresql, SRV-state-stores-contract-pair
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_lease_whose_take_removes_a_lapsed_one_runs_the_staging_cleanup() {
     let Some(schema) = Schema::named() else {
@@ -1177,7 +1177,7 @@ async fn a_new_lease_whose_take_removes_a_lapsed_one_runs_the_staging_cleanup() 
 /// of its host, answers nothing more: its next request is not served, a message on a session it
 /// carried is not answered and the session is cut, and it holds no lease until it takes a new one
 /// under a new instance id, with both listeners open again.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_whose_clock_jumps_past_its_lapse_serves_nothing_until_it_holds_a_new_lease() {
     use futures_util::{SinkExt, StreamExt};
@@ -1283,7 +1283,7 @@ fn records(schema: &Schema) -> Records {
 
 /// Two instances that each revoke a certificate at the same moment keep both revocations: each
 /// adds its own row, and neither writes the list it holds over the other's.
-/// Verifies: ADR-0025, Q-1
+/// Verifies: SRV-instances-share-one-postgresql, Q-1
 #[test]
 fn two_revocations_committed_at_once_on_two_instances_are_both_kept() {
     let Some(schema) = Schema::named() else {
@@ -1337,7 +1337,7 @@ fn two_revocations_committed_at_once_on_two_instances_are_both_kept() {
 /// An instance that holds an older floor in memory cannot lower the one another instance stored:
 /// the floor is decided from the stored row, and the answer is the `409` of a lower floor, naming
 /// the stored version, which the instance then holds.
-/// Verifies: ADR-0025, ADR-0034, Q-6
+/// Verifies: SRV-instances-share-one-postgresql, PKG-versions-high-water-mark-floor, Q-6
 #[test]
 fn an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one() {
     use fleet_server::floors::FloorError;
@@ -1418,7 +1418,7 @@ fn released(configuration: &str, hash: &str) -> fleet_server::agent_store::Persi
 /// revisions: each adds the row it pins and deletes none, and the collection each runs after its
 /// rollout reckons what the Configuration keeps from the stored assignments, in its own
 /// transaction, not from the one assignment the instance knows of.
-/// Verifies: ADR-0025, ADR-0032
+/// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
 #[test]
 fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
     use fleet_server::configs::{revision_hash, ConfigStore, Revision};
@@ -1497,7 +1497,7 @@ fn two_revisions_rolled_out_at_once_on_two_instances_are_both_kept() {
 /// Two instances that each add an entry of another platform to one Package at the same moment
 /// keep both: each writes the row of its platform, and neither writes the Package it holds over
 /// the other's.
-/// Verifies: ADR-0025, ADR-0033
+/// Verifies: SRV-instances-share-one-postgresql, PKG-signed-packages-and-delivery
 #[test]
 fn two_entries_added_at_once_on_two_instances_are_both_kept() {
     use fleet_server::packages::{PackageId, PackageStore, Platform};
@@ -1555,7 +1555,7 @@ fn two_entries_added_at_once_on_two_instances_are_both_kept() {
 /// writes the row of its member under the Deployment's row lock, and neither writes the
 /// Deployment it holds over the other's. A type another instance filled is refused from what is
 /// stored, whatever the refusing instance holds in memory.
-/// Verifies: ADR-0025, ADR-0032, ADR-0033
+/// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts, PKG-signed-packages-and-delivery
 #[test]
 fn two_members_added_at_once_on_two_instances_are_both_kept() {
     use fleet_server::deployments::{DeploymentError, DeploymentStore};
@@ -1674,7 +1674,7 @@ impl Instance {
 }
 
 impl Pki {
-    /// A certificate and key naming `host` the way the Server's own signer does (ADR-0027 §11),
+    /// A certificate and key naming `host` the way the Server's own signer does (SEC-bootstrap-certificates-and-enrolment §11),
     /// and no other name.
     fn issue_to_host(&self, host: &str) -> (String, String) {
         let ca_key = KeyPair::from_pem(&self.ca_key_pem).expect("ca key");
@@ -1792,7 +1792,7 @@ fn database_address(schema: &Schema) -> SocketAddr {
 /// An instance whose listening connection is cut and restored acts as if everything had changed:
 /// a revocation committed on A while B heard nothing ends B's session of that certificate once B
 /// listens again.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: SRV-instances-share-one-postgresql, SEC-admission-by-client-certificate
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_committed_while_the_listening_connection_was_cut_ends_its_session_once_back()
 {
@@ -1858,7 +1858,7 @@ async fn while_cut<T: Send + 'static>(
 
 /// An assignment A releases to an Agent B carries while B's listening connection is cut is held
 /// by B once it listens again.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_assignment_committed_while_the_listening_connection_was_cut_is_held_once_back() {
     let Some(schema) = Schema::named() else {
@@ -1910,7 +1910,7 @@ async fn an_assignment_committed_while_the_listening_connection_was_cut_is_held_
 
 /// A restart A queues for an Agent B carries while B's listening connection is cut is held by B
 /// once it listens again, which sends it.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_requested_while_the_listening_connection_was_cut_is_sent_once_back() {
     let Some(schema) = Schema::named() else {
@@ -1940,7 +1940,7 @@ async fn a_restart_requested_while_the_listening_connection_was_cut_is_sent_once
 
 /// Labels A sets on an Agent B carries while B's listening connection is cut are held by B once
 /// it listens again.
-/// Verifies: ADR-0025, ADR-0029
+/// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn labels_set_while_the_listening_connection_was_cut_are_held_once_back() {
     let Some(schema) = Schema::named() else {
@@ -1975,7 +1975,7 @@ async fn labels_set_while_the_listening_connection_was_cut_are_held_once_back() 
 
 /// Labels A sets on a Client Agent it carries while B's listening connection is cut reach the
 /// Agent of the same Host B carries, which inherits them once B listens again.
-/// Verifies: ADR-0025, ADR-0029
+/// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_client_agents_labels_set_while_the_listening_connection_was_cut_are_inherited_once_back()
 {
@@ -2032,7 +2032,7 @@ async fn a_client_agents_labels_set_while_the_listening_connection_was_cut_are_i
 
 /// An Agent B carries that A takes while B's listening connection is cut is carried by B no more
 /// once it listens again.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_taken_while_the_listening_connection_was_cut_is_released_once_back() {
     let Some(schema) = Schema::named() else {
@@ -2065,7 +2065,7 @@ async fn an_agent_taken_while_the_listening_connection_was_cut_is_released_once_
 
 /// A notification of a kind the instance does not know, as a newer version sends, has it read
 /// everything again: a revocation it was not told of ends its session.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_notification_of_an_unknown_kind_has_everything_read_again() {
     let Some(schema) = Schema::named() else {
@@ -2098,7 +2098,7 @@ async fn a_notification_of_an_unknown_kind_has_everything_read_again() {
 
 /// The `ETag` of the Gateways' revocation list one instance answered is answered `304` by
 /// another, and a revocation on either moves it on both.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: SRV-instances-share-one-postgresql, SEC-admission-by-client-certificate
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_etag_one_instance_answered_is_answered_304_by_another() {
     let Some(schema) = Schema::named() else {
@@ -2176,7 +2176,7 @@ async fn an_etag_one_instance_answered_is_answered_304_by_another() {
 }
 
 /// A floor set on A is what B serves the next Agent that asks for the floors.
-/// Verifies: ADR-0025, ADR-0034
+/// Verifies: SRV-instances-share-one-postgresql, PKG-versions-high-water-mark-floor
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_floor_set_on_one_instance_is_served_by_the_other() {
     let Some(schema) = Schema::named() else {
@@ -2561,7 +2561,7 @@ async fn on_one_token(
 /// both sign renewals: a host renews on A and another on B, each to a certificate the token's key
 /// signed, and each signature is in that instance's record. The hosts' certificates come from the
 /// CA beside it in `client_ca_file`, so each moves to the token's key at its renewal.
-/// Verifies: ADR-0026
+/// Verifies: SEC-admission-by-client-certificate
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_instances_on_one_token_both_sign_renewals() {
     let Some(schema) = Schema::named() else {
@@ -2599,7 +2599,7 @@ async fn two_instances_on_one_token_both_sign_renewals() {
 /// A host enrols through B's Agent plane, over its WebSocket, while A opened the window; it is
 /// approved on A, whose client CA's key is on the token both share, and B hands the certificate to
 /// the connection that asked. The host is admitted on both.
-/// Verifies: ADR-0025, ADR-0027, ADR-0026
+/// Verifies: SRV-instances-share-one-postgresql, SEC-bootstrap-certificates-and-enrolment, SEC-admission-by-client-certificate
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
     let Some(schema) = Schema::named() else {
@@ -2679,7 +2679,7 @@ async fn an_enrolment_approved_on_one_instance_is_handed_out_by_the_other() {
 /// Of two instances deciding one enrolment request, B, asked second through its Operator plane,
 /// is answered `409` while A's approval holds the request, to an approval and to a rejection
 /// alike, and `404` once A has decided it, as the manual says.
-/// Verifies: ADR-0025, ADR-0027, ADR-0039
+/// Verifies: SRV-instances-share-one-postgresql, SEC-bootstrap-certificates-and-enrolment, SRV-state-stores-contract-pair
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_decision_asked_through_one_instance_while_another_decides_is_answered_409() {
     let Some(schema) = Schema::named() else {
@@ -2776,7 +2776,7 @@ async fn enrol(instance: &Instance, pki: &Pki, bootstrap: &Pki) -> Option<String
 /// The enrolment queue's bound counts the requests of every instance: once A and B have queued
 /// requests at once up to one short of it, a host's request through B's Agent plane takes the last
 /// place, and the next host's, through A's, is answered that the queue is full.
-/// Verifies: ADR-0025, ADR-0027
+/// Verifies: SRV-instances-share-one-postgresql, SEC-bootstrap-certificates-and-enrolment
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_bound_of_the_enrolment_queue_counts_the_requests_of_every_instance() {
     use fleet_server::enrolment::{Submitted, MAX_PENDING};
@@ -2861,7 +2861,7 @@ async fn the_bound_of_the_enrolment_queue_counts_the_requests_of_every_instance(
 /// During an enrolment wave on A, A reads nothing again for its own notifications, and B takes up
 /// every certificate and Host the wave registered. A then takes up the one change B commits, and
 /// that once: what it heard of its own acts before was passed over.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_reads_nothing_again_for_its_own_notifications() {
     let Some(schema) = Schema::named() else {
@@ -2964,7 +2964,7 @@ async fn next_message(
 
 /// A rollout committed on A reaches an Agent B carries: B takes up the Configuration A saved and
 /// the assignment A released, and offers the Agent the new configuration within one second.
-/// Verifies: ADR-0025, ADR-0032
+/// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_agent() {
     use futures_util::SinkExt;
@@ -3057,7 +3057,7 @@ async fn a_rollout_on_one_instance_is_offered_by_the_instance_that_carries_the_a
 
 /// A Package created on A, and one deleted there, is what B lists next: B drops the Packages it
 /// holds for each notification and reads them again.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_package_published_on_one_instance_is_listed_by_the_other() {
     use fleet_server::packages::PackageId;
@@ -3104,7 +3104,7 @@ async fn a_package_published_on_one_instance_is_listed_by_the_other() {
 /// A Configuration and a Package deleted through B leave the Deployment that held them in A's
 /// memory too: the transaction that deletes them announces each Deployment it took them out of,
 /// and A reads the Deployments again for it.
-/// Verifies: ADR-0025, ADR-0032
+/// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_deleted_through_one_instance_leaves_the_deployments_the_other_holds() {
     use fleet_server::packages::PackageId;
@@ -3192,7 +3192,7 @@ async fn a_member_deleted_through_one_instance_leaves_the_deployments_the_other_
 /// A revocation whose notification never arrives, while the listening connection stays up, is
 /// caught by the next lease renewal: it finds the list's version moved, and the instance reads the
 /// ledger again and ends the session it concerns.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal() {
     let Some(schema) = Schema::named() else {
@@ -3226,8 +3226,8 @@ async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal
 
 /// A binding and its Host committed by another instance that ended before it sent the notice
 /// that follows the commit are taken up by the next lease renewal, which reads the ledger again
-/// (ADR-0025 §9 and §10).
-/// Verifies: ADR-0025
+/// (SRV-instances-share-one-postgresql §9 and §10).
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next_renewal() {
     let Some(schema) = Schema::named() else {
@@ -3262,9 +3262,9 @@ async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next
 
 /// A renewal registered by another writer, whose notification never arrives while the listening
 /// connection stays up, is taken up by the next lease renewal: so a revocation of the certificate
-/// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0026 §28,
-/// ADR-0039 §10).
-/// Verifies: ADR-0025, ADR-0039
+/// it renewed, committed by this instance afterwards, refuses the renewal too (SEC-admission-by-client-certificate §28,
+/// SRV-state-stores-contract-pair §10).
+/// Verifies: SRV-instances-share-one-postgresql, SRV-state-stores-contract-pair
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_renewal_whose_notification_is_missed_is_refused_once_its_predecessor_is_revoked() {
     use fleet_server::revocation::{Issued, LedgerStore, RegisterBounds, Registered};
@@ -3324,8 +3324,8 @@ async fn a_renewal_whose_notification_is_missed_is_refused_once_its_predecessor_
 /// An instance killed without a shutdown leaves its lease and its audit chain behind; a running
 /// instance takes the lease over at one of its renewals once it lapsed, and the dead chain ends
 /// with `audit.chain_closed`, `reason` `lease_lapsed`, `closed_by` the running instance's chain
-/// (ADR-0025 §18).
-/// Verifies: ADR-0028, ADR-0025
+/// (SRV-instances-share-one-postgresql §18).
+/// Verifies: SEC-append-only-audit-record, SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_instance_closes_the_chain_of_one_killed_at_its_renewal() {
     let Some(schema) = Schema::named() else {
@@ -3449,7 +3449,7 @@ fn view_of(instance: &Instance, uid: InstanceUid) -> Option<fleet_server::fleet:
 /// Labels set through B on a Client Agent A carries stay as B set them when A writes the Agent's
 /// next report before it heard of them, since A's write is of what a report decides alone; A then
 /// takes them up, and a later change through B reaches A's view within one second.
-/// Verifies: ADR-0029, ADR-0025
+/// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carries_the_agent() {
     let Some(schema) = Schema::named() else {
@@ -3522,7 +3522,7 @@ async fn labels_set_through_one_instance_stay_and_reach_the_instance_that_carrie
 /// A restart requested through B for an Agent A carries stays queued when A writes the Agent's
 /// next report before it heard of it; A then takes it up and sends the restart, which clears it,
 /// and a request made after that is queued again and sent within one second.
-/// Verifies: ADR-0029, ADR-0025
+/// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it() {
     let Some(schema) = Schema::named() else {
@@ -3582,7 +3582,7 @@ async fn a_restart_requested_through_one_instance_stays_until_the_carrying_insta
 
 /// The ceiling on Agent records holds for the fleet: with room for one, an Agent first heard of
 /// through B is refused once A stored another, and the one A stored keeps reporting through B.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: SRV-instances-share-one-postgresql, SEC-admission-by-client-certificate
 #[test]
 fn the_ceiling_on_agent_records_holds_across_instances() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3624,7 +3624,7 @@ fn the_ceiling_on_agent_records_holds_across_instances() {
 
 /// Many Agents created at once through twelve instances leave no more records than `max_agents`:
 /// each creation counts the records the others created, however many are made at once.
-/// Verifies: ADR-0025, ADR-0029
+/// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
 #[test]
 fn many_creations_at_once_on_many_instances_never_pass_the_ceiling() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3680,7 +3680,7 @@ fn many_creations_at_once_on_many_instances_never_pass_the_ceiling() {
 /// An Agent carried by A that went quiet is forgotten through B, which decides from the presence
 /// A wrote: refused while it reports, forgotten once it is silent past the budget, and A then ends
 /// its session within one second.
-/// Verifies: ADR-0029, ADR-0025
+/// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_one_that_carries_it()
 {
@@ -3730,7 +3730,7 @@ async fn an_agent_forgotten_through_one_instance_has_its_session_ended_by_the_on
 /// An Agent forgotten through B stays forgotten when A, which holds it and has not heard of it
 /// yet, writes its next report or flushes at shutdown: A writes nothing of it again, neither the
 /// record nor the labels it held, and drops the Agent it reported for and ends its session.
-/// Verifies: ADR-0029
+/// Verifies: SRV-fleet-record-agents-hosts
 #[test]
 fn an_agent_forgotten_through_one_instance_is_not_written_again_by_another() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3782,7 +3782,7 @@ fn an_agent_forgotten_through_one_instance_is_not_written_again_by_another() {
 /// An Agent that asks for a new identity keeps its stored record under the new key, labels set
 /// through another instance included, and the instance that carries it keeps carrying it: the
 /// record moves in the store as it is stored, and is not dropped as one forgotten.
-/// Verifies: ADR-0029
+/// Verifies: SRV-fleet-record-agents-hosts
 #[test]
 fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3835,7 +3835,7 @@ fn an_agent_rekeyed_at_its_request_keeps_its_stored_record() {
 /// An Agent rekeyed at its request through A is dropped under its old identity by B, which
 /// held it: the move announces the old identity forgotten, so B holds no record of it under a
 /// name no store keeps.
-/// Verifies: ADR-0029
+/// Verifies: SRV-fleet-record-agents-hosts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_rekeyed_through_one_instance_is_dropped_under_its_old_identity_by_another() {
     use fleet_server::fleet::{AppState, Transport};
@@ -3890,7 +3890,7 @@ async fn an_agent_rekeyed_through_one_instance_is_dropped_under_its_old_identity
 /// A rollout on A to Agents forgotten through B meanwhile, before A heard of it, releases to the
 /// others alone: the press counts only the Agents it wrote an assignment for, a rollout to one
 /// forgotten Agent answers that it is unknown, and A holds neither any more.
-/// Verifies: ADR-0029, ADR-0032
+/// Verifies: SRV-fleet-record-agents-hosts, SRV-deployments-and-pinned-rollouts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rollout_counts_only_the_agents_it_released_to() {
     use fleet_server::fleet::{AppState, RolloutError, Transport};
@@ -3975,7 +3975,7 @@ async fn a_rollout_counts_only_the_agents_it_released_to() {
 /// The shutdown flush of A writes only the Agents A heard from: an Agent B carries, which A
 /// only loaded, keeps what B wrote of it, and an Agent A heard from keeps a `last_seen_ms`
 /// another instance wrote later.
-/// Verifies: ADR-0029
+/// Verifies: SRV-fleet-record-agents-hosts
 #[test]
 fn the_shutdown_flush_writes_only_the_agents_this_instance_heard_from() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4029,7 +4029,7 @@ fn the_shutdown_flush_writes_only_the_agents_this_instance_heard_from() {
 
 /// The shutdown flush of A leaves an Agent A heard from, and that has moved to B since, as B
 /// wrote it: B holds its connection, so A writes nothing of it.
-/// Verifies: ADR-0029
+/// Verifies: SRV-fleet-record-agents-hosts
 #[test]
 fn the_shutdown_flush_leaves_an_agent_that_moved_to_another_instance_as_that_one_wrote_it() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4078,7 +4078,7 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_to_another_instance_as_that_one
 /// The shutdown flush of A leaves an Agent A heard from, that moved to B since and disconnected
 /// there, as B wrote it: no instance holds it any more, and B took it after A did, though B's
 /// clock runs behind A's.
-/// Verifies: ADR-0029
+/// Verifies: SRV-fleet-record-agents-hosts
 #[test]
 fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_written() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4131,7 +4131,7 @@ fn the_shutdown_flush_leaves_an_agent_that_moved_away_and_disconnected_as_last_w
 /// A's presence batch writes the disconnect of an Agent A took back from B, whose clock runs
 /// ahead of A's: the row still holds the count of takes A was answered, whatever `last_seen_ms` B
 /// stamped it with.
-/// Verifies: ADR-0029, ADR-0025
+/// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
 #[test]
 fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_agent() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4179,7 +4179,7 @@ fn a_disconnect_is_written_after_an_instance_whose_clock_runs_ahead_held_the_age
 /// A presence batch that names A anew, over an Agent B took and disconnected, counts as a take:
 /// A's disconnect is written under the count it answered, the shutdown flush of B, which took the
 /// Agent before, leaves what A wrote, and that of A, which disconnected the Agent last, writes it.
-/// Verifies: ADR-0029, ADR-0025
+/// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
 #[test]
 fn a_batch_that_names_its_instance_anew_counts_as_a_take() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4236,7 +4236,7 @@ fn a_batch_that_names_its_instance_anew_counts_as_a_take() {
 /// An Agent forgotten after A took it several times, which connects to A again before A's next
 /// batch and says goodbye, is written disconnected: the record created again counts its takes from
 /// the start, and A keeps the count that take answered, not the greater one from before.
-/// Verifies: ADR-0029
+/// Verifies: SRV-fleet-record-agents-hosts
 #[test]
 fn the_goodbye_of_an_agent_forgotten_and_connected_again_is_written() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4278,7 +4278,7 @@ fn the_goodbye_of_an_agent_forgotten_and_connected_again_is_written() {
 /// An Agent forgotten through B while A still holds it, created again through B and then
 /// connected to A, has its goodbye written by A: A keeps the count its take answered, though it
 /// counted more takes of the record before it was forgotten.
-/// Verifies: ADR-0029
+/// Verifies: SRV-fleet-record-agents-hosts
 #[test]
 fn the_goodbye_of_an_agent_forgotten_through_another_instance_is_written_where_it_connects_again() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4333,7 +4333,7 @@ fn the_goodbye_of_an_agent_forgotten_through_another_instance_is_written_where_i
 /// the Agent's next report: A's take for the Agent's old connection commits after B's for its
 /// new one, B stops carrying it on hearing of the take, A writes the disconnect when the old
 /// connection closes, and the Agent's next report on B makes B its holder again.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[test]
 fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_its_next_report() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4386,7 +4386,7 @@ fn an_instance_displaced_by_a_take_that_commits_later_takes_the_agent_back_at_it
 
 /// An Agent that has just connected to A is not forgotten through B before A's next presence
 /// batch: the report that connects it writes that A holds it, at once.
-/// Verifies: ADR-0029
+/// Verifies: SRV-fleet-record-agents-hosts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_just_connected_is_not_forgotten_through_another_instance() {
     use fleet_server::fleet::{AppState, ForgetError};
@@ -4421,7 +4421,7 @@ async fn an_agent_just_connected_is_not_forgotten_through_another_instance() {
 /// reads the holder again and stops carrying it, though its old connection has not closed yet.
 /// When that connection closes and A writes its next batch, the row still names B as the holder,
 /// connected, and B still carries it.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_whose_connection_moves_is_held_by_the_new_instance_and_no_longer_by_the_old() {
     let Some(schema) = Schema::named() else {
@@ -4473,7 +4473,7 @@ async fn an_agent_whose_connection_moves_is_held_by_the_new_instance_and_no_long
 /// Of two instances that take one Agent at once, each hearing of the other's take only after its
 /// own, only the one the row no longer names stops carrying it: each reads the holder again
 /// rather than drop the Agent on hearing of a take.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[test]
 fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carries_it() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4514,7 +4514,7 @@ fn of_two_instances_that_take_one_agent_at_once_only_the_one_the_row_names_carri
 /// An Agent whose holder changes eleven times within a minute, as two connections of one
 /// `instance_uid` on two instances take it in turn, is logged as a likely duplicate once, when
 /// the eleventh change lands, and not before.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[test]
 fn an_agent_whose_holder_changes_eleven_times_in_a_minute_is_logged_once_as_a_likely_duplicate() {
     use fleet_server::fleet::{AppState, Transport};
@@ -4624,7 +4624,7 @@ async fn assigned(session: &mut Socket, count: usize) -> Vec<Option<Vec<u8>>> {
 /// each, and the newest connection carries them. A report or a goodbye the older connection
 /// delivers after that does not take its Agent back or end it, so the older connection's close
 /// leaves every Agent connected.
-/// Verifies: ADR-0025
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_peer_whose_first_reports_wait_keeps_its_agents_identities_on_its_new_connection() {
     use futures_util::{SinkExt, StreamExt};
@@ -4725,7 +4725,7 @@ async fn a_peer_whose_first_reports_wait_keeps_its_agents_identities_on_its_new_
 /// on two Gateways' connections, whose certificates bind no Agent, and on two connections that
 /// present no host, by the duplicate detection; on two hosts' connections by the binding of the
 /// identity to the host that reported it first. The incumbent keeps its identity each time.
-/// Verifies: ADR-0025, ADR-0026
+/// Verifies: SRV-instances-share-one-postgresql, SEC-admission-by-client-certificate
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_duplicate_on_live_connections_of_different_peers_is_rekeyed() {
     use futures_util::SinkExt;
@@ -4991,7 +4991,7 @@ async fn reported(
 /// stops, each downstream Agent A held is taken over by B once, at its next report, and stays
 /// connected to the Gateway; B refuses none of the pool's connections, and the Gateway goes on
 /// admitting downstream peers.
-/// Verifies: ADR-0025, ADR-0016
+/// Verifies: SRV-instances-share-one-postgresql, CLT-modes-and-gateway
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gateway_keeps_its_agents_on_one_instance_and_moves_those_of_a_stopped_one_once() {
     let Some(schema) = Schema::named() else {
@@ -5137,7 +5137,7 @@ async fn floors_behind(
 /// holds the revocation list and the floors B holds, a revocation and a floor committed through B
 /// while A was stopped included. The revoked downstream session is ended, a request with its
 /// certificate is refused, and the floors handed down are B's.
-/// Verifies: ADR-0025, ADR-0026, ADR-0034, ADR-0016
+/// Verifies: SRV-instances-share-one-postgresql, SEC-admission-by-client-certificate, PKG-versions-high-water-mark-floor, CLT-modes-and-gateway
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_gateway_whose_instance_stopped_serves_the_list_and_the_floors_the_other_holds() {
     let Some(schema) = Schema::named() else {
@@ -5244,7 +5244,7 @@ async fn a_gateway_whose_instance_stopped_serves_the_list_and_the_floors_the_oth
 /// A Configuration whose revision was pinned through one instance is not deleted through another
 /// that holds no such pin in memory: the deletion counts the stored assignments in its own
 /// transaction, under the Configuration's row lock.
-/// Verifies: ADR-0025, ADR-0032
+/// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
 #[test]
 fn a_configuration_pinned_through_one_instance_is_not_deleted_through_another() {
     use fleet_server::agent_store::Pin;
@@ -5325,7 +5325,7 @@ fn refused_with<T: std::fmt::Debug>(
 /// A Package pinned through one instance is not changed or deleted through another that holds no
 /// such pin: each write to it counts the stored assignments in its own transaction, under the
 /// Package's row lock, and is refused, leaving the Package as stored.
-/// Verifies: ADR-0025, ADR-0032
+/// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
 #[test]
 fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
     use fleet_server::packages::{PackageId, PackageStore, Platform};
@@ -5415,7 +5415,7 @@ fn a_package_pinned_through_one_instance_is_not_changed_through_another() {
 /// A Deployment an Agent was released through on one instance is not deleted through another
 /// that holds no such assignment: the deletion counts the stored assignments in its own
 /// transaction, under the Deployment's row lock.
-/// Verifies: ADR-0025, ADR-0032
+/// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
 #[test]
 fn a_deployment_released_through_on_one_instance_is_not_deleted_through_another() {
     use fleet_server::agent_store::Pin;
@@ -5513,7 +5513,7 @@ async fn release_a_package(instance: &Instance) -> usize {
 /// A Package that a release through B pinned, and that a later release through A moved the Agent
 /// off, is deleted through B, which does not carry the Agent: B's own count of the pin is stale,
 /// and the deletion decides from the stored assignments, not from it.
-/// Verifies: ADR-0025, ADR-0032
+/// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_package_released_away_through_one_instance_is_deleted_through_another() {
     let Some(schema) = Schema::named() else {
@@ -5576,7 +5576,7 @@ async fn a_package_released_away_through_one_instance_is_deleted_through_another
 /// deployment reach through B name the Agent A carries with its labels, its assignment and A's
 /// presence, B serves its host the artifact released to it, and once A's lease is gone the Agent
 /// reads as disconnected.
-/// Verifies: ADR-0029, ADR-0025, ADR-0039, ADR-0033
+/// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql, SRV-state-stores-contract-pair, PKG-signed-packages-and-delivery
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_carried_by_one_instance_is_read_through_another_that_holds_none_of_it() {
     let Some(schema) = Schema::named() else {
@@ -5697,7 +5697,7 @@ async fn an_agent_carried_by_one_instance_is_read_through_another_that_holds_non
 /// An Agent B carries inherits the labels of its Client Agent, which A carries: B reads the Client
 /// Agent from the database when it places the Agent, once it has taken up the host register
 /// another instance wrote, and follows a change of its labels made through A.
-/// Verifies: ADR-0025, ADR-0029
+/// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_carries() {
     let Some(schema) = Schema::named() else {
@@ -5767,7 +5767,7 @@ async fn an_agent_inherits_the_labels_of_its_client_agent_that_another_instance_
 /// A label in the Supervisor's space the database already holds matches nothing in the list read
 /// from it: a Selector on it admits no Agent, an Agent placed under the Client Agent that holds it
 /// does not inherit it, and the label beside it still matches and is inherited.
-/// Verifies: ADR-0029, ADR-0030
+/// Verifies: SRV-fleet-record-agents-hosts, API-lists-paged-by-cursor
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stored_label_in_the_supervisors_space_matches_nothing_in_the_list() {
     let Some(schema) = Schema::named() else {
@@ -5876,7 +5876,7 @@ fn holding(instance: &Instance, holder: fleet_server::listing::HolderFilter) -> 
 /// through any instance; the list filters by it, `none` naming the Agents no instance with a live
 /// lease holds; a page's cursor from one instance continues the list on another; and once the
 /// holder's lease is gone the Agent is held by none.
-/// Verifies: ADR-0030, ADR-0025
+/// Verifies: API-lists-paged-by-cursor, SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agents_view_names_its_holder_and_the_list_filters_by_it() {
     use fleet_server::listing::HolderFilter;
@@ -6041,7 +6041,7 @@ async fn an_agents_view_names_its_holder_and_the_list_filters_by_it() {
 /// Agent behind the same Gateway, which A carries: B reads the Agents that arrived over the
 /// Gateway's Host through the port's `query_page` when it places the Agent, and places it again
 /// when A changes that Client Agent's labels.
-/// Verifies: ADR-0025, ADR-0029
+/// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_behind_a_gateway_inherits_the_labels_of_its_client_agent_another_instance_carries(
 ) {
@@ -6140,8 +6140,8 @@ fn two_releases_on() -> &'static [Migration] {
 /// as an instance of 0.8.0 takes one, writing no release, two instances of 0.8.1 that start at
 /// once apply migration 12 once beside it and both serve, and that lease reads 0.8.0. They apply
 /// the migrations up to 18, which name 0.8.0; migration 19 names 0.8.4
-/// (ADR-0025 §16).
-/// Verifies: ADR-0025
+/// (SRV-instances-share-one-postgresql §16).
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
     let Some(schema) = Schema::named() else {
@@ -6207,8 +6207,8 @@ fn the_next_patch_release() -> &'static [Migration] {
 /// With an instance of N on its schema, two instances of N+1 that start at once apply N+1's
 /// migration once and both serve; the instances of N and N+1 both serve the Agents that report
 /// to either, each reading the other's; and each lease names the release of its instance
-/// (ADR-0025 §16).
-/// Verifies: ADR-0025
+/// (SRV-instances-share-one-postgresql §16).
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_versions_serve_side_by_side_and_the_newer_migrates_once() {
     let Some(schema) = Schema::named() else {
@@ -6323,8 +6323,8 @@ impl Schema {
 /// the live lease of 0.8.4, each writes a Deployment and a Host, and each loads what the other
 /// wrote. A Server of 0.8.4 names the contract pair in its `INSERT`s and decodes each Host's array
 /// as a list; one of 0.8.5 names neither, and its rows hold the defaults
-/// (ADR-0039 §22).
-/// Verifies: ADR-0039
+/// (SRV-state-stores-contract-pair §22).
+/// Verifies: SRV-state-stores-contract-pair
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_of_0_8_4_and_one_of_0_8_5_each_load_what_the_other_wrote() {
     use fleet_server::revocation::{Host, HostAct};
@@ -6443,8 +6443,8 @@ async fn an_instance_of_0_8_4_and_one_of_0_8_5_each_load_what_the_other_wrote() 
 /// An instance whose lease lapsed while a Server two releases on migrated checks the schema as
 /// it takes its new lease, and stops: it takes none, keeps the refusal naming both versions, and
 /// ends what its lease sends, so its planes stay closed and the Server exits
-/// (ADR-0025 §16).
-/// Verifies: ADR-0025
+/// (SRV-instances-share-one-postgresql §16).
+/// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_its_new_lease() {
     let Some(schema) = Schema::named() else {
@@ -6609,7 +6609,7 @@ fn checkpoints_in(schema: &Schema) -> Vec<(String, fleet_server::checkpoint::Par
 
 /// On PostgreSQL with two instances, one signs at a time, each checkpoint names both chains, and
 /// the other takes over once the signer's connection ends; the record verifies against the key.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_instance_signs_at_a_time_naming_every_chain_and_another_takes_over() {
     use fleet_server::audit::Audit as _;
@@ -6808,7 +6808,7 @@ impl fleet_server::checkpoint::CheckpointSource for Racing {
 
 /// Two instances that both sign the same next checkpoint leave one per number: the insert of the
 /// one that comes second fails, and its instance writes `audit.checkpoint_failed`.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_signers_racing_leave_one_checkpoint_per_number() {
     let Some(schema) = Schema::named() else {
@@ -6871,7 +6871,7 @@ async fn two_signers_racing_leave_one_checkpoint_per_number() {
 
 /// A prune that removes checkpoints names the last of them, and the record still verifies from
 /// the first checkpoint left.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_prune_names_the_last_checkpoint_it_removes_and_the_record_verifies_after() {
     use fleet_server::audit::Audit as _;
@@ -7106,7 +7106,7 @@ async fn prune_now(
 /// entries are all past `retain_days`, holds back from its checkpoints while A still holds older
 /// ones; A's prune removes A's; then B's goes on. `audit-verify --audit-key` holds after each,
 /// once a checkpoint covers the prune's entries.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_prune_holds_back_from_checkpoints_newer_than_one_held_in_another_chain() {
     let Some(schema) = Schema::named() else {
@@ -7191,7 +7191,7 @@ async fn a_prune_holds_back_from_checkpoints_newer_than_one_held_in_another_chai
 /// The signing passes back and forth between A and B several times, and B stops, its chain
 /// closed. One prune by A, which holds the prune lock, repeats its rounds until nothing more is
 /// freed: every old checkpoint goes, in A's chain and in B's closed one, and the record verifies.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn one_prune_frees_checkpoints_after_several_signer_changes() {
     let Some(schema) = Schema::named() else {
@@ -7270,7 +7270,7 @@ async fn one_prune_frees_checkpoints_after_several_signer_changes() {
 }
 
 /// A closed chain is named closed by one checkpoint, and by none after it.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_chain_is_named_by_one_checkpoint() {
     let Some(schema) = Schema::named() else {
@@ -7389,7 +7389,7 @@ async fn signed_then_still(
 
 /// A chain removed whole, with an `audit.pruned` added after the newest checkpoint to explain it,
 /// still fails: only a removal a checkpoint covers counts.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_chain_removed_with_a_forged_prune_in_the_unsigned_tail_fails() {
     let Some(schema) = Schema::named() else {
@@ -7436,7 +7436,7 @@ async fn a_chain_removed_with_a_forged_prune_in_the_unsigned_tail_fails() {
 /// A chain's young entries cut, with an `audit.pruned` added after the newest checkpoint naming
 /// the last one cut, still fails: the earlier checkpoints name heads among them, and the chain
 /// begins where no signed removal says it may.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_young_cut_with_a_forged_prune_in_the_unsigned_tail_fails() {
     let Some(schema) = Schema::named() else {
@@ -7527,7 +7527,7 @@ fn forge_pruned_at(
 
 /// B's young, signed entries cut from an unnamed `seq` on, and one `audit.pruned` placed at that
 /// `seq` naming B's own newest head: no head that is still there covers it, so it fails.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_young_cut_excused_by_a_prune_inside_it_fails() {
     let Some(schema) = Schema::named() else {
@@ -7575,7 +7575,7 @@ async fn a_young_cut_excused_by_a_prune_inside_it_fails() {
 /// Three instances. C removed whole and B's tail cut, with prunes placed in B's cut run naming
 /// C's newest head and B's own; then, separately, B and C both cut with prunes that excuse each
 /// other. Each fails.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chains_cut_with_prunes_that_excuse_each_other_fail() {
     let Some(schema) = Schema::named() else {
@@ -7818,7 +7818,7 @@ async fn closed_chain_named_once_then_old(
 
 /// A closed chain named closed by one checkpoint: A's own prune keeps that checkpoint while the
 /// chain still holds entries, so removing the chain afterwards is still found.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closed_chain_whose_naming_checkpoint_is_old_cannot_be_removed_unseen() {
     let Some(schema) = Schema::named() else {
@@ -7851,7 +7851,7 @@ async fn a_closed_chain_whose_naming_checkpoint_is_old_cannot_be_removed_unseen(
 
 /// As above, but C pruned its own oldest entries while open: the honest record still verifies
 /// after A's prune, since the checkpoint naming C closed, which covers C's prune, is kept.
-/// Verifies: ADR-0028
+/// Verifies: SEC-append-only-audit-record
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_honest_record_holds_after_a_prune_while_a_closed_self_pruned_chain_remains() {
     let Some(schema) = Schema::named() else {

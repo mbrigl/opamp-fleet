@@ -1,4 +1,4 @@
-//! `service install` against a `supervisor.toml` the service's account rewrote (ADR-0021, ADR-0022 §1):
+//! `service install` against a `supervisor.toml` the service's account rewrote (CLT-installed-service-and-state, CLT-accounts-service-runs-under §1):
 //! driven through the real command line, because the refusal is only worth anything
 //! if it comes before the install has created, restricted or handed over a thing.
 //!
@@ -30,7 +30,7 @@ fn install(config: &Path, root: &Path, home: &Path) -> Output {
 
 /// A state directory the file names outside the install's roots is refused, naming it and
 /// `--state-dir`, and the install has created nothing: not the root, not that directory.
-/// Verifies: ADR-0021, ADR-0022
+/// Verifies: CLT-installed-service-and-state, CLT-accounts-service-runs-under
 #[test]
 fn an_install_refuses_a_state_directory_the_file_names_outside_its_roots_before_any_change() {
     let dir = tempfile::tempdir().expect("tempdir");

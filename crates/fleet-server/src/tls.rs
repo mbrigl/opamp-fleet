@@ -1,5 +1,5 @@
-//! The listeners' TLS material (ADR-0012, ADR-0026), read from the files `[tls]`,
-//! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (ADR-0008).
+//! The listeners' TLS material (SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate), read from the files `[tls]`,
+//! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (DEV-six-crates-tokio-axum).
 //!
 //! What is the Server's here is which material and why. The Agent plane requires a client
 //! certificate in the handshake, verified against the client CA and, while `[enrolment]` is set,
@@ -22,7 +22,7 @@ pub struct PlaneTls {
     pub agent: ServerTls,
     pub operator: ServerTls,
     pub issuers: Issuers,
-    /// The CAs whose certificates can be revoked (ADR-0026 §27).
+    /// The CAs whose certificates can be revoked (SEC-admission-by-client-certificate §27).
     pub authorities: Vec<Authority>,
 }
 
@@ -39,7 +39,7 @@ pub struct Issuers {
     bootstrap: Vec<Ca>,
 }
 
-/// What the certificate a connection carries makes it (ADR-0026).
+/// What the certificate a connection carries makes it (SEC-admission-by-client-certificate).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Peer {
     /// A certificate from the client CA: a member of the fleet.
@@ -48,7 +48,7 @@ pub enum Peer {
     Enrolling {
         subject: String,
         /// The values an approval carries into the host certificate, or why its subject breaks
-        /// the rules they are issued by (ADR-0016 §23).
+        /// the rules they are issued by (CLT-modes-and-gateway §23).
         carried: Box<Result<SubjectValues, String>>,
         /// SHA-256 of the certificate, hex.
         fingerprint: String,
@@ -74,7 +74,7 @@ impl Issuers {
     }
 
     /// What a bootstrap certificate (DER) an enrolment request proves says about itself
-    /// (ADR-0016 §21 and §22), when a CA of `bootstrap_ca_file` issued it directly — named as its
+    /// (CLT-modes-and-gateway §21 and §22), when a CA of `bootstrap_ca_file` issued it directly — named as its
     /// issuer and signed with its key — and it passes what the handshake checks of one: a leaf
     /// (no `CA:TRUE`) whose extended key usage, where it names one, includes `clientAuth`, valid
     /// now. The proof carries no chain, so a certificate below an intermediate cannot be told from
@@ -140,7 +140,7 @@ pub fn enrolling(certificate: &[u8]) -> Peer {
 }
 
 /// The material both planes serve with: `[tls]`'s on the Agent plane, and on the Operator plane
-/// `operator`'s — `[rest.tls]` — or, without it, `[tls]`'s as well (ADR-0012).
+/// `operator`'s — `[rest.tls]` — or, without it, `[tls]`'s as well (SEC-tls13-two-planes-bounded-input).
 ///
 /// # Errors
 /// Returns an error naming the file that cannot be read or holds nothing usable, or a `[rest.tls]`
@@ -200,7 +200,7 @@ pub fn server_tls(
     })
 }
 
-/// The `[rest.tls]` pair, read and checked as `[tls]`'s is (ADR-0012 §11). The key is
+/// The `[rest.tls]` pair, read and checked as `[tls]`'s is (SEC-tls13-two-planes-bounded-input §11). The key is
 /// matched against the certificate here rather than when the plane is built, so the refusal
 /// names both files.
 fn operator_identity(operator: &RestTlsConfig) -> Result<Identity, String> {
@@ -225,7 +225,7 @@ fn identity(cert_file: &Path, key_file: &Path) -> Result<Identity, String> {
     let cert_pem = read(cert_file)?;
     opamp::tls::certificates(&cert_pem).map_err(|e| in_file(cert_file, &e))?;
     // Read, and parsed, in buffers wiped when they are dropped; `opamp` takes the key as its own
-    // buffer, so the copy is made here (ADR-0015 §3).
+    // buffer, so the copy is made here (SEC-secrets-wiped-on-drop §3).
     let key_pem = zeroize::Zeroizing::new(read(key_file)?);
     opamp::tls::private_key(&key_pem)
         .map(zeroize::Zeroizing::new)
@@ -342,9 +342,9 @@ mod tests {
 
     /// A `[rest.tls]` pair is checked at startup as `[tls]`'s is: a key that does not match its
     /// certificate, or a key file that cannot be read, refuses the start, and the message names
-    /// the files (ADR-0012 §11). A matching pair is what the Operator plane serves, while the
+    /// the files (SEC-tls13-two-planes-bounded-input §11). A matching pair is what the Operator plane serves, while the
     /// Agent plane keeps `[tls]`'s.
-    /// Verifies: ADR-0012
+    /// Verifies: SEC-tls13-two-planes-bounded-input
     #[test]
     fn a_rest_tls_pair_is_checked_at_startup_and_served_on_the_operator_plane_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -412,8 +412,8 @@ mod tests {
 
     /// A bootstrap certificate issued through an intermediate is still no member: with a bootstrap
     /// CA configured, membership is a certificate issued directly by the client CA, and nothing
-    /// else (ADR-0026 §17).
-    /// Verifies: ADR-0026
+    /// else (SEC-admission-by-client-certificate §17).
+    /// Verifies: SEC-admission-by-client-certificate
     #[test]
     fn a_certificate_not_issued_by_the_client_ca_only_enrols() {
         let (client_der, client_subject, client_key) = ca("client CA", None);
@@ -448,8 +448,8 @@ mod tests {
 
     /// An intermediate below the bootstrap CA that copies the client CA's name issues nothing a
     /// member holds: membership is what the client CA's key signed, not a name an issuer can
-    /// take (ADR-0026 §17).
-    /// Verifies: ADR-0026
+    /// take (SEC-admission-by-client-certificate §17).
+    /// Verifies: SEC-admission-by-client-certificate
     #[test]
     fn an_intermediate_named_like_the_client_ca_only_enrols() {
         let (client_der, _, client_key) = ca("client CA", None);
@@ -480,8 +480,8 @@ mod tests {
 
     /// Through a Gateway a proven bootstrap certificate is checked as the handshake checks one on
     /// an enrolment connection: issued directly by the bootstrap CA, no CA itself, an extended key
-    /// usage that includes `clientAuth` where it names one, and valid now (ADR-0016 §21).
-    /// Verifies: ADR-0016
+    /// usage that includes `clientAuth` where it names one, and valid now (CLT-modes-and-gateway §21).
+    /// Verifies: CLT-modes-and-gateway
     #[test]
     fn a_proven_bootstrap_certificate_is_checked_as_the_handshake_checks_it() {
         use rcgen::ExtendedKeyUsagePurpose as Eku;

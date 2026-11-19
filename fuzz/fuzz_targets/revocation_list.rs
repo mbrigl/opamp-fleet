@@ -1,4 +1,4 @@
-//! The revoked certificates a Gateway fetches from its Server (ADR-0016, ADR-0026): a JSON body
+//! The revoked certificates a Gateway fetches from its Server (CLT-modes-and-gateway, SEC-admission-by-client-certificate): a JSON body
 //! the Gateway refuses its downstream peers by. Verifies: Q-2
 #![no_main]
 

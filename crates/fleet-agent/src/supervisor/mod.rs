@@ -1,7 +1,7 @@
-//! The supervision domain (ADR-0019): builds the Agents the [`Engine`](crate::engine) carries.
+//! The supervision domain (CLT-supervisor-mode-and-kinds): builds the Agents the [`Engine`](crate::engine) carries.
 //!
 //! With `[[supervisor]]` blocks configured, each becomes one Supervisor-backed Agent — everything
-//! it owns under `<supervisor_dir>/<name>/` (ADR-0019), its Managed Process driven by the plugin
+//! it owns under `<supervisor_dir>/<name>/` (CLT-supervisor-mode-and-kinds), its Managed Process driven by the plugin
 //! the block's `type` selects. Without any, the Client presents itself as the single self-Agent —
 //! the same state machine with no Managed Process behind it.
 
@@ -39,12 +39,12 @@ pub use crate::engine::SELF_AGENT_INDEX;
 /// the other way, what an Engine index is shifted back by to find the block it came from.
 pub const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
 
-/// The compiled-in plugin registry (ADR-0019 §2). A new process kind is a new module and one
+/// The compiled-in plugin registry (CLT-supervisor-mode-and-kinds §2). A new process kind is a new module and one
 /// line here — the supervision core stays untouched (goal 8). A wrapped kind is there only when
-/// its feature is, so what a build carries, reports (ADR-0019 §18) and refuses as unknown all
+/// its feature is, so what a build carries, reports (CLT-supervisor-mode-and-kinds §18) and refuses as unknown all
 /// follow from this one list.
 ///
-/// Every plugin is handed `spawner`, which starts its Managed Processes (ADR-0022 §18).
+/// Every plugin is handed `spawner`, which starts its Managed Processes (CLT-accounts-service-runs-under §18).
 fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(collector::CollectorPlugin {
@@ -57,7 +57,7 @@ fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
 }
 
 /// The [`registry`] of a run: its plugins with the [`Spawner`] the composition root chose from the
-/// Client's command line and handed [`build_engine`] (ADR-0022 §18).
+/// Client's command line and handed [`build_engine`] (CLT-accounts-service-runs-under §18).
 pub struct Registry {
     spawner: Spawner,
 }
@@ -96,7 +96,7 @@ fn kinds() -> Vec<Box<dyn Plugin>> {
     registry(&Spawner::Local)
 }
 
-/// The kinds this Client was compiled with, as attributes of its own Agent (ADR-0019 §18).
+/// The kinds this Client was compiled with, as attributes of its own Agent (CLT-supervisor-mode-and-kinds §18).
 ///
 /// A `type` is something a Client either carries or does not, and a Server rolling a wrapped kind's
 /// set at a Client without that plugin should learn it by not aiming there rather than from a `FAILED`
@@ -110,7 +110,7 @@ fn kinds() -> Vec<Box<dyn Plugin>> {
 /// there would tell the fleet something it could not act on.
 ///
 /// The keys are the build's statement alone: `[attributes]` refuses every `supervisor.*` key
-/// (ADR-0018 §10), and a value under one of them is
+/// (CLT-what-an-agent-reports §10), and a value under one of them is
 /// replaced by what this build carries.
 fn kind_attributes(mut attributes: BTreeMap<String, String>) -> BTreeMap<String, String> {
     for plugin in kinds() {
@@ -123,7 +123,7 @@ fn kind_attributes(mut attributes: BTreeMap<String, String>) -> BTreeMap<String,
 }
 
 /// Build the Engine from the configuration, starting one adapter task per Supervisor, each of whose
-/// Managed Processes `spawner` starts (ADR-0022 §18).
+/// Managed Processes `spawner` starts (CLT-accounts-service-runs-under §18).
 ///
 /// # Errors
 /// Returns an error when an Agent's state cannot be restored, a `[[supervisor]]` block names an
@@ -142,14 +142,14 @@ pub fn build_engine(
     let (event_tx, events) = mpsc::channel(64);
     let mut agents = Vec::with_capacity(config.supervisors.len() + 1);
 
-    // The Client is always its own Agent (ADR-0020), whether or not it supervises anything:
+    // The Client is always its own Agent (CLT-self-update-signed-package), whether or not it supervises anything:
     // otherwise it would be invisible on exactly the hosts that manage something, and the Server
     // would have nobody to offer the Client's own package to. It is index 0 so the Supervisors that
     // follow keep a stable, obvious offset.
     let storage = Storage::client(config.state_dir.clone(), config.process_account_group)
         .map_err(|e| format!("cannot prepare {}: {e}", config.state_dir.display()))?;
     // A host that keeps its Supervisor set takes none from the Server, and the set stored from
-    // before leaves rather than be reported as applied (ADR-0019 §39 and §41).
+    // before leaves rather than be reported as applied (CLT-supervisor-mode-and-kinds §39 and §41).
     let self_state = if config.server_manages_set() {
         AgentState::new(config.name.clone(), storage, crate::host::SystemHost)
     } else {
@@ -164,7 +164,7 @@ pub fn build_engine(
             .with_namespace(config.service_namespace.clone()),
     );
     // Consenting to be updated takes one package, the one named after this Client's Agent type —
-    // anything else is refused rather than written over this binary (ADR-0020). The consent stands
+    // anything else is refused rather than written over this binary (CLT-self-update-signed-package). The consent stands
     // unless `[packages] self_update = false` withdraws it, so this is the ordinary path rather
     // than the opted-into one. And only from a signed package: without a verification key the
     // consent is kept, but nothing is declared — the startup notice names the key.
@@ -197,8 +197,8 @@ pub fn build_engine(
     });
 
     // One set of high-water marks for every Supervisor this Client runs, now and after a
-    // Supervisor-set apply adds one (ADR-0034 §8). Read afresh at every start, and seeded
-    // from each Supervisor's installed record as it starts (ADR-0034 §9).
+    // Supervisor-set apply adds one (PKG-versions-high-water-mark-floor §8). Read afresh at every start, and seeded
+    // from each Supervisor's installed record as it starts (PKG-versions-high-water-mark-floor §9).
     let marks: Arc<dyn HighWaterMarks> = Arc::new(HighWaterFile::open(&config.state_dir));
     for (block_index, block) in config.supervisors.iter().enumerate() {
         // The event channel is keyed by position in `agents`, and the self-Agent holds 0.
@@ -214,7 +214,7 @@ pub fn build_engine(
 }
 
 /// A directory under the Supervisor root that no `[[supervisor]]` block names is reported, never
-/// reaped (ADR-0022 §25): it may be a purge a crash cut short, or an operator's deliberate
+/// reaped (CLT-accounts-service-runs-under §25): it may be a purge a crash cut short, or an operator's deliberate
 /// hand edit, a temporarily commented-out block whose identity and program are not the Client's
 /// to delete. The log line makes the leftover visible; removing it stays the operator's call. A
 /// tombstone a purge could not delete is named as one, and is reported until it is gone: its name
@@ -269,7 +269,7 @@ fn declare_heartbeat(config: &ClientConfig, mut state: AgentState) -> AgentState
 
 /// Validates one `[[supervisor]]` block exactly as [`start_supervisor`] would read it — plugin
 /// known, program key present and well-shaped, plugin settings parsing strictly — without
-/// touching the filesystem or starting anything (ADR-0019). What an offered Supervisor set is
+/// touching the filesystem or starting anything (CLT-supervisor-mode-and-kinds). What an offered Supervisor set is
 /// checked against before any running process is stopped.
 ///
 /// # Errors
@@ -280,8 +280,8 @@ pub fn validate_block(config: &ClientConfig, block: &SupervisorBlock) -> Result<
     resolved.plugin.check(&block.name, resolved.settings)
 }
 
-/// What a Server-delivered block may not bring (ADR-0019 §35 and §36; for a Supervisor whose
-/// remote configuration is switched off, ADR-0019 §51), checked against `running` — the
+/// What a Server-delivered block may not bring (CLT-supervisor-mode-and-kinds §35 and §36; for a Supervisor whose
+/// remote configuration is switched off, CLT-supervisor-mode-and-kinds §51), checked against `running` — the
 /// configuration in force, whose `[supervisors]` section the Server cannot change and whose block
 /// of the same name the delivered one may repeat.
 ///
@@ -303,7 +303,7 @@ pub fn check_delivered_block(
 
 /// The program a block resolves to, for callers that must inspect ownership rather than just
 /// spawn it. The Supervisor-set apply uses it to keep a Server-delivered block to a Client-owned
-/// program (ADR-0019).
+/// program (CLT-supervisor-mode-and-kinds).
 pub fn resolve_block_program(
     config: &ClientConfig,
     block: &SupervisorBlock,
@@ -316,7 +316,7 @@ pub fn resolve_block_program(
 
 /// Start one Supervisor at `index`: its state restored, its Endpoint bound, its adapter task
 /// running, with its plugin from `plugins`. Used at startup for every configured block and at
-/// runtime for a block an applied Supervisor set added or changed (ADR-0019).
+/// runtime for a block an applied Supervisor set added or changed (CLT-supervisor-mode-and-kinds).
 ///
 /// # Errors
 /// Returns an error when the block's state cannot be restored, its Endpoint port cannot be
@@ -342,7 +342,7 @@ pub fn start_supervisor(
 
     let supervisor_dir = config.supervisor_dir(&block.name);
     // The Managed Process passes through the Supervisors' root on its way to its own directory
-    // (ADR-0022 §21). Left as it is made where no process account is registered.
+    // (CLT-accounts-service-runs-under §21). Left as it is made where no process account is registered.
     if config.process_account_group.is_some() {
         let root = config.supervisors_root();
         crate::storage::create_shared_dir(
@@ -366,7 +366,7 @@ pub fn start_supervisor(
     );
 
     // Switched off, the Server's last configuration leaves before the kind starts, and what the
-    // operator placed in `config/` stays (ADR-0019 §49).
+    // operator placed in `config/` stays (CLT-supervisor-mode-and-kinds §49).
     let remote_config = !config.remote_config_disabled(&block.name);
     if !remote_config {
         drop_stored_remote_config(&block.name, &storage)?;
@@ -394,17 +394,17 @@ pub fn start_supervisor(
             .with_namespace(config.service_namespace.clone())
             .with_high_water(marks.clone()),
     );
-    // Every Managed Process is the fleet's (ADR-0019), so every Supervisor takes whichever
-    // top-level package the Server selects for it (ADR-0033). There is no second branch:
+    // Every Managed Process is the fleet's (CLT-supervisor-mode-and-kinds), so every Supervisor takes whichever
+    // top-level package the Server selects for it (PKG-signed-packages-and-delivery). There is no second branch:
     // a block naming a program on the machine does not parse, so the consent is discharged by the
     // type system rather than by a rule. The log line says *where* the program is, which is the
     // thing an operator reading a startup log actually wants.
     //
     // What the target itself needs — for a tree that is its root and nothing below it, since the
-    // live tree arrives by renaming a directory over that name (ADR-0033).
+    // live tree arrives by renaming a directory over that name (PKG-signed-packages-and-delivery).
     install.prepare(config.process_account_group)?;
     // Only a Client holding the operator's verification key takes packages: there is no unsigned
-    // posture (ADR-0033). Without it the program stays as installed, and the startup notice says
+    // posture (PKG-signed-packages-and-delivery). Without it the program stays as installed, and the startup notice says
     // why.
     if config.package_key().is_some() {
         state.accept_packages();
@@ -415,15 +415,15 @@ pub fn start_supervisor(
         );
     }
 
-    // Each Supervisor stops on its own channel (ADR-0019): the Client-wide shutdown is forwarded
+    // Each Supervisor stops on its own channel (CLT-supervisor-mode-and-kinds): the Client-wide shutdown is forwarded
     // into it, and retiring the Supervisor fires it alone — its Endpoint releases the port and
     // its adapter stops the Managed Process while the rest of the Client runs on.
     let (stop_tx, stop) = shutdown_channel();
     forward_shutdown(shutdown.clone(), stop_tx.clone());
 
-    // The Supervisor Endpoint is intrinsic to every Supervisor (ADR-0016): bound
+    // The Supervisor Endpoint is intrinsic to every Supervisor (CLT-modes-and-gateway): bound
     // unconditionally, before the process starts — a taken port fails startup, not later.
-    // Only the Managed Process may report through it (ADR-0016): a token fresh for every start,
+    // Only the Managed Process may report through it (CLT-modes-and-gateway): a token fresh for every start,
     // handed to the process in its environment and asked of every connection.
     let endpoint_token = endpoint::new_token()?;
     endpoint::start(
@@ -460,7 +460,7 @@ pub fn start_supervisor(
 }
 
 /// Removes what a remote configuration stored for the Supervisor `name` before its remote
-/// configuration was switched off, and says what it did (ADR-0019 §49).
+/// configuration was switched off, and says what it did (CLT-supervisor-mode-and-kinds §49).
 ///
 /// # Errors
 /// Returns an error when a file that has to go cannot be deleted — the Supervisor must not start
@@ -487,7 +487,7 @@ fn drop_stored_remote_config(name: &str, storage: &Storage) -> Result<(), String
 }
 
 /// Removes the Supervisor set the Client's own Agent stored before the host kept its set, and says
-/// what it did (ADR-0019 §41). Nothing runs on those files — the set is already in
+/// what it did (CLT-supervisor-mode-and-kinds §41). Nothing runs on those files — the set is already in
 /// `supervisor.toml` — so a file that cannot go is a warning, not a reason to stay offline.
 fn drop_stored_supervisor_set(storage: &Storage) {
     match storage.drop_stored_set() {
@@ -524,7 +524,7 @@ fn drop_stored_supervisor_set(storage: &Storage) {
     }
 }
 
-/// The startup notices `[supervisors] remote_config_disabled` earns (ADR-0019 §46): a listed
+/// The startup notices `[supervisors] remote_config_disabled` earns (CLT-supervisor-mode-and-kinds §46): a listed
 /// name no `[[supervisor]]` block carries, since the set may arrive later, and one that is the
 /// Client's own name, whose Agent the switch does not cover.
 #[must_use]
@@ -562,7 +562,7 @@ pub fn remote_config_disabled_notices(config: &ClientConfig) -> Vec<String> {
 
 /// Forwards the Client-wide shutdown into one Supervisor's own channel, so its adapter and
 /// Endpoint stop on whichever fires first — the operator stopping the Client, or the Supervisor
-/// being retired (ADR-0019).
+/// being retired (CLT-supervisor-mode-and-kinds).
 fn forward_shutdown(mut global: Shutdown, stop_tx: watch::Sender<bool>) {
     tokio::spawn(async move {
         global.requested().await;
@@ -571,9 +571,9 @@ fn forward_shutdown(mut global: Shutdown, stop_tx: watch::Sender<bool>) {
 }
 
 /// What a package replaces: one file, or — when the block says where the program sits inside the
-/// package — the whole tree under this Supervisor's `program/` (ADR-0033). A single file is found
+/// package — the whole tree under this Supervisor's `program/` (PKG-signed-packages-and-delivery). A single file is found
 /// by its name, or at the place in the archive its kind knows
-/// (ADR-0033 §55).
+/// (PKG-signed-packages-and-delivery §55).
 fn install_target(
     program_path: Option<std::path::PathBuf>,
     member: Option<&'static str>,
@@ -615,17 +615,17 @@ mod tests {
     }
 
     /// A configuration as `ClientConfig::load` leaves it when `[packages] verification_key` is set:
-    /// the decoded key is what decides whether anything takes packages (ADR-0033).
+    /// the decoded key is what decides whether anything takes packages (PKG-signed-packages-and-delivery).
     fn keyed(mut config: ClientConfig) -> ClientConfig {
         config.package_key = Some(vec![7u8; 32]);
         config
     }
 
-    /// The claim of ADR-0019 in one assertion: every wrapped kind's block is `type` and `name`, and
+    /// The claim of CLT-supervisor-mode-and-kinds in one assertion: every wrapped kind's block is `type` and `name`, and
     /// it validates whole — the program resolves inside this Supervisor's own directory, the Agent
     /// type is stated, the timing comes from the fleet, and the kind's own strict parse accepts an
     /// empty table.
-    // Verifies: ADR-0019
+    // Verifies: CLT-supervisor-mode-and-kinds
     #[test]
     fn every_wrapped_kinds_block_is_two_lines() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -641,13 +641,13 @@ mod tests {
         }
     }
 
-    /// A Client says which kinds it carries, one key per kind (ADR-0019 §18), so a Selector
+    /// A Client says which kinds it carries, one key per kind (CLT-supervisor-mode-and-kinds §18), so a Selector
     /// can aim a Supervisor set at the Clients that can actually run it — rather than the Server
     /// learning from a `FAILED` that it aimed at a Client too old to have the plugin.
     /// Which keys those are is `a_build_carries_exactly_the_wrapped_kinds_its_features_name`'s;
     /// this is what the key does to a value already under it: the build's statement replaces it,
     /// and the operator's other attributes pass.
-    // Verifies: ADR-0019
+    // Verifies: CLT-supervisor-mode-and-kinds
     #[test]
     fn a_client_reports_the_kinds_it_was_compiled_with() {
         let stated = kind_attributes(
@@ -665,13 +665,13 @@ mod tests {
         assert_eq!(stated.get("env").map(String::as_str), Some("prod"));
     }
 
-    /// The wrapped kinds, each with whether this build's features carry it (ADR-0019 §2).
+    /// The wrapped kinds, each with whether this build's features carry it (CLT-supervisor-mode-and-kinds §2).
     const WRAPPED: &[(&str, bool)] = &[];
 
     /// A build's kinds are the core's two and the wrapped ones its features name — no more, so a
     /// Selector aimed at `supervisor.kind.<type>` never reaches a build without it, and no fewer
-    /// (ADR-0019 §2 and §18).
-    // Verifies: ADR-0019
+    /// (CLT-supervisor-mode-and-kinds §2 and §18).
+    // Verifies: CLT-supervisor-mode-and-kinds
     #[test]
     fn a_build_carries_exactly_the_wrapped_kinds_its_features_name() {
         let mut expected = vec!["collector", "command"];
@@ -698,9 +698,9 @@ mod tests {
     }
 
     /// A wrapped kind this build leaves out is an unknown `type` like any other: startup and an
-    /// offered set both refuse the block, naming the kinds the build does carry (ADR-0019 §2). The default build carries every kind, so this decides something in the
+    /// offered set both refuse the block, naming the kinds the build does carry (CLT-supervisor-mode-and-kinds §2). The default build carries every kind, so this decides something in the
     /// `--no-default-features` run of CI.
-    // Verifies: ADR-0019
+    // Verifies: CLT-supervisor-mode-and-kinds
     #[test]
     fn a_kind_left_out_of_the_build_is_an_unknown_type() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -807,11 +807,11 @@ mod tests {
     }
 
     /// Where a process account is registered, the Engine lays out the path to each Managed
-    /// Process for its group (ADR-0022 §21): the state directory, the Supervisors' root and
+    /// Process for its group (CLT-accounts-service-runs-under §21): the state directory, the Supervisors' root and
     /// each Supervisor's directory passed through, `0710`, and `program/` read, `0750`. Without
     /// one, those directories are what they were: `0700`, and `program/` and the root as they are
     /// made.
-    /// Verifies: ADR-0022
+    /// Verifies: CLT-accounts-service-runs-under
     #[cfg(unix)]
     #[tokio::test]
     async fn the_engine_lays_out_the_path_to_each_managed_process_for_the_process_accounts_group() {
@@ -898,8 +898,8 @@ mod tests {
     }
 
     /// With no mark file and `a`'s record at `0.110.0`, the start seeds the mark: `b`, which has
-    /// no record of its own, refuses `0.109.0` naming the mark (ADR-0034 §9).
-    /// Verifies: ADR-0034
+    /// no record of its own, refuses `0.109.0` naming the mark (PKG-versions-high-water-mark-floor §9).
+    /// Verifies: PKG-versions-high-water-mark-floor
     #[tokio::test]
     async fn the_start_seeds_the_mark_from_the_installed_records() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -921,8 +921,8 @@ mod tests {
     }
 
     /// A mark file that does not parse is never read as empty: every Supervisor offer is refused
-    /// naming the file, and the Client still starts and reports (ADR-0034 §11).
-    /// Verifies: ADR-0034
+    /// naming the file, and the Client still starts and reports (PKG-versions-high-water-mark-floor §11).
+    /// Verifies: PKG-versions-high-water-mark-floor
     #[tokio::test]
     async fn an_unreadable_mark_file_refuses_every_supervisor_package() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -957,8 +957,8 @@ mod tests {
 
     /// Only the host lowers the mark: with the Client stopped, the operator deletes the type's
     /// entry and the type's installed records, and after the start an offer at `0.109.0` is taken
-    /// (ADR-0034 §12).
-    /// Verifies: ADR-0034
+    /// (PKG-versions-high-water-mark-floor §12).
+    /// Verifies: PKG-versions-high-water-mark-floor
     #[tokio::test]
     async fn the_host_lowers_the_mark_by_deleting_the_entry_and_the_records() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -988,14 +988,14 @@ mod tests {
         supervisor.capabilities & AgentCapabilities::AcceptsPackages as u64 != 0
     }
 
-    /// ADR-0019 where it becomes visible to the Server: **every** Supervisor declares
+    /// CLT-supervisor-mode-and-kinds where it becomes visible to the Server: **every** Supervisor declares
     /// `AcceptsPackages`, because every Managed Process is one this Client installed. The
     /// capability is a constant of this Client now, not a function of a path — which is why the
     /// second half of this test is a startup refusal rather than a second capability.
     ///
     /// The `program/` directory is created either way, before the first package: the swap renames
     /// inside it, so it has to exist beforehand rather than after.
-    /// Verifies: ADR-0019, ADR-0033
+    /// Verifies: CLT-supervisor-mode-and-kinds, PKG-signed-packages-and-delivery
     #[tokio::test]
     async fn every_supervisor_declares_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1013,7 +1013,7 @@ mod tests {
             "the directory the swap renames inside exists before any package arrives"
         );
 
-        // A program on the machine does not start at all (ADR-0019).
+        // A program on the machine does not start at all (CLT-supervisor-mode-and-kinds).
         let foreign = dir.path().join("elsewhere/managed-agent");
         let machines: ClientConfig = toml::from_str(&config(
             dir.path(),
@@ -1029,8 +1029,8 @@ mod tests {
 
     /// Without the operator's verification key, no Agent of this Client takes packages — neither a
     /// Supervisor nor the Client's own Agent, whose self-update consent stands — so nothing can be
-    /// installed unsigned (ADR-0033, ADR-0020).
-    /// Verifies: ADR-0033, ADR-0020, Q-1
+    /// installed unsigned (PKG-signed-packages-and-delivery, CLT-self-update-signed-package).
+    /// Verifies: PKG-signed-packages-and-delivery, CLT-self-update-signed-package, Q-1
     #[tokio::test]
     async fn without_a_verification_key_no_agent_takes_packages() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     /// The side-effect-free `installs_packages()` that the startup signature-posture warning reads
-    /// (ADR-0033) agrees with the `AcceptsPackages` capability an Agent actually declares.
+    /// (PKG-signed-packages-and-delivery) agrees with the `AcceptsPackages` capability an Agent actually declares.
     #[tokio::test]
     async fn installs_packages_reflects_declared_package_acceptance() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1066,7 +1066,7 @@ mod tests {
             "the program is package-updatable, so the Client installs packages"
         );
 
-        // Every Supervisor is package-updatable (ADR-0019), so the only way for an Engine to answer
+        // Every Supervisor is package-updatable (CLT-supervisor-mode-and-kinds), so the only way for an Engine to answer
         // *no* is to have no Supervisor and a withdrawn self-update consent. That is worth keeping
         // green: the startup check this feeds warns about an unconfigured verification key, and a
         // Client that installs nothing has nothing for that key to protect.
@@ -1080,7 +1080,7 @@ mod tests {
             "no Supervisor and no self-update consent means nothing here takes a package"
         );
 
-        // The Client's own Agent consents by default (ADR-0020), so a Client with no Supervisor at
+        // The Client's own Agent consents by default (CLT-self-update-signed-package), so a Client with no Supervisor at
         // all still installs packages — its own.
         let bare: ClientConfig =
             keyed(toml::from_str("endpoint = \"ws://127.0.0.1:1/v1/opamp\"\n").expect("parse"));
@@ -1091,7 +1091,7 @@ mod tests {
         );
     }
 
-    /// A tree Supervisor owns its `program/` directory and *nothing inside it* (ADR-0033). The
+    /// A tree Supervisor owns its `program/` directory and *nothing inside it* (PKG-signed-packages-and-delivery). The
     /// live tree arrives by renaming a staging directory over `program/tree`, and a rename cannot
     /// replace a directory something else created and filled — so preparing the program's parent,
     /// which is right for a single file, would make every first install of a tree fail.
@@ -1154,7 +1154,7 @@ mod tests {
         assert!(err.contains("needs a `command`"), "{err}");
     }
 
-    /// ADR-0022 §25: a directory no block names survives startup — reported, never reaped.
+    /// CLT-accounts-service-runs-under §25: a directory no block names survives startup — reported, never reaped.
     /// Startup cannot tell a purge a crash cut short from an operator's deliberate hand edit, and
     /// the destructive reading of that ambiguity would delete an identity and a program that were
     /// not meant to go.
@@ -1177,8 +1177,8 @@ mod tests {
     }
 
     /// The start removes a tombstone left behind again, beside the start rather than before it,
-    /// and leaves every other orphan in place (ADR-0022 §25).
-    /// Verifies: ADR-0022
+    /// and leaves every other orphan in place (CLT-accounts-service-runs-under §25).
+    /// Verifies: CLT-accounts-service-runs-under
     #[tokio::test]
     async fn a_start_removes_a_tombstone_left_behind() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1205,8 +1205,8 @@ mod tests {
 
     /// A tombstone a purge could not delete is reported at startup as a removed Supervisor's that
     /// is removed again, apart from the orphans the operator removes; the report itself deletes
-    /// nothing (ADR-0022 §25).
-    /// Verifies: ADR-0022
+    /// nothing (CLT-accounts-service-runs-under §25).
+    /// Verifies: CLT-accounts-service-runs-under
     #[test]
     fn a_tombstone_left_behind_is_reported_at_startup() {
         #[derive(Clone, Default)]
@@ -1325,8 +1325,8 @@ mod tests {
     }
 
     /// A listed name no block carries starts the Client and earns one notice naming it; one equal
-    /// to the Client's own name says that Agent is not covered (ADR-0019 §46).
-    /// Verifies: ADR-0019
+    /// to the Client's own name says that Agent is not covered (CLT-supervisor-mode-and-kinds §46).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn a_listed_name_without_a_block_is_a_notice_not_a_refusal() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1344,8 +1344,8 @@ mod tests {
 
     /// Switching off takes the Server's last configuration out of force before the kind starts:
     /// the entry files it wrote and `.supplementary` go while their bytes are still the stored
-    /// ones, an overwritten entry and an operator's own file stay, and the `.pb` goes (ADR-0019 §31).
-    /// Verifies: ADR-0019
+    /// ones, an overwritten entry and an operator's own file stay, and the `.pb` goes (CLT-supervisor-mode-and-kinds §31).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn a_listed_supervisor_drops_the_stored_remote_config_and_keeps_the_operators_files() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1377,8 +1377,8 @@ mod tests {
 
     /// A stored configuration whose files cannot be removed stops the Supervisor before its kind
     /// starts on them, and at startup that fails the whole Client: it fails closed rather than run
-    /// the Server's configuration under a switch that says it does not (ADR-0019 §49).
-    /// Verifies: ADR-0019
+    /// the Server's configuration under a switch that says it does not (CLT-supervisor-mode-and-kinds §49).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn a_stored_remote_config_that_cannot_be_removed_fails_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1402,8 +1402,8 @@ mod tests {
     }
 
     /// A stored `.pb` that does not decode is deleted, and `config/` is left exactly as it is,
-    /// since nothing says which of its files the Server wrote (ADR-0019 §49).
-    /// Verifies: ADR-0019
+    /// since nothing says which of its files the Server wrote (CLT-supervisor-mode-and-kinds §49).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn an_undecodable_stored_remote_config_is_deleted_and_config_is_left_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1427,8 +1427,8 @@ mod tests {
     }
 
     /// A listed Supervisor restarted over a stored configuration reports no status and no hash,
-    /// and declares neither remote-configuration capability (ADR-0019 §47 and §49).
-    /// Verifies: ADR-0019
+    /// and declares neither remote-configuration capability (CLT-supervisor-mode-and-kinds §47 and §49).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn a_listed_supervisor_reports_no_remote_config_status_after_a_restart() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1460,9 +1460,9 @@ mod tests {
     }
 
     /// The switch covers Supervisors only: the Client's own name in the list earns a notice, and
-    /// its Agent still declares `AcceptsRemoteConfig` for its Supervisor set (ADR-0019 §46
+    /// its Agent still declares `AcceptsRemoteConfig` for its Supervisor set (CLT-supervisor-mode-and-kinds §46
     /// and out of scope).
-    /// Verifies: ADR-0019
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn the_clients_own_agent_keeps_accepting_its_supervisor_set_when_its_name_is_listed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1500,8 +1500,8 @@ mod tests {
     /// On a host that keeps its set, the set the Client's own Agent stored before is removed at
     /// start — the `.pb` and the unchanged entry copies, not a copy changed since — and is not
     /// reported; the Agent declares neither remote-configuration bit. With the key `true` the same
-    /// stored set is restored as applied (ADR-0019 §39 and §41).
-    /// Verifies: ADR-0019
+    /// stored set is restored as applied (CLT-supervisor-mode-and-kinds §39 and §41).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn a_host_that_keeps_its_set_drops_the_stored_set_and_reports_no_status() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1545,8 +1545,8 @@ mod tests {
     }
 
     /// A `remote-config.pb` that cannot be read or deleted is a warning, not a refusal: nothing
-    /// runs on it, and it is still not reported (ADR-0019 §41).
-    /// Verifies: ADR-0019
+    /// runs on it, and it is still not reported (CLT-supervisor-mode-and-kinds §41).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn a_stored_set_that_cannot_be_removed_does_not_stop_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1561,8 +1561,8 @@ mod tests {
     }
 
     /// `remote-config.pb` goes before the copies, so a copy that cannot be removed leaves no hash
-    /// behind: switched back on, the next start reports none (ADR-0019 §41 and §44).
-    /// Verifies: ADR-0019
+    /// behind: switched back on, the next start reports none (CLT-supervisor-mode-and-kinds §41 and §44).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn a_copy_that_cannot_be_removed_still_leaves_no_hash_to_report() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1591,8 +1591,8 @@ mod tests {
         );
     }
 
-    /// A stored set that does not decode is deleted, and `config/` is left as it is (ADR-0019 §23).
-    /// Verifies: ADR-0019
+    /// A stored set that does not decode is deleted, and `config/` is left as it is (CLT-supervisor-mode-and-kinds §23).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn an_undecodable_stored_set_is_deleted_and_config_is_left_alone() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1618,8 +1618,8 @@ mod tests {
     }
 
     /// The removal is logged once naming the stored hash, and a set offered to the built Client
-    /// anyway is logged once per hash (ADR-0019 §40 and §41).
-    /// Verifies: ADR-0019
+    /// anyway is logged once per hash (CLT-supervisor-mode-and-kinds §40 and §41).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[tokio::test]
     async fn the_removed_stored_set_is_logged_naming_its_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1659,10 +1659,10 @@ mod tests {
         assert!(ignored[1].contains(&hex::encode(b"set-b")), "{log}");
     }
 
-    /// The notice for the Client's own name in `remote_config_disabled` (ADR-0019 §46) points
+    /// The notice for the Client's own name in `remote_config_disabled` (CLT-supervisor-mode-and-kinds §46) points
     /// at `server_manages_set`, and on a host that keeps its set says the set is the host's
-    /// already (ADR-0019).
-    /// Verifies: ADR-0019
+    /// already (CLT-supervisor-mode-and-kinds).
+    /// Verifies: CLT-supervisor-mode-and-kinds
     #[test]
     fn the_own_name_notice_points_at_server_manages_set() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1682,8 +1682,8 @@ mod tests {
     }
 
     /// The place a kind names for its member reaches the install, and a `program_path` still makes
-    /// it a tree (ADR-0033 §55).
-    /// Verifies: ADR-0033
+    /// it a tree (PKG-signed-packages-and-delivery §55).
+    /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn a_kinds_member_reaches_the_single_file_install() {
         use crate::supervisor::ports::InstallTarget;

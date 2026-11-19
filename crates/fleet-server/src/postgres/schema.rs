@@ -1,4 +1,4 @@
-//! The Server's schema (ADR-0039 §22): embedded as numbered migrations, applied by the Server
+//! The Server's schema (SRV-state-stores-contract-pair §22): embedded as numbered migrations, applied by the Server
 //! itself at startup, each recorded in `fleet_schema` with the oldest Server version that
 //! understands the schema it leaves.
 //!
@@ -78,7 +78,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // a database, and name it. A Server of 0.7.1 holds no lease, keeps its audit record in files
     // and leaves the revocation list's version where it was, so it refuses the schema they leave
     // rather than serve beside the instances of 0.8.0
-    // (ADR-0039 §22).
+    // (SRV-state-stores-contract-pair §22).
     //
     // A table only added.
     Migration {
@@ -133,7 +133,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // Columns only added, with defaults, and indexes. A Server of 0.8.0 writes none of them, and
     // the rows it writes are derived again before the list of Agents reads them, so it serves on
     // the schema they leave
-    // (ADR-0030 §8).
+    // (API-lists-paged-by-cursor §8).
     Migration {
         version: 11,
         oldest_server: "0.8.0",
@@ -141,7 +141,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A column only added, with a default. A Server of 0.8.0 writes no release into it, and every
     // lease taken before it is one of 0.8.0, which the default names
-    // (ADR-0025 §16).
+    // (SRV-instances-share-one-postgresql §16).
     Migration {
         version: 12,
         oldest_server: "0.8.0",
@@ -149,7 +149,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A table only added. A Server of 0.8.0 reads and writes none of it, so its sweeps and uploads
     // are as before, beside the instances that mark
-    // (ADR-0039 §14).
+    // (SRV-state-stores-contract-pair §14).
     Migration {
         version: 13,
         oldest_server: "0.8.0",
@@ -157,7 +157,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A table, its row and the triggers that keep it only added. A Server of 0.8.0 reads none of
     // it, and what it adds and removes is counted all the same
-    // (ADR-0039 §22).
+    // (SRV-state-stores-contract-pair §22).
     Migration {
         version: 14,
         oldest_server: "0.8.0",
@@ -166,7 +166,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // A table only added. A Server of 0.8.0 reads and writes none of it: it neither refuses nor
     // drops a rejected key, so beside the instances of this release a rejected key may wait again
     // through it and be approved
-    // (ADR-0027 §16).
+    // (SEC-bootstrap-certificates-and-enrolment §16).
     Migration {
         version: 15,
         oldest_server: "0.8.0",
@@ -175,7 +175,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // A column only added, without a default. A Server of 0.8.0 writes no label into it, so its
     // lease names none, and an instance of this release with an audit key refuses to start beside
     // it
-    // (ADR-0028 §16).
+    // (SEC-append-only-audit-record §16).
     Migration {
         version: 16,
         oldest_server: "0.8.0",
@@ -184,7 +184,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // Two columns only added, without a default, an index, and a table with its one row. A Server
     // of 0.8.0 writes no checkpoint, and an instance of this release that signs refuses to start
     // beside one by the audit key label of migration 16
-    // (ADR-0028 §11).
+    // (SEC-append-only-audit-record §11).
     Migration {
         version: 17,
         oldest_server: "0.8.0",
@@ -199,8 +199,8 @@ pub const MIGRATIONS: &[Migration] = &[
     // Three defaults only added, which change no stored row. A Server of 0.8.4 still names the
     // contract pair in its `INSERT`s and reads each Host's array only to discard it, so it serves
     // on what this leaves; a release before it does not serve beside this one
-    // (ADR-0039 §22,
-    // ADR-0025 §16).
+    // (SRV-state-stores-contract-pair §22,
+    // SRV-instances-share-one-postgresql §16).
     Migration {
         version: 19,
         oldest_server: "0.8.4",
@@ -212,7 +212,7 @@ pub const MIGRATIONS: &[Migration] = &[
 /// `configurations` and the Hosts' `instance_uids` arrays — so that a row inserted without naming
 /// them holds the empty value a Server of 0.8.4 writes there itself. Each statement takes an
 /// `ACCESS EXCLUSIVE` lock on its table for the moment it changes the catalogue. The release
-/// after the one that adds them drops the columns (ADR-0039 §22).
+/// after the one that adds them drops the columns (SRV-state-stores-contract-pair §22).
 const CONTRACT_PAIR_DEFAULTS: &str = "
 ALTER TABLE deployments ALTER COLUMN packages SET DEFAULT '[]';
 ALTER TABLE deployments ALTER COLUMN configurations SET DEFAULT '{}';
@@ -230,7 +230,7 @@ CREATE INDEX agent_assignment_configurations_configuration
 ";
 
 /// The checkpoints of the audit record
-/// (ADR-0028 §11): each
+/// (SEC-append-only-audit-record §11): each
 /// checkpoint entry's `checkpoint_seq`, at most one entry per number; the checkpoint that named each
 /// closed chain closed, so that no later one names it again; and the newest checkpoint's number and
 /// hash, which the transaction that inserts the next one compares and sets, and which a prune of
@@ -250,13 +250,13 @@ INSERT INTO audit_checkpoint_head (seq, hash)
 ";
 
 /// The `[audit] key_label` of the instance that holds each lease, null for none
-/// (ADR-0028 §16).
+/// (SEC-append-only-audit-record §16).
 const LEASE_AUDIT_KEY: &str = "
 ALTER TABLE leases ADD COLUMN audit_key_label text;
 ";
 
 /// The rejected keys, each the id of the request it refuses, with when it was rejected
-/// (ADR-0027 §16):
+/// (SEC-bootstrap-certificates-and-enrolment §16):
 /// written by a rejection under the queue's lock, read by every take under it and by
 /// every approval, and deleted by no close or end of the window.
 const ENROLMENT_REJECTED: &str = "
@@ -266,7 +266,7 @@ CREATE TABLE enrolment_rejected (
 );
 ";
 
-/// The count of the Agents' records (ADR-0039 §22): one row, raised and lowered by the
+/// The count of the Agents' records (SRV-state-stores-contract-pair §22): one row, raised and lowered by the
 /// triggers on `agents` in the statement that adds or removes rows, so the Agent-record ceiling is
 /// decided from it and not from a count of every row. The triggers exist before the row is
 /// filled, and creating them locks `agents` against every addition and removal until the
@@ -312,7 +312,7 @@ CREATE TRIGGER agents_removed AFTER DELETE ON agents
 INSERT INTO agent_count (agents) SELECT count(*) FROM agents;
 ";
 
-/// The blobs a sweep marked before it deletes them (ADR-0039 §14): written on the session
+/// The blobs a sweep marked before it deletes them (SRV-state-stores-contract-pair §14): written on the session
 /// that holds the blob store's lock, read by every upload in the transaction that checks its blob,
 /// and taken away by the sweep that wrote them, `sweep`, or by any sweep once their `lease` is
 /// not live.
@@ -327,7 +327,7 @@ CREATE INDEX blob_deletions_sweep ON blob_deletions (sweep);
 ";
 
 /// The release of the instance that holds each lease
-/// (ADR-0025 §16):
+/// (SRV-instances-share-one-postgresql §16):
 /// what an instance compares with the oldest Server its migrations leave before it
 /// migrates.
 const LEASE_RELEASE: &str = "
@@ -338,7 +338,7 @@ ALTER TABLE leases ADD COLUMN release text NOT NULL DEFAULT '0.8.0';
 pub const RELEASE_BEFORE_THE_RECORD: &str = "0.8.0";
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
-/// their own (ADR-0039 §4–§6, §9–§11 and §21). Unsigned integers are kept as `bigint` with
+/// their own (SRV-state-stores-contract-pair §4–§6, §9–§11 and §21). Unsigned integers are kept as `bigint` with
 /// their bits unchanged, so every value round-trips.
 ///
 /// PostgreSQL's `text` and `jsonb` refuse a NUL character, which a file keeps. Text an Agent or a
@@ -464,7 +464,7 @@ CREATE TABLE enrolment_requests (
 );
 ";
 
-/// The floor of each Agent type (ADR-0034 §15): one row per type, the signature as its
+/// The floor of each Agent type (PKG-versions-high-water-mark-floor §15): one row per type, the signature as its
 /// bytes.
 const PACKAGE_FLOORS: &str = r"
 CREATE TABLE package_floors (
@@ -475,7 +475,7 @@ CREATE TABLE package_floors (
 ";
 
 /// The lease of every instance on this database
-/// (ADR-0025 §1–§3).
+/// (SRV-instances-share-one-postgresql §1–§3).
 /// The times are the database's own, so every instance reads the same clock. A
 /// lease whose `expires_at` has passed is lapsed, whatever its row still says.
 const LEASES: &str = r"
@@ -491,9 +491,9 @@ CREATE TABLE leases (
 
 /// Which Host each `instance_uid` is bound to: one row per binding, the `instance_uid` its key, so
 /// no two Hosts hold one
-/// (ADR-0025 §19).
+/// (SRV-instances-share-one-postgresql §19).
 /// It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
-/// Host is bound none (ADR-0029 §16); an `instance_uid` two such Hosts' arrays hold fails the
+/// Host is bound none (SRV-fleet-record-agents-hosts §16); an `instance_uid` two such Hosts' arrays hold fails the
 /// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
 /// walk down its chain finds an entry's renewals by the index on the predecessor.
 const HOST_BINDINGS: &str = r"
@@ -519,7 +519,7 @@ CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, prede
 ";
 
 /// The members of each Deployment, one row each
-/// (ADR-0025 §19):
+/// (SRV-instances-share-one-postgresql §19):
 /// its Packages keyed by Agent type, so it holds at most one of each, and its
 /// Configurations by name. They are filled from the `packages` and `configurations` columns of
 /// `deployments`, which stay and are written from these rows. A Deployment it cannot split fails
@@ -566,7 +566,7 @@ INSERT INTO deployment_configurations (deployment, configuration)
 ";
 
 /// The revocation list's one version
-/// (ADR-0039 §10): a counter in one row that the
+/// (SRV-state-stores-contract-pair §10): a counter in one row that the
 /// transaction of every revocation added or widened and every lift increments. It is the `ETag`
 /// of the Gateways' list on every instance, and what each lease renewal compares.
 const REVOCATION_LIST_VERSION: &str = r"
@@ -578,7 +578,7 @@ INSERT INTO revocation_list_version (singleton, version) VALUES (true, 0);
 ";
 
 /// The audit record, one hash chain per lease
-/// (ADR-0028): a record per
+/// (SEC-append-only-audit-record): a record per
 /// chain, named by the instance id of the lease that opened it, with the hash of its closing entry
 /// once it is closed; each entry as the line it was hashed as; and the end of the file record a
 /// move from files left as the archive, which the first chain names as its predecessor.
@@ -603,10 +603,10 @@ CREATE TABLE audit_archive (
 );
 ";
 
-/// Where each Agent is connected (ADR-0029 §3): whether
+/// Where each Agent is connected (SRV-fleet-record-agents-hosts §3): whether
 /// a connection carries it, and the instance that holds that connection, by the id of its lease.
 /// Each instance writes them for the Agents it carries in batches
-/// (ADR-0029 §4); a holder without a live lease reads as
+/// (SRV-fleet-record-agents-hosts §4); a holder without a live lease reads as
 /// disconnected, whatever `connected` says (clause 6).
 const AGENT_PRESENCE: &str = r"
 ALTER TABLE agents ADD COLUMN connected boolean NOT NULL DEFAULT false;
@@ -614,7 +614,7 @@ ALTER TABLE agents ADD COLUMN holder uuid;
 ";
 
 /// How each Agent was taken
-/// (ADR-0025 §8):
+/// (SRV-instances-share-one-postgresql §8):
 /// `takes` counts every take and every batch that names a holder anew, so an instance
 /// writes a disconnect only where the row still holds the count it was answered, with no clock
 /// compared; `holder_changes` holds when the holder changed, the latest eleven times, by the
@@ -625,7 +625,7 @@ ALTER TABLE agents ADD COLUMN holder_changes timestamptz[] NOT NULL DEFAULT '{}'
 ";
 
 /// When each audit entry was stored, by the database's clock: what its age is reckoned from when the
-/// record is pruned (ADR-0039 §12). Entries stored before
+/// record is pruned (SRV-state-stores-contract-pair §12). Entries stored before
 /// take the time their line carries, read as text so that a line that is no entry keeps the time of
 /// the migration rather than stopping it.
 const AUDIT_RECORDED_AT: &str = r#"
@@ -637,7 +637,7 @@ CREATE INDEX audit_entries_recorded_at ON audit_entries (chain, recorded_at);
 "#;
 
 /// The digest of the columns of a row of `agents` its derived ones come from
-/// (ADR-0030 §8):
+/// (API-lists-paged-by-cursor §8):
 /// what a row whose derived columns were written with it holds in `derived_from`. Each
 /// text column enters as its MD5, each `bytea` column length-prefixed, so two rows differ in the
 /// digest wherever they differ in a column, and every function in it is immutable, so the partial
@@ -661,7 +661,7 @@ macro_rules! stamp {
 pub(crate) use stamp;
 
 /// What the list of Agents reads of each record
-/// (ADR-0030 §8):
+/// (API-lists-paged-by-cursor §8):
 /// the display name and the other sort keys, the reported values a Selector matches,
 /// the `service_name`, the machine that groups an Agent behind a Gateway, whether it is its
 /// Client's own Agent, one search text, and the digest of the columns they come from. A row whose
@@ -765,7 +765,7 @@ fn needs_newer(needs: &str, ours: &str) -> String {
 /// Refuses the schema when it names an oldest Server newer than `ours`, naming both versions: what
 /// an instance checks under the migrations' lock before it migrates and in the transaction that
 /// takes each lease
-/// (ADR-0025 §16).
+/// (SRV-instances-share-one-postgresql §16).
 ///
 /// # Errors
 /// Returns the refusal, or an error when a statement fails.
@@ -797,7 +797,7 @@ async fn leases_record_releases(client: &impl GenericClient) -> Result<bool, Str
 /// `None` when there is none. A lease of an instance that had to be alone counts as none: the
 /// caller holds the exclusive lock or found it free, so that lease's process is gone, and the
 /// next lease taken takes it over
-/// (ADR-0025 §2 and §16).
+/// (SRV-instances-share-one-postgresql §2 and §16).
 async fn lease_older_than(
     client: &impl GenericClient,
     oldest: &str,
@@ -850,7 +850,7 @@ async fn lease_older_than(
 /// refused before anything is written, naming both versions, and so is every schema while a live
 /// lease names a release older than the oldest Server the schema names once `migrations` are
 /// applied, naming both releases, whether they are applied already or not
-/// (ADR-0025 §16).
+/// (SRV-instances-share-one-postgresql §16).
 ///
 /// # Errors
 /// Returns an error when the schema needs a newer Server, a live lease is of an older one, or a
@@ -924,8 +924,8 @@ mod tests {
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
     /// one — a build that refused its own schema would never start. Migrations 11 to 18 name
     /// 0.8.0, and migration 19, the contract pair's defaults, names 0.8.4.
-    /// Verifies: ADR-0039
-    /// Verifies: ADR-0025
+    /// Verifies: SRV-state-stores-contract-pair
+    /// Verifies: SRV-instances-share-one-postgresql
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
         for (index, migration) in MIGRATIONS.iter().enumerate() {
@@ -948,7 +948,7 @@ mod tests {
         }
         // The first release to run beside another serves beside 0.8.0: its migrations name it, so
         // the instances of 0.8.0 that still run serve on the schema they leave
-        // (ADR-0025 §16).
+        // (SRV-instances-share-one-postgresql §16).
         for migration in &MIGRATIONS[10..18] {
             assert_eq!(
                 migration.oldest_server, "0.8.0",
@@ -957,12 +957,12 @@ mod tests {
             );
         }
         // The contract pair's defaults name 0.8.4, the release before the one that adds them
-        // (ADR-0039 §22).
+        // (SRV-state-stores-contract-pair §22).
         assert_eq!(MIGRATIONS[18].oldest_server, "0.8.4", "migration 19");
         assert_eq!(
             MIGRATIONS.len(),
             19,
-            "migrations 11 to 18 name 0.8.0, the audit key's label of ADR-0028, the \
+            "migrations 11 to 18 name 0.8.0, the audit key's label of SEC-append-only-audit-record, the \
              checkpoints of the audit record and the indexes of the pin counts among them, and \
              migration 19, the contract pair's defaults, names 0.8.4"
         );
@@ -974,10 +974,10 @@ mod tests {
         assert_eq!(compare("not-a-version", "99.0.0"), Ordering::Greater);
     }
 
-    /// A migration only adds (ADR-0039 §22): nothing in the embedded schema drops, renames or
+    /// A migration only adds (SRV-state-stores-contract-pair §22): nothing in the embedded schema drops, renames or
     /// alters a column away, an `ALTER COLUMN` only gives a column a default (`SET DEFAULT`), and
     /// every table it creates is one [`TABLES`] knows.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_migration_only_adds() {
         for migration in MIGRATIONS {
@@ -1028,7 +1028,7 @@ mod tests {
 
     /// The check of [`a_migration_only_adds`] admits a default and refuses every other change of
     /// a column: its type, its `NOT NULL` dropped or set, its default dropped.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn only_a_default_passes_for_an_altered_column() {
         assert_eq!(
@@ -1053,7 +1053,7 @@ mod tests {
     /// Migration 19 gives each column of the contract pair its default, and names 0.8.4 as the
     /// oldest Server: on a migrated database the catalogue holds the three defaults, and
     /// `fleet_schema` records 0.8.4 for it.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn the_contract_pair_has_its_defaults_and_names_0_8_4() {
         assert_eq!(
@@ -1210,8 +1210,8 @@ mod tests {
     /// No statement the Server runs while serving names a column of the contract pair: no string
     /// literal of its source outside the migrations of this file and outside what is compiled only
     /// into the tests, so the release after this one can drop the columns beside it
-    /// (ADR-0039 §22).
-    /// Verifies: ADR-0039
+    /// (SRV-state-stores-contract-pair §22).
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn no_statement_names_a_column_of_the_contract_pair() {
         let mut found = Vec::new();
@@ -1260,7 +1260,7 @@ mod tests {
     /// Each count of the Agents that pin a Package, a Deployment or a Configuration is served by
     /// its own index: with sequential scans priced out, its plan names that index, not a whole
     /// read of the primary key.
-    /// Verifies: ADR-0039
+    /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_pin_is_counted_by_index() {
         let Some(test) = super::super::testing::TestDatabase::named() else {

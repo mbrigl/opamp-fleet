@@ -1,14 +1,14 @@
-//! A bootstrap certificate and its key as PEM (ADR-0027 §15), and one PEM block written from
+//! A bootstrap certificate and its key as PEM (SEC-bootstrap-certificates-and-enrolment §15), and one PEM block written from
 //! DER. Every key is held in a buffer wiped when it is dropped
-//! (ADR-0015). A value only, so a core module of the Client
-//! may name it (ADR-0009); [`pkcs12`] opens one from a file.
+//! (SEC-secrets-wiped-on-drop). A value only, so a core module of the Client
+//! may name it (DEV-ports-and-adapters); [`pkcs12`] opens one from a file.
 
 pub mod pkcs12;
 
 use zeroize::Zeroizing;
 
-/// A bootstrap certificate and its key as PEM, held in memory (ADR-0027 §15), the key in a
-/// buffer wiped when it is dropped (ADR-0015). Its `Debug` names neither.
+/// A bootstrap certificate and its key as PEM, held in memory (SEC-bootstrap-certificates-and-enrolment §15), the key in a
+/// buffer wiped when it is dropped (SEC-secrets-wiped-on-drop). Its `Debug` names neither.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BootstrapIdentity {
     pub cert_pem: Vec<u8>,
@@ -22,7 +22,7 @@ impl std::fmt::Debug for BootstrapIdentity {
 }
 
 /// `der` as one PEM block, in buffers wiped when they are dropped and sized up front, so none is
-/// grown and left behind (ADR-0015).
+/// grown and left behind (SEC-secrets-wiped-on-drop).
 pub fn pem_block(label: &str, der: &[u8]) -> Zeroizing<String> {
     use base64::Engine as _;
     let body = Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(der));

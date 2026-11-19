@@ -2,8 +2,8 @@
 //!
 //! A certificate the Server issues names its host (`urn:opamp-fleet:host:<id>`). One an operator
 //! provisioned may name none; the Server gives it a host derived from its issuer and serial when it
-//! first renews it (ADR-0027 §11), and a Gateway binds its Agents to that same host before the
-//! renewal (ADR-0016 §15), so the renewal does not move them.
+//! first renews it (SEC-bootstrap-certificates-and-enrolment §11), and a Gateway binds its Agents to that same host before the
+//! renewal (CLT-modes-and-gateway §15), so the renewal does not move them.
 
 use sha2::{Digest as _, Sha256};
 
@@ -29,7 +29,7 @@ mod tests {
     use super::*;
 
     /// The same issuer and serial derive the same host, and either one changed derives another.
-    /// Verifies: ADR-0016
+    /// Verifies: CLT-modes-and-gateway
     #[test]
     fn a_host_is_derived_from_issuer_and_serial_alone() {
         let host = derived("ab", "1f");

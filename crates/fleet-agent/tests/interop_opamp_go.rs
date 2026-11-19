@@ -1,4 +1,4 @@
-//! Interoperability against `opamp-go`, the OpAMP reference implementation (ADR-0011).
+//! Interoperability against `opamp-go`, the OpAMP reference implementation (API-protocol-pinned-interop-checked).
 //!
 //! The Client and the Server of this project are written from the same reading of the
 //! specification, so a misread MUST is symmetric and the rest of the suite cannot see it. Here
@@ -410,7 +410,7 @@ async fn go_client_takes_an_assigned_identity(scheme: &str) {
     );
 }
 
-// Verifies: ADR-0011
+// Verifies: API-protocol-pinned-interop-checked
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 async fn opamp_go_client_against_our_server_over_websocket() {
@@ -418,7 +418,7 @@ async fn opamp_go_client_against_our_server_over_websocket() {
     go_client_takes_an_assigned_identity("ws").await;
 }
 
-// Verifies: ADR-0011
+// Verifies: API-protocol-pinned-interop-checked
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 async fn opamp_go_client_against_our_server_over_plain_http() {
@@ -461,7 +461,7 @@ fn our_client(dir: &Path, endpoint: &str) -> (OurClient, PathBuf) {
 /// the CA it trusts, and a member of its fleet: `member`, its certificate and key, stand in its
 /// state directory as the pair a Server issued. opamp-go signs no CSR, and a Client holding only a
 /// configured certificate enrols first over plain HTTP, sending its request and nothing else
-/// until a Server answers it (ADR-0016 §24), so the reports these tests read come from a
+/// until a Server answers it (CLT-modes-and-gateway §24), so the reports these tests read come from a
 /// Client that has enrolled.
 fn our_client_with(
     dir: &Path,
@@ -644,14 +644,14 @@ fn our_client_against_go_server(scheme: &str) {
     });
 }
 
-// Verifies: ADR-0011
+// Verifies: API-protocol-pinned-interop-checked
 #[test]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 fn our_client_against_opamp_go_server_over_websocket() {
     our_client_against_go_server("ws");
 }
 
-// Verifies: ADR-0011
+// Verifies: API-protocol-pinned-interop-checked
 #[test]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 fn our_client_against_opamp_go_server_over_plain_http() {
@@ -926,7 +926,7 @@ fn our_client_against_go_tls_server(scheme: &str) {
     );
 }
 
-// Verifies: ADR-0011, ADR-0012, ADR-0026
+// Verifies: API-protocol-pinned-interop-checked, SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 async fn opamp_go_client_against_our_tls_and_admission() {
@@ -934,7 +934,7 @@ async fn opamp_go_client_against_our_tls_and_admission() {
     go_client_against_our_tls_server("https").await;
 }
 
-// Verifies: ADR-0011, ADR-0012, ADR-0026
+// Verifies: API-protocol-pinned-interop-checked, SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate
 #[test]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 fn our_client_against_opamp_go_server_requiring_a_client_certificate() {
