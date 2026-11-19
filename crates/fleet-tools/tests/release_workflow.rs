@@ -768,7 +768,10 @@ fn the_image_job_builds_checks_and_pushes_by_digest_alone() {
         ["contents: read", "packages: write"]
     );
     assert!(!image.contains("id-token"), "{image}");
-    assert!(!image.contains("attestations"), "{image}");
+    // The permission key and the attesting action; a comment may cite the ADR, whose identifier
+    // holds the word.
+    assert!(!image.contains("attestations:"), "{image}");
+    assert!(!image.contains("actions/attest"), "{image}");
     let uses: Vec<&str> = image
         .lines()
         .map(str::trim)
