@@ -99,6 +99,9 @@ has agreed the cut.
    successor, or to `-` where it has none, and a split names each successor. A successor that is
    itself mapped is refused, so a map has no chain. Check it with `remap.sh --check`, apply it
    with `remap.sh`, and rewrite by hand what it lists as left; `--check` then reports nothing.
+   Under `--check`, exit 1 means a move or a refusal: a move prints its line on stdout, a refusal
+   nothing on stdout and its reason on stderr, and a reference left follows `remap: references
+   left to rewrite by hand:` on stderr even when exit 1 reports a move.
 5. Make the tests cite the new identifiers where `remap.sh` did not reach, and update
    [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) where the cut changed what it cites.
 6. Run `scripts/check-all.sh`.
@@ -126,9 +129,8 @@ own ADRs stay as they are; no inherited ADR is merged into its record. Work on a
    [`README.md`](../../../README.md) names and the tag to take up. Read the release notes of every
    release between the two. Keep for step 5 each map of a re-cut a note carries
    ([NUC-releases-are-semver-tags §7](../../../docs/adr/NUC-releases-are-semver-tags.md)).
-   A project on a release before `v0.9.0` still has numbered ADRs and migrates its record once:
-   walk [section 8](#8-migrate-a-numbered-record) in place of step 2, and take the other steps as
-   they stand.
+   A project on a release before `v0.9.0` still has numbered ADRs. It first takes up a `v0.9`
+   release with the copy of this skill that release ships, which migrates the record once.
 2. **The base.** Replace the `NUC-` files under `docs/adr/`, `AGENTS.md`, and the blob list
    ([NUC-base-is-fixed §2](../../../docs/adr/NUC-base-is-fixed.md)) with those
    at the new tag, for example by
@@ -150,65 +152,3 @@ own ADRs stay as they are; no inherited ADR is merged into its record. Work on a
 6. **Hand-off.** Hand the branch to the human with the two tags and, for a re-cut, the citations
    that moved. One pull request lands it
    ([NUC-main-only-via-pr §4](../../../docs/adr/NUC-main-only-via-pr.md)).
-
-## 8. Migrate a numbered record
-
-A project on a release before `v0.9.0` carries numbered ADRs: `0001` to `0006` inherited from the
-template, and its own from `0007` on. The take-up of `v0.9.0` or a later release moves them once to
-the fixed base and to identifiers
-([NUC-adrs-are-named-by-category §1](../../../docs/adr/NUC-adrs-are-named-by-category.md) and
-[NUC-base-is-fixed §1](../../../docs/adr/NUC-base-is-fixed.md)). The migration is
-a normalization of identifiers only
-([NUC-decisions-are-proposed-then-accepted §8](../../../docs/adr/NUC-decisions-are-proposed-then-accepted.md)),
-which covers its edits to accepted project ADRs: the renames, the headings, the `Status` and
-`Supersedes` fields, the `Role` lines, and the rewraps. The release's map is
-[`map-v0.9.0.txt`](map-v0.9.0.txt): the six inherited ADRs to the `NUC-` ADRs, and a table of every
-clause with the `NUC-` clause that carries it.
-
-1. **What the project added.** List what the project wrote into an inherited ADR, with
-   `git diff <tag of the release line> HEAD -- 'docs/adr/000[1-6]-*.md'` against the template's
-   tag. A decider it added goes with the file. Note for step 5 each clause it added, and each rule
-   it added to `AGENTS.md`, from `git diff <tag of the release line> HEAD -- AGENTS.md`.
-2. **The base.** Delete the inherited files `docs/adr/0001-*.md` to `docs/adr/0006-*.md`, and copy
-   the `NUC-` files, `AGENTS.md`, and the blob list as step 2 of
-   [section 7](#7-take-up-a-template-release) says
-   ([NUC-base-is-fixed §2](../../../docs/adr/NUC-base-is-fixed.md)).
-3. **The project map.** Write a map under `.scratch/`, one line per numbered ADR of the project,
-   superseded and rejected ones included, since the migration keeps every ADR
-   ([NUC-decisions-are-proposed-then-accepted §8](../../../docs/adr/NUC-decisions-are-proposed-then-accepted.md)),
-   in the form `remap.sh` names in its header: `0007-old-title.md <CAT>-<slug>`. Pick each category
-   from the fixed ones or add it to the category list of the index
-   ([NUC-adrs-are-named-by-category §2](../../../docs/adr/NUC-adrs-are-named-by-category.md)), and
-   pick a slug that states the decision
-   ([NUC-adrs-are-named-by-category §1](../../../docs/adr/NUC-adrs-are-named-by-category.md)). Hand
-   the map to the human, who reviews it before anything moves.
-4. **The index.** Rewrite the index as the release's index has it: the category list, the line
-   on the base, and the project's rows by category, without the inherited ADRs
-   ([NUC-adrs-are-named-by-category §5](../../../docs/adr/NUC-adrs-are-named-by-category.md)). The
-   rows may keep their numbered links; step 8 moves them.
-5. **The added clauses.** Turn each clause and rule from step 1 into a project ADR through
-   [`propose-adr`](../propose-adr/SKILL.md). Its `Extends:` or `Narrows:` field names the `NUC-`
-   clause that carries the inherited clause
-   ([NUC-base-is-fixed §1](../../../docs/adr/NUC-base-is-fixed.md)). A clause that
-   contradicts the base is a fork, which the human decides.
-6. **The roles.** Give the project ADR that records the harness the header field
-   `- **Role:** harness`, and the one that records the toolchain `- **Role:** toolchain`
-   ([NUC-base-is-fixed §3](../../../docs/adr/NUC-base-is-fixed.md)).
-7. **The other files.** Take up the other files and move the release line, as steps 3 and 4 of
-   [section 7](#7-take-up-a-template-release) say, so that only the project's own files are left
-   for the maps.
-8. **The references.** Run `remap.sh --record --check` with the release's map and then with the
-   project map, and read what each would move, rename, and leave. Then apply both, the release's
-   map first. With `--record` the script also renames each numbered file to `<CAT>-<slug>.md` and
-   moves its heading, its `Status` and `Supersedes` fields, its links, and its index row; it never
-   edits a `NUC-` file.
-   - Place each reference a split leaves at the `NUC-` clause that carries what it cites, from the
-     clause table of the release's map, in accepted ADRs too
-     ([NUC-decisions-are-proposed-then-accepted §6](../../../docs/adr/NUC-decisions-are-proposed-then-accepted.md)).
-   - A reference that names something other than this record's ADR, such as a message copied from
-     an older release or a file of another repository, keeps its old number. The script cannot
-     tell it apart, so revert each such move by hand after the run.
-   - Rewrap each line that a longer identifier pushed past the width
-     [`scripts/check-docs.sh`](../../../scripts/check-docs.sh) holds, in the record too.
-9. **The checks.** Go on with step 5 of [section 7](#7-take-up-a-template-release), and hand both
-   maps to the human with the branch in its step 6.

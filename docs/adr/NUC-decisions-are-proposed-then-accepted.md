@@ -74,9 +74,6 @@ accepts it.
    - A map moves the references to the new identifiers. It stands in the hand-off and the commit
      body, in no document.
    - It leaves the `NUC-` files as they are.
-   - The migration from numbered identifiers to category identifiers is a normalization of
-     identifiers only. It gives every numbered ADR its category identifier and keeps every ADR and
-     the specification as they are.
 
 **Out of scope:**
 

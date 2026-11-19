@@ -14,9 +14,10 @@
 # cannot place or claim that ticket.
 #
 # Pure bash + git + coreutils/awk. Usage:
-#     scripts/sensor-plan-frontier.sh [repository root]
+#     scripts/sensor-plan-frontier.sh [--root <dir>]
 # The root defaults to this repository; scripts/test-sensor-plan-frontier.sh passes fixtures.
-# Exit code 0 when every ticket was read, 1 otherwise.
+# Exit code 0 when every ticket was read, 1 otherwise, and 2 on an argument it does not read
+# or a root that is no directory.
 
 set -uo pipefail
 
@@ -26,7 +27,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/ticket.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ticket.sh"
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-plan-frontier.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 PLAN="docs/plan"
 
 # section <file> <heading> — the lines of a '## <heading>' section, HTML comments removed;

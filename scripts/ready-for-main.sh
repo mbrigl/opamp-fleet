@@ -30,15 +30,12 @@ set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib/bash.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
 
-# shellcheck source-path=SCRIPTDIR source=lib/git.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
-
-enter_root "ready-for-main" "${BASH_SOURCE[0]}" "$@"
-shift "$ROOT_TAKEN"
-if (($#)); then
-  echo "ready-for-main: unknown argument '$1' — usage: scripts/ready-for-main.sh [--root <dir>]" >&2
-  exit 2
-fi
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/ready-for-main.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "$@"
 
 refuse() { echo "ready-for-main: refused — $1" >&2; exit 1; }
 

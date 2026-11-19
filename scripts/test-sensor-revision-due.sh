@@ -70,7 +70,7 @@ expect() {
   local want="$1" name="$2" dir="$3" needle="$4"
   local out rc
   fixture "$dir"
-  out="$(bash "$SENSOR" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" --root "$dir" 2>&1)"; rc=$?
   if [[ $rc -eq "$want" && "$out" == *"$needle"* ]]; then
     passed=$((passed + 1))
     return
@@ -169,7 +169,7 @@ commit "$d" "2026-01-12" "the directory goes"
 overview "$d" "**Last design revision:** none yet, due after 2 changes."
 commit "$d" "2026-01-13" "lower the number"
 expect 0 "a directory counts changes, not files" "$d" "  - src/ (1 change)"
-out="$(bash "$SENSOR" "$d" 2>&1)"
+out="$(bash "$SENSOR" --root "$d" 2>&1)"
 if [[ "$out" != *"old/"* ]]; then passed=$((passed + 1)); else
   failed=$((failed + 1)); echo "FAIL: a path that no longer exists is listed" >&2; fi
 

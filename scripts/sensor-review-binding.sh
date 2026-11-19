@@ -54,8 +54,8 @@
 # with origin/main (else main) is used: the merges of the branch not yet on the remote's main. CI
 # passes the pull request's base and head, never its synthetic merge commit, and its description
 # as the hand-off. A base of zeros, which a push event reports for a new branch, counts as none.
-# Exit code 0 always, except 2 on a base or head that does not resolve, or a hand-off that is no
-# file.
+# Exit code 0 always, except 2 on a base or head that does not resolve, a hand-off that is no
+# file, an argument it does not read, or a root that is no directory.
 
 set -uo pipefail
 
@@ -68,8 +68,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/lib/adr.sh"
 
 caller="$PWD"
-enter_root "Review binding sensor" "${BASH_SOURCE[0]}" "$@"
-shift "$ROOT_TAKEN"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-review-binding.sh [--root <dir>] [--hand-off <file>] [base [head]]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
 
 # The hand-off is a path from where the sensor was called.
 hand_off=""
@@ -81,6 +84,7 @@ if [[ "${1:-}" == "--hand-off" ]]; then
     || { echo "Review binding sensor: hand-off '$hand_off' is no file." >&2; exit 2; }
 fi
 
+rest_args "${BASH_SOURCE[0]}" "$usage" 2 "$@"
 resolve_change "Review binding sensor" "${1:-}" "${2:-HEAD}" || exit 0
 base="$CHANGE_BASE" head="$CHANGE_HEAD"
 

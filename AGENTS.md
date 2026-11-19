@@ -216,7 +216,7 @@ The rules of the record stand in `NUC-` ADRs. The mechanics of the record are in
     gets the full review.
 - **A feature spec closes only after a design revision:**
   [NUC-design-is-revised §1](docs/adr/NUC-design-is-revised.md) to
-  [NUC-design-is-revised §5](docs/adr/NUC-design-is-revised.md). Skill: `design-revision`.
+  [NUC-design-is-revised §6](docs/adr/NUC-design-is-revised.md). Skill: `design-revision`.
 - **A mistake that a check would have caught must become a check,** shipped with the fix. A rule in
   prose is the fallback for what no check can decide. The design revision drops what prevented
   nothing.

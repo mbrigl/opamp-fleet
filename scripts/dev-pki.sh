@@ -27,13 +27,21 @@
 # Trust the server CA, offline/server-ca.pem, in curl and in the browser.
 #
 # Usage:
-#     scripts/dev-pki.sh [directory]      (default: .dev-pki in the repository root)
-# Refuses to overwrite a directory that already holds a set.
+#     scripts/dev-pki.sh [--root <dir>] [directory]      (default: .dev-pki in the repository root)
+# Refuses to overwrite a directory that already holds a set. Exit code 2 on an argument it does
+# not read or a root that is no directory.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${1:-$ROOT/.dev-pki}"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/dev-pki.sh [--root <dir>] [directory]"
+# A directory it is given is read from where it was started, so it returns there after enter_root.
+started="$PWD"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 1 "${ARGS[@]}"
+cd "$started"
+OUT="${ARGS[0]:-$ROOT/.dev-pki}"
 
 if [[ -e "$OUT/server" || -e "$OUT/offline" ]]; then
   echo "$OUT already holds a set; remove the directory to start over" >&2

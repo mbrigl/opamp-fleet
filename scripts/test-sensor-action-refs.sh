@@ -43,7 +43,7 @@ repo() {
 expect() {
   local name="$1" dir="$2" needle="$3" absent="${4:-}"
   local out rc
-  out="$(bash "$SENSOR" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" --root "$dir" 2>&1)"; rc=$?
   if ((rc == 0)) && [[ "$out" == *"$needle"* ]] && [[ -z "$absent" || "$out" != *"$absent"* ]]; then
     passed=$((passed + 1))
     return
@@ -125,7 +125,7 @@ expect "a repository without workflows has nothing to report" "$empty" "no workf
 require() {
   local want="$1" name="$2" form="$3" dir="$4" needle="$5"
   local out rc
-  out="$(bash "$SENSOR" --require "$form" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" --require "$form" --root "$dir" 2>&1)"; rc=$?
   if ((rc == want)) && [[ "$out" == *"$needle"* ]]; then
     passed=$((passed + 1))
     return
@@ -166,7 +166,7 @@ require 1 "an untagged image fails either check" sha \
   "$(repo req-docker "- uses: docker://alpine")" \
   "'docker://alpine' carries no tag"
 
-out="$(bash "$SENSOR" --require tags "$work/req-major" 2>&1)"; rc=$?
+out="$(bash "$SENSOR" --require tags --root "$work/req-major" 2>&1)"; rc=$?
 if ((rc == 2)) && [[ "$out" == *"takes 'major-tag' or 'sha'"* ]]; then
   passed=$((passed + 1))
 else
@@ -174,7 +174,7 @@ else
   echo "FAIL: an unknown form (expected exit 2, exit $rc)" >&2
 fi
 
-out="$(bash "$SENSOR" "$work/does-not-exist" 2>&1)"; rc=$?
+out="$(bash "$SENSOR" --root "$work/does-not-exist" 2>&1)"; rc=$?
 if ((rc == 2)) && [[ "$out" == *"is not a directory"* ]]; then
   passed=$((passed + 1))
 else

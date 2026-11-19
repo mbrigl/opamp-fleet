@@ -17,13 +17,18 @@
 # and refuses them in CI. The check ends by saying so, too.
 #
 # Usage:
-#     scripts/check-g20.sh
+#     scripts/check-g20.sh [--root <dir>]
 # Exit code 0 when the tests passed against the stack, 1 otherwise. A run whose last line says
 # "G-20 not decided" passed at a size other than G-20's and decides nothing.
+# It exits 2 on an argument it does not read or a root that is no directory.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-g20.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 
 if [[ "${FLEET_G20_STACK:-}" != "1" ]]; then
   if [[ "${CI:-}" == "true" ]]; then

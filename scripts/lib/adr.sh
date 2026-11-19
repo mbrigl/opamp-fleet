@@ -52,10 +52,27 @@ adr_field_line() { grep -m1 -E "$ADR_ITEM_RE$2:[*][*]" "$1"; }
 # adr_field_value <line> <name> — sets ADR_VALUE to what follows the field's name on the line.
 adr_field_value() { ADR_VALUE="${1##*\*\*"$2":\*\*}"; }
 
-# The names of ADR files: any name of letters before its first hyphen, so that check 2 of
-# check-docs.sh sees a misnamed ADR, such as 'Sec-x.md'. ADR_FILE_RE matches the same names.
+# The names of ADR files: any name of letters before its first hyphen, so that the rule
+# docs/adr-identifiers of check-docs.sh sees a misnamed ADR, such as 'Sec-x.md'. ADR_FILE_RE
+# matches the same names.
 ADR_GLOB='[A-Za-z]*-*.md'
 ADR_FILE_RE="[A-Za-z]+-[^/]*\\.md"
+
+# adr_rule_paths <Applies to> — each path the line names in backticks with no space in it, one
+# a line, '<path><TAB><keys>': the rule keys named before it, 'the rule `<key>` of `<path>`' or
+# 'the rules `<a>`, `<b>`, and `<c>` of `<path>`', separated by spaces, or none.
+adr_rule_paths() {
+  local token p rules pre
+  # shellcheck disable=SC2016  # the backticks are Markdown to match, not a command substitution
+  while IFS= read -r token; do
+    p="${token%\`}" && p="${p##*\`}" && rules="" pre=""
+    [[ "$token" == "the rule"* ]] && pre="${token% of \`*}"
+    while [[ "$pre" =~ \`([^\`]+)\`(.*) ]]; do
+      rules+="${rules:+ }${BASH_REMATCH[1]}" && pre="${BASH_REMATCH[2]}"
+    done
+    [[ "$p" =~ ^[^[:space:]]+$ ]] && printf '%s\t%s\n' "${p%/}" "$rules"
+  done < <(grep -oE '(the rules? `[^`]+`((,|, and| and) `[^`]+`)* of )?`[^`]+`' <<< "$1")
+}
 
 # adr_files <dir> — every ADR file in the directory, in order.
 adr_files() { LC_ALL=C find "$1" -maxdepth 1 -type f -name "$ADR_GLOB" | LC_ALL=C sort; }

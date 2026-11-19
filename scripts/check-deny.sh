@@ -9,12 +9,17 @@
 # Needs cargo-deny (cargo install cargo-deny).
 #
 # Usage:
-#     scripts/check-deny.sh
+#     scripts/check-deny.sh [--root <dir>]
 # Exit code 0 when both pass; the first failing command ends the run.
+# It exits 2 on an argument it does not read or a root that is no directory.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-deny.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 
 if ! command -v cargo-deny >/dev/null; then
   if [[ "${CI:-}" == "true" ]]; then

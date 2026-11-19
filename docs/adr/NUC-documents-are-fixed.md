@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-08
 - **Deciders:** NUC maintainer
-- **Applies to:** `docs/SPECIFICATION.md`, `AGENTS.md`, `docs/ARCHITECTURE.md`, `docs/GLOSSARY.md`, `docs/CONVENTIONS.md`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `.github/CODEOWNERS`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md`, every per-agent pointer file, checks 3, 4, and 10 of `scripts/check-docs.sh`, `scripts/sensor-plain-rules.sh`, and `scripts/lib/rules.sh`
+- **Applies to:** `docs/SPECIFICATION.md`, `AGENTS.md`, `docs/ARCHITECTURE.md`, `docs/GLOSSARY.md`, `docs/CONVENTIONS.md`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `.github/CODEOWNERS`, `.github/ISSUE_TEMPLATE/`, `.github/PULL_REQUEST_TEMPLATE.md`, every per-agent pointer file, the rules `docs/links`, `docs/section-refs`, and `docs/project-layout` of `scripts/check-docs.sh`, `scripts/sensor-plain-rules.sh`, and `scripts/lib/rules.sh`
 
 ## Context
 
@@ -175,8 +175,8 @@ A project may choose:
 ## Enforcement
 
 [`scripts/check-docs.sh`](../../scripts/check-docs.sh) holds clause 3, and its self-test cites
-this ADR. Check 3 fails on a relative link that does not resolve. Check 4 fails on a section
-reference that names no section of the rule file.
+this ADR. Its rule `docs/links` fails on a relative link that does not resolve. Its rule
+`docs/section-refs` fails on a section reference that names no section of the rule file.
 
 [`scripts/sensor-plain-rules.sh`](../../scripts/sensor-plain-rules.sh) holds clause 5 and the
 writing rule of the rule file ([`AGENTS.md` §4](../../AGENTS.md#4-working-style)), and its
@@ -191,8 +191,8 @@ an ADR and to `AGENTS.md`, a renamed file by the lines its rename changes:
   or of `AGENTS.md`, which a take-up replaces as the release has them, it only reports them.
 - `scripts/check-all.sh` and the `checks.yml` workflow run it with `--require`.
 
-Check 10 of `scripts/check-docs.sh` holds the Project Layout of `CONTRIBUTING.md` against the
-tree (clause 8).
+The rule `docs/project-layout` of `scripts/check-docs.sh` holds the Project Layout of
+`CONTRIBUTING.md` against the tree (clause 8).
 
 [`.github/CODEOWNERS`](../../.github/CODEOWNERS) routes a specification change to the owner's
 review once the repository requires it (clause 2).

@@ -47,7 +47,7 @@ expect() {
   local want="$1" name="$2" dir="$3" needle="$4"
   local out rc
   fixture "$dir"
-  out="$(bash "$SENSOR" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" --root "$dir" 2>&1)"; rc=$?
   if [[ $rc -eq "$want" && "$out" == *"$needle"* ]]; then
     passed=$((passed + 1))
     return

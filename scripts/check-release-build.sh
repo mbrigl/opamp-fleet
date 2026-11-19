@@ -9,16 +9,21 @@
 # Needs the Rust toolchain of rust-toolchain.toml.
 #
 # Usage:
-#     scripts/check-release-build.sh fleet-agent|fleet-server
-# Exit code 0 when the build succeeds, 2 on a wrong argument.
+#     scripts/check-release-build.sh [--root <dir>] fleet-agent|fleet-server
+# Exit code 0 when the build succeeds, 2 on a wrong argument or a root that is no directory.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-release-build.sh [--root <dir>] fleet-agent|fleet-server"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
+rest_args "${BASH_SOURCE[0]}" "$usage" 1 "${ARGS[@]}"
 
 case "${1:-}" in
   fleet-agent | fleet-server) ;;
-  *) echo "usage: scripts/check-release-build.sh fleet-agent|fleet-server" >&2; exit 2 ;;
+  *) echo "check-release-build.sh: name fleet-agent or fleet-server — usage: $usage" >&2; exit 2 ;;
 esac
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 

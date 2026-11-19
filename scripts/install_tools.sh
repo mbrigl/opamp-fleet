@@ -3,6 +3,13 @@
 # Fail on any error, an unset variable, or a failure anywhere in a pipeline.
 set -euo pipefail
 
+# It reads its own repository, or another one only as --root <dir>, and takes no other argument.
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/install_tools.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
+
 # Pinned versions, and the SHA-256 of every artifact this script downloads. Each download is
 # verified against its pinned digest before it is extracted or run — this installs to /usr/local/bin
 # and runs an installer, both as root via sudo, so a compromised release asset, a poisoned mirror, or

@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-08
 - **Deciders:** NUC maintainer
-- **Applies to:** every ADR under `docs/adr/`, the ADR index `docs/adr/README.md`, the ADR template `docs/adr/template.md`, checks 1, 2, 5, 6, 7, and 8 of `scripts/check-docs.sh`, and the ADR readers of `scripts/lib/adr.sh`
+- **Applies to:** every ADR under `docs/adr/`, the ADR index `docs/adr/README.md`, the ADR template `docs/adr/template.md`, the rules `docs/adr-index`, `docs/adr-identifiers`, `docs/adr-refs`, `docs/adr-link-targets`, `docs/adr-header`, and `docs/adr-supersessions` of `scripts/check-docs.sh`, and the ADR readers of `scripts/lib/adr.sh`
 
 ## Context
 

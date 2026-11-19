@@ -68,12 +68,16 @@ interop/              # the Go side of the interop check against opamp-go
 observability/        # the development observability stack, run on the host
 scripts/check-all.sh  # runs the checks, sensors, and self-tests, as the hooks and CI do
 scripts/check-*.sh    # checks: each fails on what breaks a rule
-scripts/sensor-*.sh   # sensors: report for the reviewer; sensor-repo-settings.sh runs by hand
+scripts/sensor-*.sh   # sensors: report for the reviewer; sensor-repo-settings.sh,
+                      # sensor-work-measures.sh, sensor-release-notes.sh, and
+                      # sensor-red-commits.sh run by hand
 scripts/test-*.sh     # self-tests of the checks, the sensors, the hooks, and the scripts run by
                       # hand
 scripts/lib/          # what the scripts share: the bash floor (bash.sh), the ADR header (adr.sh),
-                      # the findings of a check (check.sh), git (git.sh), the plain rules
-                      # (rules.sh), the self-tests (selftest.sh), the ticket path (ticket.sh)
+                      # the findings of a check (check.sh), git (git.sh), the root a script
+                      # reads (root.sh): every scripts/*.sh but the self-tests and check-all.sh
+                      # takes it, as check-shell.sh checks; the plain rules (rules.sh), the
+                      # self-tests (selftest.sh), the ticket path (ticket.sh)
 scripts/fixtures/     # the cases of a check as a table, which its self-test reads
 scripts/*.sh          # run by hand: the dev tools, and steps 7 and 8 of the integration
                       # branches, ready-for-main.sh and drop-merged-branch.sh
@@ -90,6 +94,14 @@ scripts/*.sh          # run by hand: the dev tools, and steps 7 and 8 of the int
 .gitattributes        # LF everywhere, and the ADR index merged by its driver
 .gitignore            # what git leaves out, .scratch/ for session artifacts among it
 ```
+
+A script `scripts/*.sh` of the project, other than its self-tests, takes its root as the
+template's do ([NUC-checks-are-bash §9](docs/adr/NUC-checks-are-bash.md)): it reads its own
+repository, or another one only as `--root <dir>`, through `enter_root` of `scripts/lib/root.sh`,
+and `rest_args` refuses an argument it does not read. The rule `shell/root` of
+`scripts/check-shell.sh` fails on one that does not. The rule `shell/mode` fails on a tracked
+script `scripts/*.sh` or `.agents/skills/<name>/*.sh` whose mode in the index is not 100755
+([NUC-checks-are-bash §9](docs/adr/NUC-checks-are-bash.md)).
 
 ## Dev Container
 

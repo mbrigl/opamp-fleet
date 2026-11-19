@@ -13,7 +13,7 @@
 # reports and never fails.
 #
 # Pure bash + git. Usage:
-#     scripts/sensor-backlog.sh [repository root]
+#     scripts/sensor-backlog.sh [--root <dir>]
 # The root defaults to this repository; scripts/test-sensor-backlog.sh passes fixtures.
 # Exit code 0, except 2 on a root that is no git repository.
 
@@ -22,10 +22,14 @@ set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib/bash.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" 2>/dev/null && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-backlog.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 DIR="docs/backlog"
-if [[ -z "$ROOT" ]] || ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "Backlog sensor: '${1:-}' is no git repository." >&2
+if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "Backlog sensor: '$ROOT' is no git repository." >&2
   exit 2
 fi
 g() { git -C "$ROOT" "$@"; }

@@ -14,13 +14,22 @@
 # latest, so that endpoint answers 404.
 #
 # Usage:
-#     scripts/check-protocol-baseline.sh [conformance file]
-# Prints 'Error: …', 'Warning: …' or 'Note: …' lines. Exit code 1 on an error, 0 otherwise.
+#     scripts/check-protocol-baseline.sh [--root <dir>] [conformance file]
+# Prints 'Error: …', 'Warning: …' or 'Note: …' lines. Exit code 1 on an error, 0 otherwise, and 2
+# on an argument it does not read or a root that is no directory.
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFORMANCE="${1:-$ROOT/docs/CONFORMANCE.md}"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-protocol-baseline.sh [--root <dir>] [conformance file]"
+# A conformance file named by a relative path is read from where the check was started, which
+# enter_root leaves.
+started="$PWD"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 1 "${ARGS[@]}"
+CONFORMANCE="${ARGS[0]:-$ROOT/docs/CONFORMANCE.md}"
+[[ "$CONFORMANCE" == /* ]] || CONFORMANCE="$started/$CONFORMANCE"
 RELEASES="https://api.github.com/repos/open-telemetry/opamp-spec/releases?per_page=1"
 
 if [[ ! -f "$CONFORMANCE" ]]; then

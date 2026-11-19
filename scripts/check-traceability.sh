@@ -38,8 +38,9 @@
 # comes from git — tracked plus new, not-yet-added files, minus everything .gitignore excludes.
 #
 # Usage:
-#     scripts/check-traceability.sh [repository root]
-# Exit code 0 when the check passes, 1 otherwise.
+#     scripts/check-traceability.sh [--root <dir>]
+# Exit code 0 when the check passes, 1 otherwise, and 2 on an argument it does not read
+# or a root that is no directory.
 
 set -uo pipefail
 
@@ -51,7 +52,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/adr.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/check.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/check.sh"
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-traceability.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 SPEC="docs/SPECIFICATION.md"
 ADR_DIR="docs/adr"
 ID_RE="$ADR_ID_RE"

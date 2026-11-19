@@ -18,12 +18,17 @@
 # against the lock's integrity hash and runs no install scripts.
 #
 # Usage:
-#     scripts/vendor-shiki.sh        (or: NODE=/path/to/node bash scripts/vendor-shiki.sh)
-# Prints the bundle's SHA-256. Exit code 0 when the bundle was written, 1 otherwise.
+#     scripts/vendor-shiki.sh [--root <dir>]   (or: NODE=/path/to/node bash scripts/vendor-shiki.sh)
+# Prints the bundle's SHA-256. Exit code 0 when the bundle was written, 1 otherwise, and 2 on an
+# argument it does not read or a root that is no directory.
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/vendor-shiki.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 INPUTS="$ROOT/scripts/vendor-shiki"
 OUT="$ROOT/crates/fleet-server/static/shiki.js"
 PIN="$ROOT/scripts/vendor-shiki.lock"

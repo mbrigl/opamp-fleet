@@ -12,9 +12,10 @@
 # nothing to check.
 #
 # Pure bash + coreutils/grep/find. Usage:
-#     scripts/check-manual.sh [repository root]
+#     scripts/check-manual.sh [--root <dir>]
 # The root defaults to this repository; scripts/test-check-manual.sh passes fixtures.
-# Exit code 0 when the check passes, 1 otherwise.
+# Exit code 0 when the check passes, 1 otherwise, and 2 on an argument it does not read or a
+# root that is no directory.
 
 set -uo pipefail
 
@@ -23,7 +24,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/check.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/adr.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/adr.sh"
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-manual.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 adr_categories "$ROOT/docs/adr/README.md"
 dir="$ROOT/docs/manual"
 

@@ -61,32 +61,42 @@
 
 set -euo pipefail
 
-examples="$(cd "$(dirname "$0")/../config/examples" && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/seed_test_configs.sh [--root <dir>] [server-url | --offline [data-dir] | --enrol [server-url]]"
+# A path it is given is read from where it was started, so it returns there after enter_root.
+started="$PWD"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
+cd "$started"
+examples="$ROOT/config/examples"
 
 mode=put
 if [ "${1:-}" = "--offline" ]; then
+    rest_args "${BASH_SOURCE[0]}" "$usage" 1 "${@:2}"
     mode=stage
-    data_dir="${2:-$examples/../../fleet-data}"
+    data_dir="${2:-$ROOT/fleet-data}"
     configurations="$data_dir/configurations"
     # Owner-only, as the Server keeps everything under data_dir (SRV-state-stores-contract-pair).
     umask 077
     mkdir -p "$configurations"
 elif [ "${1:-}" = "--enrol" ]; then
+    rest_args "${BASH_SOURCE[0]}" "$usage" 1 "${@:2}"
     mode=enrol
     server="${2:-https://127.0.0.1:4321}"
 else
+    rest_args "${BASH_SOURCE[0]}" "$usage" 1 "$@"
     server="${1:-https://127.0.0.1:4321}"
 fi
 
 curl_tls=()
-cacert="${SEED_CACERT:-$(dirname "$0")/../.dev-pki/offline/server-ca.pem}"
+cacert="${SEED_CACERT:-$ROOT/.dev-pki/offline/server-ca.pem}"
 if [ -f "$cacert" ]; then
     curl_tls=(--cacert "$cacert")
 fi
 
 if [ "$mode" = enrol ]; then
-    root="$(cd "$(dirname "$0")/.." && pwd)"
-    bootstrap_dir="$(cd "${SEED_BOOTSTRAP_DIR:-$root/.dev-pki/offline}" && pwd)"
+    bootstrap_dir="$(cd "${SEED_BOOTSTRAP_DIR:-$ROOT/.dev-pki/offline}" && pwd)"
     # A fresh certificate every time, so one that has ended since the last run is never reused.
     # The Server keeps its key only in a PKCS#12 file under the password the request names
     # (SEC-bootstrap-certificates-and-enrolment): a throwaway one opens the file once, and nothing keeps it.
@@ -105,7 +115,7 @@ if [ "$mode" = enrol ]; then
     curl -fsS "${curl_tls[@]}" -o "$work/bootstrap.p12" \
         "$server/api/v1/bootstrap-certificates/$serial/p12"
     rm -f "$bootstrap_dir/bootstrap.pem" "$bootstrap_dir/bootstrap-key.pem"
-    (cd "$root" && cargo run -q -p fleet-tools -- pki p12-extract "$work/bootstrap.p12" \
+    (cd "$ROOT" && cargo run -q -p fleet-tools -- pki p12-extract "$work/bootstrap.p12" \
         --out "$bootstrap_dir" --password-file "$work/password")
     echo "wrote the bootstrap pair, serial $serial, to $bootstrap_dir"
     curl -fsS "${curl_tls[@]}" -X POST -H 'Content-Type: application/json' \

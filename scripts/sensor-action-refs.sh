@@ -30,13 +30,19 @@
 # always, except 2 when the root does not exist or the flag names no form.
 #
 # Pure bash + grep + sed. Usage:
-#     scripts/sensor-action-refs.sh [--require major-tag|sha] [repository root]
+#     scripts/sensor-action-refs.sh [--root <dir>] [--require <major-tag|sha>]
 # The root defaults to this repository; scripts/test-sensor-action-refs.sh passes fixtures.
 
 set -uo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=lib/bash.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
+
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-action-refs.sh [--root <dir>] [--require <major-tag|sha>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
 
 require=""
 if [[ "${1:-}" == "--require" ]]; then
@@ -45,9 +51,7 @@ if [[ "${1:-}" == "--require" ]]; then
   [[ "$require" == "major-tag" || "$require" == "sha" ]] \
     || { echo "Action references sensor: '--require' takes 'major-tag' or 'sha', not '$require'." >&2; exit 2; }
 fi
-
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" 2>/dev/null && pwd)" \
-  || { echo "Action references sensor: '${1:-}' is not a directory." >&2; exit 2; }
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "$@"
 WORKFLOWS=".github/workflows"
 
 shopt -s nullglob

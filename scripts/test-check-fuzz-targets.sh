@@ -45,7 +45,7 @@ repo() {
 # name the needle.
 expect() {
   local want="$1" name="$2" dir="$3" needle="${4:-}" out rc ok=0
-  out="$(bash "$CHECK" "$dir" 2>&1)"; rc=$?
+  out="$(bash "$CHECK" --root "$dir" 2>&1)"; rc=$?
   if [[ "$want" == pass ]]; then
     ((rc == 0)) && ok=1
   else

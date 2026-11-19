@@ -44,8 +44,6 @@ verifies.
   while every identifier and every body stays.
 - **A normalization restates the record**
   ([NUC-decisions-are-proposed-then-accepted §8](NUC-decisions-are-proposed-then-accepted.md)).
-  The migration to category identifiers is the one exception: it keeps every ADR and the
-  specification, and the steps below do not apply to it; the `normalize` skill carries its steps.
   - **Start.** The tree has no proposed ADR, no feature spec or ticket under `docs/plan/`, and
     green checks.
   - **Steps.** Three, in this order on one branch, each handed to the human and confirmed

@@ -14,7 +14,7 @@ in a fresh session and states no rule of its own
 A project that plans in its host's issues, as its harness ADR records
 ([NUC-large-work-is-planned §9](../../../docs/adr/NUC-large-work-is-planned.md)), takes the
 spec's closed ticket issues as its tickets in step 1, and files what it finds as issues in
-step 6. Where step 6 deletes `spec.md`, the revision's pull request names the spec's issue with a
+step 7. Where step 7 deletes `spec.md`, the revision's pull request names the spec's issue with a
 closing keyword (`Closes #<n>`), and the human's merge closes it; the session never closes it
 itself. The rest of this skill holds as written.
 
@@ -48,7 +48,9 @@ For each module touched, look for what a single change cannot see and a check do
   entry in the catalogue of `propose-adr` describes.
 
 One candidate at a time, each with the ADR or convention it offends, or the name of the smell
-where none does.
+where none does, and with its evidence: a review finding, a commit that was red alone, a rework,
+or a cost of step 6. A candidate without evidence goes into the hand-off, not into a ticket
+([NUC-design-is-revised §3](../../../docs/adr/NUC-design-is-revised.md)).
 
 ## 3. Check the overview against the tree
 
@@ -101,20 +103,98 @@ only as that ADR may change
 The hand-off of the revision lists what was added and what it proposes to drop, with the lines each
 file gained and lost (`git diff --stat`), so the growth of the rule set is seen once per revision.
 
-## 6. File, do not fix
+## 6. What the work cost and what slowed it
 
-The conventions and the overview are corrected inline, as their documents ask. Everything else
-is filed before the revision ends rather than implemented here: a ticket per candidate the survey
-found, a ticket per rule to drop, a ticket per check to write, a `proposed` ADR through
-`propose-adr` where a finding is a decision, a consolidating one included, and a drafted
-specification change as a ticket whose *Mode* is "with the human". The tickets go into
+Read what the merges in scope cost. Four sources hold it:
+
+- the `Measures:` line of each merge's hand-off, in the form of
+  [`.github/PULL_REQUEST_TEMPLATE.md`](../../../.github/PULL_REQUEST_TEMPLATE.md): the tokens,
+  the seconds of the checks, and the rounds of review;
+- [`scripts/sensor-work-measures.sh`](../../../scripts/sensor-work-measures.sh): the hours from
+  each branch's first commit to its merge, and the rounds of review. It reads GitHub, so it runs
+  on the human's instruction ([NUC-main-only-via-pr §2](../../../docs/adr/NUC-main-only-via-pr.md));
+- [`scripts/sensor-red-commits.sh`](../../../scripts/sensor-red-commits.sh): the commits that were
+  red alone. It runs the checks once per commit, so it runs when the human asks;
+- the times [`scripts/check-all.sh`](../../../scripts/check-all.sh) prints: each check's, the
+  slowest, and the whole run's.
+
+Look for what cost much and gave little: a merge with several rounds of review, a branch open
+long, a slow check that found nothing in scope, tokens that stand out, a commit red alone. Name
+the cause of each. A cause in the project's own code, checks, or conventions is a candidate for
+a ticket of step 7. A cause in what the template ships is a finding about the template. What
+the template ships is a section of [`AGENTS.md`](../../../AGENTS.md), a `NUC-` ADR, a script, a
+skill, or another file the template ships and the project carries unchanged. Keep the findings
+about the template apart from the project's tickets
+([NUC-template-learns-from-projects §1](../../../docs/adr/NUC-template-learns-from-projects.md)).
+A backlog entry about the template, recorded by another session, is a source of a finding too.
+In the template's own repository, such a cause is a candidate for a ticket of step 7, like any
+other.
+
+In a derived project, write each finding about the template as a draft under
+`.scratch/template-findings/`, one file each
+([NUC-template-learns-from-projects §3](../../../docs/adr/NUC-template-learns-from-projects.md)).
+The draft has the fields of the issue template `template-finding.md` of `hivevm/nuc`, which the
+setup deletes from a project
+([NUC-template-learns-from-projects §2](../../../docs/adr/NUC-template-learns-from-projects.md)):
+
+```markdown
+## Template release
+
+## Concerns
+
+## Finding
+
+## Measures
+
+## Proposal
+```
+
+- *Template release* is the release the `Template release` line of the README names.
+- *Concerns* names the rule, file, or skill of the template.
+- *Finding* says what the work met.
+- *Measures* names the measures that show it, or reads "none".
+- *Proposal* says what the template changes.
+
+A draft carries no code, names, paths, or data of the project
+([NUC-template-learns-from-projects §2](../../../docs/adr/NUC-template-learns-from-projects.md)).
+List the drafts in the results of the revision, so that the human sees them before the session
+ends. The human decides whether to
+send each, as an issue of `hivevm/nuc`; the session opens none
+([NUC-template-learns-from-projects §4](../../../docs/adr/NUC-template-learns-from-projects.md)).
+Mark the backlog entry a draft came from as drafted, with a line `Drafted: <YYYY-MM-DD>` or a
+comment on its issue, and leave it
+([NUC-template-learns-from-projects §1](../../../docs/adr/NUC-template-learns-from-projects.md)).
+Draft no finding from an entry marked so. A revision that found nothing about the template drafts
+none.
+
+In the template's own repository, the open issues of that form are a second input
+([NUC-template-learns-from-projects §5](../../../docs/adr/NUC-template-learns-from-projects.md)).
+Their titles start with `[Finding]`. The human hands them over, or instructs the session to read
+them with `gh`. List each as a candidate for a ticket in the results. The human decides which
+becomes a ticket, and closes each issue listed, with a link to its ticket or the reason it was
+declined.
+
+## 7. File, do not fix
+
+The conventions and the overview are corrected inline, as their documents ask. Everything else,
+except the drafts of step 6, which stay under `.scratch/`, is filed before the revision ends
+rather than implemented here: a ticket per candidate the survey found with its evidence, a ticket
+per rule to drop, a ticket per check to write, a `proposed` ADR through `propose-adr` where a
+finding is a decision, a consolidating one included, and a drafted specification change as a
+ticket whose *Mode* is "with the human". The tickets go into
 `docs/plan/revision-<YYYY-MM-DD>/`, in the shape of the `plan-feature` skill's ticket template,
 without a spec; a second revision on one day numbers on in the same directory. List the backlog
 entries that touch the modules in scope, from
 [`scripts/sensor-backlog.sh`](../../../scripts/sensor-backlog.sh) or the host's issues, as
 candidates for the human
 ([NUC-design-is-revised §3](../../../docs/adr/NUC-design-is-revised.md)); a ticket made from one
-deletes the entry in the same commit. Where the
+deletes the entry in the same commit. The hand-off proposes to the human the deletion of each
+stale entry ([NUC-design-is-revised §6](../../../docs/adr/NUC-design-is-revised.md)): one
+added (`git log --diff-filter=A --format=%as -- docs/backlog/<entry>`, or the date the host
+shows for an issue) before two dates of the `Last design revision` line
+(`git log -L '/Last design revision/,+1:docs/ARCHITECTURE.md'`), with no ticket made from it.
+A date with an ordinal counts on its own; while the line has read fewer than two dates, no entry
+is stale. Where the
 revision took the count, move the `Last design revision` line of
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) to today's date; where it reads today's
 date already, add this revision's ordinal of the day after it, `(2)` for the second. Then delete

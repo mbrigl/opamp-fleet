@@ -41,10 +41,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/rules.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/rules.sh"
 
-enter_root "Plain rules sensor" "${BASH_SOURCE[0]}" "$@"
-shift "$ROOT_TAKEN"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-plain-rules.sh [--root <dir>] [--require] [base [head]]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
 require=0
 [[ "${1:-}" == "--require" ]] && { require=1; shift; }
+rest_args "${BASH_SOURCE[0]}" "$usage" 2 "$@"
 
 MAX_WORDS=25
 resolve_change "Plain rules sensor" "${1:-}" "${2:-}" || exit 0

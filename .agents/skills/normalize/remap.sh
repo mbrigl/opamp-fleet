@@ -10,16 +10,14 @@
 #     <CAT>-old-slug§3  <CAT>-other-slug§1
 #     <CAT>-gone-slug   -
 #     <CAT>-split-slug  <CAT>-first-half <CAT>-second-half
-#     0004-old-title.md <CAT>-new-slug
 #     G-3               G-1
 #
 # An identifier moves wherever it stands as a word: on its own, before a clause '§n', and in the
 # name of its file, so a link moves with its text. A clause line moves only that clause, and the
-# file of a link whose text cites it. A numbered ADR, the form a project carries until it migrates
-# once, is mapped by its file name: its old identifier, its file name, and a row that links it move
-# to the new identifier. NEW is '-' for an ADR or a criterion with no successor, and several
-# identifiers for a split: their references are listed and left for the hand. On a line with a
-# marker of the traceability check that already names a successor, the old identifier is dropped.
+# file of a link whose text cites it. NEW is '-' for an ADR or a criterion with no successor, and
+# several identifiers for a split: their references are listed and left for the hand. On a line
+# with a marker of the traceability check that already names a successor, the old identifier is
+# dropped.
 # A criterion, 'G-n' or 'Q-n', moves in Markdown and on a marker line; elsewhere it may be an
 # ordinary string.
 #
@@ -27,11 +25,7 @@
 # (NUC-adrs-are-named-by-category §1), so a map whose successor is itself mapped is refused, and a
 # second run of a map changes nothing. Criteria are renumbered by a normalization and may swap; a
 # map of criteria is one pass. The script never edits a criterion in docs/SPECIFICATION.md, nor
-# docs/adr/, whose record the normalization writes. With --record, for the migration to identifiers
-# (NUC-decisions-are-proposed-then-accepted §8), it edits docs/adr/ too, the index and the headings
-# among it, but never a NUC- file, the blob list, or AGENTS.md, which the release holds, and renames
-# each numbered ADR file that the map moves to one identifier, refusing a name that exists or that
-# two take.
+# docs/adr/, whose record the normalization writes.
 #
 # The files are the ones git tracks plus new ones it does not ignore, as check-docs.sh reads
 # them. A file is written only when the map changes its text, and then keeps every other byte,
@@ -39,11 +33,17 @@
 # skipped, and so is the map file itself, so that a map shipped in the tree applies as it stands.
 #
 # Pure bash, git, and awk. Usage, anywhere in the repository:
-#     .agents/skills/normalize/remap.sh [--check] [--record] <map file>
+#     .agents/skills/normalize/remap.sh [--check] <map file>
 # Prints each file it changed. Exit code 0 when every reference moved, 2 when references are left
 # for the hand, 1 on anything else; an invalid map changes nothing. With --check it changes
-# nothing, prints each reference the map would move as 'file:line: OLD -> NEW' and each rename as
-# 'OLD -> NEW', lists the references it would leave, and exits 1 when one would move.
+# nothing, prints each reference the map would move as 'file:line: OLD -> NEW', lists the
+# references it would leave, and exits 1 when one would move. --check may stand before or after
+# the map; any other option, or a second map, exits 1 before anything runs.
+# Exit 1 is both a refusal and, with --check, a move, and with --check a move hides a reference
+# that would be left. What the script prints tells them apart: a move prints its line on stdout;
+# a refusal prints nothing on stdout, only its reason on stderr, most often a line starting
+# 'remap: '; a reference left follows the line 'remap: references left to rewrite by hand:'
+# on stderr, also when exit 1 reports a move.
 set -uo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=../../../scripts/lib/bash.sh
@@ -51,12 +51,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib/bash.sh"
 
 # The script may rewrite its own text, so bash reads all of it before running any: one block.
 {
-check=0 record=0
-while [[ "${1:-}" == --check || "${1:-}" == --record ]]; do
-  [[ "$1" == --check ]] && check=1 || record=1
-  shift
+check=0 map=""
+# --check counts wherever it stands: one put after the map is a dry run too, not ignored while
+# the map rewrites the tree. Any other option and a second map are refused before anything runs.
+for arg in "$@"; do
+  if [[ "$arg" == --check ]]; then check=1
+  elif [[ "$arg" == -* ]]; then echo "remap: unknown argument '$arg'" >&2; exit 1
+  elif [[ -n "$map" ]]; then echo "remap: one map file only, not also '$arg'" >&2; exit 1
+  else map="$arg"
+  fi
 done
-map="${1:-}"
 [[ -n "$map" && -f "$map" ]] || { echo "remap: '$map' is no map file" >&2; exit 1; }
 map="$(cd "$(dirname "$map")" && pwd -P)/$(basename "$map")"
 
@@ -68,7 +72,6 @@ top="$(pwd -P)"
 
 id_re='[A-Z]{2,5}-[a-z0-9]+(-[a-z0-9]+){1,4}'
 new_re="^$id_re(§[0-9]+)?\$"
-num_re='^[0-9]{4}-[A-Za-z0-9._-]+\.md$'
 crit_re='^[GQ]-[0-9]+$'
 
 # Validate the whole map before touching a file, so that an invalid one changes nothing.
@@ -86,7 +89,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$old" =~ $crit_re ]]; then
     [[ ${#targets[@]} -eq 1 && ( "$new" == - || ( "$new" =~ $crit_re && "${new:0:1}" == "${old:0:1}" ) ) ]] \
       || err "'$new' is no single '${old:0:1}-n' and no '-'"
-  elif [[ "$old" =~ $num_re || "$old" =~ $new_re ]]; then
+  elif [[ "$old" =~ $new_re ]]; then
     if [[ "$new" != - ]]; then
       for t in "${targets[@]}"; do
         [[ "$t" =~ $new_re ]] || { err "'$t' is no identifier and no '-'"; continue; }
@@ -96,10 +99,9 @@ while IFS= read -r line || [[ -n "$line" ]]; do
       done
     fi
     [[ "$old" == *§* && ${#targets[@]} -gt 1 ]] && err "a clause maps to one clause or to '-'"
-    [[ "$old" =~ $num_re ]] && { key="${old%%-*}"; [[ -n "${seen[$key]:-}" ]] && err "$old: its number is mapped twice"; seen[$key]=1; }
-    [[ "$old" =~ $new_re ]] && olds[$old]=1
+    olds[$old]=1
   else
-    err "'$old' is no identifier, clause, numbered ADR file, or criterion"; continue
+    err "'$old' is no identifier, clause, or criterion"; continue
   fi
   [[ -n "${seen[$old]:-}" ]] && err "$old is mapped twice"
   seen[$old]=1
@@ -126,12 +128,7 @@ FNR == NR {
   if ($0 ~ /^[ \t]*(#|$)/) next
   old = $1; new = $2
   for (i = 3; i <= NF; i++) new = new " " $i
-  if (old ~ /^[0-9][0-9][0-9][0-9]-/) {
-    to = (new == "-" || new ~ / /) ? new : new ".md"
-    fname[old] = to
-    adr["ADR-" substr(old, 1, 4)] = new
-    num[substr(old, 1, 4)] = new
-  } else if (old ~ /^[GQ]-/) {
+  if (old ~ /^[GQ]-/) {
     crit[old] = new
   } else {
     adr[old] = new
@@ -168,27 +165,14 @@ function resolve(tok, to,  n, parts, i, dedupe) {
   orig = $0; line = $0; out = ""
   marker = (line ~ /Verifies:/)
   do_crit = crit_on && (all_crit || marker)
-  while (match(line, /\[[0-9][0-9][0-9][0-9]\]\([A-Za-z0-9._\/-]*[0-9][0-9][0-9][0-9]-[A-Za-z0-9._-]+\.md|ADR-[0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9]-[A-Za-z0-9._-]+\.md|[A-Z][A-Z]+-[a-z0-9]+(-[a-z0-9]+)*( §[0-9]+)?|[GQ]-[0-9]+/)) {
+  while (match(line, /[A-Z][A-Z]+-[a-z0-9]+(-[a-z0-9]+)*( §[0-9]+)?|[GQ]-[0-9]+/)) {
     at = RSTART; len = RLENGTH
     tok = substr(line, at, len)
     before = (at > 1) ? substr(line, at - 1, 1) : ""
     after = substr(line, at + len, 1)
     rep = tok
-    if (before ~ /[A-Za-z0-9_-]/ || (after ~ /[A-Za-z0-9_-]/ && tok !~ /^\[/ && tok !~ /\.md$/)) {
+    if (before ~ /[A-Za-z0-9_-]/ || after ~ /[A-Za-z0-9_-]/) {
       # part of a longer word
-    } else if (tok ~ /^\[/) {
-      n4 = substr(tok, 2, 4)
-      inner = substr(tok, 8)
-      match(inner, /[0-9][0-9][0-9][0-9]-[A-Za-z0-9._-]+\.md$/)
-      dir = substr(inner, 1, RSTART - 1); file = substr(inner, RSTART)
-      if (adr_on && (file in fname)) {
-        to = fname[file]
-        r = resolve(file, to)
-        if (r != file && r != "") rep = "[" num[n4] "](" dir r
-      }
-    } else if (tok ~ /^ADR-[0-9][0-9][0-9][0-9]$/ || tok ~ /^[0-9][0-9][0-9][0-9]-/) {
-      if (adr_on && tok ~ /^ADR-/ && (tok in adr)) rep = resolve(tok, adr[tok])
-      else if (adr_on && (tok in fname)) rep = resolve(tok, fname[tok])
     } else if (tok ~ /^[GQ]-/) {
       if (do_crit && (tok in crit)) rep = resolve(tok, crit[tok])
     } else if (adr_on) {
@@ -238,21 +222,12 @@ function resolve(tok, to,  n, parts, i, dedupe) {
 END { if (held) printf "%s%s", last, (open_end ? "" : "\n") }
 AWK
 
-# With --record, each numbered ADR the map moves to one identifier takes its file name, in the order
-# of the old names; a name that exists or that two of them take is refused before any is written.
-declare -A target=()
-while ((record)) && read -r old new rest; do
-  [[ "$old" =~ $num_re && "$new" =~ $new_re && -z "$rest" && -f "docs/adr/$old" ]] || continue
-  [[ -e "docs/adr/$new.md" || " ${target[*]} " == *" $new "* ]] && { echo "remap: $old: docs/adr/$new.md is taken" >&2; exit 1; }
-  target[$old]="$new"
-done <<< "$(grep -vE '^[[:space:]]*(#|$)' "$map")"
-
 changed=0
 while IFS= read -r f; do
   [[ -f "$f" && ! -L "$f" && "$top/$f" != "$map" ]] || continue
   grep -Iq . "$f" 2>/dev/null || continue
   adr_on=1 crit_on=1 all_crit=0
-  [[ "$f" == docs/adr/* && ( $record -eq 0 || "$f" == docs/adr/NUC[-.]* ) || $record -eq 1 && "$f" == AGENTS.md ]] && adr_on=0
+  [[ "$f" == docs/adr/* ]] && adr_on=0
   [[ "$f" == docs/SPECIFICATION.md ]] && crit_on=0
   [[ "$f" == *.md ]] && all_crit=1
   # A file whose last byte is no newline keeps it so, and awk reads bytes, not characters of the
@@ -269,11 +244,6 @@ while IFS= read -r f; do
   fi
 done < <(git ls-files --cached --others --exclude-standard | sort -u)
 
-for old in $(printf '%s\n' "${!target[@]}" | LC_ALL=C sort); do
-  changed=1 new="${target[$old]}"
-  if ((check)); then echo "docs/adr/$old -> docs/adr/$new.md" >> "$moves"
-  else git mv -- "docs/adr/$old" "docs/adr/$new.md" 2>/dev/null || mv -- "docs/adr/$old" "docs/adr/$new.md"; echo "docs/adr/$new.md"; fi
-done
 ((check)) && cat "$moves"
 if [[ -s "$left" ]]; then
   echo "remap: references left to rewrite by hand:" >&2

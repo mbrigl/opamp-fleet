@@ -26,7 +26,7 @@
 #
 # Bash + coreutils + grep + sed, plus the GitHub CLI, authenticated through its web flow
 # (NUC-main-only-via-pr §3); the JSON is read by gh's own --jq. Usage:
-#     scripts/sensor-repo-settings.sh [repository root]
+#     scripts/sensor-repo-settings.sh [--root <dir>]
 # The repository is the one gh resolves from the root's git remote. Exit code 0 always, except
 # 2 when the root does not exist, gh is missing, or gh cannot resolve the repository.
 
@@ -35,8 +35,11 @@ set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib/bash.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
 
-ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" 2>/dev/null && pwd)" \
-  || { echo "Repository settings sensor: '${1:-}' is not a directory." >&2; exit 2; }
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-repo-settings.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 GH="${GH:-gh}"
 NAME="Repository settings sensor"
 

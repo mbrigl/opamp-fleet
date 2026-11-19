@@ -17,8 +17,8 @@
 # git diffs or normalizes although it must not be touched.
 
 # A Markdown file a tool writes, such as a generated changelog or API reference, is marked
-# 'linguist-generated': check 15 of scripts/check-docs.sh then leaves its line width alone, and
-# GitHub folds it in a diff. For example:
+# 'linguist-generated': the rule docs/prose-width of scripts/check-docs.sh then leaves its line
+# width alone, and GitHub folds it in a diff. For example:
 #     CHANGELOG.md linguist-generated
 
 # The ADR index merges its table rows by keeping the lines of both sides, and its prose as text: two

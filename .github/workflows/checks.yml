@@ -4,10 +4,10 @@ name: Checks
 # toolchain of the Rust jobs, the stores the two store jobs start, and SoftHSM2, the PKCS#11 token
 # the rust job and the PostgreSQL store job test the Server's keys on a token against
 # (ShellCheck, used by the shell job, ships preinstalled on the GitHub-hosted runner image).
-# scripts/check-all.sh is the local equivalent; check 9 of scripts/check-docs.sh holds its list,
-# the jobs of this workflow, and the required checks named in CONTRIBUTING.md together. A job runs
-# each check after its self-test where it has one, and each script's header says what it checks
-# and which ADR it holds, or that the check is the rule.
+# scripts/check-all.sh is the local equivalent; the rule docs/check-lists of scripts/check-docs.sh
+# holds its list, the jobs of this workflow, and the required checks named in CONTRIBUTING.md
+# together. A job runs each check after its self-test where it has one, and each script's header
+# says what it checks and which ADR it holds, or that the check is the rule.
 #
 # The sensors report for the reviewer and fail on nothing they count, except the plain rules,
 # which this workflow runs with --require, and the action references once a project runs that
@@ -73,7 +73,8 @@ jobs:
       # working tree: a documentation link into a submodule would otherwise break in CI while
       # working locally. Their *contents* are never read — check-docs.sh enumerates via
       # `git ls-files`, which lists a submodule as one gitlink entry, not as its files. The whole
-      # history is fetched: check 2 reads the identifiers of deleted ADRs off it.
+      # history is fetched: the rule docs/adr-identifiers reads the identifiers of deleted ADRs
+      # off it, and the rule docs/template-release the release line at the merge base with main.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -215,6 +216,15 @@ jobs:
       # (NUC-checks-are-bash §7).
       - name: Self-test the repository settings sensor
         run: bash scripts/test-sensor-repo-settings.sh
+      # The work measures sensor itself runs on a human's instruction (NUC-checks-are-bash §7).
+      - name: Self-test the work measures sensor
+        run: bash scripts/test-sensor-work-measures.sh
+      # The release notes sensor itself runs on a human's instruction (NUC-checks-are-bash §7).
+      - name: Self-test the release notes sensor
+        run: bash scripts/test-sensor-release-notes.sh
+      # The red commits sensor itself runs on a human's instruction, for its cost.
+      - name: Self-test the red commits sensor
+        run: bash scripts/test-sensor-red-commits.sh
 
   shell:
     runs-on: ubuntu-latest

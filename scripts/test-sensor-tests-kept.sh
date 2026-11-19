@@ -417,7 +417,7 @@ expect 0 "2500 sleeps, a list larger than an environment variable holds, are eac
 # in, as the checks do: the tag 'base' exists only there.
 # Verifies: NUC-checks-are-bash
 d="$(repo own-repository)"
-mkdir -p "$d/scripts/lib" && cp "$SENSOR" "$d/scripts/" && cp "$ROOT/scripts/lib/git.sh" "$d/scripts/lib/"
+mkdir -p "$d/scripts/lib" && cp "$SENSOR" "$d/scripts/" && cp "$ROOT/scripts/lib/git.sh" "$ROOT/scripts/lib/root.sh" "$d/scripts/lib/"
 git -C "${d:?}" rm -q tests/a_test.py
 commit "$d" "drop a test"
 other="$work/other"

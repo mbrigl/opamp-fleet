@@ -17,15 +17,20 @@
 #     scripts/sensor-cited-commits.sh [--root <dir>] [head]
 # It reads the files of the working tree and the history of the head, HEAD when none is given;
 # --root names another repository, as its self-test does with each fixture.
-# Exit code 0, except 2 on a head that does not resolve.
+# Exit code 0, except 2 on a head that does not resolve, an argument it does not read, or a root
+# that is no directory.
 
 set -uo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=lib/git.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
 
-enter_root "Cited commits sensor" "${BASH_SOURCE[0]}" "$@"
-shift "$ROOT_TAKEN"
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/sensor-cited-commits.sh [--root <dir>] [head]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+set -- "${ARGS[@]}"
+rest_args "${BASH_SOURCE[0]}" "$usage" 1 "$@"
 
 head="${1:-HEAD}"
 if ! git rev-parse -q --verify "$head^{commit}" >/dev/null; then

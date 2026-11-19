@@ -2,11 +2,11 @@
 #
 # Runs every consistency check this repository enforces, in one command.
 #
-# AGENTS.md §5 requires these checks to pass before pushing. This script is the local equivalent of
-# .github/workflows/checks.yml; check 9 of check-docs.sh holds the two lists, the required status
-# checks named in CONTRIBUTING.md, and the scripts under scripts/ together. A script that runs on a
-# human's instruction only is named on an '# On instruction:' line below, and a workflow that
-# publishes rather than checks, such as a release, on a '# Not a gate:' line.
+# AGENTS.md §5 requires these checks to pass before pushing. This script is the local equivalent
+# of .github/workflows/checks.yml; the rule docs/check-lists of check-docs.sh holds the two lists,
+# the required status checks named in CONTRIBUTING.md, and the scripts under scripts/ together. A
+# script that runs on a human's instruction only is named on an '# On instruction:' line below,
+# and a workflow that publishes rather than checks, such as a release, on a '# Not a gate:' line.
 #
 # Every check runs even after an earlier one fails, so a single run reports everything that is
 # wrong instead of the first thing. The exit code is what a pre-push decision is made on.
@@ -17,7 +17,10 @@
 # headline that says what it found, and how many more lines its report has, blank ones not
 # counted. One that fails shows all it printed. A session reads every line a run prints, so a
 # green run costs a line a check. With --verbose every check and sensor shows all it printed; the
-# reviewer is handed that output.
+# reviewer is handed that output. Each label is followed by the whole seconds the check ran, and
+# the run names the slowest and its own time before its result, so a slow check or a slow
+# platform shows in every local run; CI runs each script as a step of its own and shows the
+# step's time. A check skipped in changed mode shows no time.
 #
 # With --changed, a self-test (scripts/test-*.sh) runs only where the branch changed what it
 # tests: the self-test itself or a path its '# Inputs:' header line names, changed in the working
@@ -174,10 +177,12 @@ run() {
   fi
   while ((running >= max_jobs)); do wait -n; running=$((running - 1)); done
   {
+    start=$SECONDS
     trap 'kill $(jobs -p) 2>/dev/null; wait; exit 143' USR1
     bash "$ROOT/$script" "$@" > "$out/$i" 2>&1 &
     wait "$!"
     echo $? > "$out/$i.rc"
+    echo $((SECONDS - start)) > "$out/$i.s"
   } &
   running=$((running + 1))
 }
@@ -244,6 +249,18 @@ run "Fixture isolation" scripts/test-fixture-isolation.sh
 # (NUC-checks-are-bash §7); its self-test runs here.
 # On instruction: scripts/sensor-repo-settings.sh
 run "Repository settings sensor self-test" scripts/test-sensor-repo-settings.sh
+# The work measures sensor reads the pull requests on GitHub and runs on a human's instruction
+# (NUC-checks-are-bash §7); its self-test runs here.
+# On instruction: scripts/sensor-work-measures.sh
+run "Work measures sensor self-test" scripts/test-sensor-work-measures.sh
+# The release notes sensor reads the pull requests on GitHub and runs on a human's instruction
+# (NUC-checks-are-bash §7); its self-test runs here.
+# On instruction: scripts/sensor-release-notes.sh
+run "Release notes sensor self-test" scripts/test-sensor-release-notes.sh
+# The red commits sensor runs the checks of every commit it reads and runs on a human's
+# instruction for its cost (NUC-checks-are-bash §7); its self-test runs here.
+# On instruction: scripts/sensor-red-commits.sh
+run "Red commits sensor self-test" scripts/test-sensor-red-commits.sh
 run "Check runner self-test" scripts/test-check-all.sh
 run "Git hooks self-test" scripts/test-git-hooks.sh
 run "Shell lint self-test" scripts/test-check-shell.sh
@@ -281,27 +298,35 @@ run "PostgreSQL store" scripts/check-store.sh postgres
 wait
 
 failed=()
+slowest="" slowest_s=-1
 for i in "${!labels[@]}"; do
+  # The seconds the check ran, after its label; a check skipped in changed mode did not run.
+  secs="$(cat "$out/$i.s" 2>/dev/null)" took=""
+  if [[ -n "$secs" ]]; then
+    took=" ($secs s)"
+    ((secs > slowest_s)) && slowest="${labels[i]}" slowest_s="$secs"
+  fi
   if [[ "$(cat "$out/$i.rc" 2>/dev/null)" != 0 ]]; then
     failed+=("${labels[i]}")
   elif ((!verbose)) && [[ "${kinds[i]}" == check ]]; then
     last="$(grep -v '^[[:space:]]*$' "$out/$i" | tail -n 1)"
-    printf 'ok: %s%s\n' "${labels[i]}" "${last:+ — $last}"
+    printf 'ok: %s%s%s\n' "${labels[i]}" "$took" "${last:+ — $last}"
     grep -iE 'skip' "$out/$i" | grep -vxF -- "$last" | sed 's/^/    /'
     continue
   elif ((!verbose)); then
     first="$(grep -m1 -v '^[[:space:]]*$' "$out/$i")"
     more="$(grep -cv '^[[:space:]]*$' "$out/$i")"
     more=$((more - 1))
-    printf 'sensor: %s%s%s\n' "${labels[i]}" "${first:+ — $first}" \
+    printf 'sensor: %s%s%s%s\n' "${labels[i]}" "$took" "${first:+ — $first}" \
       "$( ((more > 0)) && echo " (+$more line$( ((more == 1)) || echo s); --verbose shows them)")"
     continue
   fi
-  printf '\n==> %s\n' "${labels[i]}"
+  printf '\n==> %s%s\n' "${labels[i]}" "$took"
   cat "$out/$i"
 done
 
 printf '\n'
+[[ -n "$slowest" ]] && echo "Slowest: $slowest, $slowest_s s; the run took $SECONDS s."
 if ((${#failed[@]})); then
   echo "FAILED:" >&2
   printf '  - %s\n' "${failed[@]}" >&2

@@ -40,13 +40,14 @@ of `checks.yml` runs after setting up the toolchain; and, for each column of the
 tool or "none" and why, and where it runs. A job with a matrix, such as one per operating
 system, reports one check run per entry, so the required checks of `CONTRIBUTING.md` name those,
 `build (ubuntu-latest)`, and not the job. A job of `checks.yml` keeps the name GitHub gives it,
-with no `name:` of its own, since check 9 holds the required checks to the job's id. A workflow
-that publishes, such as a release, is named on a `# Not a gate:` line of `scripts/check-all.sh`.
+with no `name:` of its own, since the rule `docs/check-lists` holds the required checks to the
+job's id. A workflow that publishes, such as a release, is named on a `# Not a gate:` line of
+`scripts/check-all.sh`.
 
 ## Does not fit
 
-- Commands written inline in the workflow: they run in CI and never in the pre-push hook; check 9
-  of `scripts/check-docs.sh` fails on such a job.
+- Commands written inline in the workflow: they run in CI and never in the pre-push hook; the
+  rule `docs/check-lists` of `scripts/check-docs.sh` fails on such a job.
 - A sensor that runs only in someone's head: it is a rule in prose.
 - A slow suite as a job of `checks.yml`: it gates every push; it is a workflow of its own on a
   schedule.
@@ -54,8 +55,8 @@ that publishes, such as a release, is named on a `# Not a gate:` line of `script
 ## The rule a test decides
 
 The golden path's tests cite the toolchain ADR with a `Verifies:` marker, and the ADR flips to
-accepted with them. Check 9 of `scripts/check-docs.sh` holds the build job, the local runner, and
-the required checks of `CONTRIBUTING.md` together.
+accepted with them. The rule `docs/check-lists` of `scripts/check-docs.sh` holds the build job,
+the local runner, and the required checks of `CONTRIBUTING.md` together.
 
 ## Sensors
 

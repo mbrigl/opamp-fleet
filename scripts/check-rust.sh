@@ -23,12 +23,17 @@
 # token; the Dev Container provides both.
 #
 # Usage:
-#     scripts/check-rust.sh
+#     scripts/check-rust.sh [--root <dir>]
 # Exit code 0 when everything passes; the first failing command ends the run.
+# It exits 2 on an argument it does not read or a root that is no directory.
 
 set -euo pipefail
 
-cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# shellcheck source-path=SCRIPTDIR source=lib/root.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+usage="scripts/check-rust.sh [--root <dir>]"
+enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
 
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 

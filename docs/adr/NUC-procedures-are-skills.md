@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-08
 - **Deciders:** NUC maintainer
-- **Applies to:** `.agents/skills/`, `.claude/skills/`, checks 3, 4, and 11 of `scripts/check-docs.sh`, `AGENTS.md` where it names a procedure, `docs/adr/template.md`, `.github/ISSUE_TEMPLATE/`, and `.github/PULL_REQUEST_TEMPLATE.md`
+- **Applies to:** `.agents/skills/`, `.claude/skills/`, the rules `docs/links`, `docs/section-refs`, and `docs/skill-pointers` of `scripts/check-docs.sh`, `AGENTS.md` where it names a procedure, `docs/adr/template.md`, `.github/ISSUE_TEMPLATE/`, and `.github/PULL_REQUEST_TEMPLATE.md`
 
 ## Context
 
@@ -115,22 +115,22 @@ The catalogue has no entry for the first choice, and it needs no ADR.
   nothing to that.
 - Negative: the pointers rest on observed behaviour of one Claude Code version, not on documented
   behaviour.
-- Negative: check 11 reads the front matter without a YAML parser. YAML that breaks on a
-  top-level line, such as an unquoted `: ` in a value, passes it.
+- Negative: the rule `docs/skill-pointers` reads the front matter without a YAML parser. YAML
+  that breaks on a top-level line, such as an unquoted `: ` in a value, passes it.
 - Follow-ups: delete the pointer directory and its check once Claude Code reads `.agents/skills/`.
 
 ## Enforcement
 
-- Check 11 of `scripts/check-docs.sh` holds `.claude/skills/` (clause 6). It fails on a skill
-  without a symlink there, and on an entry that is no symlink, dangles, or resolves to another
-  skill. Its self-test cites this ADR.
-- Check 11 also holds clause 7. It fails on a `SKILL.md` whose first line is not `---` or that has
-  no closing `---` line; a fence may carry trailing spaces. It fails on one without a top-level
-  `name` equal to its directory or a top-level `description`. It fails on a non-empty unindented
-  line between the fences that starts no key, no sequence item, and no comment. Indented lines,
-  such as nested keys and block scalars, pass unread.
-- Checks 3 and 4 of `scripts/check-docs.sh` fail on a link or a section reference of a skill
-  that does not resolve.
+- The rule `docs/skill-pointers` of `scripts/check-docs.sh` holds `.claude/skills/` (clause 6).
+  It fails on a skill without a symlink there, and on an entry that is no symlink, dangles, or
+  resolves to another skill. Its self-test cites this ADR.
+- The same rule also holds clause 7. It fails on a `SKILL.md` whose first line is not `---` or
+  that has no closing `---` line; a fence may carry trailing spaces. It fails on one without a
+  top-level `name` equal to its directory or a top-level `description`. It fails on a non-empty
+  unindented line between the fences that starts no key, no sequence item, and no comment.
+  Indented lines, such as nested keys and block scalars, pass unread.
+- The rules `docs/links` and `docs/section-refs` of `scripts/check-docs.sh` fail on a link or a
+  section reference of a skill that does not resolve.
 
 **Not mechanically decidable:** the review holds four judgements:
 

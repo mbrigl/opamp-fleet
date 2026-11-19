@@ -229,6 +229,8 @@ expect_with 0 "a named path lists the ADR that names it" "$d" \
 expect_with 0 "a named directory binds an ADR that names a path under it" "$d" \
   "- $(adr_id 1) (docs/adr/$(adr_id 1).md) — docs/" --path docs/
 expect_with 2 "--path without a path fails" "$d" "--path needs a path" --path
+expect_with 2 "--path with a base as well fails, not ignoring the base" "$d" \
+  "unknown argument 'HEAD'" --path src/app.sh HEAD
 
 # A path only an ADR of the base names lists that ADR, read from its file.
 d="$(repo base-adr)"
@@ -328,18 +330,21 @@ expect_with 0 "--sections names the two sections of the template" "$d" \
 
 d="$(repo checks)"
 checks() {
-  printf 'check_a() {  # check 1\n  :\n}\nh() {\n  %s\n}\ncheck_b() {  # check 2\n  %s\n}\n' \
+  printf 'check_a() {  # t/a\n  :\n}\nh() {\n  %s\n}\ncheck_b() {  # t/b\n  %s\n}\n' \
     "$2" "$3" > "$1/scripts/c.sh"
 }
 mkdir -p "$d/scripts" && checks "$d" : :
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-adr "$d" 0004 "🟢 accepted" 'check 1 of `scripts/c.sh`'
+adr "$d" 0004 "🟢 accepted" 'the rule `t/a` of `scripts/c.sh`'
 # shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-adr "$d" 0005 "🟢 accepted" 'checks 2 and 3 of `scripts/c.sh`'
+adr "$d" 0005 "🟢 accepted" 'the rules `t/b` and `t/c` of `scripts/c.sh`'
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+adr "$d" 0006 "🟢 accepted" 'the rules `t/c`, `t/d`, and `t/b` of `scripts/c.sh`'
 base "$d"
 checks "$d" : true
-expect 0 "a change inside one check binds the ADR that names it" "$d" "- $(adr_id 5) (docs"
-reject "a change inside one check binds no ADR that names only another" "$d" "- $(adr_id 4) ("
+expect 0 "a change inside one check binds the ADR that names its rule" "$d" "- $(adr_id 5) (docs"
+expect 0 "a rule named last of three binds as one named first" "$d" "- $(adr_id 6) (docs"
+reject "a change inside one check binds no ADR that names only another rule" "$d" "- $(adr_id 4) ("
 checks "$d" true :
 expect 0 "a change between two checks binds every ADR that names the file" "$d" "- $(adr_id 4) ("
 expect 0 "a change between two checks binds the other ADR too" "$d" "- $(adr_id 5) ("
@@ -348,12 +353,28 @@ mv "$d/scripts/c.sh.new" "$d/scripts/c.sh"
 expect 0 "a deleted last line, its next line past the end, binds every ADR" "$d" "- $(adr_id 4) ("
 checks "$d" : true && sed '2d' "$d/scripts/c.sh" > "$d/c.new" && mv "$d/c.new" "$d/scripts/c.sh"
 expect 0 "a deletion inside a check binds its ADR beside an edit in another" "$d" "- $(adr_id 4) ("
+# A rule key in backticks is no path: a change at a path of its name binds no ADR by it.
+checks "$d" : : && mkdir -p "$d/t" && echo x > "$d/t/b"
+reject "a rule key is no path of its own" "$d" "- $(adr_id 5) ("
+rm -r "$d/t"
 
-docs="$ROOT/scripts/check-docs.sh"
-tags="$(grep -oE '^check_[a-z_]+\(\) \{  # check [0-9]+$' "$docs" | grep -oE '[0-9]+$' | sort -n)"
-check "the check numbers of check-docs.sh are its header items, one each" \
-  test "$tags" = "$(sed -nE '/^set /q; s/^# +([0-9]+)\. .*/\1/p' "$docs")"
-check "no check of check-docs.sh lacks its number" test "$(grep -cE '^check_.*\{$' "$docs")" = 0
+# An old key the item of a rule carries in the header names that rule's check.
+d="$(repo old-keys)"
+olds() {
+  printf '#   t/a\n#   t/b (was: t/old, t/older)\nset -u\n' > "$1/scripts/c.sh"
+  printf 'check_a() {  # t/a\n  %s\n}\ncheck_b() {  # t/b\n  %s\n}\n' "$2" "$3" >> "$1/scripts/c.sh"
+}
+mkdir -p "$d/scripts" && olds "$d" : :
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+adr "$d" 0004 "🟢 accepted" 'the rule `t/older` of `scripts/c.sh`'
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+adr "$d" 0005 "🟢 accepted" 'the rule `t/a` of `scripts/c.sh`'
+base "$d"
+olds "$d" : true
+expect 0 "an old key binds the check of the item that carries it" "$d" "- $(adr_id 4) (docs"
+reject "a change in that check binds no ADR that names another rule" "$d" "- $(adr_id 5) ("
+olds "$d" true :
+reject "an old key binds no other check" "$d" "- $(adr_id 4) ("
 
 # --- summary ---------------------------------------------------------------------------------
 

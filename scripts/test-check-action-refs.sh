@@ -109,7 +109,7 @@ CHECK_FLAGS=()
 expect() {
   local want="$1" name="$2" dir="$3" needle="${4:-}"
   local out rc
-  out="$(PATH="$work/bin:$PATH" bash "$CHECK" "${CHECK_FLAGS[@]}" "$dir" 2>&1)"; rc=$?
+  out="$(PATH="$work/bin:$PATH" bash "$CHECK" "${CHECK_FLAGS[@]}" --root "$dir" 2>&1)"; rc=$?
   if [[ "$want" == "pass" && $rc -eq 0 && ( -z "$needle" || "$out" == *"$needle"* ) ]] \
      || [[ "$want" == "fail" && $rc -ne 0 && ( -z "$needle" || "$out" == *"$needle"* ) ]]; then
     passed=$((passed + 1))

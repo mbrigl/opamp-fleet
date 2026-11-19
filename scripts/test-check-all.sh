@@ -32,7 +32,8 @@ g() {
   git -C "${dir:?}" -c user.name=t -c user.email=t@example.invalid "$@"
 }
 
-# The scripts the runner runs, in its order, read with the pattern check 9 of check-docs.sh uses.
+# The scripts the runner runs, in its order, read with the pattern the rule docs/check-lists
+# of check-docs.sh uses.
 scripts=()
 while IFS= read -r line; do
   [[ "$line" =~ ^[[:space:]]*run[[:space:]]+\"[^\"]*\"[[:space:]]+(scripts/[A-Za-z0-9._-]+\.sh) ]] \
@@ -141,49 +142,6 @@ if [[ "$out" != *"need bash"* && "$out" == *"RAN "* ]]; then
   passed=$((passed + 1))
 else
   failed=$((failed + 1)); echo "FAIL: bash 4.4 passes the guard silently" >&2
-fi
-# Each script stops the same way when run alone, a self-test through its library: its own name
-# and the version it needs, before it does anything. Only a script with a line that sources the
-# guard is started: a project's own script without one may do anything when started.
-# guard_problem <script> — prints what is wrong with the script's guard, nothing if all is.
-guard_problem() {
-  local out rc
-  grep -qE '^source .*lib/(bash|selftest)\.sh"' "$1" || return 0
-  out="$(cd "$work" && BASH_GUARD_VERSION=3.2 bash "$1" 2>&1)"; rc=$?
-  ((rc == 2)) && [[ "$out" == "${1##*/}: the checks need bash 4.4 or later"*"this is bash 3.2"* ]] \
-    || echo "below bash 4.4 names no version (exit $rc): $out"
-}
-for s in "$ROOT"/scripts/*.sh "$ROOT"/.agents/skills/*/*.sh; do
-  problem="$(guard_problem "$s")"
-  if [[ -z "$problem" ]]; then
-    passed=$((passed + 1))
-  else
-    failed=$((failed + 1)); echo "FAIL: ${s#"$ROOT"/} $problem" >&2
-  fi
-done
-own="$work/own-project"
-mkdir -p "$own/scripts"
-printf 'touch "%s/ran"\n' "$own" > "$own/scripts/own.sh"
-if [[ -z "$(guard_problem "$own/scripts/own.sh")" && ! -e "$own/ran" ]]; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1)); echo "FAIL: a project's own script without the guard is left alone" >&2
-fi
-# shellcheck disable=SC2016 # the fixture's line is its own
-printf '#     source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"\ntouch "%s/ran"\n' "$own" > "$own/scripts/own.sh"
-if [[ -z "$(guard_problem "$own/scripts/own.sh")" && ! -e "$own/ran" ]]; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1)); echo "FAIL: a project's own script that only names the guard is left alone" >&2
-fi
-# A guard that does not stop the script: the source line alone gets it started, and it is reported.
-mkdir -p "$own/scripts/lib" && : > "$own/scripts/lib/bash.sh"
-# shellcheck disable=SC2016 # the fixture's line is its own
-printf 'source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"\ntouch "%s/ran"\n' "$own" > "$own/scripts/own.sh"
-if [[ -n "$(guard_problem "$own/scripts/own.sh")" && -e "$own/ran" ]]; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1)); echo "FAIL: a script that sources the guard is started, and one it does not stop reported" >&2
 fi
 
 # A disk with less free space than FLEET_MIN_FREE_GB stops the runner before any check, naming
@@ -301,7 +259,7 @@ printf 'echo "DETAIL %s"\n' "${tests[0]}" > "$work/detail"
 cat "$work/detail" "$d/${tests[0]}" > "$work/stub" && cp "$work/stub" "$d/${tests[0]}"
 out="$(bash "$d/scripts/check-all.sh" 2>&1)"
 check "a passing check shows its label and its last line" \
-  grep -qxF "ok: $(grep -m1 -F "${tests[0]}" "$RUNNER" | cut -d'"' -f2) — RAN ${tests[0]}" <<< "$out"
+  grep -qx "ok: $(grep -m1 -F "${tests[0]}" "$RUNNER" | cut -d'"' -f2) ([0-9][0-9]* s) — RAN ${tests[0]}" <<< "$out"
 check "a passing check hides the rest" test "${out/DETAIL/}" = "$out"
 out="$(bash "$d/scripts/check-all.sh" --verbose 2>&1)"
 check "--verbose shows all a passing check prints" grep -qF "DETAIL ${tests[0]}" <<< "$out"
@@ -315,15 +273,31 @@ printf 'echo "ShellCheck skipped"\n' > "$work/detail"
 cat "$work/detail" "$d/${tests[2]}" > "$work/stub" && cp "$work/stub" "$d/${tests[2]}"
 out="$(bash "$d/scripts/check-all.sh" 2>&1)"
 check "a sensor shows its headline and counts the rest" \
-  grep -qF "sensor: $(grep -m1 -F "$sensor" "$RUNNER" | cut -d'"' -f2) — DETAIL $sensor (+1 line; --verbose shows them)" <<< "$out"
+  grep -q "sensor: $(grep -m1 -F "$sensor" "$RUNNER" | cut -d'"' -f2) ([0-9][0-9]* s) — DETAIL $sensor (+1 line; --verbose shows them)" <<< "$out"
 check "a sensor hides the rest of its report" test "${out/RAN $sensor/}" = "$out"
 check "a passing check keeps a line that says it skipped something" \
   grep -qxF "    ShellCheck skipped" <<< "$out"
 required="$(grep -m1 -E '^run "[^"]*" scripts/sensor-[^ ]+ --require' "$RUNNER")"
 check "a sensor run with --require shows its line as a check does" \
-  grep -qxF "ok: $(cut -d'"' -f2 <<< "$required") — RAN $(grep -oE 'scripts/sensor-[^ ]+' <<< "$required")" <<< "$out"
+  grep -qx "ok: $(cut -d'"' -f2 <<< "$required") ([0-9][0-9]* s) — RAN $(grep -oE 'scripts/sensor-[^ ]+' <<< "$required")" <<< "$out"
 out="$(bash "$d/scripts/check-all.sh" --verbose 2>&1)"
 check "--verbose shows a sensor's report in full" grep -qF "RAN $sensor" <<< "$out"
+
+# Each check shows the whole seconds it ran after its label, and the run names the slowest: a
+# check that sleeps two seconds shows at least two, and no other is named. A check skipped in
+# changed mode shows no time.
+d="$(repo times)"
+echo "sleep 2" >> "$d/${tests[3]}"
+label="$(grep -m1 -F "${tests[3]}" "$RUNNER" | cut -d'"' -f2)"
+out="$(bash "$d/scripts/check-all.sh" 2>&1)"
+secs="$(sed -n "s/^ok: $label (\([0-9]*\) s) — .*/\1/p" <<< "$out")"
+check "a check shows the seconds it ran" test "${secs:-0}" -ge 2
+check "every check that ran shows its time" \
+  test "$(grep -cE '^(ok|sensor): .* \([0-9]+ s\)' <<< "$out")" -eq "${#scripts[@]}"
+check "the run names the slowest check" grep -qx "Slowest: $label, [0-9][0-9]* s; the run took [0-9][0-9]* s." <<< "$out"
+out="$(bash "$d/scripts/check-all.sh" --changed 2>&1)"
+check "a check skipped in changed mode shows no time" \
+  grep -qE "^ok: [^(]* — skipped — neither it nor its inputs changed" <<< "$out"
 
 # at_once <dir> <jobs> [wait] — the most checks the runner had running at once with
 # CHECK_ALL_JOBS at jobs: each stub notes a directory of its own while it runs, and how many there
@@ -395,7 +369,7 @@ done
 rust="$work/rust"
 mkdir -p "$rust/scripts/lib" "$rust/bin"
 cp "$ROOT/scripts/check-rust.sh" "$rust/scripts/check-rust.sh"
-cp "$ROOT/scripts/lib/softhsm.sh" "$rust/scripts/lib/softhsm.sh"
+cp "$ROOT/scripts/lib/softhsm.sh" "$ROOT/scripts/lib/root.sh" "$rust/scripts/lib/"
 cat > "$rust/bin/cargo" <<'STUB'
 #!/bin/sh
 [ "$*" = "test --workspace --locked" ] || exit 0

@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-08
 - **Deciders:** NUC maintainer
-- **Applies to:** the `NUC-` ADRs, the `Extends:`, `Narrows:`, and `Role:` fields of project ADRs, the blob list `docs/adr/NUC.blobs`, `AGENTS.md` in a derived project, checks 8, 12, and 13 of `scripts/check-docs.sh`, and `adr_blobs` of `scripts/lib/adr.sh`
+- **Applies to:** the `NUC-` ADRs, the `Extends:`, `Narrows:`, and `Role:` fields of project ADRs, the blob list `docs/adr/NUC.blobs`, `AGENTS.md` in a derived project, the rules `docs/adr-supersessions`, `docs/base-blobs`, and `docs/template-identity` of `scripts/check-docs.sh`, and `adr_blobs` of `scripts/lib/adr.sh`
 
 ## Context
 
