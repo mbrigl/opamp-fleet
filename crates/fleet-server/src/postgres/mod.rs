@@ -2598,9 +2598,14 @@ mod tests {
                     Vec::<i32>::new()
                 );
             } else {
-                let err = answer.expect_err("0.7.1 refuses the schema of 0.8.0");
+                // The newest oldest Server the applied migrations name: 0.8.0 up to migration
+                // 18, 0.8.4 once migration 19 gave the contract pair its defaults.
+                let needs = migrations.last().expect("applied").oldest_server;
+                let err = answer.expect_err("0.7.1 refuses the schema of 0.8.0 and later");
                 assert!(
-                    err.contains("needs Server 0.8.0 or later, and this Server is 0.7.1"),
+                    err.contains(&format!(
+                        "needs Server {needs} or later, and this Server is 0.7.1"
+                    )),
                     "after migration {applied}: {err}"
                 );
             }
