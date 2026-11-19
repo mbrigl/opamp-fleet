@@ -206,7 +206,7 @@ expect fail "a third-party action on its major tag" "$d" "is a third-party actio
 
 d="$(repo third-party-full-version)"
 workflow "$d" "- uses: Swatinem/rust-cache@v2.9.2"
-expect fail "a third-party action on a full version tag" "$d" "(ADR-0010 clause 3)"
+expect fail "a third-party action on a full version tag" "$d" "(ADR-0010 §3)"
 
 d="$(repo third-party-no-ref)"
 workflow "$d" "- uses: Swatinem/rust-cache"
@@ -222,7 +222,7 @@ expect fail "a SHA whose comment names only a major" "$d" "carries '# v2', not '
 
 d="$(repo third-party-unprefixed-comment)"
 workflow "$d" "- uses: Swatinem/rust-cache@$S # 2.9.2"
-expect fail "a SHA whose comment has no leading v" "$d" "(ADR-0010 clause 3)"
+expect fail "a SHA whose comment has no leading v" "$d" "(ADR-0010 §3)"
 
 d="$(repo third-party-short-sha)"
 workflow "$d" "- uses: Swatinem/rust-cache@6323deb # v2.9.2"
@@ -282,7 +282,7 @@ expect pass "an annotated tag whose peeled commit is the pinned one, inside a re
 
 d="$(repo resolve-tag-object)"
 workflow "$d" "- uses: owner/annotated@$T # v2.9.2"
-expect fail "the tag object's own ID pinned in place of its commit" "$d" "tag v2.9.2 of owner/annotated is $S, not the pinned commit (ADR-0010 clause 4)"
+expect fail "the tag object's own ID pinned in place of its commit" "$d" "tag v2.9.2 of owner/annotated is $S, not the pinned commit (ADR-0010 §4)"
 
 d="$(repo resolve-moved)"
 workflow "$d" "- uses: owner/moved@$S # v1.0.0"

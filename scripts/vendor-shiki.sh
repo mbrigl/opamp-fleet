@@ -4,7 +4,7 @@
 # Agent's effective configuration with (ADR-0035), and pins its SHA-256 in scripts/vendor-shiki.lock.
 #
 # Dev-only: run it when the version is to change, on a developer's machine. CI and the Dev
-# Container never run it and need no node (ADR-0008 clause 14). The bundle is built from the
+# Container never run it and need no node (ADR-0008 §14). The bundle is built from the
 # inputs under scripts/vendor-shiki/: package.json names the exact versions, package-lock.json
 # pins every package with its integrity hash, entry.mjs is the code bundled. To change a version,
 # edit package.json, refresh the lock with `npm install --package-lock-only --ignore-scripts` in
@@ -115,7 +115,7 @@ EOF
     --banner:js="$header" --outfile="$WORK/shiki.js"
 )
 
-# The page's policy admits no eval and no WebAssembly (ADR-0035 clause 1): a bundle that needs
+# The page's policy admits no eval and no WebAssembly (ADR-0035 §1): a bundle that needs
 # either is refused here rather than shipped.
 if grep -qE '\beval\(|new Function\b|WebAssembly' "$WORK/shiki.js"; then
   echo "the bundle uses eval, new Function or WebAssembly, which the UI's policy forbids" >&2
@@ -125,7 +125,7 @@ fi
 cp "$WORK/shiki.js" "$OUT"
 sha="$(sha256sum "$OUT" | cut -d' ' -f1)"
 cat >"$PIN" <<EOF
-# The vendored crates/fleet-server/static/shiki.js (ADR-0035 clause 2), written by
+# The vendored crates/fleet-server/static/shiki.js (ADR-0035 §2), written by
 # scripts/vendor-shiki.sh. A test fails while the file's SHA-256 differs from the one here.
 shiki $shiki
 sha256 $sha

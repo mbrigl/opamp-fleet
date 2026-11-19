@@ -60,7 +60,7 @@ flate2 = "1"
 # produce. Only `crates/fleet-tools` and the Client's own tests ask for it (ADR-0008); the
 # Client daemon never encodes, and does not enable it.
 sevenz-rust2 = { version = "0.25", default-features = false, features = ["aes256"] }
-# Reading a `.zip` package artifact (ADR-0033 clause 62) — the container some agents publish their
+# Reading a `.zip` package artifact (ADR-0033 §62) — the container some agents publish their
 # portable Windows build in. Default features pull C-binding codecs (bzip2, xz, zstd), so only
 # `deflate` is taken, which decompresses on the `flate2`/`miniz_oxide` chain already present;
 # reading stays pure Rust (ADR-0011, ADR-0012). Read-only and unencrypted: the Client never
@@ -76,7 +76,7 @@ tar = "0.4"
 # of memory about to be freed cannot promise. The default `alloc` feature and no derive. At least
 # 1.9.1, the first whose `Zeroizing` `Debug` shows no content. Already in the tree through
 # `dialoguer`, `der`, `pkcs8`, `pkcs12`, `rustls` and `rustls-pki-types`; it pulls no TLS or crypto
-# backend, so ADR-0012 holds. `opamp` does not name it (ADR-0008 clause 3).
+# backend, so ADR-0012 holds. `opamp` does not name it (ADR-0008 §3).
 zeroize = "1.9.1"
 # Encoding Basic credentials into their Authorization header value (ADR-0026).
 base64 = "0.23"
@@ -146,7 +146,7 @@ opentelemetry-appender-tracing = "0.33"
 # so itself — this converts `tracing` *spans* into OpenTelemetry spans, which is what makes the
 # `own_traces` exporter have anything to export. Numbered one release ahead of the OTel crates it
 # binds to, so `0.34` is the one built against `opentelemetry` `0.33`; that pairing is a decision
-# (ADR-0018 clause 12), not a range to widen. It is also what gives the exported log records their
+# (ADR-0018 §12), not a range to widen. It is also what gives the exported log records their
 # TraceId: entering a span activates its OpenTelemetry context, which is where the appender reads
 # the correlation from — the reason its own `experimental_use_tracing_span_context` could be dropped.
 tracing-opentelemetry = "0.34"
@@ -202,7 +202,7 @@ clap = { version = "4", features = ["derive"] }
 # Cross-platform service lifecycle — systemd, launchd, and the Windows SCM behind one API
 # (ADR-0021). Pulls no TLS/crypto backends, so the rustls/ring-only constraint (ADR-0012) holds.
 service-manager = "0.11"
-# The questionnaire of `service install --interactive` and `service config` (ADR-0021 clause 28): validated answers, defaults and a yes/no confirmation, the same on three operating systems.
+# The questionnaire of `service install --interactive` and `service config` (ADR-0021 §28): validated answers, defaults and a yes/no confirmation, the same on three operating systems.
 # `password` is the one feature: the password of a `bootstrap.p12` is asked with input hidden
 # (ADR-0027), and its one dependency, `zeroize`, is already in the tree. It pulls no TLS/crypto
 # backend, so ADR-0012 holds.
@@ -211,7 +211,7 @@ dialoguer = { version = "0.12", default-features = false, features = ["password"
 # without which the SCM kills the service with error 1053. Compiled on Windows targets only.
 windows-service = "0.8"
 
-# The structural tests that read the sources as a syntax tree: ADR-0008 clause 16's, the
+# The structural tests that read the sources as a syntax tree: ADR-0008 §16's, the
 # capability matrix of G-12, and where the Client's *at calls live. Development dependencies only,
 # which link into no artifact, and all three already in the tree through the derive macros.
 syn = { version = "3", default-features = false, features = ["full", "parsing", "printing", "visit", "visit-mut"] }

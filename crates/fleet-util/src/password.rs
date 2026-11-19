@@ -3,10 +3,10 @@
 
 use std::path::Path;
 
-/// The password a password file holds: its first line, without its `\n` or `\r\n` (ADR-0027
-/// clause 18). The file is read once and left as it is: the administrator's path, read as
+/// The password a password file holds: its first line, without its `\n` or `\r\n` (ADR-0027 §18).
+/// The file is read once and left as it is: the administrator's path, read as
 /// [`crate::nofollow::read_privileged`] reads one with `roots` as the service's account's, and a
-/// file of more than 4 KiB is refused (ADR-0022 clause 11). `flag` is the option that named it,
+/// file of more than 4 KiB is refused (ADR-0022 §11). `flag` is the option that named it,
 /// such as the Client's `--bootstrap-password-file`, for the error. The file's bytes and the
 /// password are held in buffers wiped when they are dropped (ADR-0015).
 ///
@@ -44,7 +44,7 @@ mod tests {
     use super::*;
 
     /// The password is the file's first line without its line ending; an empty first line, a
-    /// missing file and a file over 4 KiB are refused, naming the flag (ADR-0027 clause 18).
+    /// missing file and a file over 4 KiB are refused, naming the flag (ADR-0027 §18).
     /// Verifies: ADR-0027
     #[test]
     fn a_password_file_gives_its_first_line_and_refuses_the_rest() {

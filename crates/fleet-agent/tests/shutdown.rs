@@ -84,7 +84,7 @@ fn sigterm_shuts_the_client_down_cleanly() {
     }
 }
 
-/// The second service is a daemon too: `SIGHUP` leaves it serving (ADR-0021 clause 18), where the
+/// The second service is a daemon too: `SIGHUP` leaves it serving (ADR-0021 §18), where the
 /// default disposition would end it and leave every program it started running without it.
 /// `SIGTERM` still stops it, and it removes its socket on the way out.
 /// Verifies: ADR-0022

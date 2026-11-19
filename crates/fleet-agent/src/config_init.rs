@@ -42,11 +42,11 @@ pub const BOOTSTRAP_KEY_FILE: &str = "bootstrap-key.pem";
 pub const VERIFICATION_KEY_FILE: &str = "package-signing-key.pub";
 
 /// The bootstrap certificate and its key in one password-protected file, which the install looks
-/// for beside its program (ADR-0027 clause 14).
+/// for beside its program (ADR-0027 §14).
 pub const BOOTSTRAP_P12_FILE: &str = fleet_core::pkcs12::FILE_NAME;
 
 /// The fleet's files that lie beside the program the install runs from, or in the directory
-/// `--fleet-files` names (ADR-0027 clause 14): the questionnaire's defaults, and what a
+/// `--fleet-files` names (ADR-0027 §14): the questionnaire's defaults, and what a
 /// non-interactive install takes without a question.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Beside {
@@ -72,7 +72,7 @@ impl Beside {
     }
 
     /// What lies in the directory `--fleet-files` names, looked in instead of beside the program
-    /// (ADR-0027 clause 14).
+    /// (ADR-0027 §14).
     ///
     /// # Errors
     /// Returns an error naming the flag when `dir` is not a readable directory.
@@ -103,7 +103,7 @@ impl Beside {
             }
             (None, None) => None,
         };
-        // Two identities would leave the install to guess which one is meant (ADR-0027 clause 14).
+        // Two identities would leave the install to guess which one is meant (ADR-0027 §14).
         let bootstrap = match (file(BOOTSTRAP_P12_FILE), pair) {
             (Some(p12), None)
                 if file(BOOTSTRAP_CERT_FILE).is_none() && file(BOOTSTRAP_KEY_FILE).is_none() =>
@@ -142,7 +142,7 @@ impl Beside {
         }
     }
 
-    /// The bootstrap identity a non-interactive install enrols with (ADR-0027 clause 18): the one
+    /// The bootstrap identity a non-interactive install enrols with (ADR-0027 §18): the one
     /// beside the program, when `config` reaches its Server over TLS and its state directory
     /// holds no issued certificate. A `bootstrap.p12` is opened here, with `password` — what
     /// `--bootstrap-password-file` read — so a file that does not open stops the install before
@@ -228,7 +228,7 @@ pub struct Answers {
     pub self_update: bool,
 }
 
-/// A bootstrap identity found on this host, not yet opened (ADR-0027 clause 14).
+/// A bootstrap identity found on this host, not yet opened (ADR-0027 §14).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootstrapFiles {
     /// `bootstrap.pem` and `bootstrap-key.pem`.
@@ -239,7 +239,7 @@ pub enum BootstrapFiles {
 
 /// The bootstrap identity (ADR-0026) the Client enrols with. Asked for only while the Client is
 /// not enrolled, and never copied or written into the file: the questionnaire's enrolment presents
-/// it once, to obtain the certificate the Server issues (ADR-0027 clause 16).
+/// it once, to obtain the certificate the Server issues (ADR-0027 §16).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bootstrap {
     /// The bootstrap certificate and its private key, PEM, where they lie on this host.
@@ -273,7 +273,7 @@ pub struct Written {
     pub answered: Option<Answered>,
     /// The endpoint `--endpoint` named over a file this run kept: no answer, but an enrolment
     /// refuses a kept file that names another
-    /// (ADR-0022 clause 28).
+    /// (ADR-0022 §28).
     pub named_over_kept: Option<String>,
     /// The paths this run's questions offered from the file, which the enrolment reads through no
     /// link at their name where an answer kept one. A run that answered nothing kept the file,
@@ -293,7 +293,7 @@ impl Written {
 
 /// The endpoint and the trust a run answered, held in memory: a privileged enrolment connects
 /// with these, never with what it would read back from the file the service's account owns
-/// (ADR-0022 clause 28).
+/// (ADR-0022 §28).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answered {
     /// The endpoint answered.
@@ -305,8 +305,7 @@ pub struct Answered {
 
 /// The paths the questionnaire offers from `supervisor.toml`, a file the service's account may
 /// write: `[tls] ca_file`, `cert_file` and `key_file`. An answer that keeps one is read through
-/// no link at its name, wherever it lies; any other answer is the administrator's (ADR-0022
-/// clause 11).
+/// no link at its name, wherever it lies; any other answer is the administrator's (ADR-0022 §11).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Offered(Vec<PathBuf>);
 
@@ -340,12 +339,12 @@ impl Offered {
 ///
 /// `current` is what the file at `path` holds, or the defaults where there is none yet, and offers
 /// each question its default; where it holds nothing, what lies `beside` the program does
-/// (ADR-0027 clause 16). A new file is rendered whole; an existing one is edited in place,
+/// (ADR-0027 §16). A new file is rendered whole; an existing one is edited in place,
 /// the asked keys changed and everything else — comments, `[[supervisor]]` blocks, the
 /// self-update consent — kept as written. `enrolled` says whether the state directory already
 /// holds an issued certificate, in which case no bootstrap identity is asked for. `password` is
 /// what `--bootstrap-password-file` read, which opens an answered `bootstrap.p12` instead of a
-/// question (ADR-0027 clause 16).
+/// question (ADR-0027 §16).
 ///
 /// The answered CA is copied beside the file first, and the file names the copy
 /// ([`copy_ca_beside`]). `account` is the roots and the state directory, which the service's
@@ -477,7 +476,7 @@ pub fn copy_ca_beside(
 /// account's: a regular file of at most [`crate::tls::MAX_PEM_BYTES`], so a FIFO or a device the
 /// service's account placed at the name never holds this step up, and through no link the account
 /// placed in its directories, such as one at the copy an earlier answer left in the data root
-/// (ADR-0022 clause 11).
+/// (ADR-0022 §11).
 fn read_certificates(
     path: &Path,
     roots: &[&Path],
@@ -511,12 +510,12 @@ fn read_certificates(
 /// Replace the configuration at `path` with `contents`, keeping who owns it.
 ///
 /// Through a temporary name and a rename, so a Client starting meanwhile reads the old file or the
-/// new one, never half of either. The new file is owner-only like the one it replaces (ADR-0021
-/// clause 25), and on Unix it is given back to the old file's owner: the file of a service that
-/// runs as its own account belongs to that account (ADR-0022 clause 1), and the administrator
+/// new one, never half of either. The new file is owner-only like the one it replaces (ADR-0021 §25),
+/// and on Unix it is given back to the old file's owner: the file of a service that
+/// runs as its own account belongs to that account (ADR-0022 §1), and the administrator
 /// editing it must not take it away. The owner is set on the new file before the rename, never on
 /// the path after it, in the held directory, so a link the account put at either name is replaced
-/// and never written through (ADR-0022 clause 11).
+/// and never written through (ADR-0022 §11).
 fn replace(path: &Path, contents: &str) -> Result<(), String> {
     let meta = std::fs::symlink_metadata(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -588,7 +587,7 @@ fn table<'a>(
 }
 
 /// Write the first configuration from an endpoint *given* rather than asked for — the whole of
-/// `--endpoint` (ADR-0027 clause 17).
+/// `--endpoint` (ADR-0027 §17).
 ///
 /// This is the half of ADR-0021 a packaged install can reach. An MSI dialog and a `%post` script
 /// both have an answer and no terminal, and [`run`] is deliberately an error without one; the file
@@ -597,9 +596,9 @@ fn table<'a>(
 ///
 /// The endpoint and the self-update consent are taken, and for a `wss://` / `https://` endpoint
 /// the Server CA and the verification key that lie `beside` the program, the CA copied beside the
-/// file as the questionnaire's answer would be (ADR-0027 clause 17). The client identity comes from
+/// file as the questionnaire's answer would be (ADR-0027 §17). The client identity comes from
 /// an enrolment an operator approves, which the install runs with a bootstrap pair beside the
-/// program (ADR-0027 clause 18); a file written without one fails the install's validation and
+/// program (ADR-0027 §18); a file written without one fails the install's validation and
 /// stays on disk to be completed (ADR-0021).
 ///
 /// Returns the copy it wrote and what it answered; a file it kept answers nothing, and the
@@ -666,7 +665,7 @@ fn keeping_existing(path: &Path) -> bool {
 /// Put the questions to the operator, each offering what `current` holds as its default. The only
 /// function here that reads a terminal.
 ///
-/// The bootstrap identity is asked for only when `enrolled` is `false` (ADR-0027 clause 16), and
+/// The bootstrap identity is asked for only when `enrolled` is `false` (ADR-0027 §16), and
 /// comes back beside the answers rather than in them: it is enrolled with, not written.
 ///
 /// # Errors
@@ -713,7 +712,7 @@ pub fn ask(
     };
 
     // The bootstrap identity (ADR-0026) a host not yet enrolled enrols with: a PEM certificate and
-    // its key, or a PKCS#12 file and its password (ADR-0027 clause 16). There is no answer without
+    // its key, or a PKCS#12 file and its password (ADR-0027 §16). There is no answer without
     // one, and no question asks for a credential (ADR-0027) — the password opens a file on this
     // host and is sent nowhere. An enrolled host renews what it was issued and is not asked.
     let bootstrap = if enrolled {
@@ -834,7 +833,7 @@ fn ask_bootstrap(
 /// The bootstrap PKCS#12 file at `path`, read by a privileged step as
 /// [`fleet_util::nofollow::read_privileged`] reads it, at most [`fleet_core::pkcs12::MAX_FILE_BYTES`]
 /// of it, with `account` — the roots and the state directory — as the service's account's
-/// (ADR-0022 clause 11). Where `path` is one `offered` names, the questionnaire offered it from a
+/// (ADR-0022 §11). Where `path` is one `offered` names, the questionnaire offered it from a
 /// file the account may write, and a link at its name is refused wherever it lies. Any other path
 /// the administrator gave.
 ///
@@ -856,7 +855,7 @@ fn read_pkcs12(
 }
 
 /// Whether an answered path is read as PKCS#12: by its extension, `.p12` or `.pfx` in any case
-/// (ADR-0027 clause 16).
+/// (ADR-0027 §16).
 #[must_use]
 pub fn is_pkcs12_path(path: &Path) -> bool {
     path.extension()
@@ -882,8 +881,8 @@ fn ask_path(prompt: &str, default: Option<String>) -> Result<PathBuf, String> {
     Ok(PathBuf::from(answer.trim()))
 }
 
-/// The default of each question: what the configuration holds (ADR-0021 clause 24), else what
-/// lies beside the program (ADR-0027 clause 16). On a fresh host `current` is the loader's
+/// The default of each question: what the configuration holds (ADR-0021 §24), else what
+/// lies beside the program (ADR-0027 §16). On a fresh host `current` is the loader's
 /// defaults, so the endpoint and name are suggested, and the files and the key are where the
 /// program found them.
 #[derive(Debug, PartialEq, Eq)]
@@ -928,7 +927,7 @@ impl Defaults {
 ///
 /// Values go through `toml`'s own string encoder rather than into `"{}"`: a name may contain a
 /// quote, and a Windows path is full of backslashes. The file has no `[auth]` section: the Client
-/// sends no credential (ADR-0027 clause 16).
+/// sends no credential (ADR-0027 §16).
 #[must_use]
 pub fn render(answers: &Answers) -> String {
     let mut out = String::new();
@@ -1004,7 +1003,7 @@ fn commented_top_level_keys() -> &'static str {
 /// "Do not overwrite" is a property of the create itself (`O_EXCL`, `CREATE_NEW`) rather than of
 /// a check that raced, and a link at the name is something that is there: it is refused, never
 /// followed. The mode is set in the same call for the same reason: the file names where the
-/// private key lies and may hold `[packages] archive_key` (ADR-0021 clause 25), before any later
+/// private key lies and may hold `[packages] archive_key` (ADR-0021 §25), before any later
 /// mode change could narrow it. The directory is held as
 /// [`held_dir`](crate::config_file::held_dir) holds it.
 ///
@@ -1062,7 +1061,7 @@ mod tests {
     /// What the questionnaire writes names no client identity — the bootstrap pair is enrolled
     /// with, not written — and the Client starts with it once the enrolment has put the issued
     /// certificate into the state directory, which an install does before it registers the
-    /// service (ADR-0027 clause 16 and ADR-0021 clause 26).
+    /// service (ADR-0027 §16 and ADR-0021 §26).
     /// Verifies: ADR-0021, ADR-0027
     #[test]
     fn a_complete_answer_writes_a_file_the_client_starts_with() {
@@ -1175,7 +1174,7 @@ mod tests {
     }
 
     /// No answer puts an `[auth]` section in the file: the questionnaire asks for no credential,
-    /// and the Client sends none (ADR-0027 clause 16).
+    /// and the Client sends none (ADR-0027 §16).
     /// Verifies: ADR-0021, ADR-0027
     #[test]
     fn a_rendered_file_has_no_auth_section() {
@@ -1199,7 +1198,7 @@ mod tests {
         }
     }
 
-    /// ADR-0027 clause 17: the packaged path has to produce a file the loader accepts, carrying the
+    /// ADR-0027 §17: the packaged path has to produce a file the loader accepts, carrying the
     /// endpoint that was given — the same guarantee the questionnaire has, without a terminal.
     /// Verifies: ADR-0021, ADR-0027
     #[test]
@@ -1261,7 +1260,7 @@ mod tests {
         assert!(!path.exists(), "nothing may be left behind");
     }
 
-    /// ADR-0021 clause 24 holds on the packaged path too: a `.deb` reinstalled over a configured
+    /// ADR-0021 §24 holds on the packaged path too: a `.deb` reinstalled over a configured
     /// host must not eat what somebody answered into the first install, or edited since.
     /// Verifies: ADR-0021
     #[test]
@@ -1479,7 +1478,7 @@ mod tests {
     }
 
     /// The fleet's files are found by their exact names; half a bootstrap pair and a public key
-    /// file that holds no key are said and not taken (ADR-0027 clause 14).
+    /// file that holds no key are said and not taken (ADR-0027 §14).
     /// Verifies: ADR-0021
     #[test]
     fn the_fleets_files_are_found_beside_the_program_by_their_names() {
@@ -1506,8 +1505,7 @@ mod tests {
         assert_eq!(beside.warnings.len(), 2, "{:?}", beside.warnings);
     }
 
-    /// Each default is what the file holds, else what lies beside the program (ADR-0027
-    /// clause 16).
+    /// Each default is what the file holds, else what lies beside the program (ADR-0027 §16).
     /// Verifies: ADR-0021
     #[test]
     fn a_default_is_what_the_file_holds_else_what_lies_beside_the_program() {
@@ -1608,7 +1606,7 @@ mod tests {
 
     /// `--endpoint` writes the CA and the verification key it finds beside the program, the CA as
     /// a copy beside the file; a loopback `ws://` takes neither, and a file that exists is kept
-    /// (ADR-0027 clause 17).
+    /// (ADR-0027 §17).
     /// Verifies: ADR-0021
     #[test]
     fn an_endpoint_install_takes_the_ca_and_the_key_beside_the_program() {
@@ -1656,7 +1654,7 @@ mod tests {
     }
 
     /// Unasked, the pair beside the program enrols a Client over TLS that holds no issued
-    /// certificate, and only such a one (ADR-0027 clause 18).
+    /// certificate, and only such a one (ADR-0027 §18).
     /// Verifies: ADR-0021
     #[test]
     fn an_unasked_install_enrols_with_the_pair_beside_the_program_until_enrolled() {
@@ -1777,7 +1775,7 @@ mod tests {
     }
 
     /// A `bootstrap.p12` is found as a bootstrap identity; lying beside a file of the pair,
-    /// neither is taken; `--fleet-files` names a directory that must be one (ADR-0027 clause 14).
+    /// neither is taken; `--fleet-files` names a directory that must be one (ADR-0027 §14).
     /// Verifies: ADR-0027
     #[test]
     fn a_bootstrap_p12_is_found_alone_and_never_beside_the_pair() {
@@ -1839,7 +1837,7 @@ mod tests {
 
     /// Unasked, a `bootstrap.p12` enrols with the password `--bootstrap-password-file` gives, and
     /// fails the install without it, under a password that does not open it, or when the flag has
-    /// no file to open (ADR-0027 clause 18).
+    /// no file to open (ADR-0027 §18).
     /// Verifies: ADR-0027
     #[test]
     fn an_unasked_install_opens_a_bootstrap_p12_with_the_password_file_or_fails() {
@@ -1890,7 +1888,7 @@ mod tests {
     }
 
     /// The password is the file's first line without its line ending; an empty one is refused
-    /// (ADR-0027 clause 18). `.p12` and `.pfx` are read as PKCS#12 (clause 8).
+    /// (ADR-0027 §18). `.p12` and `.pfx` are read as PKCS#12 (clause 8).
     /// Verifies: ADR-0027
     #[test]
     fn a_password_file_gives_its_first_line_and_a_p12_path_is_known_by_its_extension() {
@@ -2200,7 +2198,7 @@ mod tests {
 
     /// An edit changes the keys the questionnaire asked about and nothing else: the operator's
     /// comments, a `[[supervisor]]` block, the self-update consent and a key not asked about stay
-    /// byte for byte (ADR-0021 clause 24).
+    /// byte for byte (ADR-0021 §24).
     /// Verifies: ADR-0021
     #[test]
     fn an_edit_changes_the_asked_keys_and_keeps_the_rest() {
@@ -2281,7 +2279,7 @@ mod tests {
     }
 
     /// Every question offers what the file holds; a fresh host gets the loader's defaults, which
-    /// suggest an endpoint and a name and no file or key (ADR-0021 clause 24).
+    /// suggest an endpoint and a name and no file or key (ADR-0021 §24).
     /// Verifies: ADR-0021, ADR-0027
     #[test]
     fn the_defaults_are_what_the_file_holds() {
@@ -2333,7 +2331,7 @@ mod tests {
 
     /// The bootstrap pair is asked for while the state directory holds no issued certificate, and
     /// not after — a bootstrap certificate the file names does not count as enrolled, the issued
-    /// pair alone does (ADR-0027 clause 16). `ask` reads exactly this predicate.
+    /// pair alone does (ADR-0027 §16). `ask` reads exactly this predicate.
     /// Verifies: ADR-0021, ADR-0027
     #[test]
     fn the_bootstrap_pair_is_asked_only_before_enrolment() {

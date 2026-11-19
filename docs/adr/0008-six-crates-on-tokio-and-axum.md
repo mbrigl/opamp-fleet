@@ -12,8 +12,7 @@ unpackers and the 7z Unix-mode convention; `read_privileged` with its `Named`, w
 privileged step names without following a link; `read_password_file`, which reads a password file
 as the Client's own setup does; and the PKCS#12 reader, which opens a bootstrap PKCS#12 file as the
 Client's install does
-([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
-clauses 5 and 24).
+([ADR-0036 §5 and §24](0036-the-operator-program-opamp-fleetctl.md)).
 
 Taken by depending on the Client, those four items link the whole Client into `opamp-fleetctl`. Of
 the 282 crates the tool linked that way on 2026-11-15, 56 came only through `fleet-agent`: the

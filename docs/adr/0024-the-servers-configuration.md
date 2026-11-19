@@ -103,8 +103,8 @@ environment carry paths to secrets but never a secret itself.
    the Server logs, at info level, the name of every key its environment set, and never a value.
 
 8. **No other variable configures the Server.** The `AWS_*` variables are read as
-   [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-   clauses 17 and 18 say: for credentials only, never for an endpoint or an option. `FLEET_TEST_*`
+   [ADR-0023 §17 and §18](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+   say: for credentials only, never for an endpoint or an option. `FLEET_TEST_*`
    variables are read by tests alone. Where ADR-0023 says the S3 connection is configured in
    `server.toml` alone, the environment of this ADR counts as `server.toml`:
    `FLEET_SERVER__BLOBS__S3__ENDPOINT` sets the endpoint, and `AWS_ENDPOINT` still does not.

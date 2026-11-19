@@ -29,8 +29,8 @@ pub fn plane(
 /// Asks both planes to stop: neither takes a new connection, and the WebSocket sessions are closed
 /// spread over `drain`, so their Agents come back to the other instances, or to this one once it is
 /// started again, without arriving all at once
-/// (ADR-0025
-/// clause 3). What is still open shortly after the window is cut, and only then does the record
+/// (ADR-0025 §3).
+/// What is still open shortly after the window is cut, and only then does the record
 /// flush that follows shutdown (ADR-0029) run.
 ///
 /// A free function rather than a call at the signal site, so the two planes cannot end up with

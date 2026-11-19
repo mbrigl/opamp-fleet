@@ -47,7 +47,7 @@ pub async fn run<S: Session, X: StopSignal>(
     let mut reports = session.connected();
     let mut ended = Ended::Stopped;
     // Refusals in a row, `Unavailable` and throttling alike, wait at least the next step, so a
-    // Server that names no wait, or zero, is not polled at once (ADR-0012 clause 4); an exchange
+    // Server that names no wait, or zero, is not polled at once (ADR-0012 §4); an exchange
     // that is answered starts the steps again.
     let mut refused = Backoff::new();
     'poll: loop {

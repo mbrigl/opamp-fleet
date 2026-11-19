@@ -1,4 +1,4 @@
-//! The floor on the pace of every request body and every WebSocket message (ADR-0012 clause 18).
+//! The floor on the pace of every request body and every WebSocket message (ADR-0012 §18).
 //!
 //! Nothing a listener serves has a deadline: a large upload over a slow link and a long-lived
 //! session are both legitimate. What is not is a body or a message that has begun and then stalls
@@ -7,7 +7,7 @@
 //! `408`, a WebSocket message closes its connection with `1008`. A connection with nothing in flight
 //! is left alone.
 //!
-//! A message is judged by its data frames, read as they arrive (ADR-0008 clause 5): a Ping between
+//! A message is judged by its data frames, read as they arrive (ADR-0008 §5): a Ping between
 //! two fragments of a message is not progress on it, and a peer that only pings has no message in
 //! flight.
 

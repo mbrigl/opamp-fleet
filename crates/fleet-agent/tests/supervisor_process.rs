@@ -103,7 +103,7 @@ impl Drop for AgentsService {
 }
 
 /// The process this test runs as, named as the second service's: the in-process services run in
-/// it (ADR-0022 clause 19).
+/// it (ADR-0022 §19).
 #[cfg(unix)]
 fn this_process() -> fleet_agent::supervisor::channel::ServiceProcess {
     fleet_agent::supervisor::channel::ServiceProcess::named(|| Ok(Some(std::process::id())))
@@ -575,7 +575,7 @@ both!(a_swapped_binary_is_probed_again_for_its_version);
 // ── The second service (ADR-0022) ────────────────────────────────────────────
 
 /// The shipped program is the second service under `run --agents`. It will not serve its own
-/// account as the Client's (ADR-0022 clause 16); serving another, it refuses this test at the socket
+/// account as the Client's (ADR-0022 §16); serving another, it refuses this test at the socket
 /// and ends cleanly on `SIGTERM`. A program started through it needs a second account to connect
 /// from; the cases above run the same service in-process, under this test's own uid.
 /// Verifies: ADR-0022
@@ -687,7 +687,7 @@ fn holds_cap_sys_ptrace() -> bool {
     effective & (1 << 19) != 0
 }
 
-/// The shipped second service closes its process to its own account (ADR-0022 clause 19): once
+/// The shipped second service closes its process to its own account (ADR-0022 §19): once
 /// listening it reports itself not dumpable, and this test — its parent, of its account and without
 /// `CAP_SYS_PTRACE`, which Yama's `ptrace_scope` 1 would let attach to a descendant — is refused
 /// `PTRACE_ATTACH`, its `/proc/<pid>/mem` and `pidfd_getfd`.
@@ -813,7 +813,7 @@ async fn the_second_service_closes_its_process_to_its_own_account() {
 
 /// The shipped second service does not listen while it is traced: a tracer attached before it
 /// marks itself not dumpable stays attached, so it ends with an error, and the service manager
-/// starts it again (ADR-0022 clause 19).
+/// starts it again (ADR-0022 §19).
 /// Verifies: ADR-0022
 #[cfg(target_os = "linux")]
 #[test]
@@ -1352,7 +1352,7 @@ fn binary_harness(via: Via, binary: &Path, apply_grace: Duration) -> Harness {
     )
 }
 
-/// ADR-0019 clause 54: a package is *proved to run* before it replaces what runs. The check fails here, so
+/// ADR-0019 §54: a package is *proved to run* before it replaces what runs. The check fails here, so
 /// nothing is swapped and — the point of the whole exercise — the running process is never stopped
 /// for an artifact that could never have worked. Before this, the sequence was stop, swap, fail to
 /// start, roll back, restart: an outage bought for nothing.
@@ -1647,7 +1647,7 @@ async fn offer_package(harness: &Harness, dir: &Path, bytes: &[u8], version: &st
         .expect("send");
 }
 
-/// ADR-0033 clause 60: a failed package is a failed start like any other. Where the predecessor it
+/// ADR-0033 §60: a failed package is a failed start like any other. Where the predecessor it
 /// is rolled back to will not start either, the Supervisor holds after three failed starts in a
 /// row — the package's and two of the predecessor's — rather than granting the predecessor three
 /// of its own after the package's.
@@ -1696,7 +1696,7 @@ async fn a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_to
 }
 both!(a_failed_package_counts_towards_the_hold_of_a_predecessor_that_fails_too);
 
-/// ADR-0033 clause 59: the predecessor a failed package is rolled back to is started once, and
+/// ADR-0033 §59: the predecessor a failed package is rolled back to is started once, and
 /// that process stays; no second respawn replaces it while it runs.
 /// Verifies: ADR-0033
 async fn a_failed_package_starts_its_predecessor_exactly_once(via: Via) {
@@ -2101,7 +2101,7 @@ async fn the_phases_of_an_install_hang_off_the_span_that_came_with_it() {
     let _ = harness.task.await;
 }
 
-// ── An apply while the second service is away (ADR-0022 clause 17) ───────────
+// ── An apply while the second service is away (ADR-0022 §17) ───────────
 
 /// An apply that does not reach the second service, or whose program goes with the service during
 /// the apply grace, is neither applied nor failed: nothing is reported, a package is neither
@@ -2428,7 +2428,7 @@ mod an_apply_while_the_second_service_is_away {
     }
 
     /// [`a_package_waits_staged_while_the_service_is_away_and_is_swapped_in_once_it_is_back`] for a
-    /// package that is a tree (ADR-0033 clause 56): staged beside what runs and kept, the whole
+    /// package that is a tree (ADR-0033 §56): staged beside what runs and kept, the whole
     /// previous tree in place while the service is away, and swapped in whole once it is back —
     /// here it survives its grace and is `Installed`.
     /// Verifies: ADR-0022
@@ -2534,7 +2534,7 @@ mod an_apply_while_the_second_service_is_away {
         shut_down(away).await;
     }
 
-    /// The predecessor a successful update retained (ADR-0033 clause 61) outlasts the retries a
+    /// The predecessor a successful update retained (ADR-0033 §61) outlasts the retries a
     /// package that waits for the second service makes: one that does not reach the service sets
     /// nothing aside. The swap once the service is back replaces it, as any next update does.
     /// Verifies: ADR-0033, ADR-0022
@@ -2601,7 +2601,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A configuration whose retry reaches the second service but whose program does not start —
     /// it is not there — is `FAILED`, as the apply itself would have been, and is not started
-    /// again: a respawn is for a program that ran and exited within the grace (ADR-0033 clause 60), and a start that did not happen has nothing to respawn.
+    /// again: a respawn is for a program that ran and exited within the grace (ADR-0033 §60), and a start that did not happen has nothing to respawn.
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn a_retry_whose_program_does_not_start_fails_the_configuration_and_respawns_nothing() {
@@ -2700,7 +2700,7 @@ mod an_apply_while_the_second_service_is_away {
     }
 
     /// A restart command while a configuration and a package wait for the second service respawns
-    /// on the current files and does no more (ADR-0019 clause 8): its start, though it reaches the
+    /// on the current files and does no more (ADR-0019 §8): its start, though it reaches the
     /// service, acknowledges nothing and swaps nothing in. The retry it makes due at once does
     /// both, with a start of its own that is gated.
     /// Verifies: ADR-0019, ADR-0022
@@ -2745,7 +2745,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// The second service goes during a package's apply grace, and the predecessor the package
     /// would be taken back out for cannot be put back — it is gone. The package stays live and is
-    /// reported `InstallFailed`: `program/` is never left empty (ADR-0033 clause 59).
+    /// reported `InstallFailed`: `program/` is never left empty (ADR-0033 §59).
     /// Verifies: ADR-0033, ADR-0022
     #[tokio::test]
     async fn a_package_whose_predecessor_cannot_be_put_back_stays_live() {
@@ -2995,7 +2995,7 @@ mod an_apply_while_the_second_service_is_away {
             .expect("cleanly");
     }
 
-    /// The preflight runs through the second service (ADR-0022 clause 18): a package offered while
+    /// The preflight runs through the second service (ADR-0022 §18): a package offered while
     /// the service is away is staged unchecked and waits, and once the service is back the
     /// preflight runs before the swap — here it passes, and the package is installed.
     /// Verifies: ADR-0022
@@ -3031,7 +3031,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A package that waited for the second service without its preflight is refused by the
     /// preflight that runs once the service is back, before anything is stopped: it is reported
-    /// failed, and what ran stays in place (ADR-0022 clause 18, ADR-0019 clause 54).
+    /// failed, and what ran stays in place (ADR-0022 §18, ADR-0019 §54).
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn a_package_whose_preflight_found_the_service_away_is_refused_once_it_is_back() {

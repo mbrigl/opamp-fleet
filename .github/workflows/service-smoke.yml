@@ -48,7 +48,7 @@ jobs:
         # with the process account in `UserName`, and two role accounts made with `dseditgroup`
         # and `sysadminctl -roleAccount` as the refusal of a missing process account says. The
         # runner's `sudo` asks no password, as on Linux.
-        # Every platform: the install a script runs after the package (ADR-0027 clause 19) enrols
+        # Every platform: the install a script runs after the package (ADR-0027 §19) enrols
         # with a `bootstrap.p12` and its password file from `--fleet-files`, against a Server in
         # the test, and the service it registers reaches that Server on the issued certificate; a
         # wrong password fails the install before anything is written.
@@ -60,7 +60,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The test built first, so that a compile failure does not read as a smoke-test failure;
       # then, as root through sudo on Linux and macOS, the service run, and on Linux the two tests
-      # of the links root places (ADR-0022 clauses 20 and 21), which the unprivileged run in CI
+      # of the links root places (ADR-0022 §20 and §21), which the unprivileged run in CI
       # covers for every other account. Git Bash on Windows, whose runner shell is elevated.
       - name: Install, start, kill, restart, stop, uninstall; the account, the privileges, and the process account
         shell: bash

@@ -36,7 +36,7 @@ async fn exchange(server: &TestServer, msg: &opamp::proto::AgentToServer) -> Ser
 }
 
 /// The standing offer reaches a capable Agent with what it names — and no `headers`: nothing on
-/// the Agent plane reads one (ADR-0013 clause 1).
+/// the Agent plane reads one (ADR-0013 §1).
 /// Verifies: ADR-0013
 #[tokio::test]
 async fn the_offer_reaches_a_capable_agent_and_carries_no_headers() {

@@ -1,4 +1,4 @@
-//! Where a Gateway keeps its bindings across restarts (ADR-0016 clause 16):
+//! Where a Gateway keeps its bindings across restarts (ADR-0016 §16):
 //! `<state_dir>/gateway-packages/bindings`, a journal of [`Change`]s.
 //!
 //! The file begins with a line naming its format and version and holds one change per line, of at

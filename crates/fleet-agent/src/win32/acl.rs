@@ -1,4 +1,4 @@
-//! A file's DACL as SDDL text, and the changes the Client makes to it (ADR-0022 clauses 1 and 21):
+//! A file's DACL as SDDL text, and the changes the Client makes to it (ADR-0022 §1 and §21):
 //! an explicit grant to one account in place of the one it had, and the ACEs a child inherits
 //! from its parent.
 //!

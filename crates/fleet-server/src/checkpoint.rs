@@ -41,8 +41,8 @@ pub const FS_CHAIN: &str = "fs";
 pub const TAIL_INTERVALS: u32 = 3;
 
 /// The signer port for checkpoints
-/// (ADR-0026
-/// clause 37): the audit key, by its label, with its public half.
+/// (ADR-0026 §37):
+/// the audit key, by its label, with its public half.
 pub trait CheckpointSigner: Send + Sync {
     /// The key's label.
     fn label(&self) -> &str;
@@ -433,7 +433,7 @@ struct Removal {
 /// checkpoint names a head of its chain at or after it and the store still holds that head with
 /// the hash the checkpoint names; one in the unsigned tail or inside a cut run is reported and
 /// never honoured
-/// (ADR-0028 clause 13).
+/// (ADR-0028 §13).
 #[derive(Debug)]
 pub struct Check {
     key: AuditKey,

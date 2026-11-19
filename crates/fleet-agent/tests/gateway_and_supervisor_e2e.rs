@@ -336,7 +336,7 @@ async fn a_verified_offer_restarts_the_gateway_and_leaves_the_supervisors_runnin
     // gateway task underneath. The Client reports the offer applied once it verified it by
     // connecting; the Server's record of the Agent holds that report. The Client dials its second
     // connection only once the Server answered the close of the first, so the Server no longer
-    // holds it open and does not take the report for a duplicate to re-key (ADR-0025 clause 8):
+    // holds it open and does not take the report for a duplicate to re-key (ADR-0025 §8):
     // one record carries the name, under the `instance_uid` it had.
     let records = fleet_server::fs::FsAgentStore::open(&dir.path().join("fleet-configs"))
         .expect("the server's records");
@@ -451,7 +451,7 @@ async fn a_gateway_that_cannot_bind_is_loud() {
     let _client = spawn_client(&config_path);
 
     // The Client itself still reaches the Server: Gateway Mode failing to bind is loud in the log
-    // and fatal to the Gateway, not to the host's own management (ADR-0016 clause 1).
+    // and fatal to the Gateway, not to the host's own management (ADR-0016 §1).
     common::wait_until("the Client's own Agent despite the blocked gateway", || {
         state
             .snapshot()
@@ -464,7 +464,7 @@ async fn a_gateway_that_cannot_bind_is_loud() {
 
 /// A Gateway whose store of bindings cannot be read refuses every downstream Agent, and the host
 /// goes on: the Client's own Agent and the process it supervises reach the Server, while a
-/// WebSocket upgrade at the Gateway is answered `503` (ADR-0016 clause 16).
+/// WebSocket upgrade at the Gateway is answered `503` (ADR-0016 §16).
 /// Verifies: ADR-0016
 #[tokio::test]
 async fn an_unreadable_store_of_bindings_refuses_downstream_and_the_host_goes_on() {

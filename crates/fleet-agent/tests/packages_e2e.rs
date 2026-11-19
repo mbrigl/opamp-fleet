@@ -200,7 +200,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
     common::wait_until("the package to be reported Installed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type (ADR-0033 clause 9) — the program's file name here, since
+        // The wire name is the Agent type (ADR-0033 §9) — the program's file name here, since
         // the block states no `service_name`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "Installed" && package.version == "2.0.0").then_some(())
@@ -224,7 +224,7 @@ async fn a_signed_package_is_downloaded_verified_swapped_and_reported_installed(
         .exists());
 }
 
-/// ADR-0019 clause 54's preflight, reached through the `command` kind's own configuration: `version_args`
+/// ADR-0019 §54's preflight, reached through the `command` kind's own configuration: `version_args`
 /// is the arguments an operator has declared safe to invoke the program with, so they are also
 /// what proves a *staged* program runs before the running one is stopped.
 ///
@@ -316,7 +316,7 @@ async fn a_package_that_fails_the_configured_version_check_is_refused() {
     let error = common::wait_until("the package to be reported InstallFailed", || {
         let snapshot = state.snapshot();
         let agent = view(&snapshot, "myagent")?;
-        // The wire name is the Agent type (ADR-0033 clause 9) — the program's file name here, since
+        // The wire name is the Agent type (ADR-0033 §9) — the program's file name here, since
         // the block states no `service_name`, not the Supervisor's own name `myagent`.
         let package = agent.packages.iter().find(|p| p.name == "managed-agent")?;
         (package.status == "InstallFailed").then(|| package.error.clone())

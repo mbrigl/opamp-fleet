@@ -1,5 +1,5 @@
-//! `service install` against a `supervisor.toml` the service's account rewrote (ADR-0021, ADR-0022
-//! clause 1): driven through the real command line, because the refusal is only worth anything
+//! `service install` against a `supervisor.toml` the service's account rewrote (ADR-0021, ADR-0022 §1):
+//! driven through the real command line, because the refusal is only worth anything
 //! if it comes before the install has created, restricted or handed over a thing.
 //!
 //! Linux only: the command is run at `--user` scope with every per-user location in a temporary

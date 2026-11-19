@@ -3,7 +3,7 @@
 //! enrols with.
 //!
 //! One file holds one private key and the one certificate it belongs to, nothing else — neither the
-//! bootstrap CA nor the server CA (ADR-0027 clauses 4 and 6). Both are encrypted with PBES2
+//! bootstrap CA nor the server CA (ADR-0027 §4 and §6). Both are encrypted with PBES2
 //! (PBKDF2-HMAC-SHA-256, AES-256-CBC) and the file carries an HMAC-SHA-256 MAC, each at
 //! [`ITERATIONS`].
 //!
@@ -13,21 +13,21 @@
 pub mod file;
 
 /// The name of the file, wherever it lies: in the Server's download and beside the Client's
-/// program (ADR-0039 clause 11 and ADR-0027 clause 14).
+/// program (ADR-0039 §11 and ADR-0027 §14).
 pub const FILE_NAME: &str = "bootstrap.p12";
 
-/// The largest file the Client reads (ADR-0027 clause 15). A bootstrap certificate and its P-256
+/// The largest file the Client reads (ADR-0027 §15). A bootstrap certificate and its P-256
 /// key make about 2 KiB.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024;
 
 /// The shortest password the Server takes where one is chosen, when a bootstrap certificate is
-/// issued (ADR-0027 clause 5). A file issued before opens with the password it was issued under.
+/// issued (ADR-0027 §5). A file issued before opens with the password it was issued under.
 pub const MIN_PASSWORD_CHARS: usize = 8;
 
-/// The longest password the Server takes (ADR-0027 clause 5).
+/// The longest password the Server takes (ADR-0027 §5).
 pub const MAX_PASSWORD_CHARS: usize = 128;
 
-/// The PBKDF2 iterations of the encryption, and those of the MAC (ADR-0027 clause 4).
+/// The PBKDF2 iterations of the encryption, and those of the MAC (ADR-0027 §4).
 pub const ITERATIONS: u32 = 600_000;
 
 /// Whether `password` is one the Server takes: 8 to 128 characters without a control character.

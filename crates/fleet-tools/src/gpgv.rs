@@ -1,5 +1,5 @@
 //! An upstream's OpenPGP signature, verified with `gpgv` against a keyring this tool carries
-//! (ADR-0036 clause 29): a detached signature beside an
+//! (ADR-0036 §29): a detached signature beside an
 //! artifact, or a clear-signed repository index.
 //!
 //! `gpgv` runs in a home of this process's own, owner-only, holding nothing but the carried keyring

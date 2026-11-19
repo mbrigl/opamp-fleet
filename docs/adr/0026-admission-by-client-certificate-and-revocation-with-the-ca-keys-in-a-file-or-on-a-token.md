@@ -126,7 +126,7 @@ bootstrap CA it issues bootstrap certificates on request
 ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
 A key kept as a file is a PKCS#8 PEM file that `opamp-fleetctl pki init` writes into the Server's
 directory and the Server reads unattended, unencrypted
-([ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 7 and 16). Whoever reads
+([ADR-0036 §7 and §16](0036-the-operator-program-opamp-fleetctl.md)). Whoever reads
 `client-ca-key.pem` once, from the host, from a backup or from a snapshot of its disk, can sign a
 member certificate for any host until the CA is replaced, and nothing in the fleet would tell that
 certificate from a real one. Several Server instances on one PostgreSQL database
@@ -134,7 +134,7 @@ certificate from a real one. Several Server instances on one PostgreSQL database
 each need the CA keys, and copying a key file to every instance multiplies the places it can be
 read from; an instance whose CA key is a file therefore runs alone (that ADR's clause 2). A key
 on a token is made there by `opamp-fleetctl pki token-init` on the Server host and never leaves it
-([ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 7, 8, 12 and 16).
+([ADR-0036 §7, §8, §12 and §16](0036-the-operator-program-opamp-fleetctl.md)).
 
 The `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` separates the signing of a host
 certificate from the code that decides to sign it, and the bootstrap certificates are signed in
@@ -267,7 +267,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 13. **The Operator plane is guarded as a whole by `[rest.auth]`, Basic only, required beyond the
     loopback.** `[rest.auth] basic_users` is a map of `user = "$argon2id$…"` (clause 21); several
     users allow rotation and the withdrawal of one operator's credential. `basic_users_file` names a
-    file holding that map instead ([ADR-0024](0024-the-servers-configuration.md) clause 5). A
+    file holding that map instead ([ADR-0024 §5](0024-the-servers-configuration.md)). A
     section with no user, or an entry with an empty name or password, fails at startup. A
     `[rest] listen` that is not LOOPBACK without `[rest.auth]` is refused at startup with a message
     naming both keys. While present, every route on that listener — `/api/v1/…`,
@@ -275,7 +275,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     `WWW-Authenticate: Basic realm="opamp"` without a matching credential; the browser prompts
     natively and re-sends the header, so the UI needs no login page, session or cookie. On a
     LOOPBACK `listen` the section stays optional, and the plane's loopback default
-    ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 8) is what protects it. The
+    ([ADR-0012 §8](0012-tls-1-3-two-planes-and-bounded-input.md)) is what protects it. The
     Agent plane, the package download included, is untouched by it.
 14. **A re-sent credential is not a cross-site licence.** The body-less `POST` acts on the Operator
     plane refuse a request whose `Sec-Fetch-Site` says it is cross-site (`403`), and every other
@@ -326,8 +326,9 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 20. **Enrolment reaches the Server directly or through a Gateway, and the Server decides it.** A
     host enrols by connecting to the Server, or through a Gateway that holds the bootstrap CA's
     certificate: the Gateway admits it as an enrolling peer and relays its one CSR, which carries a
-    bootstrap proof, and nothing else it sends ([ADR-0016](0016-client-modes-and-the-gateway.md),
-    clause 24). The Server decides a relayed enrolment as any other
+    bootstrap proof, and nothing else it sends
+    ([ADR-0016 §24](0016-client-modes-and-the-gateway.md)). The Server decides a relayed enrolment
+    as any other
     ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
     A CSR a Gateway forwards from a peer that holds a client certificate is signed as a renewal. A
     host can also be provisioned a client certificate by an operator.
@@ -385,8 +386,8 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     the filesystem store the one Server holds every session, and a revocation reaches them in
     process as it is committed, through the revocation list's subscription. On PostgreSQL a
     revocation committed on any instance reaches every instance by its notification
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-    clause 9), or after a missed one by the re-read of that ADR's clause 10. Either way it is
+    ([ADR-0025 §9](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)),
+    or after a missed one by the re-read of that ADR's clause 10. Either way it is
     checked against every open session there at once; a session checks itself once
     more as it starts, so a revocation landing during its admission is not missed. A session it
     concerns is closed with WebSocket close code `1008` (policy violation) and the reason `revoked`.
@@ -406,15 +407,15 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     and its serial, so the Gateway resolves no chain; and a version that changes with every change
     to the list, carried as an `ETag`, so a fetch with `If-None-Match` is answered `304`. With
     PostgreSQL it is the list's one version in the database
-    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-    clause 10), the same on every instance, so an `ETag` one instance gave is answered `304` by
+    ([ADR-0023 §10](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+    the same on every instance, so an `ETag` one instance gave is answered `304` by
     another. Bootstrap certificates are not on it: a Gateway admits no bootstrap certificate. The
     route is outside the OpenAPI document, as the package download is.
 35. **One PKCS#11 token, named in `server.toml`.** `[pkcs11]` names `module`, the path of the
     PKCS#11 library; `token_label`; and `pin_file`, a file that holds the user PIN. The PIN file may
     be read by its owner and its group and written by its owner alone, as `password_file` may
-    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-    clause 24). One that others may read, or its group may write, fails startup naming it. The PIN
+    ([ADR-0023 §24](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+    One that others may read, or its group may write, fails startup naming it. The PIN
     is never written into `server.toml` (clause 21). The Server loads the module at startup through
     `cryptoki` and keeps a pool of four sessions on the token, opened as they are needed; no setting
     changes the number. PKCS#11 initialises a module once per process, so instances that share a
@@ -433,7 +434,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 38. **The Server signs only what a use case justifies, and audits every signature.** A host
     certificate is signed for a valid renewal proof, an approved enrolment request or a member's
     CSR on its own connection. A bootstrap certificate is signed for an operator's request, and a
-    checkpoint on the schedule of [ADR-0028](0028-the-audit-record.md) clause 11. Every certificate
+    checkpoint on the schedule of [ADR-0028 §11](0028-the-audit-record.md). Every certificate
     signed with a token key writes the audit entry `pkcs11.signed`. It names the key's label as
     `key_label`, the certificate's `issuer` and `serial`, and as `use_case` the one that asked for
     it: `renewal`, `enrolment_approval`, `member_csr` or `bootstrap_issue`. A checkpoint is its own
@@ -445,7 +446,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     SoftHSM2; a hardware or cloud HSM is a change of `[pkcs11] module`, nothing else. SoftHSM2 keeps
     its token in files on one host, so it serves the Server instances of that host alone
     (clause 41). The module the `[pkcs11]` section loads is a library the operator has the Server
-    load, which [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 21 leaves to the ADR
+    load, which [ADR-0012 §21](0012-tls-1-3-two-planes-and-bounded-input.md) leaves to the ADR
     that loads it. This clause decides that the module may open a connection of its own to a
     network HSM: to the address the vendor's client configuration names, over the module's own TLS
     stack. The Server neither builds that connection nor sees it; it and the device's protection of
@@ -480,11 +481,11 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     was issued by any CA in `client_ca_file`, so a host whose certificate the old CA signed renews
     to one the new key signs. Once the last certificate the old CA signed has ended, the operator
     removes it from `client_ca_file`. A new bootstrap CA takes the old one's place as
-    [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clause 12 makes it.
+    [ADR-0036 §12](0036-the-operator-program-opamp-fleetctl.md) makes it.
 41. **Instances that share the keys reach the same ones.** A key on the token is no file, so an
     instance whose CA keys are named by their labels need not be alone
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-    clause 2). Instances that sign with shared keys name the same labels on a token every one of
+    ([ADR-0025 §2](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
+    Instances that sign with shared keys name the same labels on a token every one of
     them reaches: a network HSM all of them reach, or a token that the HSM's own replication keeps
     identical on each host.
     - SoftHSM2 keeps its token in files on one host, and the instances on that host may share it:
@@ -493,7 +494,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
       Server cannot tell which host a token's files are on, so keeping a SoftHSM2 token's
       instances on its host is the operator's. The Server does not copy keys between tokens.
     - The audit key's label, which every instance on one database names alike, is decided by
-      [ADR-0028](0028-the-audit-record.md) clause 16.
+      [ADR-0028 §16](0028-the-audit-record.md).
 
 **Out of scope:** per-Agent identity beyond the host; an opt-in strict mode binding certificate
 subject to `instance_uid` where Gateway Mode and re-keying are off; proxying a CSR to an external CA
@@ -561,8 +562,8 @@ Client.
   invitation; a window that closes by itself bounds both the queue and an operator's attention.
 - **An enrolment queue whose requests outlive their window** — a request would stay pending after
   the window it was made in closed. The queue is persisted with the window's end
-  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-  clause 8), and a closing window expires every request in it.
+  ([ADR-0023 §8](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+  and a closing window expires every request in it.
 - **A download listener of its own instead of a certificate on the download** — a third listener
   serving artifacts to anyone who reaches it, where the Agent plane's handshake already proves the
   peer.
@@ -644,7 +645,7 @@ Client.
   Server.** A host that only a Gateway reaches could then join only with a client certificate an
   operator provisions, while G-15 asks that it enrol through the Gateway. A Gateway that holds the
   bootstrap CA's certificate admits an enrolling peer and relays its one CSR, and the Server decides
-  that enrolment as any other ([ADR-0016](0016-client-modes-and-the-gateway.md), clause 24; clauses
+  that enrolment as any other ([ADR-0016 §24](0016-client-modes-and-the-gateway.md); clauses
   11 and 20).
 - **A revocation that reaches the sessions of one Server's process alone, and a revocation list
   whose `ETag` is that Server's own.** It holds while one Server holds every session. Where several
@@ -664,8 +665,8 @@ Client.
   Rejected; it stays an option.
 - **PKCS#11 required with the PostgreSQL store.** One Server on PostgreSQL keeps its key on one
   host as a Server on files does; the database does not make a key file more exposed. What needs
-  shared keys is several instances, and clause 2 of
-  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  shared keys is several instances, and
+  [ADR-0025 §2](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
   makes an instance with a CA key file the only one. Rejected.
 - **Encrypted key files with a passphrase from a file.** It protects a backup, but the passphrase
   sits on the same host as the file, and every instance holds both. Rejected.
@@ -860,7 +861,7 @@ Client.
 - Negative / trade-offs: every signature waits for the token; a slow or unreachable HSM delays or
   refuses renewals and enrolments, and the Server reports it as it reports any signing error.
 - Negative / trade-offs: a compromised Server can still have the token sign while it runs; the
-  audit entries of clause 38 and the export of [ADR-0028](0028-the-audit-record.md) clause 15 are
+  audit entries of clause 38 and the export of [ADR-0028 §15](0028-the-audit-record.md) are
   what show it afterwards.
 - Follow-ups: enrolment by a per-host token; a strict per-Agent identity mode; an external-CA
   backend; running the `instance_uid` claim check against opamp-go in the interoperability suite.
@@ -1040,7 +1041,7 @@ against SoftHSM2 where a token is needed:
   the token, none of them extractable, signs both CA certificates through the token, writes no key
   file, and refuses a label the token already holds; `pki init --ca-keys-on-token` writes neither
   the client CA nor the bootstrap CA (the commands,
-  [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 7, 8 and 16).
+  [ADR-0036 §7, §8 and §16](0036-the-operator-program-opamp-fleetctl.md)).
 - `client_ca_file` with two CA certificates admits a member of either, a renewal proof whose
   certificate the old CA signed is accepted, and the renewal is signed by the token's key
   (clause 40).

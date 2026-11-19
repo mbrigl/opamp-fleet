@@ -32,14 +32,14 @@ pub struct RunSpec {
     /// and the whole of the condition for writing the log file: it says no terminal is watching.
     pub service: bool,
     /// The second service every Managed Process is started through, where a process account is
-    /// registered (ADR-0022 clause 18): from the hidden `--agents-socket` and `--process-uid` — on
+    /// registered (ADR-0022 §18): from the hidden `--agents-socket` and `--process-uid` — on
     /// Windows `--process-sid` — that `service install --process-account` writes into the command
     /// line.
     pub agents: Option<AgentsChannel>,
 }
 
 /// Where the second service listens — its socket, or its named pipe on Windows — and the account
-/// it must answer as: its uid, or its SID (ADR-0022 clause 19).
+/// it must answer as: its uid, or its SID (ADR-0022 §19).
 #[derive(Debug, Clone)]
 pub struct AgentsChannel {
     pub socket: PathBuf,
@@ -315,7 +315,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         Err(error) => return unreadable_config(&spec, error),
     };
     // What the Client shares with the Managed Processes belongs to the process account's group
-    // (ADR-0022 clause 21), from before anything is written.
+    // (ADR-0022 §21), from before anything is written.
     if let Some(agents) = &spec.agents {
         config.process_account_group = Some(process_account_group(&agents.process)?);
     }
@@ -333,7 +333,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     // file* — a log whose opening line is already about work in progress starts one step too late.
     announce(&config, &spec.config_path);
     // Once per start, not per reconnect: a leftover [auth] is ignored and nothing from it is sent
-    // (ADR-0026 clause 3).
+    // (ADR-0026 §3).
     if let Some(notice) = config.leftover_auth_notice() {
         tracing::warn!(config = %spec.config_path.display(), "{notice}");
     }
@@ -351,7 +351,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
     };
 
     // A Client the self-update left behind ends as for its own update, through the shutdown that
-    // stops its Supervisors and says goodbye (ADR-0022 clause 17).
+    // stops its Supervisors and says goodbye (ADR-0022 §17).
     let left_behind = Arc::new(AtomicBool::new(false));
     let spawner = match &spec.agents {
         Some(agents) => {
@@ -362,7 +362,7 @@ pub async fn run_until_shutdown(spec: RunSpec, mut shutdown: Shutdown) -> Result
         None => supervisor::process::Spawner::Local,
     };
     let mut engine = supervisor::build_engine(&config, &shutdown, spawner)?;
-    // The floor of each Agent type (ADR-0034 clause 17): read from `state_dir` once, fetched from
+    // The floor of each Agent type (ADR-0034 §17): read from `state_dir` once, fetched from
     // the endpoint as it falls due, and held to by every Agent of this Client.
     let floors = Arc::new(crate::floors::FloorFile::open(
         &config.state_dir,
@@ -563,7 +563,7 @@ fn heal_torn_pointer() {
 }
 
 /// The primary group of the process account `uid` names, from the password database: the group
-/// the Client shares what the Managed Processes read with (ADR-0022 clause 21). The registration
+/// the Client shares what the Managed Processes read with (ADR-0022 §21). The registration
 /// names the account by its uid alone.
 ///
 /// # Errors
@@ -587,7 +587,7 @@ fn process_account_group(
 }
 
 /// On Windows the process account itself, by the SID the registration names: what the Client
-/// shares with the Managed Processes is granted to it (ADR-0022 clause 21).
+/// shares with the Managed Processes is granted to it (ADR-0022 §21).
 ///
 /// # Errors
 /// Never; the SID was read when the command line was.
@@ -603,7 +603,7 @@ fn process_account_group(
 /// What resolves once the second service tells this Client that a self-update left it behind.
 type LeftBehind = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Every Managed Process of this run is started by the second service (ADR-0022 clause 18). The
+/// Every Managed Process of this run is started by the second service (ADR-0022 §18). The
 /// channel connects at the first start; a Client that cannot reach the service reports it per
 /// Supervisor and never starts a program itself. Beside the spawner: what resolves once the
 /// service turns out to be the build `current` names while this Client is not.
@@ -620,7 +620,7 @@ fn through_the_second_service(
     #[allow(clippy::clone_on_copy)]
     let process = agents.process.clone();
     // Each connection is also checked against the process the service manager runs as the second
-    // service (ADR-0022 clause 19).
+    // service (ADR-0022 §19).
     watched(Channel::new(
         &agents.socket,
         process,
@@ -642,7 +642,7 @@ fn watched(
 
 /// The run's shutdown where the second service starts its programs: `shutdown`, or `told`
 /// resolving — the self-update left this Client behind, and `left_behind` then says so, which
-/// ends the run for the restart that starts the version `current` names (ADR-0022 clause 17).
+/// ends the run for the restart that starts the version `current` names (ADR-0022 §17).
 fn or_left_behind(
     mut shutdown: Shutdown,
     told: LeftBehind,
@@ -714,7 +714,7 @@ mod tests {
 
     /// The shutdown signal's handlers are in place once `shutdown_signal` returns: a `SIGTERM`
     /// raised before its future is first polled is caught, and resolves it, instead of ending
-    /// the process by its default disposition (ADR-0021 clause 18).
+    /// the process by its default disposition (ADR-0021 §18).
     /// Verifies: ADR-0021
     #[cfg(unix)]
     #[tokio::test]
@@ -729,7 +729,7 @@ mod tests {
 
     /// A Client whose start meets a second service of another build, while `current` no longer
     /// names its own version, ends its run as for its own update; one the operator stops ends as
-    /// stopped (ADR-0022 clause 17). From the start through the Spawner the run hands its
+    /// stopped (ADR-0022 §17). From the start through the Spawner the run hands its
     /// Supervisors to the end of the run's shutdown; what the run returns on it is the one line
     /// after, reached only by a whole run against a Server.
     /// Verifies: ADR-0022

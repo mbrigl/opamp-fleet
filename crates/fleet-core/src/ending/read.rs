@@ -1,5 +1,5 @@
 //! A certificate's end read with `x509-parser` and `time`
-//! (ADR-0036 clause 6): what the Server's and the operator
+//! (ADR-0036 §6): what the Server's and the operator
 //! tool's `pki status` list, and what the running Server watches, read and put in words once.
 //! Each program reads the file and takes its first certificate through `opamp::tls`; this module
 //! reads the end of that certificate.

@@ -1,4 +1,4 @@
-//! Repeated admission failures from one peer address are throttled (ADR-0026 clause 19).
+//! Repeated admission failures from one peer address are throttled (ADR-0026 §19).
 //!
 //! Every `401` counts as a failure of the peer's IP address. A peer with `max_failures` failures
 //! within `window_secs` is in back-off for `backoff_secs`, and is answered before anything else is

@@ -1,5 +1,5 @@
 //! What a certificate signing request asks for, read with `x509-parser`: the adapter the proofs a
-//! CSR carries (ADR-0016 clauses 18, 20 and 21) are found through, on the Server and on a Gateway
+//! CSR carries (ADR-0016 §18, §20 and §21) are found through, on the Server and on a Gateway
 //! alike.
 //!
 //! A request arrives as PEM and is decoded once, strictly, by [`der`]: every proof, every claim and
@@ -80,7 +80,7 @@ pub fn requested_uri(csr_der: &[u8], prefix: &str) -> Result<Option<String>, Str
     }))
 }
 
-/// The two proofs a certificate signing request may carry: a renewal's (ADR-0016 clause 18) and
+/// The two proofs a certificate signing request may carry: a renewal's (ADR-0016 §18) and
 /// an enrolment's (clause 20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Proof {
@@ -104,7 +104,7 @@ impl Proof {
     }
 }
 
-/// What a request that carries both proofs is answered (ADR-0016 clause 21).
+/// What a request that carries both proofs is answered (ADR-0016 §21).
 pub const BOTH_PROOFS: &str =
     "the certificate signing request carries both a renewal proof and a bootstrap proof";
 
@@ -154,7 +154,7 @@ mod tests {
     }
 
     /// A proof is read by its kind, a request without it has none, and a request that carries
-    /// both proofs is refused whichever is asked for (ADR-0016 clause 21).
+    /// both proofs is refused whichever is asked for (ADR-0016 §21).
     /// Verifies: ADR-0016
     #[test]
     fn a_request_with_both_proofs_is_refused_whichever_is_read() {
@@ -199,7 +199,7 @@ mod tests {
 
     /// One block with whitespace around it is read; text before or after it or on a boundary's
     /// line, a second block, another label, a header, and content that is no request are refused — what makes every
-    /// reader of a request read the same one (ADR-0016 clauses 18 and 21).
+    /// reader of a request read the same one (ADR-0016 §18 and §21).
     /// Verifies: ADR-0026
     /// Verifies: ADR-0016
     #[test]

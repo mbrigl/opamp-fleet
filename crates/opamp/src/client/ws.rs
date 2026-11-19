@@ -180,7 +180,7 @@ pub async fn run_from<S: Session, X: StopSignal>(
                     "admission failed: the server refused this client (HTTP 401)"
                 );
             }
-            // Throttled (ADR-0012 clause 4): the Server asked
+            // Throttled (ADR-0012 §4): the Server asked
             // to be given this long, and is given at least that.
             Err(Connect::Refused(WsError::Http(response)))
                 if response.status() == StatusCode::SERVICE_UNAVAILABLE
@@ -228,7 +228,7 @@ pub async fn run_from<S: Session, X: StopSignal>(
 /// the endpoint's name is resolved within one silence bound, and its addresses are tried in turn
 /// by [`open_each`], so an endpoint that accepts and never answers is a failed attempt rather than
 /// a wait without end, and one dead address does not hide the next
-/// (ADR-0014 clause 3).
+/// (ADR-0014 §3).
 pub(crate) async fn open(settings: &Settings, local: Option<IpAddr>) -> Result<Socket, Connect> {
     let bound = Silence::of(settings.heartbeat).end_after;
     let (_, host, port) = target(&settings.endpoint, &settings.headers)?;
@@ -555,7 +555,7 @@ async fn serve<S: Session, X: StopSignal>(
                                 // The Server's close, its frame or the connection's end, before
                                 // the next connection reports: else the Server may still hold the
                                 // Agents carried here and take the next one for another peer
-                                // (ADR-0025 clause 8). A Server that does not answer within the
+                                // (ADR-0025 §8). A Server that does not answer within the
                                 // bound does not hold the Client back.
                                 let _ = tokio::time::timeout(CLOSE_ANSWER, async {
                                     while let Some(Ok(message)) = socket.next().await {
@@ -744,8 +744,7 @@ mod tests {
     }
 
     /// A connection opened from a named local address reaches the server from that address
-    /// (ADR-0025
-    /// clause 20).
+    /// (ADR-0025 §20).
     /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_connection_from_a_named_address_reaches_the_server_from_it() {
@@ -790,8 +789,7 @@ mod tests {
     }
 
     /// A lost connection logs the delay it drew, and the next connection comes no earlier
-    /// (ADR-0025
-    /// clause 20).
+    /// (ADR-0025 §20).
     /// Verifies: ADR-0025
     #[tokio::test]
     async fn a_lost_connection_logs_the_delay_it_drew_and_waits_it() {
@@ -1082,7 +1080,7 @@ mod tests {
     /// Consecutive `Unavailable`s grow along the backoff: a named wait of zero, as a Server that
     /// leaves `retry_after_nanoseconds` unset sends, is not a reconnect a second for ever. A named
     /// wait longer than the step is waited, not added to it. A connection whose reply was handled
-    /// before the next `Unavailable` starts the steps again (ADR-0012 clause 4).
+    /// before the next `Unavailable` starts the steps again (ADR-0012 §4).
     /// Verifies: ADR-0012
     #[tokio::test]
     async fn consecutive_unavailables_grow_along_the_backoff_until_a_reply_is_handled() {
@@ -1174,7 +1172,7 @@ mod tests {
 
     /// The bounds follow the heartbeat: a ping after half an interval of silence, the end after a
     /// whole one; without a heartbeat, the default interval of 30 seconds
-    /// (ADR-0014 clause 2).
+    /// (ADR-0014 §2).
     /// Verifies: ADR-0014
     #[test]
     fn the_bounds_follow_the_heartbeat_and_are_thirty_seconds_without_one() {
@@ -1240,7 +1238,7 @@ mod tests {
 
     /// A session busy with each reply for longer than an interval keeps a connection to a server
     /// that answers everything: its own delay is not the server's silence
-    /// (ADR-0014 clause 1).
+    /// (ADR-0014 §1).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn a_session_busy_for_longer_than_an_interval_keeps_a_live_connection() {
@@ -1296,7 +1294,7 @@ mod tests {
     /// The exact window: without a ping the next act is the ping, half an interval after the last
     /// sign of life; with one, the end comes a whole interval after the last sign of life, or the
     /// rest of the interval after the ping when the ping went out late
-    /// (ADR-0014 clause 1).
+    /// (ADR-0014 §1).
     /// Verifies: ADR-0014
     #[test]
     fn the_pong_is_given_the_rest_of_the_interval_from_its_ping() {
@@ -1350,7 +1348,7 @@ mod tests {
 
     /// A connection on which nothing arrives for one heartbeat interval is ended as a lost one,
     /// with a log line naming the bound, and no sooner than the bound
-    /// (ADR-0014 clauses 1,
+    /// (ADR-0014 §1,
     /// 4).
     /// Verifies: ADR-0014
     #[tokio::test]
@@ -1393,7 +1391,7 @@ mod tests {
 
     /// A server that answers pings and sends nothing else keeps the connection over many bounds:
     /// the pongs are signs of life
-    /// (ADR-0014 clauses 1,
+    /// (ADR-0014 §1,
     /// 2).
     /// Verifies: ADR-0014
     #[tokio::test]
@@ -1445,7 +1443,7 @@ mod tests {
 
     /// An upgrade that is never answered — a TCP connection accepted by a kernel whose process
     /// is frozen — fails once the bound has passed
-    /// (ADR-0014 clause 3).
+    /// (ADR-0014 §3).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_upgrade_that_is_never_answered_fails_within_the_bound() {
@@ -1475,8 +1473,7 @@ mod tests {
     /// A name whose first address accepts a TCP connection and never answers, as a frozen
     /// process's kernel does, still connects: that address gives way to the next once its own
     /// interval has passed, and the upgrade to the next carries the name, not the address
-    /// (ADR-0014
-    /// clause 3).
+    /// (ADR-0014 §3).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_address_not_reached_within_its_interval_gives_way_to_the_next() {
@@ -1582,7 +1579,7 @@ mod tests {
     /// An HTTP answer to the upgrade is the Server's verdict, not an address that was not
     /// reached: a refusal on the first address ends the attempt as it is, and the next address is
     /// not tried
-    /// (ADR-0014 clause 3).
+    /// (ADR-0014 §3).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_http_answer_on_the_first_address_ends_the_attempt() {
@@ -1599,7 +1596,7 @@ mod tests {
 
     /// An address that answers the upgrade with something that is not HTTP was reached all the
     /// same: its answer ends the attempt, and the next address is not tried
-    /// (ADR-0014 clause 3).
+    /// (ADR-0014 §3).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_answer_that_is_no_http_on_the_first_address_ends_the_attempt() {
@@ -1615,7 +1612,7 @@ mod tests {
 
     /// A first address that refuses the connection, as `::1` does to a Server listening on
     /// `127.0.0.1` only, gives way to the next at once
-    /// (ADR-0014 clause 3).
+    /// (ADR-0014 §3).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn a_first_address_that_refuses_gives_way_to_the_next() {
@@ -1652,7 +1649,7 @@ mod tests {
 
     /// A `wss` endpoint opened to an address carries the endpoint's name as the TLS server name,
     /// so the certificate is checked against the name, not the address
-    /// (ADR-0014 clause 3).
+    /// (ADR-0014 §3).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn the_tls_server_name_is_the_endpoints_name() {

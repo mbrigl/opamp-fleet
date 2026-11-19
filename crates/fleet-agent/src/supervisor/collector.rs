@@ -72,7 +72,7 @@ fn collector_spec(
         args,
         env: env.to_vec(),
         working_dir: None,
-        // One process, no worker of its own — signalling a group would gain nothing (ADR-0019 clause 53).
+        // One process, no worker of its own — signalling a group would gain nothing (ADR-0019 §53).
         own_process_group: false,
         // A Collector writes nothing outside what the install and the config
         // directory already provide.
@@ -166,7 +166,7 @@ impl Plugin for CollectorPlugin {
             // the generic behaviour (ADR-0019), which is also what the reference supervisor does.
             reload_signal: None,
             // The Client itself, or the second service where a process account is registered
-            // (ADR-0022 clause 18): the registry says which.
+            // (ADR-0022 §18): the registry says which.
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
             supervisor_dir: ctx.supervisor_dir.clone(),

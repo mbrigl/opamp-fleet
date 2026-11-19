@@ -63,7 +63,7 @@ service manager perform the restart.
 1. **The Client always presents a Client Agent.** It exists *alongside* the Supervisor Agents, not
    only when there are none, with its own `instance_uid`, health and `service.version` (the baked
    version, [ADR-0037](0037-the-products-version.md)) and the Agent type `supervisor`
-   ([ADR-0021](0021-the-installed-service-and-its-state.md) clause 4). A Client that supervises
+   ([ADR-0021 §4](0021-the-installed-service-and-its-state.md)). A Client that supervises
    something is visible in its own fleet, and nobody has to ask which Client version a host runs.
 
 2. **The consent is `[packages] self_update`, it stands by default, and the one package it admits
@@ -81,7 +81,7 @@ service manager perform the restart.
    constant the Client Agent reports as `service.name`. The name a Server offers this Client's
    package under is therefore the name the Client reports, and the same in every variant build,
    whatever its product name: one published Package serves them all
-   ([ADR-0021](0021-the-installed-service-and-its-state.md) clause 3).
+   ([ADR-0021 §3](0021-the-installed-service-and-its-state.md)).
 
    An absent key is consent, and so is an absent `[packages]`. While the consent stands and
    `verification_key` is set, the Client Agent declares `AcceptsPackages` and
@@ -223,7 +223,7 @@ Windows layout.
   legitimately carry this Client is its Agent type; any other names another program's package or
   none, so the freedom could only misconfigure the narrowing.
 - **The name from the product name.** Every variant build would need a Package of its own, where
-  one serves them all; [ADR-0021](0021-the-installed-service-and-its-state.md) clause 3 keeps the
+  one serves them all; [ADR-0021 §3](0021-the-installed-service-and-its-state.md) keeps the
   product name off the Agent type for that reason.
 - **The name from the running file's name.** Renaming or linking the binary would redirect the
   self-update to another package.

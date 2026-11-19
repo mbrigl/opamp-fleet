@@ -29,14 +29,14 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
-/// `server audit-verify <dir>` (ADR-0028 clause 3): walks the audit record's files in order and
+/// `server audit-verify <dir>` (ADR-0028 §3): walks the audit record's files in order and
 /// names the first entry whose `prev` does not match the entry before it. `server audit-verify
 /// --config <server.toml> [--archive <dir>]` walks every chain of the record in the database
 /// instead, lists the open ones, and checks the archive a move from files left
-/// (ADR-0028 clauses 8 and 9). Either form, given `--audit-key <PEM file>`, checks every chain
+/// (ADR-0028 §8 and §9). Either form, given `--audit-key <PEM file>`, checks every chain
 /// against the signed checkpoints too, from the saved checkpoint line in the file `--since` names
 /// where one is given, and prints the newest checkpoint's line after `checkpoint: `
-/// (ADR-0028 clause 13).
+/// (ADR-0028 §13).
 fn audit_verify(mut args: impl Iterator<Item = String>) -> ! {
     let (mut dir, mut config, mut archive, mut key, mut since) = (None, None, None, None, None);
     while let Some(arg) = args.next() {
@@ -172,7 +172,7 @@ fn audit_verify_files(
     std::process::exit(i32::from(failed));
 }
 
-/// The configuration every command that reads one reads (ADR-0024 clause 2): the file `--config`
+/// The configuration every command that reads one reads (ADR-0024 §2): the file `--config`
 /// or `FLEET_SERVER_CONFIG` names, or `server.toml` in the working directory when it exists, with
 /// the environment over it. The keys the environment set are logged by name. Stops the process on
 /// an error.
@@ -191,13 +191,13 @@ fn load_config(named: Option<PathBuf>) -> Layered {
         std::process::exit(1);
     });
     if let Some(notice) = layered.environment_notice() {
-        // ADR-0024 clause 7.
+        // ADR-0024 §7.
         info!("{notice}");
     }
     layered
 }
 
-/// `server pki status [--config <server.toml>]` (ADR-0036 clause 22): when each certificate the
+/// `server pki status [--config <server.toml>]` (ADR-0036 §22): when each certificate the
 /// Server host depends on ends. The commands that make certificates are the operator tool's
 /// (ADR-0036); the Server binary makes none.
 fn pki(mut args: impl Iterator<Item = String>) -> ! {
@@ -222,7 +222,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
         println!("{}", ending.line(now));
     }
     // The audit key's public half, for the operator to keep where the Server cannot rewrite it
-    // (ADR-0028 clause 12).
+    // (ADR-0028 §12).
     match pki::audit_key(&config) {
         Ok(None) => {}
         Ok(Some((label, pem, sha256))) => {
@@ -237,7 +237,7 @@ fn pki(mut args: impl Iterator<Item = String>) -> ! {
     std::process::exit(pki::exit_code(&endings, now));
 }
 
-/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0039 clause 26):
+/// `server migrate --config-dir <old> --packages-dir <old> --data-dir <new>` (ADR-0039 §26):
 /// moves the state an older Server kept under `config_dir` and `packages_dir` into a new, empty
 /// `data_dir`, copying, so the old directories stay as the backup. It is run while the Server is
 /// stopped — a Server still writing the old directories would be copied half-way — and that is the
@@ -290,7 +290,7 @@ fn migrate(mut args: impl Iterator<Item = String>) -> ! {
 }
 
 /// `server migrate-to-postgres --from <data_dir> [--data-dir <new>] [--config <server.toml>]`
-/// (ADR-0039 clause 27): copies the records of `data_dir` into
+/// (ADR-0039 §27): copies the records of `data_dir` into
 /// the database the configuration names, leaving the old directory as the backup and its audit
 /// record as the archive the first chain links to. With the filesystem blob store the blobs go into
 /// a new, empty `data_dir`; with S3 there is none, `--data-dir` is refused, and the blobs the
@@ -370,7 +370,7 @@ fn migrate_to_postgres(mut args: impl Iterator<Item = String>) -> ! {
 }
 
 /// `server blobs-to-s3 --data-dir <data_dir> [--config <server.toml>]`
-/// (ADR-0039 clause 19): uploads the artifacts of a Server
+/// (ADR-0039 §19): uploads the artifacts of a Server
 /// already on PostgreSQL with the filesystem blob store into the bucket the configuration names,
 /// once, while no instance runs. The configuration is the one the Server will start with: the
 /// database, the bucket, and no `data_dir`. Prints what it uploaded, and exits non-zero when an
@@ -422,7 +422,7 @@ fn blobs_to_s3(mut args: impl Iterator<Item = String>) -> ! {
 type Hasher = fn(&str) -> Result<String, String>;
 
 /// The hash `server hash-credential` makes for a scheme: Basic, for an operator's password in
-/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0026 clause 21).
+/// `[rest.auth]`, and nothing else — the Agent plane has no credential (ADR-0026 §21).
 fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     match scheme {
         Some("--basic") => Some(fleet_server::credentials::hash_basic),
@@ -430,7 +430,7 @@ fn hasher(scheme: Option<&str>) -> Option<Hasher> {
     }
 }
 
-/// `server hash-credential --basic` (ADR-0026 clause 21): reads the password from standard input —
+/// `server hash-credential --basic` (ADR-0026 §21): reads the password from standard input —
 /// without echo on a terminal — and prints the entry `server.toml` keeps instead of it.
 fn hash_credential(scheme: Option<String>) -> ! {
     let Some(hash) = hasher(scheme.as_deref()) else {
@@ -610,8 +610,7 @@ fn main() {
 
 async fn serve() {
     // The log goes to stderr, so that stdout carries only what a command prints as its result.
-    // On PostgreSQL each line names the instance id of the lease the instance holds (clause 1 of
-    // ADR-0025).
+    // On PostgreSQL each line names the instance id of the lease the instance holds (ADR-0025 §1).
     let logged = fleet_server::instance::LoggedId::default();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -629,8 +628,8 @@ async fn serve() {
     opamp::tls::install_ring_provider();
 
     // The clock a lease and a sweep measure on counts a suspend of the host
-    // (ADR-0025
-    // clause 3), handed to the package store and the lease.
+    // (ADR-0025 §3),
+    // handed to the package store and the lease.
     let elapsed = since_boot().unwrap_or_else(fleet_server::clock::Elapsed::monotonic);
 
     let Layered { config, origin, .. } = load_config(parse_args());
@@ -656,8 +655,7 @@ async fn serve() {
         }
     };
     // On PostgreSQL the instance id is made as soon as the store is known, so that every line
-    // from here on names it, and the first lease is taken under it (clause 1 of
-    // ADR-0025).
+    // from here on names it, and the first lease is taken under it (ADR-0025 §1).
     let instance_id = if config.database.postgres().is_some() {
         match fleet_server::postgres::lease::new_instance_id() {
             Ok(id) => {
@@ -675,7 +673,7 @@ async fn serve() {
     // Where the records live (ADR-0039): the data directory, its layout created owner-only and
     // checked before any store opens (ADR-0039), and with PostgreSQL the database, its lock taken
     // and its schema applied. Its startup sweep marks what it deletes under the lease the instance
-    // takes next, which another instance's sweep leaves (ADR-0039 clause 14).
+    // takes next, which another instance's sweep leaves (ADR-0039 §14).
     let records = match fleet_server::Records::open(&config, instance_id.clone()) {
         Ok(records) => records,
         Err(e) => {
@@ -688,7 +686,7 @@ async fn serve() {
     }
     let clock: Arc<dyn fleet_server::fleet::Clock> = Arc::new(fleet_server::clock::SystemClock);
     // ADR-0026: closed until an operator opens it; the window and its queue survive a restart
-    // (ADR-0039 clause 8).
+    // (ADR-0039 §8).
     let enrolment = match config.enrolment.as_ref().map(|section| {
         info!("hosts with a bootstrap certificate may enrol while an operator opens the window");
         fleet_server::enrolment::Enrolment::open_on(clock.clone(), records.enrolment()).map(
@@ -714,8 +712,7 @@ async fn serve() {
     }
     // The token the CA keys and the audit key may live on, opened before any key is read from it;
     // a module, token, PIN or key that is not there fails startup, naming it
-    // (ADR-0026
-    // clause 35).
+    // (ADR-0026 §35).
     let (token, audit_key) = match config
         .pkcs11
         .as_ref()
@@ -785,10 +782,10 @@ async fn serve() {
     };
     // What the Server serves, trusts and signs with until it restarts, read right after the files
     // above were: the warnings below judge these, not whatever the files hold later
-    // (ADR-0036 clause 21).
+    // (ADR-0036 §21).
     let watched = fleet_server::pki::loaded(&fleet_server::pki::depended_on(&config));
     if let Some(notice) = uploaded_artifacts_notice(client_ca.is_some()) {
-        // ADR-0029 clause 16.
+        // ADR-0029 §16.
         info!("{notice}");
     }
     let telemetry_offer = config
@@ -829,7 +826,7 @@ async fn serve() {
     // The package store before the lease, so that a bucket that fails startup leaves no lease
     // and no audit chain behind. Its startup cleanup needs no lease of this instance: it lists the
     // staging keys before it asks which leases are live
-    // (ADR-0039 clause 16).
+    // (ADR-0039 §16).
     let packages = config
         .packages
         .verification_key()
@@ -870,7 +867,7 @@ async fn serve() {
         }
     };
     // The audit record's export, where `[audit.export]` names a receiver: started before the
-    // lease, whose first entry it carries too (clause 15 of ADR-0028). Without the section
+    // lease, whose first entry it carries too (ADR-0028 §15). Without the section
     // the Server opens no such connection.
     let export = match config.audit.export.as_ref().map(|export| {
         fleet_server::audit_export::AuditExport::start(export, tokio::runtime::Handle::current())
@@ -883,14 +880,12 @@ async fn serve() {
         }
     };
     // With PostgreSQL, a lease before anything is decided and before either listener opens
-    // (clauses 1 to 3 of
-    // ADR-0025):
+    // (ADR-0025 §1–§3):
     // the audit chain is the lease's.
     let lease = match &records {
         fleet_server::Records::Postgres(database) => {
             // The audit files a Server on PostgreSQL kept before its record moved into the
-            // database stay as the archive, which the first chain names (clause 9 of
-            // ADR-0028).
+            // database stay as the archive, which the first chain names (ADR-0028 §9).
             // Only while the database holds no chain: a later start never reads them.
             // With S3 too there is no data directory, and no archive to offer.
             let archive = match config.data_dir().map(|data_dir| {
@@ -940,7 +935,7 @@ async fn serve() {
     };
     // On the bucket, this instance's uploads are staged under its lease, and whenever it takes over
     // a lapsed lease, the uploads that lease left go
-    // (ADR-0039 clause 16).
+    // (ADR-0039 §16).
     if let (Some(staging), Some(lease)) = (staging, &lease) {
         staging.stage_under(lease.held());
         lease.on_each_takeover(move || staging.run());
@@ -951,7 +946,7 @@ async fn serve() {
     let sink = export.as_ref().map(|export| export.sink());
     // With the audit key, the heads of every chain are signed about once a minute and at the
     // shutdown's close; without it the chains alone are the record, and the Server says so
-    // (ADR-0028 clauses 11 and 14).
+    // (ADR-0028 §11 and §14).
     if audit_key.is_none() {
         tracing::warn!(
             "the heads of the audit record are not signed: [audit] key_label names no audit key \
@@ -1018,13 +1013,13 @@ async fn serve() {
         export.report_every(audit.clone());
     }
     // The token's signatures are written to the record, and a software token says so at every
-    // start (clauses 38 and 39 of ADR-0026).
+    // start (ADR-0026 §38 and §39).
     if let Some(token) = &token {
         token.set_audit(audit.clone());
         token.warn_if_software(audit.as_ref());
     }
     // On PostgreSQL the record goes back `[audit] retain_days`: pruned at startup and once a day
-    // after (ADR-0039 clause 12).
+    // after (ADR-0039 §12).
     if let (fleet_server::Records::Postgres(database), Some(lease)) = (&records, &lease) {
         let (database, audit, held) = (database.clone(), audit_log.clone(), lease.held());
         fleet_server::postgres::audit_prune::prune_daily(
@@ -1038,7 +1033,7 @@ async fn serve() {
         enrolment.set_audit(audit.clone());
     }
     // Before a certificate the Server depends on ends, say so: at startup and once a day
-    // (ADR-0036 clause 21). Nothing stops; the hosts decide for themselves.
+    // (ADR-0036 §21). Nothing stops; the hosts decide for themselves.
     fleet_server::pki::warn_endings(
         &watched,
         Some(audit.as_ref()),
@@ -1060,7 +1055,7 @@ async fn serve() {
         }
     });
     if let Some(warning) = config.rate_limit_warning() {
-        // ADR-0012 clause 23.
+        // ADR-0012 §23.
         warn!("{warning}");
     }
     let agent_rate = Arc::new(fleet_server::agent_rate::AgentRate::new(
@@ -1094,7 +1089,7 @@ async fn serve() {
         }
     };
     // On files an approval writes its decision before its register entry: one a write between
-    // the two left decided without its entry waits again (ADR-0039 clause 9).
+    // the two left decided without its entry waits again (ADR-0039 §9).
     let read_certificate = |pem: &str| {
         let der = opamp::tls::certificates(pem.as_bytes())?;
         fleet_server::ca::facts(der.first().ok_or("no certificate in the PEM")?.as_ref())
@@ -1151,10 +1146,9 @@ async fn serve() {
     }
     let operators = fleet_server::operator_app(state.clone(), operator_auth);
 
-    // The revocations, and every other change, of the other instances followed (clauses 9 to 11
-    // of ADR-0025),
+    // The revocations, and every other change, of the other instances followed (ADR-0025 §9–§11),
     // and the presence of the Agents this instance carries written in batches under its lease
-    // (ADR-0029 clause 4).
+    // (ADR-0029 §4).
     let presence = match (&lease, &records) {
         (Some(lease), fleet_server::Records::Postgres(database)) => {
             state.serve_under(lease.held());
@@ -1171,8 +1165,7 @@ async fn serve() {
     };
     // A restart whose command was not sent and whose put-back failed is tried again until it
     // holds, on every store
-    // (ADR-0025
-    // clause 8).
+    // (ADR-0025 §8).
     fleet_server::instance::retry_restarts(state.clone());
     // The handlers are installed before either plane is bound and logged as served, so a stop
     // sent as soon as the log says so drains the planes rather than ending the process.
@@ -1205,8 +1198,7 @@ async fn serve() {
     }
     // A new lease that found a schema a newer Server migrated stops the instance as a failed
     // start does, naming both versions
-    // (ADR-0025
-    // clause 16).
+    // (ADR-0025 §16).
     if let fleet_server::Records::Postgres(database) = &records {
         if let Some(refusal) = database.outdated() {
             eprintln!("{refusal}");
@@ -1216,8 +1208,8 @@ async fn serve() {
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
     // And the presence of every Agent, its sessions ended by the drain, before the lease goes
-    // (ADR-0025
-    // clause 3): once the periodic batches stopped, so none commits after it.
+    // (ADR-0025 §3):
+    // once the periodic batches stopped, so none commits after it.
     if let Some(presence) = presence {
         presence.stop().await;
     }
@@ -1232,8 +1224,7 @@ async fn serve() {
     // What is still queued for the audit record is written before the process, and the writer
     // thread with it, ends (ADR-0028); on PostgreSQL the chain is closed then, and the lease
     // released only once it is, so that a chain left open is closed by the instance that takes
-    // over the lapsed lease (clause 7 of
-    // ADR-0028).
+    // over the lapsed lease (ADR-0028 §7).
     // The export's count of what it dropped is written once more before the record closes, and
     // what the record holds then is given its five seconds to reach the receiver.
     if let Some(export) = &export {
@@ -1267,8 +1258,7 @@ async fn serve() {
         );
     }
     // Nothing is recorded after the close: a decision taken since is refused, and counted here
-    // (ADR-0028
-    // clause 5).
+    // (ADR-0028 §5).
     let unrecorded = audit_log.unrecorded_count();
     if unrecorded > 0 {
         error!(unrecorded, "decisions went unrecorded at shutdown");
@@ -1346,7 +1336,7 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     }
 }
 
-/// What a Server that signs no CSRs says once at startup (ADR-0029 clause 16): its hosts hold the
+/// What a Server that signs no CSRs says once at startup (ADR-0029 §16): its hosts hold the
 /// certificates an operator provisioned, and only one that names its host is served an uploaded
 /// artifact.
 fn uploaded_artifacts_notice(signs_csrs: bool) -> Option<String> {

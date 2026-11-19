@@ -54,7 +54,7 @@ pub struct ProcessSpec {
     /// outside `program/` precisely because a package swap replaces that whole.
     pub ensure_dirs: Vec<PathBuf>,
     /// Start the process as the leader of its own process group, so the bounded stop can signal
-    /// the **group** rather than one pid (ADR-0019 clause 53). A daemon that runs a worker of its
+    /// the **group** rather than one pid (ADR-0019 §53). A daemon that runs a worker of its
     /// own, as an umbrella process does, otherwise leaves that worker orphaned and running when the
     /// stop escalates to a kill, holding the very state directory and port the Supervisor manages.
     /// Off by default: a process with no children of its own gains nothing from it.
@@ -63,7 +63,7 @@ pub struct ProcessSpec {
 
 /// One start of a Managed Process, resolved: the program made absolute, the environment with the
 /// Supervisor Endpoint's token last, the working directory decided. What a [`Spawner`] is handed,
-/// and what the channel to the second service carries (ADR-0022 clause 20).
+/// and what the channel to the second service carries (ADR-0022 §20).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Launch {
     pub program: PathBuf,
@@ -72,7 +72,7 @@ pub struct Launch {
     pub env: Vec<(String, String)>,
     /// The Supervisor Endpoint's token, set as [`ENDPOINT_TOKEN_ENV`] after every entry of
     /// [`Launch::env`], so none can replace it (ADR-0016). Held in a `Zeroizing` buffer; the
-    /// copies the spawn and the program keep are beyond this code's reach (ADR-0015 clause 4).
+    /// copies the spawn and the program keep are beyond this code's reach (ADR-0015 §4).
     #[serde(with = "zeroizing_token")]
     pub endpoint_token: Option<zeroize::Zeroizing<String>>,
     pub working_dir: Option<PathBuf>,
@@ -107,7 +107,7 @@ impl std::fmt::Debug for Launch {
 }
 
 /// The token of a [`Launch`] on the channel: written from its `Zeroizing` buffer, and read into
-/// one straight from the string the decoder made (ADR-0015 clause 3).
+/// one straight from the string the decoder made (ADR-0015 §3).
 mod zeroizing_token {
     use serde::{Deserialize, Deserializer, Serializer};
     use zeroize::Zeroizing;
@@ -138,7 +138,7 @@ pub enum Spawner {
     /// The Client starts the program as a child of its own.
     #[default]
     Local,
-    /// The second service starts it, on the Client's request (ADR-0022 clause 18).
+    /// The second service starts it, on the Client's request (ADR-0022 §18).
     Channel(crate::supervisor::channel::Channel),
 }
 
@@ -175,7 +175,7 @@ impl Spawner {
 
     /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
     /// directory — and the Client cannot remove itself, before the Client purges the rest
-    /// (ADR-0022 clause 20): through the second service, which runs as their account, all of them
+    /// (ADR-0022 §20): through the second service, which runs as their account, all of them
     /// within one wait. Nothing for the Client, which owns what its own programs wrote.
     ///
     /// # Errors
@@ -259,14 +259,14 @@ fn spawn_local(launch: &Launch) -> std::io::Result<Child> {
 }
 
 /// Whether `error` says that the second service was not reached, rather than that the program did
-/// not start or failed (ADR-0022 clause 17). Never so for a program the Client starts itself.
+/// not start or failed (ADR-0022 §17). Never so for a program the Client starts itself.
 #[must_use]
 pub fn is_unreachable(error: &std::io::Error) -> bool {
     crate::supervisor::channel::is_unreachable(error)
 }
 
 /// Whether `error` says that the second service was reached and refused, or was refused: another
-/// account serves its socket, it is another build, or it refused the Client (ADR-0022 clauses 19 and 20). [`is_unreachable`] holds for it too. Never so for a program the Client starts itself.
+/// account serves its socket, it is another build, or it refused the Client (ADR-0022 §19 and §20). [`is_unreachable`] holds for it too. Never so for a program the Client starts itself.
 #[must_use]
 pub fn is_refused(error: &std::io::Error) -> bool {
     crate::supervisor::channel::is_refused(error)
@@ -275,7 +275,7 @@ pub fn is_refused(error: &std::io::Error) -> bool {
 /// A start that found the second service unreachable, or a program that went with the service:
 /// no failed start of the program's, so the [`RestartPolicy`] does not count it and never holds
 /// for it. The start is tried again, with a backoff of its own, until the service is back
-/// (ADR-0022 clause 17).
+/// (ADR-0022 §17).
 struct Waiting {
     /// When the next start is due; `None` while nothing waits for the service.
     due: Option<tokio::time::Instant>,
@@ -331,7 +331,7 @@ impl Waiting {
 /// A configuration whose start did not reach the second service, or whose program went with the
 /// service during the apply grace: neither applied nor failed, so the Agent stays `APPLYING`, and
 /// the first start that reaches the service and survives the apply grace acknowledges it
-/// (ADR-0022 clause 17).
+/// (ADR-0022 §17).
 struct OwedConfig {
     hash: Vec<u8>,
     /// The span of its apply.
@@ -340,12 +340,12 @@ struct OwedConfig {
 
 /// A package that arrived while the second service could not be reached, or whose start did not
 /// reach it: staged and checked, never swapped in, so what ran before stays in place. It is
-/// swapped in, and gated, by the next start that may reach the service (ADR-0022 clause 17); until
+/// swapped in, and gated, by the next start that may reach the service (ADR-0022 §17); until
 /// then the Agent reports it `Installing`.
 struct Parked {
     staged: Staged,
     /// Whether the preflight has run on it. One that did not reach the second service is run by
-    /// the start that reaches it, before the swap (ADR-0022 clauses 17 and 18).
+    /// the start that reaches it, before the swap (ADR-0022 §17 and §18).
     checked: bool,
     version: String,
     hash: Vec<u8>,
@@ -363,9 +363,9 @@ struct Supervision {
     backoff: Backoff,
     waiting: Waiting,
     /// A configuration whose acknowledgement waits for a start that reaches the second service
-    /// (ADR-0022 clause 17).
+    /// (ADR-0022 §17).
     owed: Option<OwedConfig>,
-    /// A package that waits for the second service to be swapped in (ADR-0022 clause 17).
+    /// A package that waits for the second service to be swapped in (ADR-0022 §17).
     parked: Option<Parked>,
 }
 
@@ -474,7 +474,7 @@ impl InstallTarget {
     /// Returns an error when the directory cannot be created.
     ///
     /// Where a process account is registered, that directory is `program/`, read by the process
-    /// group and written by the Client alone (ADR-0022 clause 21).
+    /// group and written by the Client alone (ADR-0022 §21).
     pub fn prepare(
         &self,
         group: Option<crate::supervisor::ports::ProcessAccountGroup>,
@@ -513,14 +513,14 @@ impl InstallTarget {
 
     /// Unpacks the verified artifact **beside** what runs, without touching it.
     ///
-    /// Splitting this from [`commit`](Self::commit) is what buys the preflight of ADR-0019 clause 54: the
+    /// Splitting this from [`commit`](Self::commit) is what buys the preflight of ADR-0019 §54: the
     /// staged program can be proved to run *before* the running one is stopped, so a package that
     /// could never have worked costs no downtime at all.
     ///
     /// A tree is staged in a directory the process account's group reads, where a process account
     /// is registered, so the preflight it runs can reach it, and what is staged — every member of a
     /// tree, or the single program — is given to that group, without write for the group or others
-    /// (ADR-0022 clauses 21 and 23).
+    /// (ADR-0022 §21 and §23).
     fn stage(
         &self,
         artifact: &std::path::Path,
@@ -574,7 +574,7 @@ impl InstallTarget {
     }
 
     /// Puts back what ran before. Where nothing is there to put back, what is live stays, so a
-    /// failed rollback never empties `program/` (ADR-0033 clause 59).
+    /// failed rollback never empties `program/` (ADR-0033 §59).
     fn restore(&self) -> Result<(), String> {
         let (live, backup) = (self.live(), self.backup());
         if let Err(e) = std::fs::symlink_metadata(&backup) {
@@ -586,9 +586,9 @@ impl InstallTarget {
     }
 
     /// Takes a package that was swapped in back out to its staged name, and puts back what ran
-    /// before it (ADR-0022 clause 17). On an error what was live is live again: where the package
+    /// before it (ADR-0022 §17). On an error what was live is live again: where the package
     /// cannot be taken out it stays, and where what ran before cannot be put back the package is
-    /// put back, so `program/` is never left empty (ADR-0033 clause 59).
+    /// put back, so `program/` is never left empty (ADR-0033 §59).
     fn take_back(&self, staged: &Staged, has_backup: bool) -> Result<(), String> {
         let live = self.live();
         std::fs::rename(&live, &staged.temp)
@@ -617,7 +617,7 @@ impl InstallTarget {
     /// survives a Client restart the way the self-update outcome marker does (ADR-0020).
     ///
     /// The marker is the Client's alone, `0600`, though it stands in `program/`, which the process
-    /// account's group reads (ADR-0022 clause 21).
+    /// account's group reads (ADR-0022 §21).
     fn retain(&self, deadline_unix: u64) {
         let _ = crate::storage::write_private(
             &self.backup_marker(),
@@ -689,7 +689,7 @@ pub struct Staged {
 /// of the environment, in the working directory — so a tree carrying its own libraries, or a
 /// program that is handed paths into its own tree, is checked against **those** rather than
 /// against the ones the running version happens to leave behind
-/// (ADR-0019 clause 57).
+/// (ADR-0019 §57).
 pub struct Preflight {
     pub args: Vec<String>,
     /// Environment for the check.
@@ -715,7 +715,7 @@ pub struct VersionProbe {
     pub args: Vec<String>,
     /// Where the probe starts; `None` inherits. A kind whose program needs its tree root to run at
     /// all names it here as it does for the start, or the probe asks a program that is not the
-    /// one the Supervisor runs (ADR-0019 clause 57).
+    /// one the Supervisor runs (ADR-0019 §57).
     pub working_dir: Option<PathBuf>,
     /// How to read a version out of what the program printed. `None` is [`find_semver`], the strict
     /// Semantic Versioning read. A program whose version banner is not SemVer, such as
@@ -725,7 +725,7 @@ pub struct VersionProbe {
     /// Environment for the probe, empty by default. A kind whose start hands its program an
     /// environment it needs to run at all — a tree's own library path — hands the probe the same,
     /// or the probe asks a program that cannot start
-    /// (ADR-0019 clause 57).
+    /// (ADR-0019 §57).
     pub env: Vec<(String, String)>,
 }
 
@@ -741,7 +741,7 @@ pub struct Runner {
     /// Handed to the Managed Process as [`ENDPOINT_TOKEN_ENV`] (ADR-0016); wiped when it is
     /// dropped (ADR-0015). Empty where the kind declares that its program gets no token, because
     /// it never connects to the Supervisor Endpoint, and an empty one is not set
-    /// (ADR-0016 clause 28).
+    /// (ADR-0016 §28).
     pub endpoint_token: zeroize::Zeroizing<String>,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
@@ -757,7 +757,7 @@ pub struct Runner {
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
-    /// How to prove a staged package runs before it replaces what does (ADR-0019 clause 54). `None` proves
+    /// How to prove a staged package runs before it replaces what does (ADR-0019 §54). `None` proves
     /// nothing in advance: the swap is the first thing that finds out.
     pub preflight: Option<Preflight>,
     /// The signal that makes the running process re-read its configuration in place (ADR-0019);
@@ -768,7 +768,7 @@ pub struct Runner {
     pub spawner: Spawner,
     /// The process account's primary group, where a process account is registered: the
     /// directories the Managed Process writes into and the preflight's staging belong to it
-    /// (ADR-0022 clause 21).
+    /// (ADR-0022 §21).
     pub process_account_group: Option<crate::supervisor::ports::ProcessAccountGroup>,
     /// The Supervisor's own directory (ADR-0019): beneath it, no link is followed on the way to a
     /// directory the Managed Process writes into.
@@ -818,7 +818,7 @@ impl Runner {
             tokio::select! {
                 _ = sweep.tick() => self.sweep_backup(),
                 // The second service was not reached: try again, as long as no shutdown comes
-                // first (ADR-0022 clause 17). A package that waits for it is what is started then,
+                // first (ADR-0022 §17). A package that waits for it is what is started then,
                 // and a configuration owed its acknowledgement is decided by this start.
                 () = s.waiting.due(), if retry => {
                     if let Some(package) = s.parked.take() {
@@ -827,7 +827,7 @@ impl Runner {
                         }
                         continue;
                     }
-                    // What a restart command started acknowledges nothing (ADR-0019 clause 8).
+                    // What a restart command started acknowledges nothing (ADR-0019 §8).
                     stop(&mut s.child, self.stop_timeout, &self.name).await;
                     let started = tokio::select! {
                         started = self.spawn_if_due(&mut s.waiting) => started,
@@ -893,7 +893,7 @@ impl Runner {
                     Some(ProcessCommand::ApplyPackage { staged, version, hash, span }) => {
                         // A newer offer replaces the one that waits for the second service: what
                         // was staged for it goes, and nothing is reported for it — the Agent
-                        // reports the newer one (ADR-0022 clause 17).
+                        // reports the newer one (ADR-0022 §17).
                         if let Some(superseded) = s.parked.take() {
                             info!(supervisor = %self.name, version = %superseded.version, "a package that waited for the second service is replaced by a newer one");
                             self.discard(&superseded);
@@ -923,8 +923,7 @@ impl Runner {
                         let (staged, checked) = prepared;
                         let package = Parked { staged, checked, version, hash, span };
                         // The second service is away: staged and kept, never swapped in, so what
-                        // ran stays in place until a start can reach the service (ADR-0022
-                        // clause 17).
+                        // ran stays in place until a start can reach the service (ADR-0022 §17).
                         if s.waiting.armed() {
                             info!(supervisor = %self.name, version = %package.version, "package staged; it is swapped in once the second service is back");
                             s.parked = Some(package);
@@ -934,10 +933,10 @@ impl Runner {
                             break;
                         }
                     }
-                    // A respawn on the current files, and nothing more (ADR-0019 clause 8): it
+                    // A respawn on the current files, and nothing more (ADR-0019 §8): it
                     // acknowledges no configuration and swaps in no package that waits for the
                     // second service. Unless it found the service away, the retry for what waits
-                    // is due at once (ADR-0022 clause 17).
+                    // is due at once (ADR-0022 §17).
                     Some(ProcessCommand::Restart) => {
                         stop(&mut s.child, self.stop_timeout, &self.name).await;
                         s.policy.fresh_chance(); // an operator restart (ADR-0033)
@@ -965,7 +964,7 @@ impl Runner {
                 },
                 status = exited => {
                     // The program went with the second service, which the service manager brings
-                    // back: no exit of the program's, and nothing to hold (ADR-0022 clause 17).
+                    // back: no exit of the program's, and nothing to hold (ADR-0022 §17).
                     if status.as_ref().is_err_and(is_unreachable) {
                         warn!(supervisor = %self.name, "the second service went, and the program with it; starting it again once the service is back");
                         s.child = None;
@@ -1000,7 +999,7 @@ impl Runner {
         }
         stop(&mut s.child, self.stop_timeout, &self.name).await;
         // A package that waits was never swapped in: what runs is what the record names, and its
-        // staged files go with the Client (ADR-0022 clause 17). A restarted Client is offered it
+        // staged files go with the Client (ADR-0022 §17). A restarted Client is offered it
         // again.
         if let Some(package) = s.parked.take() {
             self.discard(&package);
@@ -1013,7 +1012,7 @@ impl Runner {
     ///
     /// Beside the staged package: whether the preflight ran. One that did not reach the second
     /// service proves nothing either way, and the package waits for the service unchecked
-    /// (ADR-0022 clause 17).
+    /// (ADR-0022 §17).
     #[instrument(name = "stage", skip_all, fields(supervisor = %self.name))]
     async fn stage_and_check(&self, artifact: &std::path::Path) -> Result<(Staged, bool), String> {
         let target = self
@@ -1038,7 +1037,7 @@ impl Runner {
         }
     }
 
-    /// Runs the plugin's preflight on `staged`, where it has one (ADR-0019 clause 54).
+    /// Runs the plugin's preflight on `staged`, where it has one (ADR-0019 §54).
     async fn check(&self, staged: &Staged) -> Preflighted {
         match &self.preflight {
             Some(preflight) => run_preflight(&self.spawner, &self.name, staged, preflight).await,
@@ -1056,7 +1055,7 @@ impl Runner {
     /// Swaps a staged package in, starts it and gates it (ADR-0033), and reports the outcome;
     /// a package that fails is rolled back to its predecessor, which is started again.
     ///
-    /// Swapped in only once the second service is reached (ADR-0022 clause 17): until then the
+    /// Swapped in only once the second service is reached (ADR-0022 §17): until then the
     /// package waits in `parked`, and what ran before stays in place, its retained predecessor
     /// with it, so no package is live before a start that can run it — and a Client that ends
     /// meanwhile, however it ends, leaves the program the record names. Where the service goes
@@ -1150,7 +1149,7 @@ impl Runner {
                         result: Err(error),
                     })
                     .await;
-                // The package's start failed, and counts as a failed start (ADR-0033 clause 60):
+                // The package's start failed, and counts as a failed start (ADR-0033 §60):
                 // what runs now — the predecessor, rolled back, or a first install kept in place
                 // — is started again once, unless the streak holds it, and stays supervised
                 // exactly as after a failed ApplyConfig. That start, not the package's, decides
@@ -1174,7 +1173,7 @@ impl Runner {
     }
 
     /// Runs the preflight on a package that waited for the second service without one, now that
-    /// the service is reached (ADR-0022 clause 18). A package it refuses is reported failed and
+    /// the service is reached (ADR-0022 §18). A package it refuses is reported failed and
     /// thrown away, and a configuration owed its acknowledgement is decided by a start on the
     /// current program instead, as an apply would decide it; one it cannot run for want of the
     /// service waits on.
@@ -1240,8 +1239,7 @@ impl Runner {
     /// `child` holds the running process; on failure the previous binary is restored (and the
     /// caller respawns it). The second service was reached just before; where it has gone by the
     /// start, or goes during the grace, the package is taken back out to its staged name and what
-    /// ran before is put back: it is [`Swapped::Parked`], neither installed nor failed (ADR-0022
-    /// clause 17).
+    /// ran before is put back: it is [`Swapped::Parked`], neither installed nor failed (ADR-0022 §17).
     ///
     /// Everything here moves *files*: the old binary is renamed aside rather than read into
     /// memory, and the artifact is moved or streamed rather than loaded. A program can weigh
@@ -1297,7 +1295,7 @@ impl Runner {
         };
         let outcome = match started {
             // Not started because the second service was not reached: the package rejected
-            // nothing, and waits for the service out of the way (ADR-0022 clause 17).
+            // nothing, and waits for the service out of the way (ADR-0022 §17).
             Err(e) if is_unreachable(&e) => {
                 waiting.arm();
                 GraceOutcome::Unreachable
@@ -1391,10 +1389,10 @@ impl Runner {
     /// not reached, or after a failed package — and, where a configuration is owed its
     /// acknowledgement, gates it and settles it (ADR-0019's health-gated acknowledgement): applying
     /// means running on the new files and surviving the apply grace. A start that did not reach
-    /// the service leaves it owed (ADR-0022 clause 17). Returns `true` when shutdown was requested
+    /// the service leaves it owed (ADR-0022 §17). Returns `true` when shutdown was requested
     /// meanwhile.
     ///
-    /// Only a program that ran and exited within the grace is started again (ADR-0033 clause 60):
+    /// Only a program that ran and exited within the grace is started again (ADR-0033 §60):
     /// a start that did not happen — the program is not there, or cannot be executed — has
     /// already said why in its health, and starting the same files again would only say so once
     /// more.
@@ -1429,7 +1427,7 @@ impl Runner {
             // just stop gracefully on the way out.
             GraceOutcome::ShuttingDown => return true,
             // Neither applied nor failed: the start that reaches the second service again decides
-            // it (ADR-0022 clause 17).
+            // it (ADR-0022 §17).
             GraceOutcome::Unreachable => {
                 s.waiting.arm();
                 s.owed = Some(config);
@@ -1477,7 +1475,7 @@ impl Runner {
     /// and resets the streak. Returns `true` when shutdown was requested mid-wait.
     ///
     /// A start that finds the second service unreachable is no failed start: it is left to
-    /// `waiting`, and the streak is not counted for it (ADR-0022 clause 17).
+    /// `waiting`, and the streak is not counted for it (ADR-0022 §17).
     async fn respawn_or_hold(&self, s: &mut Supervision, shutdown: &mut Shutdown) -> bool {
         let delay = match s.policy.failed() {
             AfterFailure::Retry => s.backoff.advance(),
@@ -1501,11 +1499,11 @@ impl Runner {
         }
     }
 
-    /// Holds the program down after `failures` failed starts in a row, and says so (ADR-0033
-    /// clause 60): it is not started again until a new configuration, package, or restart. A
+    /// Holds the program down after `failures` failed starts in a row, and says so (ADR-0033 §60):
+    /// it is not started again until a new configuration, package, or restart. A
     /// configuration owed its acknowledgement — held after the package that was to be its start
     /// failed — is no longer waited for: no start comes to decide it, so it is `FAILED`
-    /// (ADR-0022 clause 17).
+    /// (ADR-0022 §17).
     async fn hold(&self, failures: usize, s: &mut Supervision) {
         warn!(
             supervisor = %self.name, restarts = failures,
@@ -1541,7 +1539,7 @@ impl Runner {
                 tokio::select! {
                     status = proc.wait() => {
                         // The program went with the second service: it rejected nothing, and the
-                        // start that reaches the service again decides (ADR-0022 clause 17).
+                        // start that reaches the service again decides (ADR-0022 §17).
                         if status.as_ref().is_err_and(is_unreachable) {
                             warn!(supervisor = %self.name, "the second service went during the apply grace, and the program with it");
                             self.events
@@ -1714,7 +1712,7 @@ impl Runner {
         // made.
         for dir in &spec.ensure_dirs {
             // Written by the Managed Process, so shared with its group where a process account
-            // is registered (ADR-0022 clause 21), and reached through no link beneath the
+            // is registered (ADR-0022 §21), and reached through no link beneath the
             // Supervisor's directory.
             if let Err(e) = crate::storage::create_shared_dir(
                 data_root(&self.supervisor_dir, &spec.ensure_dirs, dir),
@@ -1824,7 +1822,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 /// A later self-report through the Supervisor Endpoint replaces the probed value.
 ///
 /// `spawner` runs it, as it starts the Managed Process: under the process account where one is
-/// registered (ADR-0022 clause 18), for the Supervisor named `supervisor`.
+/// registered (ADR-0022 §18), for the Supervisor named `supervisor`.
 pub async fn probe_version(
     spawner: Spawner,
     supervisor: String,
@@ -1907,7 +1905,7 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
         }
         warn!(supervisor = %name, "process ignored SIGTERM; killing it");
         // The group too, so a worker the child spawned does not survive the escalation and go on
-        // holding what the Supervisor manages (ADR-0019 clause 53). `Child::kill` below only reaps the one.
+        // holding what the Supervisor manages (ADR-0019 §53). `Child::kill` below only reaps the one.
         let _ = c.signal(libc::SIGKILL, true).await;
     }
     #[cfg(not(unix))]
@@ -1916,7 +1914,7 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
     info!(supervisor = %name, "process stopped");
 }
 
-/// Runs a plugin's preflight against a staged package (ADR-0019 clause 54).
+/// Runs a plugin's preflight against a staged package (ADR-0019 §54).
 ///
 /// Bounded like the version probe, because this is the same shape of question asked of a program
 /// nobody has run yet. The message on failure is the program's own — a linker error names the
@@ -1924,7 +1922,7 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
 /// alone destroys.
 ///
 /// Run by `spawner`, as the Managed Process is started: under the process account where one is
-/// registered (ADR-0022 clause 18). A preflight that does not reach the second service rejects
+/// registered (ADR-0022 §18). A preflight that does not reach the second service rejects
 /// nothing: [`Preflighted::Unreached`].
 #[instrument(name = "preflight", skip_all)]
 async fn run_preflight(
@@ -1987,7 +1985,7 @@ enum Preflighted {
     /// It does not run here, and why: the package is refused.
     Refused(String),
     /// The second service was not reached: nothing was proved either way, and the package waits
-    /// for the service, as one offered while it is away does (ADR-0022 clause 17).
+    /// for the service, as one offered while it is away does (ADR-0022 §17).
     Unreached(std::io::Error),
 }
 
@@ -2074,7 +2072,7 @@ enum GraceOutcome {
     ShuttingDown,
     /// The start did not reach the second service, or the program went with it during the grace:
     /// neither applied nor failed, and the start that reaches the service again decides
-    /// (ADR-0022 clause 17).
+    /// (ADR-0022 §17).
     Unreachable,
 }
 
@@ -2092,7 +2090,7 @@ enum GraceOutcome {
 ///
 /// The artifact may be the program or an archive holding it (ADR-0033). An archive is opened here,
 /// where the binary's name is known, and the member of that name — or at the place `member` names,
-/// where the kind knows it (ADR-0033 clause 55) — is what gets
+/// where the kind knows it (ADR-0033 §55) — is what gets
 /// installed — nothing
 /// upstream of this ever repacked the artifact, which is why the hash an Agent verified is the one
 /// its author published. Unpacking always writes; only the raw case can be a move.
@@ -2114,7 +2112,7 @@ fn stage_executable(
         install::make_executable(&temp)?;
     } else {
         // Where the kind knows the member's place in the archive, that place; otherwise the
-        // program's own file name (ADR-0033 clause 55).
+        // program's own file name (ADR-0033 §55).
         let member = match member {
             Some(member) => member.to_string(),
             None => path
@@ -2200,7 +2198,7 @@ fn stage_tree(
     // executed is not something to inherit from how someone built an archive.
     install::make_executable(&program)?;
     // Every member is read and run by the process account through its group, at the mode the
-    // archive gave it (ADR-0022 clauses 21 and 23).
+    // archive gave it (ADR-0022 §21 and §23).
     if let Err(e) = share_staged(&staging, group) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);
@@ -2328,7 +2326,7 @@ mod tests {
 
     /// On Windows what is staged is granted to the process account — `LocalService` standing in —
     /// itself: a program staged beside `program/` and renamed into it keeps that grant, where it
-    /// would inherit nothing on the way (ADR-0022 clause 21).
+    /// would inherit nothing on the way (ADR-0022 §21).
     /// Verifies: ADR-0022
     #[cfg(windows)]
     #[test]
@@ -2392,7 +2390,7 @@ mod tests {
 
     /// A retry made due at once by a start that reached the second service — a restart command's —
     /// is due without the service being away: a package offered before it runs is swapped in, not
-    /// parked for a service that is back (ADR-0022 clause 17).
+    /// parked for a service that is back (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[tokio::test(start_paused = true)]
     async fn a_retry_due_at_once_does_not_say_the_service_is_away() {
@@ -2417,7 +2415,7 @@ mod tests {
 
     /// A Supervisor held after a package that failed leaves no configuration waiting: one owed its
     /// acknowledgement — its start waited for the second service, and the package was to be its
-    /// start — is `FAILED`, not left `APPLYING` while nothing starts (ADR-0022 clause 17).
+    /// start — is `FAILED`, not left `APPLYING` while nothing starts (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[tokio::test]
@@ -2473,7 +2471,7 @@ mod tests {
     /// After a package that failed, only a predecessor that ran and exited within the grace is
     /// started again: one that does not start at all — its interpreter is missing — has said why
     /// in its health, and is not tried again, with no configuration owed just as with one
-    /// (ADR-0033 clause 60).
+    /// (ADR-0033 §60).
     /// Verifies: ADR-0033
     #[cfg(unix)]
     #[tokio::test]
@@ -2525,7 +2523,7 @@ mod tests {
 
     /// A shutdown requested while the preflight a package waited for runs ends the install at
     /// once, without waiting out the preflight's bound: the package stays parked, unchecked, and
-    /// what ran before stays in place (ADR-0022 clauses 17 and 18).
+    /// what ran before stays in place (ADR-0022 §17 and §18).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[tokio::test]
@@ -2893,7 +2891,7 @@ mod tests {
     /// The second service stopped — its service manager restarts it, an operator stops it, the
     /// host goes down — and stops the programs it started on the way: none of them exited on its
     /// own, so however often the service goes, no exit is counted and the Supervisor is never
-    /// held; it starts the program again once the service is back (ADR-0022 clause 17).
+    /// held; it starts the program again once the service is back (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[tokio::test]
@@ -2937,7 +2935,7 @@ mod tests {
 
     /// A start that finds the second service unreachable is no failed start: the Supervisor says
     /// so and tries again with backoff, past the streak after which a program that keeps failing
-    /// is held (ADR-0022 clause 17).
+    /// is held (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]
@@ -2971,7 +2969,7 @@ mod tests {
     }
 
     /// A program that went with the second service did not exit on its own: the Supervisor says
-    /// that the service went, counts no failure, and waits for the service (ADR-0022 clause 17).
+    /// that the service went, counts no failure, and waits for the service (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[tokio::test]
@@ -3030,7 +3028,7 @@ mod tests {
     }
 
     /// A socket another account serves is no outage: the Supervisor reports it as a refusal of its
-    /// own, so the Server tells a misconfigured host from a stopped service (ADR-0022 clause 19).
+    /// own, so the Server tells a misconfigured host from a stopped service (ADR-0022 §19).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[tokio::test]
@@ -3059,7 +3057,7 @@ mod tests {
     }
 
     /// A start that waits for the second service to come back is cut short by a shutdown: the
-    /// Supervisor does not wait out the reconnect before it stops (ADR-0022 clause 17).
+    /// Supervisor does not wait out the reconnect before it stops (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[tokio::test]
@@ -3196,7 +3194,7 @@ mod tests {
     /// A single file whose kind names its place is installed from that place, past a directory and
     /// another file of the program's name ahead of it; without the place the same archive holds
     /// the program twice and is refused, and nothing staged is left behind
-    /// (ADR-0033 clause 55).
+    /// (ADR-0033 §55).
     /// Verifies: ADR-0033
     #[test]
     fn a_member_target_installs_the_file_at_its_kinds_place() {
@@ -3280,7 +3278,7 @@ mod tests {
     }
 
     /// A package taken back out whose predecessor cannot be put back — here it is gone — is put
-    /// back itself, a file and a tree alike: `program/` is never left empty (ADR-0033 clause 59).
+    /// back itself, a file and a tree alike: `program/` is never left empty (ADR-0033 §59).
     /// Verifies: ADR-0033
     #[test]
     fn a_package_taken_back_whose_predecessor_cannot_be_put_back_stays_live() {
@@ -3353,7 +3351,7 @@ mod tests {
     }
 
     /// The retention marker is the Client's alone, `0600`, whatever the umask: it stands in
-    /// `program/`, which the process account's group reads (ADR-0022 clause 21).
+    /// `program/`, which the process account's group reads (ADR-0022 §21).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[test]
@@ -3410,7 +3408,7 @@ mod tests {
     /// the Client — the program it names is not even on this host — in the working directory and
     /// with the environment its kind names, and what the service relays of its output is what the
     /// version is read from
-    /// (ADR-0022 clause 18, ADR-0019 clause 57).
+    /// (ADR-0022 §18, ADR-0019 §57).
     /// Verifies: ADR-0022, ADR-0019
     #[cfg(unix)]
     #[tokio::test]
@@ -3461,7 +3459,7 @@ mod tests {
     /// With a process account registered, the preflight of a staged package is run by the second
     /// service, with `${staged}` resolved in its arguments, its environment and its working
     /// directory, and what the program said through the service is the reason it is refused
-    /// (ADR-0022 clause 18, ADR-0019 clause 57).
+    /// (ADR-0022 §18, ADR-0019 §57).
     /// Verifies: ADR-0022, ADR-0019
     #[cfg(unix)]
     #[tokio::test]
@@ -3524,7 +3522,7 @@ mod tests {
 
     /// What the Client asks the second service to start carries no environment of the Client's:
     /// the block's `env` and the Supervisor Endpoint's token, last, and nothing else — the program
-    /// takes the rest from the second service (ADR-0022 clause 22). A Runner holding no token sets
+    /// takes the rest from the second service (ADR-0022 §22). A Runner holding no token sets
     /// none.
     /// Verifies: ADR-0022, ADR-0016
     #[cfg(unix)]
@@ -3566,7 +3564,7 @@ mod tests {
         );
 
         // A Runner holding no token, as a kind whose program never connects to the Supervisor
-        // Endpoint builds it, sets none (ADR-0016 clause 28).
+        // Endpoint builds it, sets none (ADR-0016 §28).
         let (peer, mut asked) = answering(Stream::Stdout, "", 0).await;
         runner.endpoint_token = zeroize::Zeroizing::default();
         runner.spawner = Spawner::Channel(peer.channel.clone());
@@ -3579,7 +3577,7 @@ mod tests {
 
     /// Where a process account is registered, a tree is staged in a directory its group reads, so
     /// the preflight the second service runs reaches it, and a data directory the agent writes
-    /// into is made set-group-ID and group-writable (ADR-0022 clause 21). Without one, the staging
+    /// into is made set-group-ID and group-writable (ADR-0022 §21). Without one, the staging
     /// is made as it always was.
     /// Verifies: ADR-0022
     #[cfg(unix)]
@@ -3636,7 +3634,7 @@ mod tests {
     /// Where the walk to a data directory begins, beneath which no link is followed: the
     /// Supervisor's directory for one inside it, the outermost of the kind's directories that
     /// holds one outside it, and the directory itself where none does. A `..` does not lift a
-    /// directory out of the Supervisor's: the walk from there refuses it (ADR-0022 clause 21).
+    /// directory out of the Supervisor's: the walk from there refuses it (ADR-0022 §21).
     /// Verifies: ADR-0022
     #[test]
     fn a_data_directory_is_walked_to_from_the_outermost_root_that_holds_it() {
@@ -3681,7 +3679,7 @@ mod tests {
 
     /// Where a process account is registered, a data directory is reached through no link beneath
     /// the Supervisor's directory: a link where `data` should be, placed by an account that writes
-    /// there, fails the start, and nothing is made or shared where it points (ADR-0022 clause 21).
+    /// there, fails the start, and nothing is made or shared where it points (ADR-0022 §21).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[tokio::test]
@@ -3743,7 +3741,7 @@ mod tests {
     /// Where a process account is registered, every member of an unpacked package is given to its
     /// group at the mode the archive gave it, so a package whose members are `0750`, `0640` or
     /// `0700` runs under the process account as the archive meant it to: what the archive grants
-    /// the group, the process account has (ADR-0022 clauses 21 and 23). A single program is given
+    /// the group, the process account has (ADR-0022 §21 and §23). A single program is given
     /// to the group too.
     /// Verifies: ADR-0022
     #[cfg(unix)]
@@ -3819,7 +3817,7 @@ mod tests {
 
     /// A preflight that does not reach the second service refuses nothing, however long the wait
     /// for the service takes: that wait is no program failing to answer in time, and the package
-    /// waits for the service instead of being refused (ADR-0022 clauses 17 and 18).
+    /// waits for the service instead of being refused (ADR-0022 §17 and §18).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[tokio::test(start_paused = true)]

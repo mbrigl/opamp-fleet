@@ -54,9 +54,8 @@ use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPack
 /// Whether an instance on PostgreSQL must be alone on its database, and the key that makes it so:
 /// blobs kept as files, or a CA key in a file. A CA key named by its label on a token makes it
 /// alone no more
-/// (ADR-0025
-/// clause 2, ADR-0026
-/// clause 41).
+/// (ADR-0025 §2,
+/// ADR-0026 §41).
 #[must_use]
 pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {
     if config.blobs.s3().is_none() {
@@ -84,7 +83,7 @@ fn named(error: String) -> String {
     format!("data_dir: {error}")
 }
 
-/// Where the Server keeps its records (ADR-0039 clause 1): files under `data_dir`, or one
+/// Where the Server keeps its records (ADR-0039 §1): files under `data_dir`, or one
 /// PostgreSQL database. The composition root asks it for each port's adapter, so the rest of the
 /// Server names the ports alone.
 pub enum Records {
@@ -114,7 +113,7 @@ impl Records {
             (None, None) => Err("the filesystem record store needs data_dir".to_string()),
             (Some(database), data_dir) => {
                 // With S3 too the Server keeps nothing on its disk and has no data directory
-                // (ADR-0039 clause 1).
+                // (ADR-0039 §1).
                 if let Some(data_dir) = data_dir {
                     fs::open_data_dir_beside_database(data_dir).map_err(named)?;
                 }
@@ -203,7 +202,7 @@ impl Records {
         }
     }
 
-    /// The floor of each Agent type (ADR-0034 clause 15).
+    /// The floor of each Agent type (ADR-0034 §15).
     #[must_use]
     pub fn floors(&self) -> Box<dyn floors::FloorStore> {
         match self {
@@ -276,9 +275,9 @@ impl packages::PackageStore {
     }
 
     /// Opens the store in the data directory `data_dir` with the artifacts in the store `[blobs]`
-    /// chooses (ADR-0039 clause 14): the filesystem as [`open`](Self::open) does, or the bucket of
+    /// chooses (ADR-0039 §14): the filesystem as [`open`](Self::open) does, or the bucket of
     /// `[blobs.s3]`. On the bucket, a referenced artifact it lacks and `data_dir/blobs/` holds is
-    /// copied into it first (ADR-0039 clause 19).
+    /// copied into it first (ADR-0039 §19).
     ///
     /// # Errors
     /// Returns an error when the store cannot be opened, as [`open`](Self::open) does, when the
@@ -298,7 +297,7 @@ impl packages::PackageStore {
 
     /// [`open_with`](Self::open_with), the Package records in `records` (ADR-0039) and the bytes
     /// in the store `[blobs]` chooses, the filesystem's under `data_dir`, which is `None` only
-    /// with PostgreSQL and S3 (ADR-0039 clause 1).
+    /// with PostgreSQL and S3 (ADR-0039 §1).
     ///
     /// On the bucket the staging objects of every lease that is not live are deleted (clause 16),
     /// with PostgreSQL under the blob store's lock (clause 14) and by every sweep, and the cleanup
@@ -308,7 +307,7 @@ impl packages::PackageStore {
     /// that a bucket that fails leaves no lease behind, and it takes no upload until
     /// [`StagingCleanup::stage_under`](s3::StagingCleanup::stage_under) names that lease. A sweep
     /// measures the time between the renewal of a mark and its deletion on `elapsed`
-    /// (ADR-0039 clause 14).
+    /// (ADR-0039 §14).
     ///
     /// # Errors
     /// As [`open_with`](Self::open_with), and when the filesystem blob store has no `data_dir`.
@@ -425,7 +424,7 @@ impl bootstrap::BootstrapCertificates {
 
 /// The **Agent plane** (ADR-0012): the OpAMP endpoint, guarded by Admission (ADR-0026), and the
 /// package download route beside it — behind the same handshake, and reached only with a
-/// certificate of the fleet (ADR-0026 clause 18).
+/// certificate of the fleet (ADR-0026 §18).
 ///
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its

@@ -145,8 +145,8 @@ admits.
 
 **The `supervisor.` namespace is the Supervisor's own statement.** A Package is matched against
 the version of the Package a Supervisor installed
-([ADR-0032](0032-deployments-and-rollouts.md) clause 25), and the Client Agent is told apart by
-the kinds it reports ([ADR-0019](0019-supervisor-mode-and-its-kinds.md) clause 18). An operator
+([ADR-0032 §25](0032-deployments-and-rollouts.md)), and the Client Agent is told apart by
+the kinds it reports ([ADR-0019 §18](0019-supervisor-mode-and-its-kinds.md)). An operator
 who could state a key in that namespace could make every Agent of the host a Client Agent or
 choose the version a Package is held against.
 
@@ -196,7 +196,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
    `os.version`, `os.build_id`, `os.description`, `host.name`, `host.id`, `host.cpu.model.name`,
    `host.ip`, and `host.mac`. A Supervisor-backed Agent also reports `supervisor.package.version`,
    the version of the Package its Supervisor installed, when and from what record
-   [ADR-0032](0032-deployments-and-rollouts.md) clause 25 states.
+   [ADR-0032 §25](0032-deployments-and-rollouts.md) states.
    What the platform cannot answer is left out: a placeholder would be something false a Selector
    could match. Nothing is taken from the connection.
 
@@ -267,7 +267,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
     `supervisor.`, whether TOML spells it quoted, dotted, or as a sub-table under
     `[attributes.supervisor]`, fails at startup with a message naming the key. That namespace is
     the Supervisor's own statement: `supervisor.kind.*`
-    ([ADR-0019](0019-supervisor-mode-and-its-kinds.md) clause 18)
+    ([ADR-0019 §18](0019-supervisor-mode-and-its-kinds.md))
     and `supervisor.package.version` (clause 5). An operator who could state one could make every
     Agent of the host a Client Agent or choose the version a Package is held against.
 
@@ -525,7 +525,7 @@ description ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)).
 - **Stop handing the token to processes that speak no OpAMP.** It narrows who can reach the
   Endpoint, but a Collector's own children still inherit the token, and the type would still be the
   process's word. It is a separate decision about the Supervisor Endpoint, which
-  [ADR-0016](0016-client-modes-and-the-gateway.md) clause 28 takes for a kind whose program never
+  [ADR-0016 §28](0016-client-modes-and-the-gateway.md) takes for a kind whose program never
   connects to it.
 - **Fold every key a process reports except `service.instance.id` and `service.instance.name`.**
   A process on one host could draw another host's Configurations, an artifact for another

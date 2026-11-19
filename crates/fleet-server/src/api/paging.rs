@@ -1,6 +1,6 @@
 //! The parameters and the headers of the four lists that grow with the fleet
-//! (ADR-0030
-//! clauses 3, 4 and 6): `limit` and `cursor`, a `400` for a parameter a route does not name, and
+//! (ADR-0030 §3, §4 and §6):
+//! `limit` and `cursor`, a `400` for a parameter a route does not name, and
 //! the `Link` and `X-Total-Count` headers of the answer.
 
 use std::collections::BTreeMap;

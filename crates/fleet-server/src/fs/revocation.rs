@@ -37,7 +37,7 @@ struct HostFile {
 }
 
 /// The file name of a certificate: the first 16 hex characters of its issuer's name hash, and its
-/// serial (ADR-0034 clause 23).
+/// serial (ADR-0034 §23).
 pub(crate) fn cert_file_stem(id: &CertId) -> String {
     format!("{}-{}", &id.issuer[..16.min(id.issuer.len())], id.serial)
 }
@@ -88,8 +88,8 @@ impl FsLedgerStore {
     }
 
     /// The list as persisted, without the credential entries a list may still hold: the Agent
-    /// plane admits by client certificate alone, so there is no credential to revoke (ADR-0026
-    /// clause 29). They are dropped with one log line, and the list is written back without them.
+    /// plane admits by client certificate alone, so there is no credential to revoke (ADR-0026 §29).
+    /// They are dropped with one log line, and the list is written back without them.
     fn certificate_revocations(&self, bytes: &[u8]) -> Result<Vec<Revocation>, String> {
         let parse =
             |e: serde_json::Error| format!("cannot parse {}: {e}", self.revocations.display());
@@ -213,7 +213,7 @@ impl LedgerStore for FsLedgerStore {
 
     /// Answers from the Hosts as last written, which the next write of the Hosts carries the
     /// binding into: another Host speaking for `instance_uid` holds it, unless it is marked as a
-    /// Gateway. A Gateway's Host is bound none (ADR-0029 clause 16), but its file may list
+    /// Gateway. A Gateway's Host is bound none (ADR-0029 §16), but its file may list
     /// `instance_uid`s a release before this one kept there, and no migration rewrites the files.
     fn bind(&self, instance_uid: &str, host: &str) -> Result<Bound, String> {
         let written = self.written_hosts.lock().expect("hosts lock");

@@ -17,7 +17,7 @@ publish.workspace = true
 name = "supervisor"
 path = "src/main.rs"
 
-# ADR-0019 clause 2: each wrapped Supervisor kind is a feature named after its `type`, all of them
+# ADR-0019 §2: each wrapped Supervisor kind is a feature named after its `type`, all of them
 # in the published build. `collector` and `command` are the core's own and always compiled in.
 [features]
 default = []
@@ -42,7 +42,7 @@ serde_json.workspace = true
 toml.workspace = true
 # ADR-0019: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
 # the file — comments, ordering, formatting — exactly as written; the questionnaire's edit of an
-# existing file does the same (ADR-0021 clause 24).
+# existing file does the same (ADR-0021 §24).
 toml_edit.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
@@ -95,7 +95,7 @@ windows-service.workspace = true
 # Neither ships a systemd unit — deliberately. `cargo-deb`'s `systemd-units` integration would write
 # a second registration knowing nothing of ADR-0022's service name or ADR-0021's restart policy; the
 # maintainer scripts call `service install` instead, which is the one install path (ADR-0022).
-# The package carries the **product's** name (ADR-0021 clause 9), not the program's: a second
+# The package carries the **product's** name (ADR-0021 §9), not the program's: a second
 # instance is a second build, and two variants that shared a package name could not be installed
 # side by side. `cargo-deb`'s `[package.metadata.deb.variants.<name>]` is the seam a variant build
 # would use to override it without templating this manifest.
@@ -114,7 +114,7 @@ packages the Server offers.
 The package delivers the binary only. `supervisor service install`, which the post-install \
 runs, lays out the versioned install root and registers the systemd service."""
 # Derived from what the binary actually links, rather than a floor somebody typed — and `passwd`,
-# which ships the `useradd` the post-install creates the account with (ADR-0022 clause 3).
+# which ships the `useradd` the post-install creates the account with (ADR-0022 §3).
 depends = "$auto, passwd"
 # Always spelled `target/release/`, whatever the real target directory is: cargo-deb rewrites the
 # prefix itself for a cross build, and a hand-adjusted path defeats that.
@@ -123,7 +123,7 @@ depends = "$auto, passwd"
 # maintainer scripts lay through the layout's `current` pointer, so the CLI always answers for the
 # binary the service runs. The payload itself stays off PATH.
 #
-# A directory named after the product, holding a file named after the program (ADR-0021 clauses 3 and 13): two variant builds ship the same program under different products, so a bare
+# A directory named after the product, holding a file named after the program (ADR-0021 §3 and §13): two variant builds ship the same program under different products, so a bare
 # `usr/libexec/supervisor` would be one file two packages both claim to own.
 assets = [["target/release/supervisor", "usr/libexec/opamp-fleet/", "755"]]
 maintainer-scripts = "../../packaging/linux"
@@ -147,7 +147,7 @@ pre_uninstall_script = "../../packaging/linux/prerm"
 post_uninstall_script = "../../packaging/linux/postrm"
 post_trans_script = "../../packaging/linux/posttrans"
 
-# The post-install creates the account `opamp-fleet` with `useradd` (ADR-0022 clause 3). A file
+# The post-install creates the account `opamp-fleet` with `useradd` (ADR-0022 §3). A file
 # dependency, because the package that ships it is `shadow-utils` on Fedora and RHEL and `shadow`
 # on SUSE. cargo-generate-rpm writes a plain `Requires:`; it has no `Requires(post):` form.
 [package.metadata.generate-rpm.requires]

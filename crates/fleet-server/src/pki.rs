@@ -26,7 +26,7 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
     Ending::read(file, der.as_ref())
 }
 
-/// The certificates a running Server depends on (ADR-0036 clause 21): its own on each plane
+/// The certificates a running Server depends on (ADR-0036 §21): its own on each plane
 /// (ADR-0012), the client CA as both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each
 /// file once.
 #[must_use]
@@ -50,7 +50,7 @@ pub fn depended_on(config: &ServerConfig) -> Vec<PathBuf> {
     files
 }
 
-/// `server pki status` (ADR-0036 clause 22): every certificate the configuration depends on, with
+/// `server pki status` (ADR-0036 §22): every certificate the configuration depends on, with
 /// its end.
 ///
 /// # Errors
@@ -65,7 +65,7 @@ pub fn status(config: &ServerConfig) -> Result<Vec<Ending>, String> {
 /// The audit key `[audit] key_label` names on the `[pkcs11]` token, as `server pki status` prints
 /// it: its label, its public half as PEM, and the SHA-256 of that half the checkpoints carry in
 /// `key`
-/// (ADR-0028 clause 12). `None`
+/// (ADR-0028 §12). `None`
 /// without an audit key.
 ///
 /// # Errors
@@ -107,7 +107,7 @@ pub fn loaded(files: &[PathBuf]) -> Vec<Ending> {
         .collect()
 }
 
-/// The running Server's look at what it depends on (ADR-0036 clause 21): a certificate that is
+/// The running Server's look at what it depends on (ADR-0036 §21): a certificate that is
 /// ending is a warning and `pki.expiring`, one that has ended an error and `pki.expired`.
 /// Nothing stops: the hosts decide for themselves.
 ///
@@ -250,7 +250,7 @@ mod tests {
 
     /// The running Server judges the certificate it serves, read at startup, not whatever the
     /// file holds a day later: a file replaced without a restart neither silences the warning
-    /// for the certificate still served nor goes unsaid (ADR-0036 clause 21).
+    /// for the certificate still served nor goes unsaid (ADR-0036 §21).
     /// Verifies: ADR-0036
     #[test]
     fn a_file_replaced_without_a_restart_neither_silences_the_warning_nor_goes_unsaid() {
@@ -278,7 +278,7 @@ mod tests {
     }
 
     /// The Operator plane's own certificate is one the Server depends on, and a file both
-    /// sections name is watched once (ADR-0012 clause 13).
+    /// sections name is watched once (ADR-0012 §13).
     /// Verifies: ADR-0012
     #[test]
     fn the_operator_planes_certificate_is_watched_once() {

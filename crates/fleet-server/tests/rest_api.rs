@@ -154,7 +154,7 @@ async fn a_configuration_carries_an_optional_role() {
     assert_eq!(stored["role"], "some-agents-own-word");
 }
 
-/// A Configuration has no Selector (ADR-0032 clauses 2 and 23): a `PUT` naming one is `400` and says the
+/// A Configuration has no Selector (ADR-0032 §2 and §23): a `PUT` naming one is `400` and says the
 /// Deployment is where to aim, and the Configuration's own rollout route is gone (`404`).
 /// Verifies: ADR-0032
 #[tokio::test]
@@ -340,7 +340,7 @@ async fn a_configuration_waits_until_it_is_rolled_out() {
     assert_eq!(missing.status(), 404);
 }
 
-/// ADR-0032 clause 10: an Agent that appears after the rollout act waits — it surfaces as pending
+/// ADR-0032 §10: an Agent that appears after the rollout act waits — it surfaces as pending
 /// and receives nothing until an act of its own. The Deployment's act must be repeated (or the
 /// per-Agent one pressed) for latecomers.
 #[tokio::test]
@@ -399,7 +399,7 @@ async fn an_agent_that_appears_later_waits() {
     assert_eq!(view["assigned_configurations"][0], "fleet");
 }
 
-/// ADR-0032 clause 4 over the wire: of the Configurations a Deployment holds, one stating an
+/// ADR-0032 §4 over the wire: of the Configurations a Deployment holds, one stating an
 /// Agent type reaches only Agents reporting that `service.name`.
 /// Verifies: ADR-0032
 #[tokio::test]
@@ -444,7 +444,7 @@ async fn a_typed_configuration_reaches_only_agents_of_its_type() {
     );
 }
 
-/// Nothing an assignment pins can be deleted (ADR-0032 clause 12): a pinned Configuration and a
+/// Nothing an assignment pins can be deleted (ADR-0032 §12): a pinned Configuration and a
 /// pinned Deployment answer `409` saying how many Agents pin them. After a press without the
 /// Configuration it is deleted, and it leaves every Deployment that held it.
 /// Verifies: ADR-0032
@@ -525,7 +525,7 @@ async fn a_pinned_configuration_or_deployment_is_not_deleted() {
     assert_eq!(canary["configurations"], serde_json::json!([]));
 }
 
-/// The per-Agent act on an Agent no Deployment claims, or two claim, is `409` (ADR-0032 clause 9).
+/// The per-Agent act on an Agent no Deployment claims, or two claim, is `409` (ADR-0032 §9).
 /// Verifies: ADR-0032
 #[tokio::test]
 async fn the_per_agent_act_without_one_claiming_deployment_is_a_conflict() {
@@ -595,7 +595,7 @@ async fn invalid_configurations_are_rejected_loudly() {
     }
 }
 
-/// A Configuration is written for one Agent type (ADR-0032 clause 2): a `PUT` without
+/// A Configuration is written for one Agent type (ADR-0032 §2): a `PUT` without
 /// `service_name`, or with an empty one, is `400` naming the field, and nothing is stored.
 /// Verifies: ADR-0032
 #[tokio::test]
@@ -651,7 +651,7 @@ fn urlencoding(s: &str) -> String {
 }
 
 /// Every mutating act on the Operator plane is recorded before it runs and answers `503` when it
-/// cannot be (ADR-0028 clauses 1 and 5): every `POST`, `PUT`, `PATCH` and `DELETE` of the
+/// cannot be (ADR-0028 §1 and §5): every `POST`, `PUT`, `PATCH` and `DELETE` of the
 /// document names that answer as the Server gives it, plain text with a `Retry-After`, so a client
 /// generated from it knows it.
 /// Verifies: ADR-0028, ADR-0031
@@ -747,7 +747,7 @@ async fn the_openapi_document_describes_the_contract() {
     ] {
         assert!(paths.contains_key(route), "{route} is described");
     }
-    // A signature lives on the entry, and every artifact is uploaded (ADR-0033 clause 12): the
+    // A signature lives on the entry, and every artifact is uploaded (ADR-0033 §12): the
     // Deployment signature routes and the entry's source route are not in the contract.
     for gone in [
         "/api/v1/deployments/{name}/signatures/{agent_type}/{version}/{os}/{arch}",
@@ -902,7 +902,7 @@ async fn forgetting_an_agent_that_is_still_reporting_is_refused() {
     );
 }
 
-/// ADR-0029 clauses 10 and 11: forgetting drops the record and reaches no host, so a Client that is
+/// ADR-0029 §10 and §11: forgetting drops the record and reaches no host, so a Client that is
 /// still running simply comes back — and the Server, which now knows nothing about it, asks for
 /// full state exactly as it does for any Agent it has never seen.
 // Verifies: ADR-0029
@@ -1534,7 +1534,7 @@ async fn a_label_moves_an_agent_into_a_rollout_ring() {
         .is_empty());
 }
 
-/// The crux (ADR-0029 clause 20): reported attributes decide which artifact fits a machine, so a
+/// The crux (ADR-0029 §20): reported attributes decide which artifact fits a machine, so a
 /// label may not restate one. Refused where it is written, naming the key — not quietly ignored.
 // Verifies: ADR-0029
 #[tokio::test]
@@ -1679,7 +1679,7 @@ async fn the_view_carries_the_held_configuration_and_a_refusal_with_its_reason()
     );
 }
 
-/// Labels are part of the Agent's record (ADR-0029 clause 21): forgetting an Agent removes them
+/// Labels are part of the Agent's record (ADR-0029 §21): forgetting an Agent removes them
 /// with it, and an Agent that comes back starts unlabelled.
 /// Verifies: ADR-0029
 #[tokio::test]
@@ -2097,9 +2097,9 @@ async fn the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves() {
     }
 }
 
-/// The bundled UI is a client of the REST API and nothing more (ADR-0032 clause 24), so its
+/// The bundled UI is a client of the REST API and nothing more (ADR-0032 §24), so its
 /// Enrolments tab depends on the names the enrolment routes share with it: the routes it calls and
-/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0027 clause 10 lists
+/// the fields it shows and sends, the requested key's fingerprint above all — what ADR-0027 §10 lists
 /// so an operator can match a request to the Client's log. The page asks for them, and the OpenAPI
 /// document describes them; a rename on one side breaks here rather than in an empty column. What
 /// the page does with them is not tested in the repository: it is one embedded page with no

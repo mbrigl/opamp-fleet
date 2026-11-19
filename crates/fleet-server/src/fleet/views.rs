@@ -1,5 +1,5 @@
-//! The views of the fleet: the Agents each Host carries (ADR-0029 clause 24), the views of an
-//! Agent and of the whole fleet, the list of Agents a page at a time (ADR-0030 clauses 3 to 8), and
+//! The views of the fleet: the Agents each Host carries (ADR-0029 §24), the views of an
+//! Agent and of the whole fleet, the list of Agents a page at a time (ADR-0030 §3–§8), and
 //! the version a reader of the fleet table is shown (ADR-0037). Its entry points are methods of
 //! `AppState`.
 
@@ -19,7 +19,7 @@ use super::rollout::{waiting, Waiting};
 use super::{is_stale, AgentRecord, AppState};
 
 impl AppState {
-    /// The Agents each Host carries (ADR-0029 clause 24) — those whose record names it as the Host
+    /// The Agents each Host carries (ADR-0029 §24) — those whose record names it as the Host
     /// they last arrived over — and the name it is displayed by: the `host.name` its Client Agent
     /// reports, when it has exactly one on a direct connection. Shown only; it decides nothing.
     ///
@@ -46,7 +46,7 @@ impl AppState {
                     .unwrap_or_default()
                     .to_string()
             };
-            // The names as the list derives them (ADR-0018 clauses 1 and 2), so the two cannot
+            // The names as the list derives them (ADR-0018 §1 and §2), so the two cannot
             // differ.
             let (service_name, service_instance_name) = match &record.description {
                 Some(d) => crate::listing::names(
@@ -97,8 +97,7 @@ impl AppState {
 
     /// The REST view of the fleet (`GET /api/v1/agents`), read as [`read_fleet`](Self::read_fleet)
     /// reads it: on a shared store from the database, each Agent connected as its stored presence
-    /// says (ADR-0025
-    /// clause 13).
+    /// says (ADR-0025 §13).
     ///
     /// # Errors
     /// Returns an error when the shared store cannot be read.
@@ -126,15 +125,14 @@ impl AppState {
 
     /// Whether the Agents have a holder to filter by: on a shared store, where each presence
     /// names one
-    /// (ADR-0030
-    /// clause 6).
+    /// (ADR-0030 §6).
     pub fn keeps_holders(&self) -> bool {
         self.agent_store.is_shared()
     }
 
     /// One page of the list of Agents
-    /// (ADR-0030
-    /// clauses 3 to 6 and 8): on a store this Server alone writes, cut from what it holds; on a
+    /// (ADR-0030 §3–§6 and §8):
+    /// on a store this Server alone writes, cut from what it holds; on a
     /// shared store read through
     /// [`AgentStore::query_page`](crate::agent_store::AgentStore::query_page), each Agent placed
     /// under the Client Agent the store found for it and with the values of the Host it arrived
@@ -240,8 +238,8 @@ impl AppState {
 
     /// The distinct reported `key=value` pairs and `service_name` values of the fleet, each sorted,
     /// at most 1000 of each
-    /// (ADR-0030
-    /// clause 7): from memory on a store this Server alone writes, through the port on a shared one.
+    /// (ADR-0030 §7):
+    /// from memory on a store this Server alone writes, through the port on a shared one.
     ///
     /// # Errors
     /// Returns an error when the shared store cannot be read.
@@ -305,10 +303,10 @@ impl AppState {
         let package_conflict = Self::package_conflict(&claim);
         let claimed = claim.ok().flatten();
         // Which channel claims it *now* — the other half of the answer, so "no channel" and
-        // "a channel with nothing for me" are not the same empty row (ADR-0033 clause 27).
+        // "a channel with nothing for me" are not the same empty row (ADR-0033 §27).
         let claiming_deployment = claimed.map(|d| d.name.clone()).unwrap_or_default();
 
-        // What a press would release to it now (ADR-0032 clause 9). A conflict, or no
+        // What a press would release to it now (ADR-0032 §9). A conflict, or no
         // channel at all, proposes nothing — `package_conflict` says why.
         let proposed = self
             .packages()
@@ -352,8 +350,7 @@ pub(crate) fn display_version(reported: &str) -> String {
 }
 
 /// What the list of Agents is asked
-/// (ADR-0030
-/// clauses 3 to 6).
+/// (ADR-0030 §3–§6).
 #[derive(Clone, Debug, Default)]
 pub struct AgentQuery {
     pub filter: crate::listing::AgentFilter,
@@ -373,7 +370,7 @@ pub struct AgentListing {
     pub next: Option<crate::listing::Position>,
 }
 
-/// The Agents one Host carries, and the name it is shown by (ADR-0029 clause 24).
+/// The Agents one Host carries, and the name it is shown by (ADR-0029 §24).
 #[derive(Default)]
 pub struct HostAgents {
     /// The `host.name` its Client Agent reports; `None` for a Gateway, and while it has no single
@@ -382,7 +379,7 @@ pub struct HostAgents {
     pub agents: Vec<HostAgentView>,
 }
 
-/// One Agent under the Host it arrived over (ADR-0029 clause 24): enough to group it by its
+/// One Agent under the Host it arrived over (ADR-0029 §24): enough to group it by its
 /// Client Agent.
 pub struct HostAgentView {
     pub instance_uid: String,
@@ -440,21 +437,21 @@ pub struct AgentView {
     /// ones it holds that fit this Agent's type (ADR-0032), in name order. Never what it runs;
     /// that is [`assigned_configurations`](Self::assigned_configurations).
     pub matched_configurations: Vec<String>,
-    /// The Configurations rolled out to this Agent (ADR-0032 clause 6), in name order — what its
+    /// The Configurations rolled out to this Agent (ADR-0032 §6), in name order — what its
     /// offer is composed from.
     pub assigned_configurations: Vec<String>,
     /// The Deployment that claims this Agent **now** — whose Selector matches it — or empty when
     /// none does.
     ///
     /// This is not [`assigned_deployment`](Self::assigned_deployment), and the difference is what
-    /// tells four states apart that would otherwise look alike (ADR-0033 clause 27). Empty here
+    /// tells four states apart that would otherwise look alike (ADR-0033 §27). Empty here
     /// with no conflict means the host is in **no channel**: label it, or give it a `channel`
     /// attribute. Set here with nothing assigned and nothing pending means the channel holds
     /// nothing this Agent can take — no Package for its type, or none for its platform. The
     /// operator's next move differs in each case, which is why the Server says which one it is
     /// rather than showing an empty row three ways.
     pub deployment: String,
-    /// The Deployment this Agent's release went **through** (ADR-0032 clause 6), or empty when
+    /// The Deployment this Agent's release went **through** (ADR-0032 §6), or empty when
     /// nothing has been rolled out to it. Pinned as of that act, so it may name a channel that no
     /// longer claims this Agent.
     pub assigned_deployment: String,
@@ -464,7 +461,7 @@ pub struct AgentView {
     /// putting a newer Package in that channel, changes what is *proposed* and never what this Agent
     /// was already given.
     pub assigned_package: String,
-    /// The Configurations waiting for a rollout act toward this Agent (ADR-0032 clause 8):
+    /// The Configurations waiting for a rollout act toward this Agent (ADR-0032 §8):
     /// one its Deployment holds and it is not assigned (`change: "new"`), one whose
     /// saved revision differs from the assigned one (`change: "update"`), one assigned that the
     /// next press drops from a release that keeps something else (`change: "remove"`), or one
@@ -472,13 +469,13 @@ pub struct AgentView {
     /// assignment and it keeps running what it runs (`change: "kept"`). The Server never acts on
     /// this by itself.
     pub pending_configurations: Vec<PendingConfigurationView>,
-    /// The Package waiting for a rollout act toward this Agent (ADR-0032 clause 8) — at most one:
+    /// The Package waiting for a rollout act toward this Agent (ADR-0032 §8) — at most one:
     /// the candidate of the Deployment that claims it, when that is not what it is assigned, or
     /// the assigned one the next press drops (`change: "remove"`, or `"kept"` as for a
     /// Configuration).
     pub pending_packages: Vec<PendingPackageView>,
     /// The Deployment the next press releases through, when the assignment names another one or
-    /// none (ADR-0032 clause 9); empty otherwise. A release whose content is unchanged still moves
+    /// none (ADR-0032 §9); empty otherwise. A release whose content is unchanged still moves
     /// the assignment to the claiming Deployment.
     pub pending_deployment: String,
     /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
@@ -492,7 +489,7 @@ pub struct AgentView {
     /// The Agent's package installations (ADR-0033), in name order; empty until reported.
     pub packages: Vec<PackageStatusView>,
     /// Why this Agent is proposed nothing — more than one Deployment claims it, and an Agent
-    /// belongs to at most one (ADR-0033 clause 28). The message names every Deployment in the way.
+    /// belongs to at most one (ADR-0033 §28). The message names every Deployment in the way.
     /// Absent when at most one claims it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_conflict: Option<String>,
@@ -536,35 +533,35 @@ pub struct AgentView {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shadowed_labels: Vec<String>,
     /// Labels stored with a key in `fleet.` or `supervisor.`, which no label may speak in
-    /// (ADR-0029 clause 20): ignored by every Selector and by
+    /// (ADR-0029 §20): ignored by every Selector and by
     /// package matching, and inherited by no Agent. Listed rather than dropped in silence; the next
     /// label set put without them removes them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored_labels: Vec<String>,
-    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0029
-    /// clause 19); empty for the Client Agent itself, for an Agent whose Client the Server cannot
+    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0029 §19);
+    /// empty for the Client Agent itself, for an Agent whose Client the Server cannot
     /// tell, and for an ambiguous one.
     pub inherited_labels: BTreeMap<String, String>,
     /// The Instance UID of this Agent's Client Agent — its own, for the Client Agent — or empty
     /// when the Server cannot tell.
     pub client_agent: String,
     /// The group this Agent's Client is recognised in holds more than one Client Agent, so it
-    /// inherits nothing (ADR-0029 clause 19).
+    /// inherits nothing (ADR-0029 §19).
     pub ambiguous: bool,
-    /// The Host this Agent last arrived over (ADR-0029 clause 16), or empty. Behind a Gateway, the
+    /// The Host this Agent last arrived over (ADR-0029 §16), or empty. Behind a Gateway, the
     /// Gateway's.
     pub host: String,
     /// The instance id of the instance that holds it under a live lease
-    /// (ADR-0025
-    /// clause 13); empty without one, and always on the filesystem store.
+    /// (ADR-0025 §13);
+    /// empty without one, and always on the filesystem store.
     pub holder: String,
     /// The host name that instance's lease records; empty when `holder` is.
     pub holder_host: String,
-    /// The `fleet.host.*` values its effective description takes from that Host (ADR-0029
-    /// clause 18); empty behind a Gateway.
+    /// The `fleet.host.*` values its effective description takes from that Host (ADR-0029 §18);
+    /// empty behind a Gateway.
     pub host_attributes: BTreeMap<String, String>,
     /// Reported attributes in the Server's `fleet.` space, left out of what Selectors match
-    /// (ADR-0029 clause 20).
+    /// (ADR-0029 §20).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored_attributes: Vec<String>,
 }
@@ -587,11 +584,11 @@ pub struct DeploymentReach {
     /// Agents this Deployment claims — and no other does. Zero is the aim mistake worth hunting.
     pub claiming: usize,
     /// Of those, the Agents a press would actually move — what it would release differs from what
-    /// their assignment pins (ADR-0032 clause 9). Zero with a non-zero `claiming` means everyone is
+    /// their assignment pins (ADR-0032 §9). Zero with a non-zero `claiming` means everyone is
     /// up to date.
     pub targeted: usize,
     /// Agents this Deployment matches that **another one matches too**. They are offered nothing
-    /// new until an operator narrows a Selector (ADR-0033 clause 28).
+    /// new until an operator narrows a Selector (ADR-0033 §28).
     pub conflicting: usize,
 }
 
@@ -1510,7 +1507,7 @@ mod tests {
 
     /// The Hosts view shows an Agent's service name and instance name as its listed record does:
     /// the service name only from the identifying attributes, the instance name only from the
-    /// non-identifying ones (ADR-0018 clauses 1 and 2), so an Agent that reports either in the
+    /// non-identifying ones (ADR-0018 §1 and §2), so an Agent that reports either in the
     /// other set shows it in neither view.
     /// Verifies: ADR-0018, ADR-0029
     #[test]

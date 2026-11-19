@@ -18,12 +18,11 @@ use tokio::sync::mpsc;
 
 use crate::shutdown::Shutdown;
 
-/// The health status a Supervisor reports while the second service cannot be reached (ADR-0022
-/// clause 17).
+/// The health status a Supervisor reports while the second service cannot be reached (ADR-0022 §17).
 pub const UNREACHABLE: &str = "the second service cannot be reached";
 
 /// What a Supervisor reports while the second service is reached and refused: another account
-/// serves its socket, it is another build, or it refuses the Client (ADR-0022 clauses 19 and 20).
+/// serves its socket, it is another build, or it refuses the Client (ADR-0022 §19 and §20).
 /// Not an outage that ends by itself, so it is told apart from [`UNREACHABLE`].
 pub const REFUSED: &str =
     "the second service is refused: another account, another build, or it refuses this Client";
@@ -31,7 +30,7 @@ pub const REFUSED: &str =
 /// Why `health` says that the second service is not reached — [`UNREACHABLE`] or [`REFUSED`] —
 /// or `None` where it says nothing of the kind. While it says so, a configuration that is
 /// `APPLYING` and a package that is `Installing` wait for the service, and the Agent names it as the
-/// reason (ADR-0022 clause 17).
+/// reason (ADR-0022 §17).
 #[must_use]
 pub fn waiting_reason(health: &ComponentHealth) -> Option<&str> {
     let waits = !health.healthy && (health.status == UNREACHABLE || health.status == REFUSED);
@@ -45,7 +44,7 @@ pub enum ProcessCommand {
     /// to the adapter's [`config_dir`](SupervisorContext::config_dir). Apply it, which for a
     /// process means restarting on the new files, and answer with
     /// [`ProcessEvent::ConfigApplied`] — where the start does not reach the second service, once
-    /// a start does (ADR-0022 clause 17).
+    /// a start does (ADR-0022 §17).
     ApplyConfig {
         config: AgentRemoteConfig,
         /// The span of the apply this command is one half of (ADR-0018). The core opens it when the
@@ -61,7 +60,7 @@ pub enum ProcessCommand {
     /// hash the status refers to; `version` is what the Agent then reports it has. While the
     /// second service cannot be reached, the package is staged and kept, never swapped in, and
     /// the answer follows its swap once a start reaches the service; a newer package replaces it
-    /// unanswered (ADR-0022 clause 17).
+    /// unanswered (ADR-0022 §17).
     ApplyPackage {
         staged: PathBuf,
         version: String,
@@ -156,7 +155,7 @@ pub enum InstallTarget {
         /// Where the program lives.
         path: PathBuf,
         /// Where its archive holds it, where its kind knows the place
-        /// (ADR-0033 clause 55): the one member whose trailing
+        /// (ADR-0033 §55): the one member whose trailing
         /// path components are this, `/`-separated and without the archive's wrapping directory
         /// (`usr/bin/agent`), so a release that carries further files of the program's name
         /// installs the program and not one of those. `None` finds the member by the program's
@@ -172,7 +171,7 @@ pub enum InstallTarget {
         /// Where the program sits inside the tree, as written in the configuration.
         program_path: PathBuf,
         /// The absolute links the kind's tree keeps, the only links the install creates
-        /// (ADR-0033 clause 57).
+        /// (ADR-0033 §57).
         links: &'static [fleet_util::tree::KeptLink],
     },
 }
@@ -185,19 +184,19 @@ impl InstallTarget {
     }
 }
 
-/// The process account's primary group, where a process account is registered (ADR-0022 clause 21).
+/// The process account's primary group, where a process account is registered (ADR-0022 §21).
 /// What the Client shares with the Managed Processes belongs to this group, and nothing else does.
 ///
 /// Resolved from the `--process-uid` of the Client's command line when it starts, never from the
 /// configuration file: the registration that names the process account is the only place it is
-/// stated (ADR-0022 clause 6).
+/// stated (ADR-0022 §6).
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub u32);
 
 /// On Windows the process account itself, by its SID, from the `--process-sid` of the Client's
 /// command line: what the Client shares with the Managed Processes is granted to it by ACL, where
-/// Unix gives it to the account's group (ADR-0022 clause 21). Made once per run.
+/// Unix gives it to the account's group (ADR-0022 §21). Made once per run.
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessAccountGroup(pub &'static str);
@@ -212,13 +211,13 @@ pub struct InstalledPackage {
 }
 
 /// The highest package version this Client has installed for each Agent type — its **high-water
-/// mark** (ADR-0034 clause 8). Shared by every Supervisor of the Client and kept where no purge of
+/// mark** (ADR-0034 §8). Shared by every Supervisor of the Client and kept where no purge of
 /// a Supervisor's directory reaches it. The filesystem adapter is
 /// [`HighWaterFile`](crate::storage::HighWaterFile).
 pub trait HighWaterMarks: Send + Sync {
     /// The mark of `agent_type`: `Ok(None)` when this Client has installed nothing of the type,
     /// and `Err` with a reason naming the file when the marks cannot be read — which refuses every
-    /// Supervisor package (ADR-0034 clause 11).
+    /// Supervisor package (ADR-0034 §11).
     ///
     /// # Errors
     /// Returns the reason the marks cannot be read.
@@ -229,14 +228,14 @@ pub trait HighWaterMarks: Send + Sync {
     fn raise(&self, agent_type: &str, version: &str);
 }
 
-/// The floor of each Agent type this Client keeps (ADR-0034 clause 17): the highest version below
+/// The floor of each Agent type this Client keeps (ADR-0034 §17): the highest version below
 /// which the operator signed that nothing of the type is taken. Shared by every Agent of the
 /// Client and kept where no purge reaches it. The filesystem adapter, which also fetches them, is
 /// [`FloorFile`](crate::floors::FloorFile).
 pub trait PackageFloors: Send + Sync {
     /// The floor of `agent_type`: `Ok(None)` when none is kept, and `Err` with a reason naming the
     /// file when the floors cannot be read — which refuses every package offer, the Client's own
-    /// included (ADR-0034 clause 17).
+    /// included (ADR-0034 §17).
     ///
     /// # Errors
     /// Returns the reason the floors cannot be read.
@@ -358,7 +357,7 @@ pub struct SupervisorContext {
     /// configured. Client-wide, like the package verification key.
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// The process account's primary group, where a process account is registered: what the
-    /// Supervisor shares with its Managed Process belongs to it (ADR-0022 clause 21).
+    /// Supervisor shares with its Managed Process belongs to it (ADR-0022 §21).
     pub process_account_group: Option<ProcessAccountGroup>,
     /// The plugin-specific keys of the block, for the strict second-stage parse.
     pub settings: toml::Table,
@@ -413,13 +412,12 @@ pub struct KindDefaults {
     pub program_path: Option<&'static str>,
     /// Where a single-file package's archive holds the program, as trailing path components
     /// (`usr/bin/agent`), for an archive that carries more than one file of the program's name.
-    /// `None` finds the member by its file name alone (ADR-0033
-    /// clause 55).
+    /// `None` finds the member by its file name alone (ADR-0033 §55).
     pub member: Option<&'static str>,
     /// The absolute links a tree package of this kind keeps as links, each by its exact path in
     /// the tree and its exact target: the only links the tree's install creates, and the only
     /// links leading out that `opamp-fleetctl` packs
-    /// (ADR-0033 clause 57). Empty for nearly every kind.
+    /// (ADR-0033 §57). Empty for nearly every kind.
     pub tree_links: &'static [fleet_util::tree::KeptLink],
     /// The Agent *type* this kind presents (ADR-0018). `None` falls back to the program's file
     /// name, which is what the block already said.
@@ -472,8 +470,8 @@ impl KindDefaults {
 pub type Purged<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Result<(), String>>> + Send + 'a>>;
 
-/// The plugins a run starts its Supervisors with (ADR-0019 clause 2), as the composition root
-/// made them: every one starts its Managed Process the way the run does (ADR-0022 clause 18). The
+/// The plugins a run starts its Supervisors with (ADR-0019 §2), as the composition root
+/// made them: every one starts its Managed Process the way the run does (ADR-0022 §18). The
 /// Engine keeps it, so a Supervisor that a Supervisor-set apply starts later is started the same
 /// way as those started with the Client.
 pub trait PluginRegistry: Send + Sync {
@@ -482,12 +480,12 @@ pub trait PluginRegistry: Send + Sync {
 
     /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
     /// directory — that the Client cannot remove itself, before the purge deletes the rest
-    /// (ADR-0034 clause 13, ADR-0022 clause 20), all of them within one wait (ADR-0022 clause 17).
+    /// (ADR-0034 §13, ADR-0022 §20), all of them within one wait (ADR-0022 §17).
     /// Nothing where the Client starts its programs itself.
     ///
     /// # Errors
     /// Each answer, in the order of `removed`, is why something is left: the purge then leaves an
-    /// orphan, with a warning (ADR-0019 clause 34).
+    /// orphan, with a warning (ADR-0019 §34).
     fn purge<'a>(&'a self, removed: &'a [(String, std::path::PathBuf)]) -> Purged<'a> {
         Box::pin(std::future::ready(removed.iter().map(|_| Ok(())).collect()))
     }
@@ -527,7 +525,7 @@ pub trait Plugin {
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String>;
 
     /// What a Server-delivered block of this kind may not say beyond the generic rule on `env` and
-    /// `args` (ADR-0019 clause 36): a kind whose settings name files the Supervisor reads confines
+    /// `args` (ADR-0019 §36): a kind whose settings name files the Supervisor reads confines
     /// them here. `running` is the settings of the running block of the same name, if any. By
     /// default a kind names no such file.
     ///

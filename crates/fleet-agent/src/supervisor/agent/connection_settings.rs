@@ -41,7 +41,7 @@ impl AgentState {
     }
 }
 
-/// Whether an offer carries anything this Client can put in force (ADR-0013 clause 4): OpAMP
+/// Whether an offer carries anything this Client can put in force (ADR-0013 §4): OpAMP
 /// settings, or a destination for one of the three own-telemetry signals.
 ///
 /// `other_connections` deliberately does not count. `AcceptsOtherConnectionSettings` is undeclared,

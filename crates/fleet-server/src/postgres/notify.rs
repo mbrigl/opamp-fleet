@@ -1,6 +1,6 @@
 //! The notifications the instances on one database share
-//! (ADR-0025
-//! clause 9): one channel per schema, a `NOTIFY` that names a kind of change, the identifier it
+//! (ADR-0025 §9):
+//! one channel per schema, a `NOTIFY` that names a kind of change, the identifier it
 //! concerns and the instance that sent it, and nothing else, sent in the transaction that commits
 //! the change, and a connection of each instance's own that listens. A channel is the database's,
 //! not the schema's, so its name carries the schema: two fleets in two schemas of one database
@@ -19,7 +19,7 @@
 //! ([`will_follow`], [`follow_commit`]): PostgreSQL
 //! commits one transaction that sent a `NOTIFY` at a time, database-wide, across its flush, so
 //! announcing each new Agent's binding in its commit would let a connecting fleet in no faster than
-//! one flush apiece (ADR-0025 clause 9). Such a notice may be lost. Every lease
+//! one flush apiece (ADR-0025 §9). Such a notice may be lost. Every lease
 //! renewal reads the ledger again for one of a binding or a Host (clause 10); a Gateway's groups
 //! another instance placed before a lost arrival are placed again at the next event that places
 //! them.
@@ -47,8 +47,8 @@ const CHANNEL: &str = "'opamp_fleet:' || coalesce(current_schema(), '')";
 pub(crate) const ORIGIN_SETTING: &str = "opamp_fleet.origin";
 
 /// The name a kind of change travels under. A version that runs beside this one reads the same
-/// names (ADR-0025
-/// clause 16), so a name, once sent, does not change.
+/// names (ADR-0025 §16),
+/// so a name, once sent, does not change.
 fn kind(change: Changed) -> &'static str {
     match change {
         Changed::Revocation => "revocation",
@@ -121,8 +121,7 @@ pub enum Heard {
     Notified(Notice),
     /// Another instance committed a change of a kind this version does not know, as a newer
     /// version sends while two run side by side, or sent a payload that does not read: it counts
-    /// as a missed notification (ADR-0025
-    /// clause 10).
+    /// as a missed notification (ADR-0025 §10).
     Unknown,
     /// The listening connection was made, the first time or again after it ended: whatever was
     /// committed in between was not heard.
@@ -332,7 +331,7 @@ pub(crate) fn will_follow(change: Changed, id: &str) {
 /// Announces what [`will_follow`] counted in this call to every other instance, now that the call
 /// committed it: on `client`, the connection that committed it, in a transaction of its own that
 /// does not wait for its WAL flush, so it holds PostgreSQL's turn for announcing commits only for a
-/// moment (ADR-0025 clause 9). It is sent apart from the call, which answers
+/// moment (ADR-0025 §9). It is sent apart from the call, which answers
 /// at once: a sending that fails is logged and tried again on another connection of `pool`, and
 /// after the last try the other instances take the change up at their next lease renewal.
 pub(crate) fn follow_commit(client: deadpool_postgres::Object, pool: &deadpool_postgres::Pool) {

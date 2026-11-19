@@ -7,7 +7,7 @@
 //!
 //! The default state directory is [`STATE_DIR_NAME`] under the *data* root — the same directory
 //! as this layout's root everywhere except Linux system installs, where the layout executes from
-//! `/opt` while data stays in `/var/lib` (ADR-0021 clause 12).
+//! `/opt` while data stays in `/var/lib` (ADR-0021 §12).
 //!
 //! The directory name is Elastic Agent's `<component>-<version>-<hash>` scheme: always the bare
 //! version base and the commit short-hash, never the pre-release — whether a directory holds a
@@ -37,8 +37,8 @@ pub const BINARY_FILENAME: &str = if cfg!(windows) {
 /// [`BINARY_FILENAME`] carries without its Windows extension. One definition, so the directory and
 /// the file it holds cannot drift.
 ///
-/// Not the product's, and not the service's. ADR-0022 clause 17 registers the service under
-/// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME), and ADR-0022 clause 6 keeps this constant off it
+/// Not the product's, and not the service's. ADR-0022 §17 registers the service under
+/// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME), and ADR-0022 §6 keeps this constant off it
 /// on purpose: the version directory and the archive member a self-update extracts are identical in
 /// every variant build, which is what lets one published package Set serve them all.
 pub const COMPONENT: &str = "supervisor";
@@ -46,8 +46,8 @@ pub const COMPONENT: &str = "supervisor";
 /// The manifest inside each version directory: the full version string and the content hash.
 const MANIFEST_FILENAME: &str = "manifest.toml";
 
-/// The state directory's name under its root (ADR-0021) — the *data* root, which ADR-0022
-/// clause 17 places beside the configuration rather than inside the executable layout on Linux
+/// The state directory's name under its root (ADR-0021) — the *data* root, which ADR-0022 §17
+/// places beside the configuration rather than inside the executable layout on Linux
 /// system installs.
 pub const STATE_DIR_NAME: &str = "state";
 
@@ -95,8 +95,8 @@ impl Layout {
     ///
     /// The root is held while the pointer changes ([`HeldDir::open_root`]): on Windows the
     /// service's account holds delete on it, so a root that is a reparse point is refused and the
-    /// root cannot be renamed away and replaced by a junction under the switch (ADR-0022 clauses
-    /// 11 and 13). The names in it are then removed, created and renamed as themselves: a link at
+    /// root cannot be renamed away and replaced by a junction under the switch (ADR-0022 §11 and §13).
+    /// The names in it are then removed, created and renamed as themselves: a link at
     /// `current` or at the temporary name is replaced, never followed.
     ///
     /// # Errors
@@ -274,7 +274,7 @@ fn plain(path: PathBuf) -> PathBuf {
 
 /// What a `service` verb knows of where an installed Client lives before it reads the
 /// configuration: its two roots, and the state directory an administrator named — by
-/// `--state-dir`, or by the registration an earlier install wrote (ADR-0021 clause 14).
+/// `--state-dir`, or by the registration an earlier install wrote (ADR-0021 §14).
 #[derive(Debug, Clone)]
 pub struct Roots {
     /// The absolute `--state-dir` this command was given.
@@ -290,10 +290,10 @@ pub struct Roots {
 /// Whether `dir` lies beneath one of `roots`, through real directories only: the test a directory
 /// taken from `supervisor.toml` passes before `service install` or `service config` acts on it.
 ///
-/// The file belongs to the service's account (ADR-0022 clause 1), and the install runs as root or
+/// The file belongs to the service's account (ADR-0022 §1), and the install runs as root or
 /// an Administrator, creates what it names, restricts it on Windows and hands it over to that
 /// account. A directory the file names is therefore that account's word, and it is taken only where
-/// the install's own roots already are (ADR-0021 clause 15): lexically beneath one of them, with no
+/// the install's own roots already are (ADR-0021 §15): lexically beneath one of them, with no
 /// `.` or `..` after the root, and with every component below the root that exists a directory and
 /// not a symbolic link or junction — a link the account planted there would carry what the install
 /// does out of the root. The roots are the operator's, named by flag or by platform default, and
@@ -325,7 +325,7 @@ pub fn beneath(dir: &Path, roots: &[&Path]) -> Result<(), String> {
 }
 
 /// Creates the state directory `dir` where it is missing, as `service install` does before it
-/// hands the directory over (ADR-0022 clause 12). Beneath one of `roots`, which belong to the
+/// hands the directory over (ADR-0022 §12). Beneath one of `roots`, which belong to the
 /// service's account, the root is created where it is missing, and every component below it is
 /// created and opened as itself, one held directory at a time, so a link the account put on the
 /// way is refused, and nothing is created where it points. A directory outside every root is the
@@ -343,7 +343,7 @@ pub fn create_state_dir(dir: &Path, roots: &[&Path]) -> Result<(), String> {
     else {
         return std::fs::create_dir_all(dir).map_err(refused);
     };
-    // The root's own name is the administrator's (ADR-0022 clause 13).
+    // The root's own name is the administrator's (ADR-0022 §13).
     std::fs::create_dir_all(root).map_err(refused)?;
     let mut held = HeldDir::open_root(root).map_err(refused)?;
     for component in rest.components() {
@@ -653,7 +653,7 @@ mod tests {
         assert!(!layout.heal_current(&b).expect("heal again"));
     }
 
-    /// What tells the second service that a self-update left it behind (ADR-0022 clause 17):
+    /// What tells the second service that a self-update left it behind (ADR-0022 §17):
     /// `current` names one version directory, and no other.
     /// Verifies: ADR-0022
     #[cfg(unix)]
@@ -673,7 +673,7 @@ mod tests {
 
     /// Only a `current` that resolves to another version is evidence of a switch: one that does
     /// not resolve — missing, or dangling — is none, so the second service does not end on it
-    /// (ADR-0022 clause 17).
+    /// (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[test]

@@ -8,7 +8,7 @@
 //! build, and enabling them is a dependency decision (ADR-0008) this module does not take.
 
 /// The SID of `LocalSystem`, which never runs the second service and is never the Client's account
-/// where a process account is registered (ADR-0022 clause 16).
+/// where a process account is registered (ADR-0022 §16).
 pub const LOCAL_SYSTEM: &str = "S-1-5-18";
 
 /// `NT AUTHORITY\LocalService`.
@@ -112,7 +112,7 @@ pub fn virtual_account_sid(service: &str) -> Option<Sid> {
 }
 
 /// The SID of an account named in one of the passwordless forms a service may run under
-/// (ADR-0022 clauses 1 and 16), where it can be known without asking the system: a
+/// (ADR-0022 §1 and §16), where it can be known without asking the system: a
 /// virtual account `NT SERVICE\<name>`, `LocalSystem`, and the two built-in service accounts. A
 /// group-managed service account (`name$`) is the domain's and is looked up instead; `None` for it
 /// and for every other name.
@@ -144,7 +144,7 @@ pub fn known_account_sid(account: &str) -> Option<Sid> {
 /// would let the Client's account serve the pipe itself (Named Pipe Security and Access Rights).
 pub const PIPE_CLIENT_ACCESS: u32 = 0x0012_0089 | 0x0000_0002;
 
-/// The security descriptor of the second service's named pipe, in SDDL (ADR-0022 clause 19): owned
+/// The security descriptor of the second service's named pipe, in SDDL (ADR-0022 §19): owned
 /// by the account the second service runs as, which the Client checks it for, and a protected DACL
 /// that grants the Client's account [`PIPE_CLIENT_ACCESS`] — nothing to create an instance — and
 /// the second service's own account all access, which it needs to create the pipe's next instance
@@ -516,7 +516,7 @@ mod system {
     }
 
     /// The owner of the named pipe `handle` names: the account of the server that created it
-    /// (ADR-0022 clause 19). The handle must carry `READ_CONTROL` (GetSecurityInfo), which a client
+    /// (ADR-0022 §19). The handle must carry `READ_CONTROL` (GetSecurityInfo), which a client
     /// that opened the pipe for reading holds.
     ///
     /// # Errors
@@ -976,7 +976,7 @@ mod system {
     }
 
     /// The process that serves the named pipe the client end `pipe` is connected to
-    /// (GetNamedPipeServerProcessId; ADR-0022 clause 19).
+    /// (GetNamedPipeServerProcessId; ADR-0022 §19).
     ///
     /// # Errors
     /// Returns why it could not be read.
@@ -1678,8 +1678,8 @@ mod system {
     }
 
     /// A job object whose processes all end when its last handle closes
-    /// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`): one per program the second service starts (ADR-0022
-    /// clause 19). Every process the program starts belongs to it too, unless it breaks away, which
+    /// (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`): one per program the second service starts (ADR-0022 §19).
+    /// Every process the program starts belongs to it too, unless it breaks away, which
     /// the job does not allow.
     pub struct Job(OwnedHandle);
 
@@ -2022,7 +2022,7 @@ mod tests {
     }
 
     /// The pipe is owned by the second service's account and grants the Client's account reading
-    /// and writing, the service's own everything, and nobody else anything (ADR-0022 clause 19).
+    /// and writing, the service's own everything, and nobody else anything (ADR-0022 §19).
     /// Verifies: ADR-0022
     #[test]
     fn the_pipe_admits_the_clients_account_alone() {
@@ -2238,7 +2238,7 @@ mod lock_tests {
     /// The install lock a `LocalSystem` process holds — in session 0, under a logon session of
     /// its own, as an MSI's custom action runs — keeps out this elevated process in another, and
     /// is taken once it is let go: a private namespace bounded by the Administrators excludes
-    /// across logon sessions (ADR-0022 clauses 16 and 17). The `LocalSystem` process is a scheduled
+    /// across logon sessions (ADR-0022 §16 and §17). The `LocalSystem` process is a scheduled
     /// task running this test binary's helper above; the test fails where the task cannot be
     /// created or run.
     /// Verifies: ADR-0022

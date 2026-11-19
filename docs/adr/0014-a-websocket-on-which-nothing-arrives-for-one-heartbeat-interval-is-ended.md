@@ -9,7 +9,7 @@
 
 An Agent learns that its Server is gone when its connection closes. A Server killed by its kernel
 resets its connections, and its Agents reconnect as
-[ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 4 says. A Server whose host loses
+[ADR-0012 §4](0012-tls-1-3-two-planes-and-bounded-input.md) says. A Server whose host loses
 power, whose process is frozen, or which a partition cuts off sends nothing and closes nothing. The
 Agent's heartbeats go into its socket's send buffer and are retransmitted until the kernel gives
 up: at Linux's default `tcp_retries2` of 15, about fifteen minutes. A frozen process is worse:
@@ -28,16 +28,17 @@ A WebSocket ping is answered by every conforming peer: RFC 6455 says an endpoint
 Ping must send a Pong. It needs nothing of OpAMP, so it holds against any Server the `opamp`
 crate talks to, with heartbeats or without, and on a Gateway's pool connection, which carries other
 Agents' reports and has no heartbeat of its own. The Server's rate limit counts messages handed to
-its handler (ADR-0012 clause 24), and its pace floor judges data frames (clause 18); a ping is
+its handler (ADR-0012 §24), and its pace floor judges data frames (clause 18); a ping is
 neither.
 
 The heartbeat interval is the operator's measure of how often an Agent is heard from, and G-20 is
 stated in it. A bound that follows it keeps the failover inside G-20 whatever the operator sets,
 and costs one ping per connection per interval at most, since anything that arrives counts.
 
-The `opamp` crate is versioned by the Baseline ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)
-clause 2): a new field on its public settings would break its interface and wait for the next
-Baseline. The heartbeat is already a field of the driver's settings.
+The `opamp` crate is versioned by the Baseline
+([ADR-0008 §2](0008-six-crates-on-tokio-and-axum.md)): a new field on its public settings would
+break its interface and wait for the next Baseline. The heartbeat is already a field of the driver's
+settings.
 
 ## Decision
 
@@ -64,16 +65,15 @@ ping while it handles a message.
    probe of an offered endpoint. An attempt that reaches no address fails with the last address's
    failure and is retried with the next backoff step.
 4. **An ended connection is a lost one.** The driver logs that nothing arrived, with the bound,
-   and reconnects after the delay ADR-0012 clause 4 draws over `[0, 30 s)`. The Gateway's pool
-   marks the connection gone, and its Agents are placed anew at their next report (ADR-0016
-   clause 9).
+   and reconnects after the delay ADR-0012 §4 draws over `[0, 30 s)`. The Gateway's pool
+   marks the connection gone, and its Agents are placed anew at their next report (ADR-0016 §9).
 5. **Nothing at the TCP level.** No TCP keepalive and no TCP user timeout are set.
 6. **No existing interface changes.** No public function or setting of `crates/opamp` changes;
    the bounds come from the heartbeat already in the settings. `ws::Silence` is public, so that
    the Gateway's pool derives the same bounds, and so is `ws::run_from`, `run` with every
    connection opened from a local address the caller names
-   ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-   clause 20). Both are additions, not breaks under ADR-0008 clause 2.
+   ([ADR-0025 §20](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
+   Both are additions, not breaks under ADR-0008 §2.
    `Connection::connect_websocket` keeps its signature and fails once the bounds of clause 3 have
    passed.
 7. **The end that listens answers a ping while it handles a message.** The endpoint of
@@ -102,7 +102,7 @@ says.
   from G-20 when the operator changes the interval. Following the heartbeat gives the same values
   at the defaults and keeps the failover inside G-20 at any interval.
 - **A key of its own in the Client's configuration.** A knob is added when a deployment needs a
-  value other than the heartbeat's, not before, as ADR-0012 clause 18 does for its bounds.
+  value other than the heartbeat's, not before, as ADR-0012 §18 does for its bounds.
 - **TCP keepalive, or `TCP_USER_TIMEOUT`.** Neither notices a frozen process, whose kernel keeps
   acknowledging. Keepalive's interval needs `socket2`, a dependency this would add for nothing the
   ping does not do; the user timeout is Linux's alone; and the connect path of
@@ -114,7 +114,7 @@ says.
   than an interval, but each attempt opens several connections at once and needs a staggering of
   its own. Trying the addresses in turn is simpler and bounded too.
 - **A new field on the driver's settings.** It would break the `opamp` crate's interface
-  (ADR-0008 clause 2) and gives nothing the heartbeat does not.
+  (ADR-0008 §2) and gives nothing the heartbeat does not.
 
 ## Sources / Prior art
 

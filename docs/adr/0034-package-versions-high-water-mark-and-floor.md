@@ -8,7 +8,7 @@
 ## Context
 
 A package signature covers the Agent type, the version and the artifact's SHA-256
-(`fleet_core::package::statement`, [ADR-0033](0033-packages-signatures-and-delivery.md) clause 52).
+(`fleet_core::package::statement`, [ADR-0033 §52](0033-packages-signatures-and-delivery.md)).
 It binds an artifact to its own version, but it says nothing about how that version orders against
 another, and it never expires. A build the operator signed once stays validly signed forever,
 including a build with a flaw that became known later. Whatever stops a downgrade must therefore be
@@ -40,7 +40,7 @@ The forces:
   the refusal that counts is the Client's.
 - **The one move to an older version takes no offer.** When an apply fails within the apply grace,
   the Supervisor renames the predecessor back over the live program
-  ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 59).
+  ([ADR-0033 §59](0033-packages-signatures-and-delivery.md)).
 - **A mark knows only what this host installed.** An old build the operator signed under a version
   above the current mark, such as a long-ago pre-release of a later version (`2.0.0-rc.1` while
   the fleet runs `1.9.4`), is taken by a host that never ran anything newer. What closes that gap
@@ -64,9 +64,9 @@ highest floor the operator signed for that type.
    version and says a Package version is SemVer, for example `1.19.0` for upstream's `1.19`. A
    Package that the store already holds under a version that is a token but not SemVer is read as
    clause 3 says; it does not fail the store's opening
-   ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 8). A Package has no name of its
+   ([ADR-0033 §8](0033-packages-signatures-and-delivery.md)). A Package has no name of its
    own, no Selector and no kind. Its entries carry their signatures
-   ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 18). Creating a Package that exists
+   ([ADR-0033 §18](0033-packages-signatures-and-delivery.md)). Creating a Package that exists
    is the same request arriving twice.
 
 2. **One predicate decides what is SemVer, in the internal crate.** A version is SemVer when
@@ -88,14 +88,14 @@ highest floor the operator signed for that type.
    content under a SemVer version, signs it again, and rolls that out.
 
 4. **`opamp-fleetctl package sign` signs only a SemVer version.** It refuses a `--version`, and a
-   signing-file entry ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 20), whose
+   signing-file entry ([ADR-0033 §20](0033-packages-signatures-and-delivery.md)), whose
    version is not SemVer. It does so before it reads the key, and names the version. The
    operator's key therefore never signs a version that a Client would refuse.
 
 5. **A Package becomes a candidate when its version is SemVer, it fits, it is aimed at the Agent,
    and it moves the Agent forward.** A Package whose version is not SemVer (clause 3) is nobody's
    candidate, whatever the Agent reports. Fit is
-   [ADR-0033](0033-packages-signatures-and-delivery.md) clause 14's, mandatory, and comes first
+   [ADR-0033 §14](0033-packages-signatures-and-delivery.md)'s, mandatory, and comes first
    after that. The version test ([ADR-0032](0032-deployments-and-rollouts.md)) runs *with* the fit:
    a Package it holds back is nobody's candidate and appears in no count and no proposal. A
    per-Agent refusal of a non-SemVer Package names the version and the SemVer rule, as the version
@@ -137,9 +137,9 @@ highest floor the operator signed for that type.
    [ADR-0021](0021-the-installed-service-and-its-state.md)), so no purge can delete it, even where
    an operator places `supervisor_dir` at `state_dir` itself. The mark rises when a Supervisor
    reports a package `Installed`, that is, once its program has survived the apply grace
-   ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 58). It never falls. It does not
+   ([ADR-0033 §58](0033-packages-signatures-and-delivery.md)). It never falls. It does not
    move on `InstallFailed`, and it does not move on the rollback of
-   [ADR-0033](0033-packages-signatures-and-delivery.md) clause 59.
+   [ADR-0033 §59](0033-packages-signatures-and-delivery.md).
 
 9. **The mark is seeded at every start from what is installed.** At startup, each Supervisor's
    installed-package record with a SemVer version raises its Agent type's mark to at least that
@@ -235,7 +235,7 @@ highest floor the operator signed for that type.
     runs below the floor, naming both versions, and takes the next offer at or above the floor. The
     Client's own Agent reports no such health: its version is the running build's, and its next
     update at or above the floor replaces it. The rollback of
-    [ADR-0033](0033-packages-signatures-and-delivery.md) clause 59 puts back the installed
+    [ADR-0033 §59](0033-packages-signatures-and-delivery.md) puts back the installed
     predecessor whatever the floor says, since it takes no offer, and the health then says so too.
 
 20. **Only the host lowers a floor.** No Server route, no offer, no delivered Supervisor block and
@@ -303,7 +303,7 @@ withholds a floor, which delays it until the Client reaches one that serves it; 
 from a version that a Managed Process reports about itself, as opposed to one this Client installed;
 an operator command that lowers a mark; reporting the mark to the Server; the Gateway refusing to
 cache a non-SemVer offer, which the Client's refusal decides, as the Client's signature check
-decides the rest ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 19).
+decides the rest ([ADR-0033 §19](0033-packages-signatures-and-delivery.md)).
 
 ## Alternatives considered
 
@@ -351,7 +351,7 @@ decides the rest ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 19
   it, known or not. Not taken; it stays possible beside a floor.
 - **A signing time in every package statement and a signed cut-off date.** It would also catch
   builds whose version nobody remembers, but it changes the package statement
-  ([ADR-0033](0033-packages-signatures-and-delivery.md) clause 52), and every signature the fleet
+  ([ADR-0033 §52](0033-packages-signatures-and-delivery.md)), and every signature the fleet
   holds would have to be made again. Rejected.
 - **Rotating the package key.** It removes every old signature at once, and with it every good one.
   It is a fleet-wide operation with no counterpart in the Client. Rejected as the way to withdraw

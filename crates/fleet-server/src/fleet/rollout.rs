@@ -26,8 +26,8 @@ use super::{
 impl AppState {
     /// Reads the Configurations and, where package delivery is armed, the Deployments and the
     /// Packages again from their stores, as another instance changed them
-    /// (ADR-0025
-    /// clause 12). Each one whose flag is set is dropped and read again whole.
+    /// (ADR-0025 §12).
+    /// Each one whose flag is set is dropped and read again whole.
     ///
     /// # Errors
     /// Returns an error when a store cannot be read; what it held is then kept.
@@ -78,16 +78,16 @@ impl AppState {
         deployment_for(&all, record.effective_description().as_deref()).map(|found| found.cloned())
     }
 
-    /// What a press of `deployment` would release to this Agent (ADR-0032 clause 9) — the
+    /// What a press of `deployment` would release to this Agent (ADR-0032 §9) — the
     /// assignment it would write, or `None` when it has nothing for the Agent.
     ///
     /// Two parts, each as of now: the Package the Deployment holds for the Agent's type when it is
-    /// a candidate (ADR-0034 clause 5 and ADR-0032 clauses 14, 15, 16 and 17), and every Configuration it holds that fits the Agent's
+    /// a candidate (ADR-0034 §5 and ADR-0032 §14, §15, §16 and §17), and every Configuration it holds that fits the Agent's
     /// type, at its saved revision. Where the Deployment holds a Package for the Agent's type that
     /// is no candidate — the Agent already runs it, or it would move the Agent backwards — the
     /// press cannot move the package part, so the Package the assignment pins stays pinned: the
     /// release is replaced whole, and a part the press does not move must not fall out of it
-    /// (ADR-0032 clause 20). A Package or Configuration the Deployment no longer holds leaves the
+    /// (ADR-0032 §20). A Package or Configuration the Deployment no longer holds leaves the
     /// release.
     ///
     /// The rollout acts, the reach counts and the fleet view's waiting changes all ask this one
@@ -123,7 +123,7 @@ impl AppState {
         })
     }
 
-    /// Writes releases (ADR-0032 clause 6, ADR-0039 clause 2): each Configuration's saved revision
+    /// Writes releases (ADR-0032 §6, ADR-0039 §2): each Configuration's saved revision
     /// is pinned — copied into the store's retained revisions, its hash the one the assignment
     /// keeps — and the revisions and the records carrying the new assignments go to the store as
     /// one operation. Only once it succeeded are they the fleet's. A failure leaves the fleet's
@@ -197,7 +197,7 @@ impl AppState {
     }
 
     /// Collects every retained revision of `names` no stored assignment references any more — a
-    /// question the store answers (ADR-0039 clause 2).
+    /// question the store answers (ADR-0039 §2).
     pub(super) fn collect_revisions(&self, names: impl IntoIterator<Item = String>) {
         for name in names.into_iter().collect::<BTreeSet<_>>() {
             let referenced = self.agent_store.referenced_revisions(&name);
@@ -207,7 +207,7 @@ impl AppState {
         }
     }
 
-    /// The per-Agent rollout act (ADR-0032 clause 9): releases the Deployment that claims this
+    /// The per-Agent rollout act (ADR-0032 §9): releases the Deployment that claims this
     /// Agent to it, replacing its assignment, and wakes the WebSocket loops so a connected Agent
     /// hears it now.
     ///
@@ -286,7 +286,7 @@ impl AppState {
         Ok((deployment.name, release))
     }
 
-    /// The rollout act for a Deployment (ADR-0032 clause 9): releases it to every Agent it claims
+    /// The rollout act for a Deployment (ADR-0032 §9): releases it to every Agent it claims
     /// and would move, replacing each one's assignment, and returns how many Agents that was.
     ///
     /// An Agent some *other* Deployment also claims is skipped rather than counted — the conflict
@@ -348,7 +348,7 @@ impl AppState {
     ///
     /// The request is written to its own column of the record before this answers, and on a shared
     /// store announced to the instance that carries the Agent, which decides from what is stored
-    /// (ADR-0029 clause 2).
+    /// (ADR-0029 §2).
     pub fn request_restart(&self, uid: &InstanceUid) -> Result<(), RestartError> {
         // A request, a delivery, a try and a forget of one Agent each hold its own lock.
         let _agent = self.agent_lock(uid);
@@ -395,10 +395,10 @@ impl AppState {
     /// A label move changes only what the fleet view **proposes** (ADR-0032): the Agent's
     /// candidates follow its new channel, and nothing is distributed until a rollout act says so.
     ///
-    /// The labels are part of the Agent's record (ADR-0029 clause 21) and are written to their own
+    /// The labels are part of the Agent's record (ADR-0029 §21) and are written to their own
     /// column of it before this answers; on a shared store the Agent is read from the store, and
     /// the change announced to the instance that carries it. A Client Agent's labels hold for its
-    /// Client's other Agents (ADR-0029 clause 19), so its group is placed again.
+    /// Client's other Agents (ADR-0029 §19), so its group is placed again.
     pub fn set_labels(
         &self,
         uid: &InstanceUid,
@@ -475,7 +475,7 @@ impl AppState {
         holding
     }
 
-    /// Which Deployments hold each Configuration, by name (ADR-0032 clause 23) — how a
+    /// Which Deployments hold each Configuration, by name (ADR-0032 §23) — how a
     /// Configuration answers "whom would this reach", since it does not aim by itself.
     pub fn deployments_holding_configurations(&self) -> BTreeMap<String, Vec<String>> {
         let mut holding: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -560,8 +560,7 @@ impl AppState {
     /// queued again through [`unsent`](Self::unsent). It is handed out only to `conn`, the
     /// WebSocket connection asking, where that connection carries the Agent: an older connection
     /// of its host that still names it leaves the restart to the newer one
-    /// (ADR-0025
-    /// clause 8).
+    /// (ADR-0025 §8).
     ///
     /// A delivery holds the Agent's own lock, and clears the restart in the store with the fleet
     /// lock let go.
@@ -588,7 +587,7 @@ impl AppState {
     /// Clears the queued restart of `record` in the store first, and answers whether it was still
     /// queued there, so it is delivered: one another instance delivered already is not delivered
     /// twice, and a request made after the clear stays queued
-    /// (ADR-0029 clause 2). One that cannot be cleared is
+    /// (ADR-0029 §2). One that cannot be cleared is
     /// kept for the next exchange, and one cleared whose command is not sent is put back by
     /// [`unsent`](Self::unsent).
     ///
@@ -625,7 +624,7 @@ impl AppState {
         self.agent_store.set_restart_pending(uid, false)
     }
 
-    /// Deletes a Configuration (ADR-0032 clause 12); `false` when none of that name exists.
+    /// Deletes a Configuration (ADR-0032 §12); `false` when none of that name exists.
     /// **Refused while any Agent's assignment pins it** — the message says how many — because a
     /// deletion must not change what a running Agent receives: those Agents are rolled out through
     /// a Deployment without it first, or forgotten. A deleted Configuration leaves every Deployment
@@ -633,7 +632,7 @@ impl AppState {
     ///
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between. A store that other Servers write too counts the stored assignments again
-    /// in the act that deletes (ADR-0039 clause 2), so a pin
+    /// in the act that deletes (ADR-0039 §2), so a pin
     /// written through another instance refuses it as well, and takes it out of every Deployment
     /// in that act too.
     pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
@@ -669,7 +668,7 @@ impl AppState {
         Ok(deleted)
     }
 
-    /// Puts a Configuration into a Deployment (ADR-0032 clause 5); a Configuration the Server
+    /// Puts a Configuration into a Deployment (ADR-0032 §5); a Configuration the Server
     /// does not hold is `Missing`. Distributes nothing. Under the fleet lock, so a Configuration
     /// cannot be deleted between the check and the write. A store that other Servers write too
     /// reads the Configuration again in the act that adds it, so one deleted through another
@@ -688,7 +687,7 @@ impl AppState {
     }
 
     /// Takes a Configuration out of a Deployment. Not gated: nothing a Deployment holds is frozen
-    /// (ADR-0032 clause 11), and an Agent already released keeps its pinned revision until the next
+    /// (ADR-0032 §11), and an Agent already released keeps its pinned revision until the next
     /// press, which drops it from the Agent's map.
     pub fn remove_deployment_configuration(
         &self,
@@ -721,7 +720,7 @@ impl AppState {
         })
     }
 
-    /// Deletes a Deployment — **refused while an Agent's assignment names it** (ADR-0032 clause 12).
+    /// Deletes a Deployment — **refused while an Agent's assignment names it** (ADR-0032 §12).
     ///
     /// An assignment points at the channel it was released through, and the fleet view names it.
     /// So the operator ends that first, by an act that says so: rolling those Agents out through
@@ -759,7 +758,7 @@ pub(super) struct Waiting {
     pub(super) deployment: String,
 }
 
-/// What waits for an Agent's next press (ADR-0032 clauses 6, 8 and 9): the
+/// What waits for an Agent's next press (ADR-0032 §6, §8 and §9): the
 /// difference between what the claiming Deployment would release and what the assignment pins,
 /// per Configuration, for the Package, and for the Deployment the release goes through — so
 /// whatever makes a press move this Agent shows here, and the reach count agrees with the view.
@@ -768,7 +767,7 @@ pub(super) struct Waiting {
 /// pinned and leaves the release — the Deployment no longer holds it, or no longer fits it to this
 /// Agent — while the release keeps something else, so the smaller assignment is applied. `kept` is
 /// pinned while the release holds nothing for the Agent at all: the press leaves it with no
-/// assignment, it is offered nothing, and it keeps running what it runs (ADR-0032 clause 9).
+/// assignment, it is offered nothing, and it keeps running what it runs (ADR-0032 §9).
 pub(super) fn waiting(
     assigned: Option<&Assignment>,
     release: Option<&Assignment>,
@@ -888,7 +887,7 @@ pub(super) fn restart_command(uid: &InstanceUid, capabilities: u64) -> ServerToA
 
 /// Refuses a per-Agent press that would move nothing because the Package the Deployment holds for
 /// the Agent's type is not released to it — no upgrade, no entry for its platform — and says why,
-/// naming the version it compared against (ADR-0032 clause 19). A press that moves nothing for any
+/// naming the version it compared against (ADR-0032 §19). A press that moves nothing for any
 /// other reason is not refused: it is the same request arriving twice.
 fn refuse_a_package_left_out(
     store: &crate::packages::PackageStore,
@@ -912,7 +911,7 @@ fn refuse_a_package_left_out(
 }
 
 /// Refuses a rollout of a Deployment that holds nothing, or a Package with an unsigned entry —
-/// naming each such Package and its platforms; nothing is released (ADR-0032 clause 9, ADR-0033).
+/// naming each such Package and its platforms; nothing is released (ADR-0032 §9, ADR-0033).
 fn refuse_unreleasable(
     store: &crate::packages::PackageStore,
     deployment: &Deployment,

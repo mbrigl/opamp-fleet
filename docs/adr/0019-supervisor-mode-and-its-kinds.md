@@ -188,7 +188,7 @@ Server answers it with the offer again. A second apply would wait behind the fir
 Managed Process once more after the first had reported `APPLIED`: on a test host a flaky
 end-to-end test, on a production host a needless restart. A package offer is treated the same way:
 a repeat of the hash installed or in flight is ignored
-([ADR-0033](0033-packages-signatures-and-delivery.md) clause 49).
+([ADR-0033 §49](0033-packages-signatures-and-delivery.md)).
 
 **A program may answer only where and as its start runs it.** A kind may name the working directory
 a Managed Process starts in (clause 14). A program that needs its tree root to run, as a bundled
@@ -199,7 +199,7 @@ staged package, whose root is known only once it is staged, so a preflight that 
 program a path into its own tree needs a name for that root.
 
 **The `supervisor.` namespace is the Supervisor's own statement.** `[attributes]` refuses every
-`supervisor.*` key ([ADR-0018](0018-what-an-agent-reports-about-itself.md) clause 10), so the
+`supervisor.*` key ([ADR-0018 §10](0018-what-an-agent-reports-about-itself.md)), so the
 kinds a Client Agent reports are the kinds it was compiled with (clause 18).
 
 ## Decision
@@ -383,8 +383,8 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     Supervisor set at Clients that can run it. One key per kind, because a Selector is equality
     over string values and the question is about one member of the set. An operator cannot state
     one: `[attributes]` refuses every `supervisor.*` key at startup
-    ([ADR-0018](0018-what-an-agent-reports-about-itself.md)
-    clause 10). `AvailableComponents` is
+    ([ADR-0018 §10](0018-what-an-agent-reports-about-itself.md)).
+    `AvailableComponents` is
     not used for this: the message is *Development* in the pinned Baseline
     ([ADR-0011](0011-the-protocol-is-pinned-and-checked-against-opamp-go.md)) and Selectors do not
     match it.
@@ -507,7 +507,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     the file written, so the set the Server asked for is running; a purge error (a file held open
     on Windows, permissions) is a warning naming the path. The purge renamed the directory to a
     tombstone before deleting it, and the next start and the next purge remove the tombstone
-    again ([ADR-0022](0022-the-accounts-the-service-runs-under.md), clause 25).
+    again ([ADR-0022 §25](0022-the-accounts-the-service-runs-under.md)).
 
 35. **A delivered block brings no environment and no arguments the operator did not allow.** In
     the apply path, a delivered block's `env` entries, `args` and `version_args` must equal those
@@ -726,7 +726,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     to `SIGKILL` cannot leave the worker behind. Leading a group is opt-in per kind; kinds with one
     process keep signalling the pid. On Windows a program the second service starts runs in a job
     of its own, and a stop ends the job with everything in it
-    ([ADR-0022](0022-the-accounts-the-service-runs-under.md), clauses 19 and 20). A program the
+    ([ADR-0022 §19 and §20](0022-the-accounts-the-service-runs-under.md)). A program the
     Client starts itself on Windows has no group, and its stop ends the pid alone.
 
 54. **A package is proved to run before it is installed.** For every kind, after an artifact is
@@ -753,7 +753,7 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
     Client twice is the normal case, not a fault. An offer of another hash is taken as before,
     after the one applying. A hash whose apply `FAILED` is applied again when offered again, so a
     host repaired after the failure takes the offer once more. A deliberate restart stays the
-    `Restart` command. [ADR-0033](0033-packages-signatures-and-delivery.md) clause 49 treats a
+    `Restart` command. [ADR-0033 §49](0033-packages-signatures-and-delivery.md) treats a
     package hash already installed or in flight the same way.
 
 57. **The version probe and the preflight ask the program as its start runs it.** `VersionProbe`
@@ -976,7 +976,7 @@ program the Client starts itself on Windows.
 - **Leave a directory the purge cannot delete as an orphan.** The orphan stays beneath the
   Supervisors' root with nothing to remove it. The purge renames the directory to a tombstone first,
   which the next start and the next purge remove again
-  ([ADR-0022](0022-the-accounts-the-service-runs-under.md), clause 25; clause 34).
+  ([ADR-0022 §25](0022-the-accounts-the-service-runs-under.md); clause 34).
 - **Run every command a configuration can run as the Client's account.** Where a process account is
   registered, that puts a command a Server can deliver above the Managed Process it belongs to. It
   runs as its Managed Process's account instead
@@ -1228,7 +1228,7 @@ program the Client starts itself on Windows.
 - Directory and program, in `crates/fleet-agent/src/config.rs`:
   `the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable` and
   `a_relative_state_dir_yields_absolute_directories` (the root of
-  [ADR-0022](0022-the-accounts-the-service-runs-under.md) clause 24),
+  [ADR-0022 §24](0022-the-accounts-the-service-runs-under.md)),
   `a_bare_name_resolves_and_everything_else_is_refused`,
   `an_absolute_program_path_is_refused_and_names_the_way_across`,
   `the_retired_package_keys_are_refused`, `a_program_path_must_stay_inside_the_package`.
@@ -1237,7 +1237,7 @@ program the Client starts itself on Windows.
   `installs_packages_reflects_declared_package_acceptance`,
   `a_tree_supervisor_prepares_its_root_and_leaves_the_tree_to_the_package`,
   `a_program_path_that_is_neither_fails_the_build`, `a_block_without_a_program_fails_the_build`,
-  `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (ADR-0022 clause 25).
+  `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (ADR-0022 §25).
 - Placeholders: `the_placeholders_name_this_supervisors_own_directories` and
   `an_unknown_placeholder_is_passed_through_untouched`
   (`crates/fleet-agent/src/supervisor/ports.rs`),
@@ -1253,7 +1253,7 @@ program the Client starts itself on Windows.
   `the_rewrite_keeps_the_files_restrictive_mode`, `a_freshly_created_file_is_owner_only`,
   `the_plan_is_a_diff_by_name_and_unchanged_blocks_ride_through`,
   `the_purge_deletes_exactly_the_removed_supervisors_directory` (the purge of
-  [ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 13),
+  [ADR-0034 §13](0034-package-versions-high-water-mark-and-floor.md)),
   `the_purge_does_not_follow_a_symlink_out_of_the_supervisors_root`,
   `an_empty_offer_removes_every_block`; `retiring_uninstalls_the_removed_and_only_stops_the_changed`
   (`crates/fleet-agent/src/engine.rs`); and end to end

@@ -16,7 +16,7 @@
 //!   paths — so every path is validated by [`safe_member_path`] *before a byte is written*, and one
 //!   member this Client will not write refuses the whole archive. A `.tar.gz` tree may hold the
 //!   absolute links its kind names by exact path and target, and nothing beneath them; every
-//!   other link refuses it (ADR-0033 clause 57).
+//!   other link refuses it (ADR-0033 §57).
 //! - **The output is bounded.** Extraction stops at [`MAX_UNPACKED_BYTES`] — for a tree, across all
 //!   its members, and at [`MAX_TREE_MEMBERS`] members — so an archive that expands without end
 //!   fills a temporary file up to that limit and then fails, rather than a disk. A `.tar.gz` is
@@ -208,7 +208,7 @@ fn locate_program(
 /// Whether an archive entry at `path` is a single-file package's `member`: its trailing path
 /// components are the member's, `/`-separated. A bare name is one component, so it matches the
 /// entry's file name wherever the archive keeps it; a longer one says where
-/// (ADR-0033 clause 55). The path is only compared, never written
+/// (ADR-0033 §55). The path is only compared, never written
 /// to, so what it climbs to does not matter.
 fn is_member(path: &Path, member: &str) -> bool {
     ends_with_components(path, Path::new(member))
@@ -229,7 +229,7 @@ fn no_member_named(member: &str, seen: &[String]) -> String {
 
 /// The error for a single-file package whose member the archive holds more than once. Which one
 /// would be installed is the archive's order, which nobody chose, so none is
-/// (ADR-0033 clause 55).
+/// (ADR-0033 §55).
 fn several_members_named(member: &str, matched: &[String]) -> String {
     format!(
         "{member:?} matches {} members of the archive ({}) — refusing to choose between them",
@@ -284,7 +284,7 @@ pub enum Kind {
     TarGz,
     /// A 7z container, which may be encrypted (ADR-0033).
     SevenZ,
-    /// A zip container (ADR-0033 clause 62) — the form some agents publish their portable Windows
+    /// A zip container (ADR-0033 §62) — the form some agents publish their portable Windows
     /// build in, taken as published so the hash an Agent verifies stays upstream's own.
     /// Read-only here, and never encrypted: a confidential artifact is a `.7z`.
     Zip,
@@ -341,7 +341,7 @@ pub fn extract(
 
 /// Extracts the archive at `archive` **whole** into `dest` (ADR-0033), in whatever container
 /// [`detect`] finds, dropping the directory prefix the match of `program_path` sits under. Only a
-/// `.tar.gz` keeps a link, and only one `kept` names (ADR-0033 clause 57); a `.7z` or a `.zip`
+/// `.tar.gz` keeps a link, and only one `kept` names (ADR-0033 §57); a `.7z` or a `.zip`
 /// keeps none. `key` opens an encrypted `.7z`.
 ///
 /// # Errors
@@ -449,7 +449,7 @@ fn extract_7z_within(
 /// difference between how one project and the next lays out a release — and `usr/bin/agent` finds
 /// the one file of that name a kind means among several. Only files are members. An archive
 /// holding the member more than once is refused rather than left to its order
-/// (ADR-0033 clause 55).
+/// (ADR-0033 §55).
 ///
 /// # Errors
 /// Returns an error when the archive cannot be read, holds no such member, or the member exceeds
@@ -474,7 +474,7 @@ fn extract_tar_gz_within(
     let mut seen: Vec<String> = Vec::new();
     // Every entry that is the member. The archive is read to its end even after the first, because
     // a second one means the archive's order would be choosing the program
-    // (ADR-0033 clause 55).
+    // (ADR-0033 §55).
     let mut matched: Vec<String> = Vec::new();
     let mut written: u64 = 0;
     let mut decompressed: u64 = 0;
@@ -548,7 +548,7 @@ fn skipped(member: &Path, summary: &mut TreeSummary) {
 /// Every member is validated before anything is written; one that cannot be written safely refuses
 /// the whole archive. A symbolic link is created only where `kept` names its path in the tree and
 /// its target exactly, and nothing else may sit at or beneath it, so no member is written through
-/// it (ADR-0033 clause 57); any other link refuses the archive.
+/// it (ADR-0033 §57); any other link refuses the archive.
 ///
 /// # Errors
 /// Returns an error when the archive cannot be read, holds no or several members matching
@@ -606,7 +606,7 @@ fn extract_tree_tar_gz_within(
         // A tar carries its own modes, and a tree needs them: the program is made executable by
         // its caller either way, but a helper beside it is only executable if the archive said so.
         // Never with write for group or others, on every host, so no account but the Client's can
-        // rewrite what a Supervisor runs (ADR-0022 clause 23).
+        // rewrite what a Supervisor runs (ADR-0022 §23).
         #[cfg(unix)]
         if let (Some(out_path), Ok(mode)) = (written, entry.header().mode()) {
             use std::os::unix::fs::PermissionsExt;
@@ -916,7 +916,7 @@ fn is_7z_link(entry: &sevenz_rust2::ArchiveEntry) -> bool {
 }
 
 /// Whether a `.7z` entry is a regular file, the only kind of entry that can be a single-file
-/// package's member (ADR-0033 clause 55): not a directory, not
+/// package's member (ADR-0033 §55): not a directory, not
 /// a link, and not an anti-item, which deletes rather than installs.
 fn is_7z_file(entry: &sevenz_rust2::ArchiveEntry) -> bool {
     !entry.is_directory && !entry.is_anti_item && !is_7z_link(entry)
@@ -952,7 +952,7 @@ fn list_7z(
 }
 
 /// Extracts the member called `member` from the `.zip` at `archive`, writing it to `out` —
-/// [`extract_tar_gz`] for the third container (ADR-0033 clause 62). Matching is by **trailing
+/// [`extract_tar_gz`] for the third container (ADR-0033 §62). Matching is by **trailing
 /// path components**, and a member held twice is refused, exactly as there; the bound is
 /// [`MAX_UNPACKED_BYTES`] on what is written. Unlike a tar, a zip is read
 /// through its central directory, so members before the match are never decompressed and there is
@@ -977,7 +977,7 @@ fn extract_zip_within(
 
     // Find the member by metadata alone — `by_index_raw` reads the central directory and
     // decompresses nothing — and every entry of it, so one held twice is refused
-    // (ADR-0033 clause 55).
+    // (ADR-0033 §55).
     let mut found: Vec<(usize, String)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for index in 0..zip.len() {
@@ -1006,7 +1006,7 @@ fn extract_zip_within(
         .map_err(|e| format!("cannot unpack {member:?} from the archive: {e}"))
 }
 
-/// Extracts a `.zip` **whole** into `dest` (ADR-0033 clause 62), exactly as [`extract_tree_tar_gz`]
+/// Extracts a `.zip` **whole** into `dest` (ADR-0033 §62), exactly as [`extract_tree_tar_gz`]
 /// does for a `.tar.gz`.
 ///
 /// Modes are not taken from the archive, as for a `.7z`: zip carries host attributes a Windows
@@ -1260,7 +1260,7 @@ mod tests {
     /// A member given as a path is the one file whose trailing components are that path, wherever
     /// the archive puts it in its order: a directory of the program's name and another file of it
     /// ahead of the program change nothing
-    /// (ADR-0033 clause 55).
+    /// (ADR-0033 §55).
     /// Verifies: ADR-0033
     #[test]
     fn a_member_path_picks_its_file_among_others_of_the_same_name() {
@@ -1281,7 +1281,7 @@ mod tests {
 
     /// A member the archive holds more than once is refused, naming every place it holds it,
     /// in each container — and a directory of that name is not one of them
-    /// (ADR-0033 clause 55).
+    /// (ADR-0033 §55).
     /// Verifies: ADR-0033
     #[test]
     fn a_member_held_twice_refuses_the_archive_in_every_container() {
@@ -1323,7 +1323,7 @@ mod tests {
     /// Only a regular file is a member in a `.zip` and a `.7z` too: a link or an anti-item of the
     /// program's name, ahead of the program, is no candidate, so it neither installs its target
     /// text nor makes the archive ambiguous; and an archive holding only such an entry has no
-    /// member (ADR-0033 clause 55).
+    /// member (ADR-0033 §55).
     /// Verifies: ADR-0033
     #[test]
     fn a_link_or_an_anti_item_is_no_member_in_a_zip_or_a_7z() {
@@ -2358,7 +2358,7 @@ mod tests {
         assert!(refused.contains("not an archive"), "{refused}");
     }
 
-    // ── Zip (ADR-0033 clause 62) ──────────────────────────────────────────────────────────
+    // ── Zip (ADR-0033 §62) ──────────────────────────────────────────────────────────
 
     /// Builds a `.zip` holding `members` — (path inside the archive, contents). A name ending in
     /// `/` becomes a directory entry, the way zip spells one.
@@ -2491,7 +2491,7 @@ mod tests {
         assert!(err.contains("LICENSE"), "names what it holds: {err}");
     }
 
-    /// The case ADR-0033 clause 62 adds the format for: a portable zip, taken as published — the
+    /// The case ADR-0033 §62 adds the format for: a portable zip, taken as published — the
     /// tree lands whole, directory entries and all, with the member outside counted as skipped.
     #[test]
     fn a_zip_tree_lands_whole_with_the_wrapper_directory_dropped() {

@@ -154,7 +154,7 @@ message would be an error.
    never their values. The hash is echoed either way, so the Server does not re-offer in a loop.
    `TLSConnectionSettings` is refused on merit: a Server able to command `insecure_skip_verify`
    could switch off the check that proves it is the Server, and trust is an operator's file
-   ([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 5).
+   ([ADR-0012 §5](0012-tls-1-3-two-planes-and-bounded-input.md)).
    `ProxyConnectionSettings` has nothing on this Client to configure. Both are Development
    upstream. Offered `headers` on the OpAMP connection are refused on merit too: the Agent plane
    reads no `Authorization` and admits by client certificate alone

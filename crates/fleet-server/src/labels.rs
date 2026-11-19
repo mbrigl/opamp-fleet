@@ -8,18 +8,18 @@
 //! A label joins the attribute set a Deployment's Selector matches against (ADR-0032), which
 //! releases Configurations and packages alike. It never travels to the Agent: it is an input to
 //! matching here, and the Agent experiences it only as the Configurations and the packages it is
-//! offered. Labels are part of the Agent's record (ADR-0029 clause 21), and the labels of a
-//! Client's own Agent hold for that Client's other Agents (ADR-0029 clause 19).
+//! offered. Labels are part of the Agent's record (ADR-0029 §21), and the labels of a
+//! Client's own Agent hold for that Client's other Agents (ADR-0029 §19).
 //!
 //! **A label can never restate a reported attribute.** `os.type` and `host.arch` decide which
 //! artifact an Agent is offered (ADR-0033) and `service.name` decides which packages fit it at all
 //! (ADR-0033), so a label that outranked them would let a typo hand a Windows binary to a Linux
 //! host. Labels annotate; they do not correct. **And nothing an Agent reports or an operator labels
 //! can speak in the Server's name**: `fleet.*` is the Server's own, filled from the Host's
-//! certificate (ADR-0029 clauses 18 and 20). **Nor can a label speak in a Supervisor's**:
+//! certificate (ADR-0029 §18 and §20). **Nor can a label speak in a Supervisor's**:
 //! `supervisor.*` is what a Supervisor states about its Client and the Package it installed
-//! (ADR-0018 clause 10), and a label is refused there as in
-//! `fleet.*` (ADR-0029 clause 20). A label already stored
+//! (ADR-0018 §10), and a label is refused there as in
+//! `fleet.*` (ADR-0029 §20). A label already stored
 //! with a key in either space is ignored: it enters no effective description and nothing inherits
 //! it, and the fleet row lists it as ignored.
 
@@ -28,16 +28,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use opamp::attributes::SUPERVISOR_KIND_PREFIX;
 use opamp::proto::AgentDescription;
 
-/// The key prefix only the Server fills (ADR-0029 clause 20).
+/// The key prefix only the Server fills (ADR-0029 §20).
 pub const RESERVED_PREFIX: &str = "fleet.";
 
 /// Whether a label key is in a space no label may speak in: the Server's `fleet.` or a Supervisor's
-/// `supervisor.` (ADR-0029 clause 20).
+/// `supervisor.` (ADR-0029 §20).
 pub fn is_reserved_label(key: &str) -> bool {
     key.starts_with(RESERVED_PREFIX) || key.starts_with(opamp::attributes::SUPERVISOR_PREFIX)
 }
 
-/// The labels a Client Agent's group inherits (ADR-0029 clause 19): its own, without the ones in
+/// The labels a Client Agent's group inherits (ADR-0029 §19): its own, without the ones in
 /// a reserved space, which match nothing.
 pub fn inheritable(labels: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     labels
@@ -64,7 +64,7 @@ pub enum LabelError {
 
 /// Whether a label set can be applied: an empty key or value can match no Selector and is far more
 /// likely a mistake than an intent, a `fleet.` key is the Server's own, and a `supervisor.` key a
-/// Supervisor's (ADR-0029 clause 20).
+/// Supervisor's (ADR-0029 §20).
 pub fn check_pairs(set: &BTreeMap<String, String>) -> Result<(), String> {
     for (key, value) in set {
         if key.contains('\0') || value.contains('\0') {
@@ -113,7 +113,7 @@ pub fn reported_keys(description: Option<&AgentDescription>) -> Vec<&str> {
         .collect()
 }
 
-/// What an Agent's effective description is built from (ADR-0029 clause 18), in order of
+/// What an Agent's effective description is built from (ADR-0029 §18), in order of
 /// precedence: for each key the first source that has it.
 #[derive(Clone, Copy)]
 pub struct Sources<'a> {
@@ -124,7 +124,7 @@ pub struct Sources<'a> {
     pub reported: Option<&'a AgentDescription>,
     /// The Agent's own labels.
     pub own: &'a BTreeMap<String, String>,
-    /// The labels of its Client Agent (ADR-0029 clause 19).
+    /// The labels of its Client Agent (ADR-0029 §19).
     pub inherited: &'a BTreeMap<String, String>,
 }
 
@@ -146,7 +146,7 @@ impl Sources<'_> {
     }
 }
 
-/// The description a Selector is matched against (ADR-0029 clause 18): the Host's values, what the
+/// The description a Selector is matched against (ADR-0029 §18): the Host's values, what the
 /// Agent reported without its `fleet.*` attributes, its own labels and then its Client Agent's,
 /// none in `fleet.*` or `supervisor.*` (clause 20) — each key from the first source that has it.
 ///
@@ -210,7 +210,7 @@ pub fn shadowed(
 }
 
 /// The reported attributes left out of the effective description because their key is the
-/// Server's own (ADR-0029 clause 20), in the order reported.
+/// Server's own (ADR-0029 §20), in the order reported.
 pub fn ignored(description: Option<&AgentDescription>) -> Vec<String> {
     reported_keys(description)
         .into_iter()
@@ -219,8 +219,8 @@ pub fn ignored(description: Option<&AgentDescription>) -> Vec<String> {
         .collect()
 }
 
-/// The labels this Agent has in a reserved space (ADR-0029
-/// clause 20) — stored, and matching nothing. Listed on the fleet row, as a shadowed label is,
+/// The labels this Agent has in a reserved space (ADR-0029 §20)
+/// — stored, and matching nothing. Listed on the fleet row, as a shadowed label is,
 /// rather than dropped in silence.
 pub fn ignored_labels(labels: &BTreeMap<String, String>) -> Vec<String> {
     labels
@@ -230,8 +230,8 @@ pub fn ignored_labels(labels: &BTreeMap<String, String>) -> Vec<String> {
         .collect()
 }
 
-/// Whether this is a Client's own Agent: it alone reports `supervisor.kind.*` (ADR-0019
-/// clause 18, ADR-0029 clause 19).
+/// Whether this is a Client's own Agent: it alone reports `supervisor.kind.*` (ADR-0019 §18,
+/// ADR-0029 §19).
 pub fn is_client_agent(description: Option<&AgentDescription>) -> bool {
     description.is_some_and(|description| {
         description
@@ -241,7 +241,7 @@ pub fn is_client_agent(description: Option<&AgentDescription>) -> bool {
     })
 }
 
-/// The machine an Agent behind a Gateway says it runs on (ADR-0029 clause 19): its `host.id`, or
+/// The machine an Agent behind a Gateway says it runs on (ADR-0029 §19): its `host.id`, or
 /// its `host.name` where it reports no `host.id`. Kept apart, so a `host.id` never equals a
 /// `host.name` that happens to be spelled alike. `None` when it reports neither.
 pub fn machine(description: Option<&AgentDescription>) -> Option<String> {
@@ -313,7 +313,7 @@ mod tests {
         ));
     }
 
-    /// The crux (ADR-0029 clause 20): reported wins. A label that could rewrite `os.type` would let
+    /// The crux (ADR-0029 §20): reported wins. A label that could rewrite `os.type` would let
     /// a slip in the UI offer this Agent an artifact built for another machine.
     /// Verifies: ADR-0029
     #[test]

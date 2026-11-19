@@ -269,8 +269,7 @@ provenance of every asset and of the image, publishing nothing that does not ver
       resolves under `/`, where `65532` cannot write, and fails startup naming `data_dir`; it never
       writes outside the volume. A Server on PostgreSQL and S3 is given none, and the volume stays
       unused
-      ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-      clause 1).
+      ([ADR-0023 §1](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
     - It contains no `server.toml`, no certificate, no key and no credential. Off the loopback the
       Server refuses to start without TLS and without `[rest.auth]`, so an image started with
       nothing mounted fails, naming the missing key, rather than serving in the clear or without
@@ -420,8 +419,8 @@ provenance of every asset and of the image, publishing nothing that does not ver
   Rejected.
 - **The image sets `FLEET_SERVER__DATA_DIR=/var/lib/opamp-fleet`.** A Server on PostgreSQL and S3
   keeps nothing on its disk and refuses a data directory its configuration names
-  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-  clause 1), so the image could not run it. Rejected; clause 16 names none, and the operator gives
+  ([ADR-0023 §1](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+  so the image could not run it. Rejected; clause 16 names none, and the operator gives
   one to a Server that keeps state on its disk.
 
 ## Sources / Prior art

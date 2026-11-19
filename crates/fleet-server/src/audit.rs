@@ -131,8 +131,7 @@ pub struct Unavailable;
 /// A place held in the record for the entry of one act, whose fields are known only once the act
 /// has run: the act runs only with the place held, and writes into it what it did. Dropped
 /// unwritten, as by an act that failed, it gives the place back
-/// (ADR-0028
-/// clause 5).
+/// (ADR-0028 §5).
 pub struct Permit(Box<dyn FnOnce(Entry) + Send>);
 
 impl Permit {
@@ -148,7 +147,7 @@ impl Permit {
     }
 }
 
-/// The record every security decision goes to (ADR-0028 clause 5).
+/// The record every security decision goes to (ADR-0028 §5).
 pub trait Audit: Send + Sync {
     /// Records one decision; without a record the caller does not take it.
     ///

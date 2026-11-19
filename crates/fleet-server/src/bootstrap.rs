@@ -1,12 +1,12 @@
 //! Bootstrap certificates the Server issues (ADR-0027).
 //!
 //! An operator asks for one with a subject naming at least a customer and a site, and a password
-//! (ADR-0027 clauses 1 and 3). The key never leaves in PEM: the Server seals it with its
+//! (ADR-0027 §1 and §3). The key never leaves in PEM: the Server seals it with its
 //! certificate into a PKCS#12 file under that password, keeps the file and hands it out on request
 //! until the certificate ends or is revoked; the password it keeps nowhere (ADR-0027). The Server
 //! keeps the certificate's facts, never its key in the clear, so it can list what is valid and an
-//! operator can revoke one by its serial (ADR-0026 clause 27). A bootstrap certificate opens
-//! nothing on its own: it needs an open enrolment window and an operator's approval (ADR-0039 clause 8 and ADR-0027 clause 9).
+//! operator can revoke one by its serial (ADR-0026 §27). A bootstrap certificate opens
+//! nothing on its own: it needs an open enrolment window and an operator's approval (ADR-0039 §8 and ADR-0027 §9).
 //!
 //! The signing is the [`BootstrapSigner`] port, the bootstrap CA in [`crate::ca`] its adapter; the
 //! record is the [`BootstrapStore`] port, `bootstrap/` under `data_dir` its adapter (ADR-0039).
@@ -20,13 +20,13 @@ use zeroize::Zeroizing;
 use crate::fleet::Clock;
 use crate::revocation::{CertId, SubjectValues};
 
-/// A bootstrap certificate's life when the request names none (ADR-0036 clause 14).
+/// A bootstrap certificate's life when the request names none (ADR-0036 §14).
 pub const DEFAULT_VALIDITY_DAYS: u32 = 10;
 
-/// The longest life a request may ask for (ADR-0036 clause 14).
+/// The longest life a request may ask for (ADR-0036 §14).
 pub const MAX_VALIDITY_DAYS: u32 = 90;
 
-/// The valid bootstrap certificates the record holds at most (ADR-0039 clause 11).
+/// The valid bootstrap certificates the record holds at most (ADR-0039 §11).
 pub const MAX_VALID: usize = 10_000;
 
 /// The longest value of a subject attribute: RFC 5280's upper bound for the names that have one.
@@ -34,7 +34,7 @@ pub const MAX_VALUE_CHARS: usize = 64;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// The subject an operator names (ADR-0027 clause 1): six attributes, `organization` and
+/// The subject an operator names (ADR-0027 §1): six attributes, `organization` and
 /// `organizational_unit` required and the others optional. The Server sets the common name. The
 /// values describe and select; they authorize nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -62,7 +62,7 @@ pub struct Subject {
 }
 
 /// An attribute of a bootstrap certificate's subject, in the order a certificate lists them
-/// (ADR-0027 clause 1).
+/// (ADR-0027 §1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attribute {
     Country,
@@ -76,7 +76,7 @@ pub enum Attribute {
 
 impl Attribute {
     /// The six attributes a host certificate carries over from its bootstrap certificate, in
-    /// certificate order (ADR-0027 clauses 1, 11 and 12 and ADR-0016 clause 23).
+    /// certificate order (ADR-0027 §1, §11 and §12 and ADR-0016 §23).
     pub const CARRIED: [Attribute; 6] = [
         Attribute::Country,
         Attribute::State,
@@ -121,7 +121,7 @@ impl Attribute {
         self == Attribute::Country
     }
 
-    /// Checks a value against ADR-0027 clause 1: a country of exactly two upper-case letters,
+    /// Checks a value against ADR-0027 §1: a country of exactly two upper-case letters,
     /// any other value 1 to [`MAX_VALUE_CHARS`] characters without a control character.
     ///
     /// # Errors
@@ -176,7 +176,7 @@ impl Attribute {
 }
 
 /// The attributes `values` hold, in certificate order, ending with `common_name`: the subject of
-/// a host certificate (ADR-0027 clause 11).
+/// a host certificate (ADR-0027 §11).
 #[must_use]
 pub fn carried_attributes(values: &SubjectValues, common_name: &str) -> Vec<(Attribute, String)> {
     let mut attributes: Vec<(Attribute, String)> = Attribute::CARRIED
@@ -193,7 +193,7 @@ impl Subject {
     ///
     /// # Errors
     /// Returns the `400` text for a missing `organization` or `organizational_unit`, or a value
-    /// that breaks ADR-0027 clause 1, naming the attribute.
+    /// that breaks ADR-0027 §1, naming the attribute.
     pub fn attributes(&self, common_name: &str) -> Result<Vec<(Attribute, String)>, String> {
         for (attribute, value) in [
             (Attribute::Organization, &self.organization),
@@ -237,13 +237,13 @@ pub struct IssueRequest {
     /// 1 to 90; 10 when absent.
     #[serde(default)]
     pub validity_days: Option<u32>,
-    /// The password of the PKCS#12 file the key is sealed in (ADR-0027 clause 3).
+    /// The password of the PKCS#12 file the key is sealed in (ADR-0027 §3).
     /// Required; read as absent when it is missing, so the refusal names it.
     #[serde(default)]
     pub password: Option<Password>,
 }
 
-/// A password, which no `Debug` and no log line shows (ADR-0027 clause 5), held in a buffer wiped
+/// A password, which no `Debug` and no log line shows (ADR-0027 §5), held in a buffer wiped
 /// when it is dropped (ADR-0015).
 #[derive(Clone)]
 pub struct Password(pub Zeroizing<String>);
@@ -263,7 +263,7 @@ impl std::fmt::Debug for Password {
 
 /// A certificate the signer made, with the key that belongs to it sealed with the certificate into
 /// a PKCS#12 file under the password the request named; the key is never handed out in PEM
-/// (ADR-0027 clause 3).
+/// (ADR-0027 §3).
 #[derive(Clone)]
 pub struct Pair {
     pub id: CertId,
@@ -276,7 +276,7 @@ pub struct Pair {
     pub not_before_ms: u64,
     pub not_after_ms: u64,
     pub certificate_pem: String,
-    /// The PKCS#12 file (ADR-0027 clause 4).
+    /// The PKCS#12 file (ADR-0027 §4).
     pub pkcs12: Vec<u8>,
 }
 
@@ -292,7 +292,7 @@ impl std::fmt::Debug for Pair {
 /// The port that signs a bootstrap certificate: the bootstrap CA with its key.
 pub trait BootstrapSigner: Send + Sync {
     /// The common name a bootstrap certificate carries, derived from the bootstrap CA's
-    /// (ADR-0036 clause 19).
+    /// (ADR-0036 §19).
     fn leaf_common_name(&self) -> String;
 
     /// When the bootstrap CA ends, in milliseconds since the epoch.
@@ -305,7 +305,7 @@ pub trait BootstrapSigner: Send + Sync {
     /// Makes a fresh key and signs a client-authentication leaf for it, valid from `now_ms`
     /// less the allowance for clocks that disagree until `not_after_ms`. The key is sealed with
     /// the certificate into a PKCS#12 file under `password` and not handed back in PEM
-    /// (ADR-0027 clause 3).
+    /// (ADR-0027 §3).
     ///
     /// # Errors
     /// Returns an error when no key can be made, the certificate cannot be signed, or the file
@@ -319,8 +319,7 @@ pub trait BootstrapSigner: Send + Sync {
     ) -> Result<Pair, String>;
 }
 
-/// What the record keeps of a bootstrap certificate — never its key in the clear (ADR-0039
-/// clause 11).
+/// What the record keeps of a bootstrap certificate — never its key in the clear (ADR-0039 §11).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Entry {
     pub id: CertId,
@@ -332,13 +331,13 @@ pub struct Entry {
     /// The issuing CA's key fingerprint: an entry of a CA since replaced is forgotten.
     #[serde(default)]
     pub ca_key: String,
-    /// Whether the store keeps its PKCS#12 file, for download (ADR-0039 clause 11).
+    /// Whether the store keeps its PKCS#12 file, for download (ADR-0039 §11).
     #[serde(default)]
     pub p12: bool,
 }
 
 /// The port the record persists through: one document per certificate, keyed by its issuer and
-/// serial as every certificate store keys one (ADR-0039 clause 11).
+/// serial as every certificate store keys one (ADR-0039 §11).
 pub trait BootstrapStore: Send + Sync {
     /// Every entry persisted.
     ///
@@ -358,8 +357,8 @@ pub trait BootstrapStore: Send + Sync {
     /// Returns an error when it cannot be removed.
     fn remove(&self, id: &CertId) -> Result<(), String>;
 
-    /// Persists the entry of a certificate just issued together with its PKCS#12 file (ADR-0039
-    /// clause 11): both or neither. An adapter that cannot make it one step
+    /// Persists the entry of a certificate just issued together with its PKCS#12 file (ADR-0039 §11):
+    /// both or neither. An adapter that cannot make it one step
     /// writes the file first and removes it again when the entry cannot be written, so no file is
     /// kept that no entry names.
     ///
@@ -378,8 +377,8 @@ pub trait BootstrapStore: Send + Sync {
     /// [`put_with_p12`](Self::put_with_p12) does, unless `max` certificates valid at `now_ms` are on
     /// record already, and answers whether it did. The count is of what is stored, in the write,
     /// so the bound holds for every instance on one database
-    /// (ADR-0025
-    /// clause 19). This body counts what it loads, for a store that is its only writer.
+    /// (ADR-0025 §19).
+    /// This body counts what it loads, for a store that is its only writer.
     ///
     /// # Errors
     /// Returns an error when the store cannot be read or written; nothing is then kept.
@@ -436,7 +435,7 @@ pub enum IssueError {
     Failed(String),
 }
 
-/// Why a bootstrap certificate's entry was not deleted (ADR-0027 clause 7).
+/// Why a bootstrap certificate's entry was not deleted (ADR-0027 §7).
 #[derive(Debug, PartialEq, Eq)]
 pub enum DeleteError {
     /// No certificate on record under that serial — `404`.
@@ -498,8 +497,8 @@ impl BootstrapCertificates {
         self.signer.is_some()
     }
 
-    /// Issues one bootstrap certificate and records it before answering (ADR-0027 clauses 1 and 3,
-    /// ADR-0036 clause 14 and ADR-0039 clause 11).
+    /// Issues one bootstrap certificate and records it before answering (ADR-0027 §1 and §3,
+    /// ADR-0036 §14 and ADR-0039 §11).
     ///
     /// # Errors
     /// See [`IssueError`].
@@ -529,7 +528,7 @@ impl BootstrapCertificates {
         if signer.ca_not_after_ms() <= now {
             return Err(IssueError::CaEnded);
         }
-        // Never past the CA (ADR-0036 clause 14).
+        // Never past the CA (ADR-0036 §14).
         let not_after = (now + u64::from(days) * DAY_MS).min(signer.ca_not_after_ms());
         // Outside the record's lock: sealing a PKCS#12 file derives three keys of 600 000
         // iterations, and the list and the download must not wait for it (ADR-0027).
@@ -551,7 +550,7 @@ impl BootstrapCertificates {
             ca_key: signer.ca_key_fingerprint(),
             p12: true,
         };
-        // The entry and its file together (ADR-0039 clause 11): no file is
+        // The entry and its file together (ADR-0039 §11): no file is
         // kept that no entry ends. The bound is counted again in what is stored, for every
         // instance on the database.
         if !self
@@ -593,7 +592,7 @@ impl BootstrapCertificates {
     }
 
     /// The entry of a valid certificate and its PKCS#12 file, `None` when the certificate is not
-    /// on record, has ended, or has no file (ADR-0039 clause 11). Whether it is revoked is the
+    /// on record, has ended, or has no file (ADR-0039 §11). Whether it is revoked is the
     /// caller's to tell, from the revocation list.
     ///
     /// # Errors
@@ -607,7 +606,7 @@ impl BootstrapCertificates {
         Ok(self.store.p12(&entry.id)?.map(|file| (entry.clone(), file)))
     }
 
-    /// Deletes a revoked certificate's entry and any PKCS#12 file of it (ADR-0027 clause 7).
+    /// Deletes a revoked certificate's entry and any PKCS#12 file of it (ADR-0027 §7).
     /// `revoked` tells whether the entry is revoked, and `recorded` puts the deletion on the audit
     /// record; both run under the record's lock with the removal, so a second request, or a
     /// revocation lifted meanwhile, cannot slip between the check and the deletion.
@@ -638,7 +637,7 @@ impl BootstrapCertificates {
     }
 
     /// Forgets the PKCS#12 file of a certificate, which a revocation does before it is answered
-    /// (ADR-0039 clause 11). A certificate without one is left as it is.
+    /// (ADR-0039 §11). A certificate without one is left as it is.
     ///
     /// # Errors
     /// Returns an error when the file or the entry cannot be written.
@@ -660,8 +659,8 @@ impl BootstrapCertificates {
         self.store.remove_p12(&id)
     }
 
-    /// The entry a REST `{serial}` names: the one of the bootstrap CA in force (ADR-0039
-    /// clause 11). Without the CA's key, the Server holds entries of whichever CA issued them, and
+    /// The entry a REST `{serial}` names: the one of the bootstrap CA in force (ADR-0039 §11).
+    /// Without the CA's key, the Server holds entries of whichever CA issued them, and
     /// the newest of that serial is the one meant.
     fn in_force<'a>(
         &self,
@@ -683,7 +682,7 @@ impl BootstrapCertificates {
             .max_by_key(|entry| entry.issued_ms)
     }
 
-    /// Forgets every certificate that has ended (ADR-0039 clause 11).
+    /// Forgets every certificate that has ended (ADR-0039 §11).
     fn prune(&self, entries: &mut BTreeMap<CertId, Entry>) -> Result<(), String> {
         let now = self.clock.now_ms();
         let ended: Vec<CertId> = entries
@@ -833,7 +832,7 @@ mod tests {
         serde_json::from_value(full).expect("subject")
     }
 
-    /// A subject takes the six attributes of ADR-0027 clause 1 and nothing else, each within its
+    /// A subject takes the six attributes of ADR-0027 §1 and nothing else, each within its
     /// bounds, and lists them in certificate order before the common name the Server sets.
     /// Verifies: ADR-0027
     #[test]
@@ -909,7 +908,7 @@ mod tests {
     }
 
     /// Organization and organizational unit are required, and a request without either, or
-    /// without a password, issues nothing and is refused naming the field (ADR-0027 clauses 1 and 3).
+    /// without a password, issues nothing and is refused naming the field (ADR-0027 §1 and §3).
     /// Verifies: ADR-0027
     #[test]
     fn an_issue_without_a_customer_a_site_or_a_password_is_refused_naming_it() {

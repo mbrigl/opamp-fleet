@@ -20,13 +20,13 @@ pub const ISSUED_CERT_FILE: &str = "client-cert.pem";
 /// leaves is a CSR over its public half.
 pub const ISSUED_KEY_FILE: &str = "client-key.pem";
 /// The key a request in flight asks to be certified, kept apart from [`ISSUED_KEY_FILE`] so the
-/// certificate in force keeps its own key until the new one is proved (ADR-0026 clause 10).
+/// certificate in force keeps its own key until the new one is proved (ADR-0026 §10).
 pub const PENDING_KEY_FILE: &str = "client-key.pending.pem";
 /// An issued certificate staged beside [`PENDING_KEY_FILE`] while the two are put in force, so a
 /// swap cut short is completed at the next start rather than leaving a mismatched pair.
 pub const PENDING_CERT_FILE: &str = "client-cert.pending.pem";
 /// The request in flight, re-sent unchanged until it is answered — the enrolment queue knows a
-/// request by its public key (ADR-0027 clause 9).
+/// request by its public key (ADR-0027 §9).
 pub const PENDING_CSR_FILE: &str = "client-csr.pending.pem";
 
 /// The trust and the identity in force.
@@ -67,14 +67,14 @@ pub fn client_tls_for(
                 ));
             }
             // `opamp` takes the key as its own buffer; the copy is made here and the one read
-            // is wiped (ADR-0015 clause 3).
+            // is wiped (ADR-0015 §3).
             Some(Identity {
                 cert_pem: cert.to_vec(),
                 key_pem: key_in(&key, state_file(&key)?)?.to_vec(),
             })
         }
         // An identity opened from a `bootstrap.p12` stands in for the configured one until the
-        // Server's certificate is stored (ADR-0027 clause 15); the issued one outranks both.
+        // Server's certificate is stored (ADR-0027 §15); the issued one outranks both.
         None => match (&config.bootstrap_identity, config.is_enrolled()) {
             (Some(bootstrap), false) => Some(Identity {
                 cert_pem: bootstrap.cert_pem.clone(),
@@ -146,7 +146,7 @@ pub(crate) fn key_in(path: &Path, pem: Vec<u8>) -> Result<Zeroizing<Vec<u8>>, St
 
 /// A file `[tls]` names, read by its path: the run-time Client's own files, which its operator
 /// may reach through a link. A privileged enrolment reads them through
-/// [`fleet_util::nofollow::read_privileged`] instead, and never by this path (ADR-0022 clause 11).
+/// [`fleet_util::nofollow::read_privileged`] instead, and never by this path (ADR-0022 §11).
 fn read(path: &Path) -> Result<Vec<u8>, String> {
     read_bounded(path)
         .map(|mut bytes| std::mem::take(&mut *bytes))
@@ -232,7 +232,7 @@ mod tests {
     }
 
     /// A `bootstrap.p12` opens to PEM in memory and stands in for the configured identity until
-    /// the Server's certificate is stored (ADR-0027 clause 15). The bound its read is held to is
+    /// the Server's certificate is stored (ADR-0027 §15). The bound its read is held to is
     /// `config_init`'s, tested there.
     /// Verifies: ADR-0027
     #[test]

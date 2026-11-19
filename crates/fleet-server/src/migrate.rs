@@ -1,4 +1,4 @@
-//! `server migrate` (ADR-0039 clause 26): moves the state an older Server kept under `config_dir`
+//! `server migrate` (ADR-0039 §26): moves the state an older Server kept under `config_dir`
 //! and `packages_dir` into a new `data_dir`, once, while the Server is stopped.
 //!
 //! The Server reads no older layout; this is the one place that knows it, and it knows the layout
@@ -16,7 +16,7 @@
 //!   signatures moved onto the entries, and a Package that was not carried leaves them, named.
 //! - **Configurations** keep their content; each loses its Selector, and is listed with the
 //!   Selector it had, for the operator to place in a Deployment. One without an Agent type is not
-//!   carried, because the Server refuses it at startup (ADR-0032 clause 2): it is listed, and its
+//!   carried, because the Server refuses it at startup (ADR-0032 §2): it is listed, and its
 //!   file stays in the old directory for the operator to save again with a type.
 //! - **Agents** are carried with their labels moved into the record. A Package released through a
 //!   Deployment stays assigned through it, while both were carried. A 0.5 Server released every
@@ -146,7 +146,7 @@ fn carry_register(config_dir: &Path, data_dir: &Path, report: &mut Report) -> Re
     let list = old.join("revocations.json");
     if list.exists() {
         // Byte for byte: the Server reads the list as it always has, and drops a credential entry
-        // it may still hold on its first load (ADR-0026 clause 29).
+        // it may still hold on its first load (ADR-0026 §29).
         match copy_owner_only(&list, &data_dir.join(fs::REVOCATIONS)) {
             Ok(()) => report.line("carried: the revocation list"),
             Err(e) => report.failed(format!("the revocation list: {e}")),
@@ -444,7 +444,7 @@ fn carry_packages(
                 continue;
             }
         };
-        // A version that is a token but not SemVer is carried over as read (ADR-0034 clause 3):
+        // A version that is a token but not SemVer is carried over as read (ADR-0034 §3):
         // the new Server keeps it, warns about it, and writes nothing to it.
         let id = match PackageId::load(&old.agent_type, &old.version) {
             Ok(id) => id,
@@ -763,7 +763,7 @@ fn assignment(
 }
 
 /// A clock at which nothing has ended: the check forgets no certificate, revocation or Host the
-/// migration has just reported as carried (ADR-0039 clause 26).
+/// migration has just reported as carried (ADR-0039 §26).
 struct Beginning;
 
 impl crate::fleet::Clock for Beginning {

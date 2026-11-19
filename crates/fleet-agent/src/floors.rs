@@ -1,11 +1,11 @@
-//! The floor of each Agent type on this Client (ADR-0034 clause 17): fetched from the endpoint —
+//! The floor of each Agent type on this Client (ADR-0034 §17): fetched from the endpoint —
 //! the Server, or the Gateway this Client sits behind — verified against `[packages]
 //! verification_key`, and kept, the highest version per type, in `<state_dir>/package-floors.json`.
-//! Every package offer is held to it, the Client's own included (ADR-0034 clauses 18 and 21).
+//! Every package offer is held to it, the Client's own included (ADR-0034 §18 and §21).
 //!
 //! A floor only rises here. A floor that does not verify, or that orders below the one kept, is
 //! ignored; a failed fetch keeps what is held; and nothing the Server sends lowers a floor — only
-//! the host does, by editing or deleting the file while the Client is stopped (ADR-0034 clause 20).
+//! the host does, by editing or deleting the file while the Client is stopped (ADR-0034 §20).
 
 use std::collections::BTreeMap;
 use std::io;
@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::config::ClientConfig;
 
-/// The file under `state_dir` that holds the floors. Like the high-water marks (ADR-0034 clause 8)
+/// The file under `state_dir` that holds the floors. Like the high-water marks (ADR-0034 §8)
 /// it sits outside `supervisor_dir`, and its name holds a `.`, which no Supervisor name can: no
 /// purge of a Supervisor's directory deletes it.
 pub const FILE: &str = "package-floors.json";
@@ -61,8 +61,8 @@ pub fn parse(body: &[u8]) -> Result<Floors, String> {
     serde_json::from_slice(body).map_err(|e| e.to_string())
 }
 
-/// Whether `floor` is the operator's for `agent_type`: its version SemVer (ADR-0034 clause 2) and
-/// its signature one `key` verifies over the floor statement (ADR-0034 clause 14).
+/// Whether `floor` is the operator's for `agent_type`: its version SemVer (ADR-0034 §2) and
+/// its signature one `key` verifies over the floor statement (ADR-0034 §14).
 #[must_use]
 pub fn verifies(key: &[u8], agent_type: &str, floor: &Floor) -> bool {
     let Ok(signature) = hex::decode(&floor.signature) else {
@@ -83,7 +83,7 @@ pub fn verifies(key: &[u8], agent_type: &str, floor: &Floor) -> bool {
 /// was kept, so a later change of the key does not undo it. A file that exists but does not parse,
 /// or maps a type to a version that is not SemVer, is never read as empty: every floor then
 /// answers the reason, which refuses every package offer until the operator repairs or deletes the
-/// file (ADR-0034 clause 17).
+/// file (ADR-0034 §17).
 pub struct FloorFile {
     path: PathBuf,
     /// `[packages] verification_key`: without it nothing verifies, so nothing is fetched or kept —
@@ -180,7 +180,7 @@ impl FloorFile {
         crate::storage::write_private(&self.path, &json)
     }
 
-    /// Fetches the floors from `config`'s endpoint and keeps what verifies (ADR-0034 clause 17). A
+    /// Fetches the floors from `config`'s endpoint and keeps what verifies (ADR-0034 §17). A
     /// failed fetch keeps the floors held, and is logged. Nothing is fetched without a key.
     pub async fn update(&self, config: &ClientConfig) {
         if self.key.is_none() {
@@ -235,7 +235,7 @@ impl crate::supervisor::ports::PackageFloors for FloorFile {
 }
 
 /// One fetch of the floors from `config`'s endpoint, with this Client's own certificate and no
-/// `Authorization` (ADR-0026 clause 3): the body, bounded, or why there is none.
+/// `Authorization` (ADR-0026 §3): the body, bounded, or why there is none.
 ///
 /// # Errors
 /// Returns an error naming the URL when the endpoint cannot be reached, answers anything but a

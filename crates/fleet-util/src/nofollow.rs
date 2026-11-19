@@ -274,7 +274,7 @@ const MAX_LINKS: usize = 40;
 ///
 /// - **A root or the state directory** that the walk reaches must hold the file directly: the
 ///   name after it is opened in that directory, held, and a link at the name is refused. A root
-///   is held as [`HeldDir::open_root`] holds it (ADR-0022 clause 13), the state directory without
+///   is held as [`HeldDir::open_root`] holds it (ADR-0022 §13), the state directory without
 ///   following a link at its own name (clauses 11 and 12). The state directory directly in a root
 ///   is reached by that name too, and counts as the account's where it is missing.
 /// - **A path that goes on beneath one of them** is refused: a directory there could be a link
@@ -480,7 +480,7 @@ fn refused_link(path: &Path) -> io::Error {
 /// The `*at` system calls this module and the Client share on Unix, each wrapped once here: a
 /// directory held by its handle, and an entry in it named and never followed where the flags say
 /// so. The rest of this module and the Client's state, its reconfiguration and its service manager
-/// work by directory handle through these (ADR-0022 clauses 11 to 15).
+/// work by directory handle through these (ADR-0022 §11–§15).
 #[cfg(unix)]
 pub mod at {
     use std::ffi::CStr;

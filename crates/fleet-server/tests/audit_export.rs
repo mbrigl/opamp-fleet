@@ -1,6 +1,6 @@
 //! The audit record's export
-//! (ADR-0028
-//! clause 15), seen from outside the Server binary: an OTLP/HTTP receiver in the test process, and a
+//! (ADR-0028 §15),
+//! seen from outside the Server binary: an OTLP/HTTP receiver in the test process, and a
 //! decision on the Operator plane, whose `operator.act` entry the Server records before it runs.
 #![cfg(unix)]
 

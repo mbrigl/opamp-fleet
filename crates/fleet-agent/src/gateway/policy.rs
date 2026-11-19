@@ -1,5 +1,5 @@
-//! Which host a Gateway takes to speak for an `instance_uid` (ADR-0016 clause 15, after ADR-0027
-//! clause 11): the host of the first report for it, kept across the Gateway's restarts in its store
+//! Which host a Gateway takes to speak for an `instance_uid` (ADR-0016 §15, after ADR-0027 §11):
+//! the host of the first report for it, kept across the Gateway's restarts in its store
 //! ([`store`](crate::gateway::store)). What the Gateway forwards, relays and passes on for an Agent
 //! is decided against this binding; the state is the core's, and the package cache holds it and
 //! asks it.
@@ -32,7 +32,7 @@ pub enum Bound {
     Waiting,
 }
 
-/// Where a host's certificate ends, as the Gateway keeps it (ADR-0016 clause 16): the latest
+/// Where a host's certificate ends, as the Gateway keeps it (ADR-0016 §16): the latest
 /// `notAfter` among the valid certificates the host reported under, and that certificate as the
 /// revocation list names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub struct End {
     pub serial: String,
 }
 
-/// One change to the bindings, as the store keeps it (ADR-0016 clause 16).
+/// One change to the bindings, as the store keeps it (ADR-0016 §16).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     /// An `instance_uid` is bound to a host.
@@ -93,7 +93,7 @@ pub struct Outcome {
     /// The `instance_uid` whose binding made room, if one did, so what else the Gateway holds for
     /// it can go too.
     pub evicted: Vec<InstanceUid>,
-    /// What the store must hold before the report is forwarded (ADR-0016 clause 16): the new
+    /// What the store must hold before the report is forwarded (ADR-0016 §16): the new
     /// binding, the removals that made room for it, and the host's certificate end where the
     /// report moved it. Empty when the report changed nothing the store keeps.
     pub changes: Vec<Change>,
@@ -160,12 +160,12 @@ impl Bindings {
     /// most recently reported; another host's report for it changes nothing. A host binds at most
     /// `limits.per_host`, and the Gateway at most `limits.total`: past either the host's own least
     /// recently reported binding whose `instance_uid` is `idle` makes room, so a host whose Agents
-    /// come and go is not shut out by its own past, and never another host's (ADR-0016 clause 15).
+    /// come and go is not shut out by its own past, and never another host's (ADR-0016 §15).
     /// Without one nothing is bound.
     ///
     /// A report under a certificate whose `notAfter` has passed by `now` binds nothing and moves
-    /// no end (ADR-0016 clause 17); one under a certificate that ends later than the one the host's
-    /// end was kept from moves it to `end` (ADR-0016 clause 17). A new binding is pending until
+    /// no end (ADR-0016 §17); one under a certificate that ends later than the one the host's
+    /// end was kept from moves it to `end` (ADR-0016 §17). A new binding is pending until
     /// [`Bindings::commit`], and a moved end until the write settles it: a pending binding makes
     /// no room, a report for it binds nothing, and a report of its host that relies on a moved end
     /// is [`Bound::Waiting`], so nothing is relied on before the store holds it.
@@ -369,7 +369,7 @@ impl Bindings {
     }
 
     /// The bindings reported since the last call: what keeps their order across a restart
-    /// (ADR-0016 clause 16).
+    /// (ADR-0016 §16).
     pub fn reports(&mut self) -> Reports {
         Reports(
             std::mem::take(&mut self.reported)
@@ -380,7 +380,7 @@ impl Bindings {
     }
 
     /// Ends every binding of each host whose kept certificate end has passed by `now`, or, when
-    /// `revoked` is given, whose certificate it says the revocation list names (ADR-0016 clause 16). Returns each such host, and the `instance_uid`s it held. The ends that have passed are
+    /// `revoked` is given, whose certificate it says the revocation list names (ADR-0016 §16). Returns each such host, and the `instance_uid`s it held. The ends that have passed are
     /// found by their order; the revocation list is asked about every host's end.
     pub fn end(
         &mut self,
@@ -438,7 +438,7 @@ impl Bindings {
         }
     }
 
-    /// The bindings `changes` leave, applied in order: the store read back (ADR-0016 clause 16). A
+    /// The bindings `changes` leave, applied in order: the store read back (ADR-0016 §16). A
     /// later report orders a binding after the earlier ones, and a removal of what is not bound
     /// changes nothing.
     ///

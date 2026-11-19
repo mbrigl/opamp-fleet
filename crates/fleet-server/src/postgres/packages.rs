@@ -1,8 +1,8 @@
-//! Package records in PostgreSQL (ADR-0039 clause 6): the PostgreSQL adapter behind
+//! Package records in PostgreSQL (ADR-0039 §6): the PostgreSQL adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one row per Package and one per entry,
 //! each entry naming its artifact by hash, and each call one transaction on the rows it names
-//! (ADR-0025
-//! clause 19). The bytes are the blob store's, with either.
+//! (ADR-0025 §19).
+//! The bytes are the blob store's, with either.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -69,7 +69,7 @@ impl PackageBackend for PgPackageBackend {
     /// ([`hold_unassigned`]). The transaction takes the blob store's lock shared first, and asks
     /// `stored` under it before it locks the Package's row: a sweep holds the lock alone, so none
     /// runs between the answer and the commit, and none deletes the blob the entry names
-    /// (ADR-0039 clause 14). A blob a sweep marked is refused before the store is asked: that
+    /// (ADR-0039 §14). A blob a sweep marked is refused before the store is asked: that
     /// sweep may still delete it once its lock is gone. The lock goes with the
     /// transaction, its session's end included, which writes no entry.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), PackageError> {
@@ -260,12 +260,12 @@ impl PackageBackend for PgPackageBackend {
         })?
     }
 
-    /// On a connection of its own (ADR-0039 clause 14).
+    /// On a connection of its own (ADR-0039 §14).
     fn hold_blobs(&self) -> Result<crate::blobs::BlobHold, String> {
         self.hold()
     }
 
-    /// On the session that holds the lock (ADR-0039 clause 14): the marks of every lease that is
+    /// On the session that holds the lock (ADR-0039 §14): the marks of every lease that is
     /// not live, or of none, are taken away first once they were last renewed more than
     /// [`MARKS_OUTLIVE`](super::MARKS_OUTLIVE) before, which a sweep that stopped short left; then
     /// each hash no stored entry names is marked in one statement, under the lease this instance
@@ -356,12 +356,12 @@ impl PgPackageBackend {
 }
 
 /// Holds the Package's row `FOR UPDATE` until the caller's transaction ends, and then counts the
-/// stored assignments that pin it, failing with `refusal` when any does (ADR-0032 clauses 12 and
+/// stored assignments that pin it, failing with `refusal` when any does (ADR-0032 §12 and
 /// 13). A rollout holds the row of each Package it pins `FOR KEY SHARE` until its assignments are
 /// committed, so the count waits for it and sees them, and no rollout pins the Package until this
 /// transaction ends
-/// (ADR-0025
-/// clause 19). Answers whether the Package is stored.
+/// (ADR-0025 §19).
+/// Answers whether the Package is stored.
 async fn hold_unassigned(
     client: &impl GenericClient,
     id: &PackageId,
@@ -736,7 +736,7 @@ mod tests {
     /// stored as `linux/arm32` beside them: all fold onto `linux/arm32`, the row stored under the
     /// canonical spelling is served, and the load does not fail. Without one, the row of the
     /// first spelling in their order is served, whichever instance reads them
-    /// (ADR-0033 clause 6).
+    /// (ADR-0033 §6).
     /// Verifies: ADR-0033
     #[test]
     fn rows_stored_under_an_older_spelling_load_folded() {

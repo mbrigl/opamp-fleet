@@ -1,6 +1,6 @@
 //! The links a kind's tree package keeps as links
-//! (ADR-0036 clause 27,
-//! ADR-0033 clause 57).
+//! (ADR-0036 §27,
+//! ADR-0033 §57).
 //!
 //! A tree package carries no link, with one exception a kind decides: an absolute link it names
 //! by its exact path in the tree and its exact target, such as a program loader an upstream tree

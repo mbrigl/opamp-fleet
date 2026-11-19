@@ -62,7 +62,7 @@ fn the_post_install_prints_no_endpoint_the_client_refuses_at_startup() {
 /// to start. The `--endpoint` it does print is the scripted form, with `--fleet-files`, where the
 /// install finds the bootstrap identity it enrols with. The manual alternative names the identity,
 /// `[tls] cert_file` and `key_file`, and nothing the Client does not read; a password it names is
-/// a `bootstrap.p12`'s, never a credential (ADR-0022 clause 9).
+/// a `bootstrap.p12`'s, never a credential (ADR-0022 §9).
 /// Verifies: ADR-0027, ADR-0022
 #[test]
 fn the_post_install_steps_ask_for_the_client_identity() {
@@ -281,7 +281,7 @@ fn the_pre_removal_acts_only_on_a_real_removal() {
     }
 }
 
-/// A removal runs `service stop`, then `service uninstall` (ADR-0022 clause 4), and stops nothing
+/// A removal runs `service stop`, then `service uninstall` (ADR-0022 §4), and stops nothing
 /// by its unit name: the stop takes down the second service too, where a process account is
 /// registered (ADR-0022).
 /// Verifies: ADR-0022

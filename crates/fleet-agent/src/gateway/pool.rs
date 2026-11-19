@@ -76,7 +76,7 @@ impl Pool {
             .map_err(|e| format!("cannot forward a report of {uid}: {e}"))?;
 
         // Two attempts: the assigned connection may have died between the last send and this one,
-        // and re-homing is exactly what clause 9 of ADR-0016 asks for.
+        // and re-homing is exactly what ADR-0016 §9 asks for.
         let outbound = self.connection_for(uid).await?;
         if outbound
             .send(Message::Binary(frame.clone().into()))
@@ -112,7 +112,7 @@ impl Pool {
                 }
             }
             // Grow only when every existing connection already carries something, and only to the
-            // cap: the pool costs what it uses (ADR-0016 clause 8).
+            // cap: the pool costs what it uses (ADR-0016 §8).
             let live = inner
                 .connections
                 .iter()
@@ -149,7 +149,7 @@ impl Pool {
     /// Opens one upstream connection and starts its reader and writer tasks.
     async fn open(&self, uid: InstanceUid) -> Result<mpsc::Sender<Message>, String> {
         // This Gateway's own identity, and no `Authorization`: a downstream peer's is never
-        // forwarded, and nothing is sent in its place (ADR-0016 clause 11, ADR-0026).
+        // forwarded, and nothing is sent in its place (ADR-0016 §11, ADR-0026).
         let mut upstream = crate::transport::connection(&self.config)?;
         upstream.max_message_size = self.limit;
         // An upstream that sends nothing for a heartbeat interval, not even the pong to a ping
@@ -213,7 +213,7 @@ impl Pool {
                     Ok(_) => continue,
                 };
                 match opamp::frame::decode::<ServerToAgent>(&payload, limit) {
-                    // Routing is by `instance_uid` alone (ADR-0016 clause 13): a message for an Agent
+                    // Routing is by `instance_uid` alone (ADR-0016 §13): a message for an Agent
                     // this Gateway has never carried is dropped, never broadcast.
                     Ok(reply) => match InstanceUid::from_wire(&reply.instance_uid) {
                         Some(uid) => registry.deliver(uid, reply).await,
@@ -262,7 +262,7 @@ impl Pool {
         Ok(tx)
     }
 
-    /// Drops an Agent's assignment so the next report re-homes it (ADR-0016 clause 9). Nothing is
+    /// Drops an Agent's assignment so the next report re-homes it (ADR-0016 §9). Nothing is
     /// said upstream on its behalf: it never disconnected.
     fn forget_connection_of(&self, uid: InstanceUid) {
         let mut inner = self.inner.lock().expect("pool lock");
@@ -275,7 +275,7 @@ impl Pool {
 
     /// Releases the places of Agents no downstream connection carries any more, so a peer that
     /// keeps coming back under new `instance_uid`s grows nothing here. Nothing is said upstream on
-    /// their behalf (ADR-0016 clause 10). The registry is asked under the pool's lock, so an Agent
+    /// their behalf (ADR-0016 §10). The registry is asked under the pool's lock, so an Agent
     /// claimed again in between keeps the place its next report is forwarded on.
     pub fn release(&self, uids: impl IntoIterator<Item = InstanceUid>) {
         let mut inner = self.inner.lock().expect("pool lock");

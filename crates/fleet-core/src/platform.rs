@@ -52,7 +52,7 @@ pub fn canonical_arch(raw: &str) -> &str {
 }
 
 /// The canonical `os.type` token for a spelling of it, as a Platform is stored and compared
-/// (ADR-0033 clause 6): trimmed, lower-cased, folded by the alias table.
+/// (ADR-0033 §6): trimmed, lower-cased, folded by the alias table.
 ///
 /// # Errors
 /// Returns an error when the token is empty, longer than 16 characters, or carries anything but
@@ -137,7 +137,7 @@ mod tests {
     }
 
     /// A token is trimmed, lower-cased and folded, and one that cannot be half of a file name is
-    /// refused (ADR-0033 clause 6).
+    /// refused (ADR-0033 §6).
     /// Verifies: ADR-0033
     #[test]
     fn a_token_is_folded_and_held_to_its_shape() {
@@ -168,8 +168,7 @@ mod tests {
 
     /// A Collector release names its 32-bit ARM build `armv7`, an Agent reports `arm`, and the
     /// semantic conventions say `arm32`: all three meet there, so the build is offered to the host
-    /// it runs on. `armv6` keeps its own token (ADR-0033
-    /// clause 6).
+    /// it runs on. `armv6` keeps its own token (ADR-0033 §6).
     /// Verifies: ADR-0033
     #[test]
     fn a_32_bit_arm_build_is_spelled_arm32() {

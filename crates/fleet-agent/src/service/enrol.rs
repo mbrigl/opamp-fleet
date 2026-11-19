@@ -1,4 +1,4 @@
-//! The questionnaire's enrolment (ADR-0027 clause 16): a host not yet enrolled is carried to its
+//! The questionnaire's enrolment (ADR-0027 §16): a host not yet enrolled is carried to its
 //! first certificate before its service is registered, with the bootstrap pair where it lies, or
 //! the identity a `bootstrap.p12` opened to, in memory (ADR-0027).
 //!
@@ -47,7 +47,7 @@ pub fn written(state_dir: &Path) -> Vec<PathBuf> {
 /// `config` is the configuration the service will run with, its `state_dir` the service's.
 /// `written` is what this run asked and wrote: the bootstrap identity it enrols with, an endpoint
 /// and trust it answered, which replace the file's, and an endpoint named over a kept file, which
-/// holds the file to it (ADR-0022 clause 28).
+/// holds the file to it (ADR-0022 §28).
 /// `roots` are the data root and the layout root. The CA file and the bootstrap pair are read
 /// once, before anything connects; one in a root or the state directory, which the service's
 /// account owns, is read through that directory, never through a link at its name.
@@ -70,7 +70,7 @@ pub fn run(config: &ClientConfig, written: &Written, roots: &[&Path]) -> Result<
 }
 
 /// Connect with `bootstrap` as the client identity and keep the connection until the Server's
-/// certificate is in the state directory (ADR-0027 clauses 9 and 10).
+/// certificate is in the state directory (ADR-0027 §9 and §10).
 ///
 /// The request's key fingerprint is logged as the request is generated, and printed here for a
 /// request an earlier, interrupted run left in flight — what the operator matches in the
@@ -169,9 +169,9 @@ async fn connect(mut config: ClientConfig, mut shutdown: Shutdown) -> Result<(),
 }
 
 /// `config` as the enrolment connects with it: what the run answered in place of what the file
-/// says (ADR-0022 clause 28),
+/// says (ADR-0022 §28),
 /// and the CA file and the bootstrap pair read once, before anything connects, never again by a
-/// path the account gave (ADR-0022 clause 11). `None` where `written` holds no bootstrap identity,
+/// path the account gave (ADR-0022 §11). `None` where `written` holds no bootstrap identity,
 /// and so nothing to enrol with.
 fn prepare(
     config: &ClientConfig,
@@ -187,7 +187,7 @@ fn prepare(
     }
     holds_to_named(&config, written)?;
     // A run that answered nothing kept the file, and each `[tls]` path in it is the file's word,
-    // which the service's account may have written, not the administrator's (ADR-0022 clause 11).
+    // which the service's account may have written, not the administrator's (ADR-0022 §11).
     let offered = match &written.answered {
         None => Offered::of(&config),
         Some(_) => written.offered.clone(),
@@ -198,7 +198,7 @@ fn prepare(
 
 /// Refuses the enrolment where `--endpoint` named, over a file the install kept, another endpoint
 /// than the file's: such a run answered nothing, and the file stands for the service
-/// (ADR-0022 clause 28).
+/// (ADR-0022 §28).
 ///
 /// # Errors
 /// Returns an error naming both endpoints.
@@ -215,7 +215,7 @@ pub fn holds_to_named(config: &ClientConfig, written: &Written) -> Result<(), St
 
 /// Puts what the run answered in place of what `config` read from the file: the endpoint, and the
 /// CA copy with the certificates written into it, or no CA where none was answered
-/// (ADR-0022 clause 28).
+/// (ADR-0022 §28).
 fn take_answered(config: &mut ClientConfig, answered: &Answered) {
     config.endpoint.clone_from(&answered.endpoint);
     let ca_file = answered.ca.as_ref().map(|(copy, _)| copy.clone());
@@ -235,11 +235,11 @@ fn take_answered(config: &mut ClientConfig, answered: &Answered) {
 
 /// Reads what a privileged enrolment connects with, once, into `config`: the certificates of
 /// `[tls] ca_file`, and the bootstrap identity, which a `bootstrap.p12` already opened to in
-/// memory (ADR-0027 clause 15). The connection then reads none of these files again.
+/// memory (ADR-0027 §15). The connection then reads none of these files again.
 ///
 /// `service install` and `service config` run as root or an Administrator, and these paths come
 /// from answers whose defaults `supervisor.toml` gives, a file the service's account can rewrite
-/// (ADR-0022 clause 11). So each is read as [`fleet_util::nofollow::read_privileged`] reads it: a path
+/// (ADR-0022 §11). So each is read as [`fleet_util::nofollow::read_privileged`] reads it: a path
 /// the questionnaire offered from the file and the answer kept, through no link at its name; any
 /// other as an administrator's path. A file that is no certificate or no key is named.
 fn read_once(
@@ -646,7 +646,7 @@ mod tests {
     }
 
     /// A state directory the account swapped for a link is not read through: a file named in it
-    /// is refused, though the link leads to a plain directory (ADR-0022 clause 12).
+    /// is refused, though the link leads to a plain directory (ADR-0022 §12).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[test]

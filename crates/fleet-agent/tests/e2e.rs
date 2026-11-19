@@ -246,7 +246,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "[attributes]\n",
             "env = \"prod\"\n\n",
             // The set the Server delivers below carries arguments; the operator consents to that
-            // here, where the Server cannot (ADR-0019 clause 35).
+            // here, where the Server cannot (ADR-0019 §35).
             "[supervisors]\n",
             "delivered_args = true\n\n",
             "{otelcol_block}\n",
@@ -320,7 +320,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // The push is held back until each Supervisor's Agent has sent a heartbeat after the rollout.
     // Those heartbeats still name the old hash, so the Server answers them with the offer again,
     // and the same hash reaches each Agent twice: the second is a report, not a second apply
-    // (ADR-0019, clause 56).
+    // (ADR-0019 §56).
     common::save(&state, "fleet", "receivers: {}\n", otelcol_type);
     common::save(&state, "client-yaml", "receivers: {}\n", "supervisor");
     push_held.send_replace(true);
@@ -744,7 +744,7 @@ async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
 /// ADR-0019 over one connection: a released Configuration reaches the unlisted Supervisor and not
 /// the listed one, whose Agent declares neither remote-configuration capability. Switched back on,
 /// the next start declares both, is offered what is released, and the stored offer replaces every
-/// file in `config/`, the operator's included (ADR-0019 clause 52).
+/// file in `config/`, the operator's included (ADR-0019 §52).
 /// Verifies: ADR-0019
 #[tokio::test]
 async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
@@ -855,7 +855,7 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
 /// set that would add a block reaches neither `supervisor.toml` nor the running Supervisors, and
 /// the Client's own Agent declares neither remote-configuration capability and reports no status.
 /// Switched back on, the next start is offered the released set, and it replaces the
-/// `[[supervisor]]` array, the operator's block included (ADR-0019 clause 44).
+/// `[[supervisor]]` array, the operator's block included (ADR-0019 §44).
 /// Verifies: ADR-0019
 #[tokio::test]
 async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {

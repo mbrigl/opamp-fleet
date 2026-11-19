@@ -1,11 +1,11 @@
-//! The account the system service runs as (ADR-0022 clause 1): decided and resolved before
+//! The account the system service runs as (ADR-0022 §1): decided and resolved before
 //! anything is written, and the ownership handover after the layout exists.
 //!
 //! `service install --run-as <account>` names the account; without the flag a re-registration
 //! keeps the account its registration names, and a first registration runs as root (Linux, macOS)
 //! or the service's own virtual account `NT SERVICE\<service>` (Windows, ADR-0022). The
 //! installation's files — the configuration, the state directory, and the executable layout,
-//! across both roots (ADR-0021 clause 12) — belong to that account afterwards. *What* the service manager is told is [`manager`](super::manager)'s and
+//! across both roots (ADR-0021 §12) — belong to that account afterwards. *What* the service manager is told is [`manager`](super::manager)'s and
 //! [`windows_config`](super::windows_config)'s business.
 //!
 //! **The decision and the resolution come first** because an install that cannot succeed fails
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use super::manager::Registration;
 use super::ServiceLevel;
 
-/// Where the account a registration runs under came from (ADR-0022 clause 1).
+/// Where the account a registration runs under came from (ADR-0022 §1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     /// `--run-as`.
@@ -71,7 +71,7 @@ pub struct Decision {
     pub source: Source,
 }
 
-/// Decide the account of a `service install` (ADR-0022 clause 1) and resolve it, before anything is
+/// Decide the account of a `service install` (ADR-0022 §1) and resolve it, before anything is
 /// written: `--run-as`, else the account `registration` names, else — a registration that names
 /// none, on a data root a non-root account owns — that owner, else root.
 ///
@@ -112,11 +112,11 @@ pub fn decide(
     }
 }
 
-/// The order on Windows (ADR-0022 clause 1): `--run-as`, else the logon account the SCM holds for
+/// The order on Windows (ADR-0022 §1): `--run-as`, else the logon account the SCM holds for
 /// the service, `LocalSystem` included — the SCM names an empty account for it, so a registration
 /// that names none is `LocalSystem` — else, on a first registration, the service's own virtual
 /// account `NT SERVICE\<service>`. A re-registration — an upgrade of the MSI among them — keeps the
-/// account, and with it what the process account needs of it (ADR-0022 clause 16).
+/// account, and with it what the process account needs of it (ADR-0022 §16).
 #[cfg(any(not(unix), test))]
 fn choose_on_windows(
     flag: Option<&str>,
@@ -150,7 +150,7 @@ fn is_local_system(account: &str) -> bool {
 }
 
 /// The warning an install gives where the Client runs as `LocalSystem`, named or kept
-/// (ADR-0022 clause 1): every Managed Process it starts itself holds `LocalSystem` too. `None` for
+/// (ADR-0022 §1): every Managed Process it starts itself holds `LocalSystem` too. `None` for
 /// any other account, and on Linux and macOS.
 #[must_use]
 pub fn local_system_warning(account: &str, service: &str) -> Option<String> {
@@ -166,7 +166,7 @@ pub fn local_system_warning(account: &str, service: &str) -> Option<String> {
     None
 }
 
-/// The order of ADR-0022 clause 1, on what was found. `owner` names the data root's owner when it
+/// The order of ADR-0022 §1, on what was found. `owner` names the data root's owner when it
 /// is not root, and is asked only for a registration that names no account.
 #[cfg(unix)]
 fn choose(
@@ -385,7 +385,7 @@ pub struct RunAs {
 
 impl RunAs {
     /// Validate `account` against the platform's rules and resolve what the handover needs.
-    /// `service` is the service's name, which is the product's (ADR-0022 clause 17) — on Windows the
+    /// `service` is the service's name, which is the product's (ADR-0022 §17) — on Windows the
     /// one virtual account that may be named is the service's own. `source` and `data_root` go into
     /// the refusal of an account that does not exist.
     ///
@@ -447,7 +447,7 @@ impl RunAs {
     /// failure here), and a path inside one handed over before it in the same call, which that
     /// walk covered without following a link. The handover is idempotent.
     ///
-    /// Where `process` names a process account, its data is left alone (ADR-0022 clause 1): an
+    /// Where `process` names a process account, its data is left alone (ADR-0022 §1): an
     /// entry it owns is skipped with everything beneath it, and an entry in its primary group
     /// keeps that group, a directory its mode too, so a re-registration takes from no Managed
     /// Process what it wrote or reads. Without one, everything is re-owned, group included.
@@ -500,7 +500,7 @@ impl RunAs {
 
     /// On Windows a grant on every entry, each set through its own handle: it never enters a link
     /// or a junction, which is granted as itself, and leaves what the process account owns, with
-    /// everything beneath it, as it is (ADR-0022 clause 1).
+    /// everything beneath it, as it is (ADR-0022 §1).
     #[cfg(windows)]
     fn own(
         &self,
@@ -511,7 +511,7 @@ impl RunAs {
         use crate::win32::files::{grant_tree, Access, Entry, Passed};
         let sid = &self.sid;
         // `LocalSystem` is granted nothing: it keeps full control of every root
-        // (ADR-0022 clause 1).
+        // (ADR-0022 §1).
         if sid.as_str() == crate::win32::LOCAL_SYSTEM {
             return Ok(());
         }
@@ -553,7 +553,7 @@ impl RunAs {
 /// The ACEs the hand-over grants the Client's account `sid` on Windows, for a directory and for a
 /// file: modify, inherited by what a directory holds, and where a process account is registered
 /// `WRITE_DAC` beside it — the Client grants that account its share of what the install laid out
-/// (ADR-0022 clause 21), on directories the install, not the Client, made — and never `WRITE_OWNER`.
+/// (ADR-0022 §21), on directories the install, not the Client, made — and never `WRITE_OWNER`.
 #[cfg(any(windows, test))]
 fn handover_aces(sid: &str, process_account: bool) -> [Vec<String>; 2] {
     use crate::win32::acl::{allow, MODIFY, WRITE_DAC};
@@ -591,7 +591,7 @@ fn id(account: &str, flag: &str) -> Result<u32, Option<String>> {
         .map_err(|e| Some(format!("cannot read what id(1) said: {e}")))
 }
 
-/// The refusal of an account that does not exist (ADR-0022 clause 1): it names the account and,
+/// The refusal of an account that does not exist (ADR-0022 §1): it names the account and,
 /// for a kept one, the file it came from, shows the line that creates it, and names the flag that
 /// names another.
 #[cfg(unix)]
@@ -631,10 +631,10 @@ fn missing_account(
 /// What the hand-over left as it was, to be named in a warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Skipped {
-    /// A regular file with a second hard link (ADR-0022 clause 1).
+    /// A regular file with a second hard link (ADR-0022 §1).
     HardLinked(PathBuf),
     /// One of the paths handed over, which the process account owns: left to it with everything
-    /// beneath it (ADR-0022 clause 1).
+    /// beneath it (ADR-0022 §1).
     ProcessAccounts(PathBuf),
     /// An entry that could not be opened to be handed over (Windows).
     Unreadable(PathBuf),
@@ -662,7 +662,7 @@ impl Skipped {
     }
 }
 
-/// The account every Managed Process runs under, through the second service (ADR-0022 clause 16):
+/// The account every Managed Process runs under, through the second service (ADR-0022 §16):
 /// decided and checked before anything is written, like the Client's own.
 #[derive(Debug, Clone)]
 pub struct ProcessAccount {
@@ -670,11 +670,11 @@ pub struct ProcessAccount {
     #[cfg(unix)]
     uid: u32,
     /// The primary group: what the Client shares with the Managed Processes belongs to it
-    /// (ADR-0022 clause 21).
+    /// (ADR-0022 §21).
     #[cfg(unix)]
     gid: u32,
     /// Its SID, which the Client accepts as the owner of the second service's pipe, and which the
-    /// Client's shares are granted to (ADR-0022 clauses 19 and 21).
+    /// Client's shares are granted to (ADR-0022 §19 and §21).
     #[cfg(windows)]
     sid: crate::win32::Sid,
     /// The SID of the Client's account, the one client the second service serves.
@@ -715,7 +715,7 @@ impl ProcessAccount {
     /// Grants the account read and execute on the layout's `versions` directory and what it
     /// holds, and on nothing else of the layout: the second service runs
     /// `current\supervisor.exe` from it, and a root the install took over or cut off grants it
-    /// nothing (ADR-0022 clause 17). A version the self-update stages there later inherits the
+    /// nothing (ADR-0022 §17). A version the self-update stages there later inherits the
     /// grant. On Unix the layout is world-readable, as a program's directory is.
     ///
     /// # Errors
@@ -754,7 +754,7 @@ impl ProcessAccount {
     }
 }
 
-/// What the checks of ADR-0022 clause 16 read of an account, as `id(1)` answers for it.
+/// What the checks of ADR-0022 §16 read of an account, as `id(1)` answers for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ids {
     pub uid: u32,
@@ -772,7 +772,7 @@ pub struct Ids {
     pub primary_of: Vec<(String, u32)>,
 }
 
-/// Decide the process account of a `service install` (ADR-0022 clause 16) and check it against the
+/// Decide the process account of a `service install` (ADR-0022 §16) and check it against the
 /// Client's account `client`, before anything is written: none where `dropped`
 /// (`--no-process-account`), else `--process-account`, else the account `registration` — the
 /// second service's unit — names, else none, and no second service. `supported` says whether this
@@ -843,7 +843,7 @@ pub fn decide_process_account(
     #[cfg(windows)]
     {
         let named = |e: String| refuse_on_windows(&account, kept_from.as_deref(), &e);
-        // A system service on Windows always names its account (ADR-0022 clause 1); a user
+        // A system service on Windows always names its account (ADR-0022 §1); a user
         // service names none.
         let Some(client) = client else {
             return Err(unsupported());
@@ -877,7 +877,7 @@ fn windows_sid(account: &str) -> Result<crate::win32::Sid, String> {
 }
 
 /// The SID of the account `former` a registration names, where what it was granted is to be
-/// withdrawn (ADR-0022 clauses 16 and 21): none where there is no former account, where it is named
+/// withdrawn (ADR-0022 §16 and §21): none where there is no former account, where it is named
 /// as one of `current` — the accounts the registration names now, each with its SID — or resolves
 /// to one of their SIDs, or where it is `LocalSystem`, which keeps full control of every root
 /// anyway. An account named as before is not looked up again.
@@ -914,7 +914,7 @@ pub fn former_sid(
 
 /// Withdraws from the account of SID `former` — a process account dropped or replaced, or a
 /// Client's account replaced — what it was granted in `roots` and what it owns there, on Windows
-/// (ADR-0022 clauses 1, 16 and 21): every ACE that allows it, explicit or inherited, on every entry,
+/// (ADR-0022 §1, §16 and §21): every ACE that allows it, explicit or inherited, on every entry,
 /// and what it owns given to the Administrators, as Unix withdraws it by a change of owner. Nothing
 /// where `former` is `LocalSystem`, which keeps full control of every root anyway. A root, or a
 /// root within one walked already, is walked once, never through a link and never into one.
@@ -974,7 +974,7 @@ fn refuse_on_windows(account: &str, kept_from: Option<&Path>, reason: &str) -> S
     format!("{named} is refused: {reason}.{drop} {NOTHING}")
 }
 
-/// The checks of ADR-0022 clause 16 on Windows: the process account `account`, of SID `sid`, is one
+/// The checks of ADR-0022 §16 on Windows: the process account `account`, of SID `sid`, is one
 /// of the passwordless forms — the second service `agents`'s own virtual account, a gMSA,
 /// `LocalService` or `NetworkService` — never `LocalSystem`, and never the Client's account
 /// `client`, of SID `client_sid`, which itself is not `LocalSystem`.
@@ -1013,7 +1013,7 @@ pub(crate) fn check_windows_process_account(
     windows_account_form(account, agents)
 }
 
-/// The order of ADR-0022 clause 16, on what was found: the flag, else the account the second
+/// The order of ADR-0022 §16, on what was found: the flag, else the account the second
 /// service's unit names, with that unit, else none.
 fn choose_process_account(
     flag: Option<&str>,
@@ -1039,10 +1039,10 @@ fn choose_process_account(
     }
 }
 
-/// How a refusal that a kept process account causes names the way to drop it (ADR-0022 clause 16).
+/// How a refusal that a kept process account causes names the way to drop it (ADR-0022 §16).
 const DROP: &str = "--no-process-account, and the Client starts its Managed Processes itself.";
 
-/// The checks of ADR-0022 clause 16 on the process account `account` — `found` as `id(1)` answers
+/// The checks of ADR-0022 §16 on the process account `account` — `found` as `id(1)` answers
 /// for it, `None` where it does not exist — against the Client's account `client_name` with
 /// `client`. `kept_from` is the unit a kept account came from.
 ///
@@ -1058,8 +1058,8 @@ pub fn check_process_account(
     check_process_account_on(Host::THIS, account, found, client_name, client, kept_from)
 }
 
-/// The tools an operator changes accounts and groups with, which a refusal names (ADR-0022
-/// clause 16): the shadow utilities on Linux, the directory service's on macOS. The binary runs
+/// The tools an operator changes accounts and groups with, which a refusal names (ADR-0022 §16):
+/// the shadow utilities on Linux, the directory service's on macOS. The binary runs
 /// none of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Host {
@@ -1193,7 +1193,7 @@ fn refuse_process_account(
         ));
     }
     // What the process account's primary group may read is what the Managed Processes may read
-    // (ADR-0022 clause 21): never root's group, and never a group that reaches the Client's files.
+    // (ADR-0022 §21): never root's group, and never a group that reaches the Client's files.
     if found.gid == 0 {
         return Err(format!(
             "{named} has the primary group {} (gid 0), and a process account's group is never \
@@ -1308,7 +1308,7 @@ fn id_text(account: &str, flag: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// The handover walk on Unix: descriptors, never paths below the top (ADR-0022 clauses 1 and 11 to
+/// The handover walk on Unix: descriptors, never paths below the top (ADR-0022 §1 and §11 to
 /// 15).
 #[cfg(unix)]
 mod walk {
@@ -1337,7 +1337,7 @@ mod walk {
         .or(Flags::O_NOCTTY)
         .or(Flags::O_CLOEXEC);
 
-    /// What the walk leaves to the process account (ADR-0022 clause 1): an entry `uid` owns is
+    /// What the walk leaves to the process account (ADR-0022 §1): an entry `uid` owns is
     /// not re-owned and not entered, and an entry in the group `gid` keeps it.
     #[derive(Debug, Clone, Copy)]
     pub(super) struct Kept {
@@ -1455,7 +1455,7 @@ mod walk {
         /// handle. Its mode stays as it was: macOS clears a directory's set-group-ID bit on a
         /// change of owner by anyone but root, even one that changes nothing, so a mode the change
         /// took is set again — the bit of a data directory of the process account's group
-        /// (ADR-0022 clause 21) among it.
+        /// (ADR-0022 §21) among it.
         fn directory(&mut self, handle: OwnedFd, gid: u32, path: &Path) -> io::Result<()> {
             // The path-only handle cannot list entries; `.` through it is that same directory.
             #[cfg(target_os = "linux")]
@@ -1480,7 +1480,7 @@ mod walk {
 }
 
 /// Give each of `paths` the owner of `like`, the configuration of an installed Client: what
-/// `service config` creates belongs to the account the service runs as (ADR-0022 clause 1), not
+/// `service config` creates belongs to the account the service runs as (ADR-0022 §1), not
 /// to the administrator who ran it. A missing path is skipped.
 ///
 /// Each path is re-owned as what it is and nothing is walked: the state directory belongs to that
@@ -1488,8 +1488,8 @@ mod walk {
 /// exactly the files it wrote. Nor is a link followed on the way (ADR-0022): each path's
 /// directory is opened without following a link at its name, and the entry is re-owned through a
 /// handle on it, a link as a link. The data root the administrator named, `data_root`, and the
-/// configuration's own directory are the two directories reached as their paths say (ADR-0022
-/// clause 13); every other is one the account could have swapped. A regular file with a second hard
+/// configuration's own directory are the two directories reached as their paths say (ADR-0022 §13);
+/// every other is one the account could have swapped. A regular file with a second hard
 /// link is skipped, as the handover skips one: another name for it may stand anywhere.
 ///
 /// Returns the files skipped for a second hard link.
@@ -1547,7 +1547,7 @@ pub fn match_owner(like: &Path, data_root: &Path, paths: &[&Path]) -> Result<Vec
 
 /// The passwordless Windows account forms — the only ones `--run-as` accepts, because a password
 /// parameter must not exist (ADR-0022: it would stand in the process list and the installer log).
-/// `LocalSystem` is one of them, named as an operator's choice (ADR-0022 clause 1).
+/// `LocalSystem` is one of them, named as an operator's choice (ADR-0022 §1).
 ///
 /// Compiled wherever it is used — the Windows install, and the tests of any platform: the rule is
 /// pure string logic, and testing it must not need a Windows host.
@@ -1591,8 +1591,8 @@ fn windows_account_form(account: &str, service: &str) -> Result<(), String> {
 }
 
 /// The warning an install gives where the process account's rights are granted or withdrawn and
-/// the Supervisors' root lies outside the roots it acts on (ADR-0022 clause 21): that root is the
-/// operator's (ADR-0021 clause 16), left as it is. `None` where it is beneath them, or where no
+/// the Supervisors' root lies outside the roots it acts on (ADR-0022 §21): that root is the
+/// operator's (ADR-0021 §16), left as it is. `None` where it is beneath them, or where no
 /// process account is named and none was.
 #[must_use]
 pub fn supervisors_root_left(root: &Path, ours: bool, process_account: bool) -> Option<String> {
@@ -1611,7 +1611,7 @@ mod tests {
     use super::*;
 
     /// A Supervisors' root outside the install's roots is named in a warning wherever a process
-    /// account's rights are granted or withdrawn, and only there (ADR-0022 clause 21).
+    /// account's rights are granted or withdrawn, and only there (ADR-0022 §21).
     /// Verifies: ADR-0022
     #[test]
     fn a_supervisors_root_outside_the_roots_is_named_where_a_process_account_is_involved() {
@@ -1625,7 +1625,7 @@ mod tests {
     /// On Windows a re-registration keeps the logon account the SCM holds, as a unit's is kept,
     /// unless `--run-as` names another — `LocalSystem` included, which the SCM may name as no
     /// account at all — and a first registration runs as the service's own virtual account
-    /// (ADR-0022 clauses 1 and 16).
+    /// (ADR-0022 §1 and §16).
     /// Verifies: ADR-0022
     #[test]
     fn on_windows_a_reregistration_keeps_the_scms_logon_account() {
@@ -1665,7 +1665,7 @@ mod tests {
     }
 
     /// On Windows a first registration — no SCM entry, no `--run-as` — runs as the service's own
-    /// virtual account, not as `LocalSystem` (ADR-0022 clause 1).
+    /// virtual account, not as `LocalSystem` (ADR-0022 §1).
     /// Verifies: ADR-0022
     #[test]
     fn on_windows_a_first_registration_runs_as_the_services_virtual_account() {
@@ -1678,7 +1678,7 @@ mod tests {
 
     /// `LocalSystem` is a form an operator names, and the install warns where the Client runs as
     /// it, named or kept, and names the way to the virtual account; any other account draws no
-    /// warning (ADR-0022 clause 1).
+    /// warning (ADR-0022 §1).
     /// Verifies: ADR-0022
     #[test]
     fn local_system_is_named_and_warned_about() {
@@ -1705,7 +1705,7 @@ mod tests {
 
     /// On Windows the hand-over enters no junction or symlink a Managed Process placed in its data
     /// directory, with a process account or without, and leaves what the process account owns as
-    /// it is, with everything beneath it (ADR-0022 clause 1). This test's own account stands in
+    /// it is, with everything beneath it (ADR-0022 §1). This test's own account stands in
     /// for the process account, `LocalService` for the Client's.
     /// Verifies: ADR-0022
     #[cfg(windows)]
@@ -1851,7 +1851,7 @@ mod tests {
 
     /// On Windows what a former account was granted is withdrawn from it, and what it owns given
     /// to the Administrators: no ACE allows it anything anywhere in the tree — not on what was
-    /// created after the grant, which holds a copy — and it owns nothing (ADR-0022 clauses 16 and 21). `LocalService` stands in for the former process account; the test runs elevated, as an
+    /// created after the grant, which holds a copy — and it owns nothing (ADR-0022 §16 and §21). `LocalService` stands in for the former process account; the test runs elevated, as an
     /// install does.
     /// Verifies: ADR-0022
     #[cfg(windows)]
@@ -1940,7 +1940,7 @@ mod tests {
     }
 
     /// On Windows a former account that cannot be resolved fails the install before it has changed
-    /// anything, rather than leaving what it was granted granted (ADR-0022 clause 16).
+    /// anything, rather than leaving what it was granted granted (ADR-0022 §16).
     /// Verifies: ADR-0022
     #[cfg(windows)]
     #[test]
@@ -1952,7 +1952,7 @@ mod tests {
 
     /// On Windows the hand-over grants the Client modify, and where a process account is
     /// registered `WRITE_DAC` beside it, so that the Client can grant that account its share
-    /// (ADR-0022 clause 21) of directories the install made — never the owner's right.
+    /// (ADR-0022 §21) of directories the install made — never the owner's right.
     /// Verifies: ADR-0022
     #[test]
     fn on_windows_the_handover_lets_the_client_share_with_the_process_account() {
@@ -1980,7 +1980,7 @@ mod tests {
 
     /// On Windows the process account is one of the passwordless forms — the second service's own
     /// virtual account, a gMSA, `LocalService` or `NetworkService` — never `LocalSystem` and never
-    /// the Client's account, and the Client does not run as `LocalSystem` (ADR-0022 clause 16).
+    /// the Client's account, and the Client does not run as `LocalSystem` (ADR-0022 §16).
     /// Verifies: ADR-0022
     #[test]
     fn on_windows_the_process_account_is_a_passwordless_account_of_its_own() {
@@ -2510,8 +2510,8 @@ mod tests {
         }
     }
 
-    /// The Client reaches what the process account may read through its primary group (ADR-0022
-    /// clause 21): an account whose group the Client's account is not in is refused, with the line
+    /// The Client reaches what the process account may read through its primary group (ADR-0022 §21):
+    /// an account whose group the Client's account is not in is refused, with the line
     /// that adds it.
     /// Verifies: ADR-0022
     #[test]
@@ -2539,7 +2539,7 @@ mod tests {
 
     /// `--no-process-account` drops a kept process account; a refusal that a kept one causes —
     /// here `--run-as root` beside a registered second service — names that flag, and one an
-    /// install named does not (ADR-0022 clause 16).
+    /// install named does not (ADR-0022 §16).
     /// Verifies: ADR-0022
     #[test]
     fn a_kept_process_account_can_be_dropped_and_its_refusals_say_so() {
@@ -2592,7 +2592,7 @@ mod tests {
     }
 
     /// The process account's primary group is neither root's nor the Client's own, and the
-    /// account is not in the Client's primary group (ADR-0022 clause 21): what that group may read
+    /// account is not in the Client's primary group (ADR-0022 §21): what that group may read
     /// is what every Managed Process may.
     /// Verifies: ADR-0022
     #[test]
@@ -2639,7 +2639,7 @@ mod tests {
         );
     }
 
-    /// The process account's primary group is its own (ADR-0022 clause 21): a member beside the
+    /// The process account's primary group is its own (ADR-0022 §21): a member beside the
     /// Client's account, or another account whose primary group it is, would read what every
     /// Managed Process reads, and is refused with the way out. The account itself — a member of
     /// its own group (`usermod -aG`), or another name for its uid — is no other account.
@@ -2823,7 +2823,7 @@ mod tests {
     }
 
     /// A tree as a Supervisor's directory stands where a process account is registered: the
-    /// directories ADR-0022 clause 21 gives the process account's group — the state directory
+    /// directories ADR-0022 §21 gives the process account's group — the state directory
     /// passed through, a data directory written — and a configuration entry, all in `group`, beside
     /// a record of the Client's left in the group it was created with. Returns the entries in
     /// `group` with their modes, and the record.
@@ -2853,7 +2853,7 @@ mod tests {
     }
 
     /// Where a process account is registered, the hand-over leaves its group where
-    /// ADR-0022 clause 21 put it: a directory in the process account's group keeps that group and
+    /// ADR-0022 §21 put it: a directory in the process account's group keeps that group and
     /// its mode, and so does an entry in it, while the rest is handed over as before. A
     /// re-registration — every package upgrade — takes from no Managed Process what it reads or
     /// writes. The test is not root, and macOS, unlike Linux, clears a directory's set-group-ID bit

@@ -45,7 +45,7 @@ pub struct ClientConfig {
     /// Managed Processes' programs somewhere `state_dir` cannot go — off a `noexec` mount, or
     /// onto a volume sized for a few hundred megabytes of agent rather than for state.
     pub supervisor_dir: Option<PathBuf>,
-    /// Operator-defined attributes (ADR-0018 clause 10), reported as non-identifying attributes of
+    /// Operator-defined attributes (ADR-0018 §10), reported as non-identifying attributes of
     /// **every** Agent this Client presents — machine-level tags like `env = "prod"` that
     /// Selectors can match. Attributes the code reports win over configured ones; a configured one
     /// stands against whatever a Managed Process reports. A key in the `supervisor.` namespace,
@@ -59,7 +59,7 @@ pub struct ClientConfig {
     /// Optional TLS trust override for `wss://` / `https://` endpoints.
     pub tls: Option<TlsConfig>,
     /// An `[auth]` section a file written for an earlier version still holds. The Client sends
-    /// no credential (ADR-0026 clause 3): the section is read only so that it does not fail the
+    /// no credential (ADR-0026 §3): the section is read only so that it does not fail the
     /// load — whatever keys it has — and nothing in it is kept. Its presence is what
     /// [`leftover_auth_notice`](Self::leftover_auth_notice) reports, once, at startup.
     #[serde(default, rename = "auth")]
@@ -106,17 +106,17 @@ pub struct ClientConfig {
     #[serde(skip)]
     pub state_dir_as_written: PathBuf,
     /// The bootstrap identity a `bootstrap.p12` opened to, held in memory for the enrolment and
-    /// never written to disk (ADR-0027 clause 15). Presented while the Client holds no issued
+    /// never written to disk (ADR-0027 §15). Presented while the Client holds no issued
     /// certificate; set by the install, never by the file.
     #[serde(skip)]
     pub bootstrap_identity: Option<fleet_util::identity::BootstrapIdentity>,
     /// The certificates of `[tls] ca_file`, read once by a privileged enrolment and held in memory
-    /// (ADR-0022 clause 11): while set, they are the trust, and the file is not read again. Set by
+    /// (ADR-0022 §11): while set, they are the trust, and the file is not read again. Set by
     /// the install, never by the file.
     #[serde(skip)]
     pub ca_pem: Option<Vec<u8>>,
-    /// The process account's primary group, where a process account is registered (ADR-0022
-    /// clause 21): what the Client shares with the Managed Processes belongs to it. Set by the run
+    /// The process account's primary group, where a process account is registered (ADR-0022 §21):
+    /// what the Client shares with the Managed Processes belongs to it. Set by the run
     /// from the `--process-uid` its registration names, never by the file.
     #[serde(skip)]
     pub process_account_group: Option<crate::supervisor::ports::ProcessAccountGroup>,
@@ -247,7 +247,7 @@ pub struct Program {
     pub path: PathBuf,
 }
 
-/// Resolves the program path of a `[[supervisor]]` block (ADR-0022 clause 24, as amended by
+/// Resolves the program path of a `[[supervisor]]` block (ADR-0022 §24, as amended by
 /// ADR-0019).
 ///
 /// `key` is the block's own name for it (`binary`, `command`) so the error names what the operator
@@ -307,7 +307,7 @@ pub fn resolve_program(
 /// A name validated against the intersection of the systemd-unit, launchd-label, Windows
 /// service-name, and directory-name grammars (ADR-0021).
 ///
-/// It names no instance, since there is no instance flag (ADR-0021 clause 10): it governs
+/// It names no instance, since there is no instance flag (ADR-0021 §10): it governs
 /// `[[supervisor]]` block names, and `build.rs` holds a second copy of the same rules for
 /// `PRODUCT_NAME` — which cannot borrow this one, because a build script cannot depend on the crate
 /// it builds.
@@ -364,7 +364,7 @@ pub fn parse_instance_name(raw: &str) -> Result<InstanceName, String> {
 /// How the directory of a removed Supervisor is named while it is purged: beneath the Supervisors'
 /// root, by a name no Supervisor can carry — it starts with a dot — so that a Supervisor added
 /// again under the same name gets a fresh directory, whatever is still being removed from the old
-/// one (ADR-0034 clause 13).
+/// one (ADR-0034 §13).
 pub(crate) const TOMBSTONE: &str = ".purge-";
 
 /// How many digits a tombstone's nonce has at least: the nanoseconds since the Unix epoch, 16
@@ -415,7 +415,7 @@ impl TryFrom<toml::Table> for SupervisorBlock {
         let stop_timeout_secs = take_secs(&mut table, &name, "stop_timeout_secs")?;
         let apply_grace_secs = take_secs(&mut table, &name, "apply_grace_secs")?;
         let retain_previous_secs = take_secs(&mut table, &name, "retain_previous_secs")?;
-        // Not a supervisor key (ADR-0019 clause 13), and refused by name rather than left to the
+        // Not a supervisor key (ADR-0019 §13), and refused by name rather than left to the
         // plugin's strict parse: a block carrying it expects a Client that takes it, and what
         // answers it is not another key but a different place entirely.
         if table.contains_key("attributes") {
@@ -533,7 +533,7 @@ fn take_integer(table: &mut toml::Table, key: &str) -> Result<Option<i64>, Strin
 
 /// Keys whose values are secrets: `[packages]`'s `archive_key`, and the `bearer_token` and
 /// `password` a leftover `[auth]` section may still hold — the Client ignores the section
-/// (ADR-0026 clause 3), but the file's text is reported as it stands, so its values stay masked.
+/// (ADR-0026 §3), but the file's text is reported as it stands, so its values stay masked.
 /// Paths and public keys are not on the list — a path locates a secret, it is not one, and the
 /// `verification_key` is the *public* half of the signing pair.
 pub(crate) const SECRET_KEYS: &[&str] = &["bearer_token", "password", "archive_key"];
@@ -582,7 +582,7 @@ fn secret<'de, D: serde::Deserializer<'de>>(
 }
 
 /// `[attributes]`, each value a string, with every key of the `supervisor.` namespace refused by
-/// name (ADR-0018 clause 10). The namespace is refused however
+/// name (ADR-0018 §10). The namespace is refused however
 /// TOML spells the key: quoted (`"supervisor.kind.x"`), dotted (`supervisor.kind.x`), or as the
 /// sub-table `[attributes.supervisor]`. The last two reach here as a table under `supervisor`,
 /// which a map of strings would refuse only as a type error that names neither the key nor the
@@ -645,7 +645,7 @@ fn default_self_update() -> bool {
     true
 }
 
-/// The file name ADR-0021 clause 8 looks for beside a missing `supervisor.toml`, and the one reason
+/// The file name ADR-0021 §8 looks for beside a missing `supervisor.toml`, and the one reason
 /// a missing file is an error rather than the defaults.
 pub const LEGACY_CONFIG_FILE_NAME: &str = "client.toml";
 
@@ -712,12 +712,12 @@ pub struct SupervisorsConfig {
     #[serde(default = "default_apply_grace_secs")]
     pub apply_grace_secs: u64,
     /// The environment variables a Server-delivered block may set, each name exact or ending in
-    /// `*` as a prefix (ADR-0019 clause 35). Empty — the default — lets a delivered block keep only
+    /// `*` as a prefix (ADR-0019 §35). Empty — the default — lets a delivered block keep only
     /// the environment its running block already has.
     #[serde(default)]
     pub delivered_env: Vec<String>,
     /// Whether a Server-delivered block may state `args` and `version_args` its running block does
-    /// not already have (ADR-0019 clause 35).
+    /// not already have (ADR-0019 §35).
     #[serde(default)]
     pub delivered_args: bool,
     /// The Supervisors whose Agents neither declare nor act on remote configuration (ADR-0019),
@@ -727,7 +727,7 @@ pub struct SupervisorsConfig {
     #[serde(default)]
     pub remote_config_disabled: Vec<String>,
     /// Whether the Server manages the set of `[[supervisor]]` blocks through the Client's own
-    /// Agent (ADR-0019 clauses 26 and 38). `false` builds that Agent without remote configuration,
+    /// Agent (ADR-0019 §26 and §38). `false` builds that Agent without remote configuration,
     /// and the blocks in this file are the operator's alone. Read from this file only, like the
     /// rest of the section.
     #[serde(default = "default_server_manages_set")]
@@ -798,7 +798,7 @@ pub struct GatewayConfig {
     #[serde(default = "default_max_carried_agents")]
     pub max_carried_agents: usize,
     /// The most bytes of package artifacts this Gateway holds for the Agents behind it
-    /// (ADR-0033 clause 45), under `<state_dir>/gateway-packages`. An artifact larger than this, or
+    /// (ADR-0033 §45), under `<state_dir>/gateway-packages`. An artifact larger than this, or
     /// than `max_artifact_size_bytes`, is not cached and not delivered through the Gateway. `0` is
     /// refused at load.
     #[serde(default = "default_package_cache_bytes")]
@@ -812,8 +812,8 @@ pub struct GatewayConfig {
     pub tls: Option<GatewayTlsConfig>,
 }
 
-/// The `[gateway.rate_limit]` section (ADR-0017 clause 3): the bucket of each downstream host,
-/// sized as the Server sizes a host's (ADR-0012 clause 22). Both keys have a default, and neither
+/// The `[gateway.rate_limit]` section (ADR-0017 §3): the bucket of each downstream host,
+/// sized as the Server sizes a host's (ADR-0012 §22). Both keys have a default, and neither
 /// is `0`: no value switches the limit off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -862,8 +862,8 @@ pub struct GatewayTlsConfig {
     /// PEM bundle a downstream Agent's client certificate must chain to, required (ADR-0016): a
     /// peer without one fails the handshake. An `Option` only so its absence can be named.
     pub client_ca_file: Option<PathBuf>,
-    /// The public certificate of the Server's `[enrolment] bootstrap_ca_file`, optional (ADR-0016
-    /// clause 18): a peer whose certificate chains to it alone passes the handshake as an enrolling
+    /// The public certificate of the Server's `[enrolment] bootstrap_ca_file`, optional (ADR-0016 §18):
+    /// a peer whose certificate chains to it alone passes the handshake as an enrolling
     /// peer, which may relay one plain-HTTP enrolment request and nothing else.
     #[serde(default)]
     pub bootstrap_ca_file: Option<PathBuf>,
@@ -992,7 +992,7 @@ fn default_max_carried_agents() -> usize {
 }
 
 /// Ten gibibytes: room for a handful of releases of a large Agent across a few Platforms, which is
-/// what one rollout behind a Gateway asks for (ADR-0033 clause 45).
+/// what one rollout behind a Gateway asks for (ADR-0033 §45).
 fn default_package_cache_bytes() -> u64 {
     10 * 1024 * 1024 * 1024
 }
@@ -1073,7 +1073,7 @@ impl ClientConfig {
     pub fn checked(self, path: &Path) -> Result<Self, String> {
         let mut config = self;
         config.check_supervisor_names()?;
-        // A name no block can ever carry would switch nothing off, silently (ADR-0019 clause 46).
+        // A name no block can ever carry would switch nothing off, silently (ADR-0019 §46).
         for name in &config.supervisor_defaults.remote_config_disabled {
             parse_instance_name(name).map_err(|e| {
                 format!(
@@ -1242,7 +1242,7 @@ impl ClientConfig {
             .any(|listed| listed == name)
     }
 
-    /// Whether the Server manages this Client's Supervisor set (ADR-0019 clause 38).
+    /// Whether the Server manages this Client's Supervisor set (ADR-0019 §38).
     #[must_use]
     pub fn server_manages_set(&self) -> bool {
         self.supervisor_defaults.server_manages_set
@@ -1271,7 +1271,7 @@ impl ClientConfig {
         self.attributes.clone()
     }
 
-    /// The one startup notice a leftover `[auth]` section earns (ADR-0026 clause 3), or `None`
+    /// The one startup notice a leftover `[auth]` section earns (ADR-0026 §3), or `None`
     /// when the file has none. The section is ignored and nothing from it is sent; it is not a
     /// reason to refuse the file, since a Client the Server updated must keep connecting.
     #[must_use]
@@ -1527,7 +1527,7 @@ mod tests {
     }
 
     /// `[packages] allowed_sources` fails the load whatever it holds, naming the key as removed:
-    /// ignored, it would be a list an operator believes is in force and is not (ADR-0033 clause 51).
+    /// ignored, it would be a list an operator believes is in force and is not (ADR-0033 §51).
     /// Verifies: ADR-0033
     #[test]
     fn allowed_sources_fails_the_load_naming_the_key_as_removed() {
@@ -2097,7 +2097,7 @@ mod tests {
     }
 
     /// The switch is a list of Supervisor names in `[supervisors]`, empty unless the operator
-    /// writes one (ADR-0019 clause 45).
+    /// writes one (ADR-0019 §45).
     /// Verifies: ADR-0019
     #[test]
     fn remote_config_disabled_defaults_to_empty_and_lists_supervisor_names() {
@@ -2123,8 +2123,7 @@ mod tests {
         assert!(!listed.remote_config_disabled("fluent-bit"));
     }
 
-    /// A value no block can ever carry fails startup, naming the key and the value (ADR-0019
-    /// clause 28).
+    /// A value no block can ever carry fails startup, naming the key and the value (ADR-0019 §28).
     /// Verifies: ADR-0019
     #[test]
     fn a_remote_config_disabled_name_outside_the_instance_name_grammar_fails_startup() {
@@ -2143,7 +2142,7 @@ mod tests {
     }
 
     /// The switch is a boolean in `[supervisors]`, `true` unless the operator writes `false`
-    /// (ADR-0019 clause 38).
+    /// (ADR-0019 §38).
     /// Verifies: ADR-0019
     #[test]
     fn server_manages_set_defaults_to_true_and_reads_false() {
@@ -2388,7 +2387,7 @@ mod tests {
     /// Where `supervisor_dir` is the state directory, no Supervisor takes the name of an entry the
     /// Client keeps there, and the refusal names the Supervisor and the entry; under the default
     /// root the same names are Supervisors like any other. A Supervisor's directory is never the
-    /// state directory or one that holds it (ADR-0022 clauses 21 and 24).
+    /// state directory or one that holds it (ADR-0022 §21 and §24).
     /// Verifies: ADR-0022
     #[test]
     fn a_supervisor_never_takes_a_directory_of_the_clients() {
@@ -2441,7 +2440,7 @@ mod tests {
     }
 
     /// A tombstone name ([`crate::reconfigure::tombstone_name`]) names the Supervisor whose
-    /// directory it holds, and is no name a Supervisor can carry (ADR-0034 clause 13).
+    /// directory it holds, and is no name a Supervisor can carry (ADR-0034 §13).
     /// Verifies: ADR-0019
     #[test]
     fn a_tombstone_names_its_supervisor_and_no_supervisor_carries_one() {
@@ -2469,7 +2468,7 @@ mod tests {
     }
 
     /// Only the nonce a tombstone name is made with marks one: a directory an operator named
-    /// alike is no tombstone, so neither a start nor a purge removes it (ADR-0022 clause 25).
+    /// alike is no tombstone, so neither a start nor a purge removes it (ADR-0022 §25).
     /// Verifies: ADR-0022
     #[test]
     fn a_directory_named_alike_is_no_tombstone() {

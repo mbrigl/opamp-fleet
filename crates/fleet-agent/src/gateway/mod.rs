@@ -72,18 +72,18 @@ struct Forwarding {
     /// The most distinct Agents one downstream connection may carry (ADR-0016): past it a report
     /// for a *new* Agent is dropped, so a single peer cannot grow the routing state without bound.
     max_agents: usize,
-    /// What the Server revoked, which this Gateway refuses (ADR-0016 clause 14).
+    /// What the Server revoked, which this Gateway refuses (ADR-0016 §14).
     revocations: RevocationList,
-    /// Tells a member from an enrolling peer (ADR-0016 clause 11).
+    /// Tells a member from an enrolling peer (ADR-0016 §11).
     members: Members,
-    /// The version of the revocation list the bindings were last held against (ADR-0016
-    /// clause 17), so an unchanged list is not asked about every host again.
+    /// The version of the revocation list the bindings were last held against (ADR-0016 §17),
+    /// so an unchanged list is not asked about every host again.
     list_checked: std::sync::atomic::AtomicU64,
     /// The downstream hosts' buckets, which the download route counts in too (ADR-0017).
     rate: Arc<rate::HostRate>,
 }
 
-/// What tells a downstream member from an **enrolling peer** (ADR-0016 clause 11). Without
+/// What tells a downstream member from an **enrolling peer** (ADR-0016 §11). Without
 /// `bootstrap_ca_file` the handshake trusts the client CA alone, so every peer that passed it is a
 /// member. With it, a member is a peer whose certificate a CA of `client_ca_file` issued directly —
 /// named as its issuer and signed with its key, as the Server tells the two apart — and any other
@@ -110,8 +110,8 @@ impl Members {
 }
 
 /// Why a plain-HTTP report of an enrolling peer is not forwarded, or `None` when it is the one
-/// thing an enrolling peer sends (ADR-0016 clause 24): its identity, its sequence number and
-/// capabilities, and a certificate signing request carrying a bootstrap proof (ADR-0016 clause 20)
+/// thing an enrolling peer sends (ADR-0016 §24): its identity, its sequence number and
+/// capabilities, and a certificate signing request carrying a bootstrap proof (ADR-0016 §20)
 /// — nothing a member reports, no description, health, effective configuration, configuration
 /// status, package statuses, components, connection-settings status, flags, goodbye or custom
 /// message — whose proof embeds, byte for byte, the certificate `presented` the peer presented in
@@ -146,7 +146,7 @@ fn not_an_enrolment(report: &AgentToServer, presented: &[u8]) -> Option<&'static
         return Some("an enrolling peer sends a certificate signing request and nothing else");
     }
     // Read as the Server reads it: one PEM block, nothing around it, and no renewal proof beside
-    // the bootstrap proof (ADR-0016 clause 21).
+    // the bootstrap proof (ADR-0016 §21).
     let encoded = match fleet_core::csr::der(&csr.csr)
         .and_then(|der| fleet_core::csr::proof(&der, fleet_core::csr::Proof::Bootstrap))
     {
@@ -198,7 +198,7 @@ impl Default for Timings {
 
 /// Serves the downstream endpoint until `shutdown` fires.
 ///
-/// Mutual TLS is per hop (ADR-0016 clause 11): the downstream hop serves TLS 1.3 from
+/// Mutual TLS is per hop (ADR-0016 §11): the downstream hop serves TLS 1.3 from
 /// `[gateway.tls]`, and every downstream peer must present a certificate that chains to its
 /// `client_ca_file`, or to its `bootstrap_ca_file` where one is named — the access-control boundary
 /// of the hop. Downstream Agents travel upstream under this Gateway's own member certificate, so
@@ -262,7 +262,7 @@ pub async fn run_on_timed(
     let registry = Arc::new(Registry::new(cache.clone()));
     let revocations = RevocationList::new(timings.revocation_max_age);
     // Its first peers are not refused for want of a list, nor kept waiting for a Server that does
-    // not answer (ADR-0016 clause 14).
+    // not answer (ADR-0016 §14).
     let _ = tokio::time::timeout(
         REVOCATION_FIRST_WAIT,
         revocations::update(&revocations, &config),
@@ -276,7 +276,7 @@ pub async fn run_on_timed(
     ));
     tokio::spawn(write_reports(cache.clone(), shutdown.clone()));
     // The floors, fetched when the Gateway starts and once an hour, and handed down as last
-    // fetched (ADR-0034 clause 16).
+    // fetched (ADR-0034 §16).
     let relayed = floors::Relayed::default();
     tokio::spawn(floors::refresh(
         relayed.clone(),
@@ -306,15 +306,14 @@ pub async fn run_on_timed(
         list_checked: std::sync::atomic::AtomicU64::new(u64::MAX),
         rate,
     });
-    // What the first list names ends now; what a later one names, when it comes (ADR-0016
-    // clause 17).
+    // What the first list names ends now; what a later one names, when it comes (ADR-0016 §17).
     let mut changes = handler.revocations.subscribe();
     changes.mark_unchanged();
     handler.end_certificates(cache::now()).await;
     tokio::spawn(keep_bindings(handler.clone(), changes, shutdown.clone()));
     // The receive and send limits the Baseline requires, enforced per hop; beside the OpAMP
     // endpoint, the download route the Agents behind this Gateway resolve their offers against
-    // (ADR-0016 clause 15), and the floors they hold them to (ADR-0034 clause 16).
+    // (ADR-0016 §15), and the floors they hold them to (ADR-0034 §16).
     let app = opamp::server::router(handler, Settings::new(config.max_message_size_bytes))
         .merge(cache::router(downloads))
         .merge(floors::router(floors));
@@ -344,7 +343,7 @@ pub async fn run_on_timed(
 }
 
 /// Until `shutdown` fires: ends the bindings of hosts whose certificates ended whenever the
-/// revocation list changes and once an hour (ADR-0016 clause 17), and once an hour, while the
+/// revocation list changes and once an hour (ADR-0016 §17), and once an hour, while the
 /// bindings' store cannot be read, says so again (clause 16).
 async fn keep_bindings(
     forwarding: Arc<Forwarding>,
@@ -374,8 +373,8 @@ async fn keep_bindings(
     }
 }
 
-/// Writes the order of the bindings' reports once a minute until `shutdown` fires (ADR-0016
-/// clause 16); the Gateway writes it once more when its endpoint has drained.
+/// Writes the order of the bindings' reports once a minute until `shutdown` fires (ADR-0016 §16);
+/// the Gateway writes it once more when its endpoint has drained.
 async fn write_reports(cache: Arc<cache::PackageCache>, mut shutdown: Shutdown) {
     let every = std::time::Duration::from_secs(60);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
@@ -387,7 +386,7 @@ async fn write_reports(cache: Arc<cache::PackageCache>, mut shutdown: Shutdown) 
     }
 }
 
-/// The material the downstream endpoint serves with (ADR-0016 clause 11), and what tells its members
+/// The material the downstream endpoint serves with (ADR-0016 §11), and what tells its members
 /// from its enrolling peers: a client certificate that chains to `client_ca_file` — or, where
 /// `bootstrap_ca_file` names one, to that bootstrap CA — is **mandatory** in the handshake. A CA in
 /// both files could not be told apart, so it fails startup naming both keys.
@@ -422,7 +421,7 @@ fn server_tls(tls: &GatewayTlsConfig) -> Result<(ServerTls, Members), String> {
     Ok((
         ServerTls {
             // `opamp` takes the key as its own buffer; the copy is made here and the one read is
-            // wiped (ADR-0015 clause 3).
+            // wiped (ADR-0015 §3).
             identity: Identity {
                 cert_pem: crate::tls::certificates_file(&tls.cert_file)?,
                 key_pem: crate::tls::key_file(&tls.key_file)?.to_vec(),
@@ -454,23 +453,22 @@ struct Downstream {
     /// Every Agent this peer turned out to carry, so all of them are released when it goes. A set,
     /// not a list: membership is checked per report, and the cap bounds how large it grows.
     carried: HashSet<InstanceUid>,
-    /// Why the socket was ended from this side, for its close frame (ADR-0016 clause 14).
+    /// Why the socket was ended from this side, for its close frame (ADR-0016 §14).
     ended: Arc<Mutex<Option<&'static str>>>,
     /// The certificate it was admitted with, which every report is judged by again.
     certificate: Vec<u8>,
     /// The host that certificate names, which the offers relayed over it are recorded for
-    /// (ADR-0016 clause 15).
+    /// (ADR-0016 §15).
     host: Option<String>,
     /// The host that certificate speaks as, which the `instance_uid`s it reports for are bound to
-    /// (ADR-0016 clause 15): the one it names, else the one the Server derives for it.
+    /// (ADR-0016 §15): the one it names, else the one the Server derives for it.
     speaker: String,
-    /// Where that certificate ends, which its reports move the host's kept end to (ADR-0016
-    /// clause 16).
+    /// Where that certificate ends, which its reports move the host's kept end to (ADR-0016 §16).
     end: policy::End,
-    /// The certificate chains to the bootstrap CA alone (ADR-0016 clause 11): this peer may relay
+    /// The certificate chains to the bootstrap CA alone (ADR-0016 §11): this peer may relay
     /// one enrolment request and nothing else, and binds nothing.
     enrolling: bool,
-    /// The bucket every message of this connection takes its token from (ADR-0017 clause 1): the
+    /// The bucket every message of this connection takes its token from (ADR-0017 §1): the
     /// host it speaks as, or an enrolling peer's address.
     bucket: rate::Key,
 }
@@ -542,7 +540,7 @@ impl Handler for Forwarding {
     ) -> Result<(Downstream, Option<Replies>), Rejection> {
         // No Agent is carried while the bindings' store cannot be read; an enrolling peer's one
         // plain-HTTP request binds nothing, so the exchange is let through to be judged
-        // (ADR-0016 clause 16).
+        // (ADR-0016 §16).
         if request.transport == Transport::WebSocket && self.registry.cache().unreadable().is_some()
         {
             return Err(Rejection {
@@ -551,7 +549,7 @@ impl Handler for Forwarding {
                 message: cache::STORE_UNREADABLE.to_string(),
             });
         }
-        // The one admission refusal beyond the handshake, and it is the Server's (ADR-0016 clause 14).
+        // The one admission refusal beyond the handshake, and it is the Server's (ADR-0016 §14).
         let certificate = request
             .extensions
             .get::<PeerCertificate>()
@@ -576,7 +574,7 @@ impl Handler for Forwarding {
             }
         }
         // A certificate the revocation list could judge can be read, so this refuses nothing the
-        // handshake and the list admitted; it only gives the binding its host (ADR-0016 clause 15).
+        // handshake and the list admitted; it only gives the binding its host (ADR-0016 §15).
         let (Some(speaker), Some(end)) =
             (cache::speaker_of(&certificate), cache::end_of(&certificate))
         else {
@@ -587,7 +585,7 @@ impl Handler for Forwarding {
             });
         };
         // An `Authorization` the peer sends is ignored, never refused, and nothing is forwarded in
-        // its place (ADR-0016 clause 11).
+        // its place (ADR-0016 §11).
         let peer = request
             .peer
             .map_or_else(|| "unknown".to_string(), |peer| peer.to_string());
@@ -649,7 +647,7 @@ impl Handler for Forwarding {
 
     async fn on_message(&self, downstream: &mut Downstream, report: AgentToServer) -> Reply {
         // Before anything else — before a CSR is read, an `instance_uid` bound, the package cache
-        // touched or anything forwarded — the host's token (ADR-0017 clause 2). Past the limit it
+        // touched or anything forwarded — the host's token (ADR-0017 §2). Past the limit it
         // is answered as the Server answers, and a WebSocket stays open (clause 4).
         if !self.rate.admit(&downstream.bucket) {
             return Reply::Send(rate::unavailable(&report.instance_uid));
@@ -673,8 +671,8 @@ impl Handler for Forwarding {
 
     /// An unreadable report is dropped, never answered: the Gateway invents nothing (ADR-0016). A
     /// plain-HTTP exchange still needs a response, and it says why. It takes the host's token as
-    /// the Server counts one (ADR-0012 clause 24); past the limit it is answered as the Server
-    /// answers it, naming no Agent, and not logged one by one (ADR-0017 clause 4).
+    /// the Server counts one (ADR-0012 §24); past the limit it is answered as the Server
+    /// answers it, naming no Agent, and not logged one by one (ADR-0017 §4).
     fn on_unreadable(&self, downstream: &mut Downstream, error: &Unreadable) -> Reply {
         if !self.rate.admit(&downstream.bucket) {
             return Reply::Send(rate::unavailable(&[]));
@@ -687,7 +685,7 @@ impl Handler for Forwarding {
     }
 
     /// The peer is gone. Its Agents stop being routable here — and nothing is said upstream on
-    /// their behalf, because they said nothing (ADR-0016 clause 10).
+    /// their behalf, because they said nothing (ADR-0016 §10).
     fn on_closed(&self, downstream: Downstream) {
         if let Some(replies) = &downstream.replies {
             let count = downstream.carried.len();
@@ -702,7 +700,7 @@ impl Handler for Forwarding {
 impl Forwarding {
     /// Ends the bindings of every host whose kept certificate end has passed by `now`, or whose
     /// certificate the revocation list held names, with their routes, current offers and places
-    /// upstream, as a binding that makes room goes (ADR-0016 clauses 7 and 17), and
+    /// upstream, as a binding that makes room goes (ADR-0016 §7 and §17), and
     /// writes their removals.
     async fn end_certificates(&self, now: i64) {
         self.end_bindings(now, true).await;
@@ -760,7 +758,7 @@ impl Forwarding {
             return Reply::Nothing;
         }
         // Forwarded only for an `instance_uid` bound to the host that sent it; the binding logs
-        // a refusal (ADR-0016 clause 13).
+        // a refusal (ADR-0016 §13).
         let Some(replies) = &downstream.replies else {
             return Reply::Nothing;
         };
@@ -789,7 +787,7 @@ impl Forwarding {
         Reply::Nothing
     }
 
-    /// An enrolling peer's one report (ADR-0016 clauses 13 and 24): forwarded only when it is an
+    /// An enrolling peer's one report (ADR-0016 §13 and §24): forwarded only when it is an
     /// enrolment request and nothing else, binding nothing, its exchange its route for its one
     /// reply. Any other report is answered `403` and logged.
     async fn forward_enrolment(&self, downstream: &Downstream, report: AgentToServer) -> Reply {
@@ -852,7 +850,7 @@ impl Forwarding {
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         // Forwarded only for an `instance_uid` bound to the host that sent it; the binding logs
-        // a refusal (ADR-0016 clause 13). A binding that made room for it takes its Agent's place
+        // a refusal (ADR-0016 §13). A binding that made room for it takes its Agent's place
         // upstream along: no socket going releases a plain-HTTP Agent's.
         let (exchange, evicted) = self
             .registry
@@ -1056,7 +1054,7 @@ mod tests {
 
     /// An upstream connection on which nothing arrives for one heartbeat interval is ended, and
     /// the Agent it carried is placed anew at its next report, on a connection of its own
-    /// (ADR-0014 clauses 1,
+    /// (ADR-0014 §1,
     /// 4).
     /// Verifies: ADR-0014
     #[tokio::test]
@@ -1100,7 +1098,7 @@ mod tests {
 
     /// An upstream that accepts the TCP connection and never answers the upgrade fails the
     /// forward once one heartbeat interval has passed, rather than holding it
-    /// (ADR-0014 clause 3).
+    /// (ADR-0014 §3).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_upstream_that_never_answers_the_upgrade_fails_the_forward_within_the_bound() {
@@ -1142,7 +1140,7 @@ mod tests {
     /// An upstream reader held up by a downstream Agent that reads its replies slowly, for longer
     /// than an interval, keeps a connection to an upstream that answers: the Gateway's own delay
     /// is not the Server's silence
-    /// (ADR-0014 clause 1).
+    /// (ADR-0014 §1).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_upstream_reader_held_up_by_a_slow_downstream_keeps_a_live_connection() {
@@ -1227,8 +1225,7 @@ mod tests {
 
     /// An upstream connection ended for its silence is closed towards the Server too: its writer,
     /// which may be blocked on a peer that reads nothing, is aborted rather than left holding the
-    /// socket (ADR-0014
-    /// clause 4).
+    /// socket (ADR-0014 §4).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_ended_upstream_connection_is_closed_towards_the_server() {
@@ -1281,7 +1278,7 @@ mod tests {
 
     /// An upstream that answers the pool's pings keeps its connection over several bounds,
     /// though it sends nothing else
-    /// (ADR-0014 clause 1).
+    /// (ADR-0014 §1).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn an_upstream_that_answers_pings_keeps_its_connection() {
@@ -1728,7 +1725,7 @@ mod tests {
             assert!(!forwarding.registry.routes(&uid));
         }
         // A bootstrap proof of the very certificate presented does not pass with a renewal proof
-        // beside it (ADR-0016 clause 21).
+        // beside it (ADR-0016 §21).
         let renewal = format!("{}AAAA", fleet_core::renewal::URI_PREFIX);
         let both = csr_with_uris(&[&bootstrap_uri(&presented), &renewal]);
         let why = refused(

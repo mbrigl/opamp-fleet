@@ -12,7 +12,7 @@ name: Release
 # The artifacts are packed by this project's own `opamp-fleetctl package pack`, so each Client archive
 # is also a valid package artifact for a fleet self-update (ADR-0033, ADR-0020) — the file an operator
 # downloads is the file they hand the Server. The operator tool's archives are not packages of the
-# fleet: they are downloaded, never uploaded (ADR-0036 clause 4).
+# fleet: they are downloaded, never uploaded (ADR-0036 §4).
 #
 # Every published asset is a subject of one build-provenance attestation, made and verified in
 # `publish` before the release exists, and each shipped program has a CycloneDX SBOM per target
@@ -51,9 +51,9 @@ env:
   # one published Set serve every variant build. They live in crates/fleet-agent/Cargo.toml and
   # packaging/windows/supervisor.wxs, not here.
   ARTIFACT: supervisor
-  # The operator tool's program and the stem of its archives (ADR-0036 clause 3).
+  # The operator tool's program and the stem of its archives (ADR-0036 §3).
   OPERATOR_TOOL: opamp-fleetctl
-  # The Server's image, tagged with the exact version and nothing else (ADR-0038 clause 18).
+  # The Server's image, tagged with the exact version and nothing else (ADR-0038 §18).
   IMAGE: ghcr.io/mbrigl/opamp-fleet-server
 
 jobs:
@@ -195,7 +195,7 @@ jobs:
           # operator must type into `?version=` for a self-update to pass its probe.
           echo "full=$full" >> "$GITHUB_OUTPUT"
 
-  # ADR-0038 clause 7: one CycloneDX SBOM per shipped program and target, from the
+  # ADR-0038 §7: one CycloneDX SBOM per shipped program and target, from the
   # lockfile the build uses — the Server's for each architecture of its image.
   # A job of its own: the dependency graph of a target needs no runner of that target, and the tool
   # is installed once. It runs on a dry run too, with the top-level read-only token, no kept
@@ -264,7 +264,7 @@ jobs:
       matrix:
         include:
           # `operator_tool`: this row also builds and publishes `opamp-fleetctl` for its target
-          # (ADR-0036 clause 2). Every row builds it for its runner as the packer.
+          # (ADR-0036 §2). Every row builds it for its runner as the packer.
           - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest, os: linux, arch: amd64, suffix: "", native: true, operator_tool: true }
           - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, os: linux, arch: arm64, suffix: "", native: true, operator_tool: true }
           - { target: aarch64-apple-darwin, runner: macos-latest, os: darwin, arch: arm64, suffix: "", native: true, operator_tool: true }
@@ -291,11 +291,11 @@ jobs:
       # A host build: it runs here, on this runner, to pack the artifacts.
       - name: Build the packer
         run: cargo build --release -p fleet-tools --bin opamp-fleetctl --locked
-      # A target build: the program this row publishes (ADR-0036 clause 2).
+      # A target build: the program this row publishes (ADR-0036 §2).
       - name: Build the operator tool
         if: matrix.operator_tool
         run: cargo build --release -p fleet-tools --bin opamp-fleetctl --target ${{ matrix.target }} --locked
-      # A target build: the Server, which ships in the image and nowhere else (ADR-0038 clause 14).
+      # A target build: the Server, which ships in the image and nowhere else (ADR-0038 §14).
       - name: Build the Server
         if: matrix.os == 'linux'
         run: cargo build --release -p fleet-server --bin server --target ${{ matrix.target }} --locked
@@ -355,7 +355,7 @@ jobs:
           echo "$sha  $name" > "$name.sha256"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           # Every artifact of this row shares these four fields; only the extension differs
-          # (ADR-0038 clause 3).
+          # (ADR-0038 §3).
           echo "STEM=${name%.tar.gz}" >> "$GITHUB_ENV"
 
       # ---- ADR-0036: the operator tool, one archive per target, named like the Client's. ----
@@ -426,16 +426,16 @@ jobs:
           # ride the same silently-degrading path mechanism, so they are asserted the same way.
           grep -q 'ln -sfn' <<<"$scripts"
           # The two halves of ADR-0022's remove/purge distinction, drawn across the two roots by
-          # ADR-0021 clause 12: a removal takes the executable layout under /opt, and only a purge
+          # ADR-0021 §12: a removal takes the executable layout under /opt, and only a purge
           # takes the data root with the identity and the credential in it. Asserting both is what
           # makes a scriptlet that silently became its own file name fail here.
           #
-          # Nothing sweeps `$data_root/versions`: an upgrade is never a migration (ADR-0021 clause 13), and no host was ever installed under that path.
+          # Nothing sweeps `$data_root/versions`: an upgrade is never a migration (ADR-0021 §13), and no host was ever installed under that path.
           #
           # `-F`: these are literals, and a mid-pattern `$` is what regex dialects disagree on.
           grep -qF 'rm -rf "$layout_root"' <<<"$scripts"
           grep -qF 'rm -rf "$data_root"' <<<"$scripts"
-          # ADR-0022 clause 3: the account is created, a first registration names it, and the
+          # ADR-0022 §3: the account is created, a first registration names it, and the
           # package requires what creates it.
           grep -q 'useradd --system' <<<"$scripts"
           grep -q -- '--run-as opamp-fleet' <<<"$scripts"
@@ -495,7 +495,7 @@ jobs:
           # `error` is guarding here.
           if-no-files-found: error
 
-  # ADR-0038 clause 19: the Server's image, built from the two binaries the Linux rows built and
+  # ADR-0038 §19: the Server's image, built from the two binaries the Linux rows built and
   # checked, by the Containerfile, which runs nothing — so neither platform needs emulation. The
   # `amd64` image is checked here, on its own architecture; the `arm64` binary's version was
   # asserted on its native runner, and the image copies it unchanged. A dry run stops after the
@@ -523,8 +523,8 @@ jobs:
           path: image
           merge-multiple: true
       # A builder of its own: the default `docker` driver neither builds for two platforms at once
-      # nor pushes an index by digest. Its BuildKit image is pinned by version and digest (ADR-0038
-      # clause 19), the release `buildx-stable-1` named when it was set; Dependabot does not read an
+      # nor pushes an index by digest. Its BuildKit image is pinned by version and digest (ADR-0038 §19),
+      # the release `buildx-stable-1` named when it was set; Dependabot does not read an
       # image out of a shell step, so a new one arrives by a reviewed commit.
       - name: Build the image
         run: |
@@ -632,7 +632,7 @@ jobs:
     if: needs.version.outputs.publish == 'true'
     needs: [version, build, sbom, image]
     runs-on: ubuntu-latest
-    # The only job that may attest (ADR-0038 clause 10). It checks out no code
+    # The only job that may attest (ADR-0038 §10). It checks out no code
     # and builds nothing; its only actions are download-artifact and attest, and every other step,
     # the registry login and the tagging included, is shell and gh.
     permissions:
@@ -675,7 +675,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username '${{ github.actor }}' --password-stdin
-      # ADR-0038 clause 9: the image's own attestation, over the index digest `image` pushed, stored
+      # ADR-0038 §9: the image's own attestation, over the index digest `image` pushed, stored
       # in the registry beside it. No storage record: that needs a permission ADR-0038 does not grant,
       # and GitHub keeps one for organisation-owned repositories alone.
       - name: Attest the image
@@ -685,7 +685,7 @@ jobs:
           subject-digest: ${{ needs.image.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
-      # Nothing is published that does not verify as an operator will verify it (ADR-0038 clause 12).
+      # Nothing is published that does not verify as an operator will verify it (ADR-0038 §12).
       - name: Every asset verifies
         env:
           GH_TOKEN: ${{ github.token }}
@@ -708,7 +708,7 @@ jobs:
             --signer-workflow "${{ github.repository }}/.github/workflows/release.yml" \
             --deny-self-hosted-runners > /dev/null
           echo "verified ${IMAGE}@${{ needs.image.outputs.digest }}"
-      # ADR-0038 clauses 18 and 19: the exact version, and only after the attestation verified. A single
+      # ADR-0038 §18 and §19: the exact version, and only after the attestation verified. A single
       # index as the source is copied as it is, so the tag names the attested digest — checked below.
       - name: Tag the image
         run: |

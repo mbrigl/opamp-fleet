@@ -1,11 +1,11 @@
-//! The Gateway's package cache (ADR-0033 clauses 41 to 46 and ADR-0016 clause 15): each uploaded
+//! The Gateway's package cache (ADR-0033 §41–§46 and ADR-0016 §15): each uploaded
 //! artifact the Gateway relays an offer of is fetched from the Server once, with the Gateway's own
 //! certificate, and passed on only to a downstream host whose Agent it relayed that offer to.
 //!
 //! What is kept here:
 //! - the **bindings**: each `instance_uid` to the host of the first report for it, as the Server
-//!   binds on first report (ADR-0027 clause 11), kept across restarts in the store beside the held
-//!   artifacts ([`store`](crate::gateway::store), ADR-0016 clause 16) and relied on only once the
+//!   binds on first report (ADR-0027 §11), kept across restarts in the store beside the held
+//!   artifacts ([`store`](crate::gateway::store), ADR-0016 §16) and relied on only once the
 //!   store holds them;
 //! - the **offers**: per `instance_uid`, the Server-hosted artifacts its last recorded
 //!   `packages_available` named, indexed by host;
@@ -54,25 +54,25 @@ pub const ROUTE: &str = "/api/v1/packages/{agent_type}/{version}/file";
 /// What every offered path on the Server's download route begins with.
 const ROUTE_PREFIX: &str = "/api/v1/packages/";
 
-/// How many fetches run at a time (ADR-0033 clause 41): a rollout rarely offers more distinct
+/// How many fetches run at a time (ADR-0033 §41): a rollout rarely offers more distinct
 /// artifacts at once, and each one holds a reservation of up to the per-artifact limit.
 const CONCURRENT_FETCHES: usize = 4;
 
-/// The most `instance_uid`s bound at once, over all hosts (ADR-0016 clause 15).
+/// The most `instance_uid`s bound at once, over all hosts (ADR-0016 §15).
 pub(crate) const MAX_BINDINGS: usize = 1_000_000;
 
-/// How many lines per host and minute are logged one by one (ADR-0033 clause 44).
+/// How many lines per host and minute are logged one by one (ADR-0033 §44).
 const LINES_PER_MINUTE: u32 = 5;
 
-/// What a request is told to wait while a fetch runs (ADR-0016 clause 15).
+/// What a request is told to wait while a fetch runs (ADR-0016 §15).
 const RETRY_AFTER_SECS: &str = "30";
 
-/// The pace a fetch keeps up after its grace, or it is cut (ADR-0033 clause 41).
+/// The pace a fetch keeps up after its grace, or it is cut (ADR-0033 §41).
 const PACE_FLOOR_BYTES_PER_SEC: u64 = 64 * 1024;
 const PACE_GRACE: Duration = Duration::from_secs(60);
 
 /// Whether a fetch that has received `bytes` in `elapsed` has fallen below the pace floor: after
-/// the grace, at least 64 KiB for every second past it (ADR-0033 clause 41).
+/// the grace, at least 64 KiB for every second past it (ADR-0033 §41).
 fn below_pace(bytes: u64, elapsed: Duration) -> bool {
     let Some(past) = elapsed.checked_sub(PACE_GRACE) else {
         return false;
@@ -81,7 +81,7 @@ fn below_pace(bytes: u64, elapsed: Duration) -> bool {
 }
 
 /// One artifact as an offer names it: the path on the Server's route, query included, and the
-/// content hash the offer carries (ADR-0033 clause 43).
+/// content hash the offer carries (ADR-0033 §43).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Artifact {
     pub path: String,
@@ -116,7 +116,7 @@ pub fn host_of(der: &[u8]) -> Option<String> {
     fleet_core::x509::read::host(&fleet_core::x509::read::certificate(der).ok()?)
 }
 
-/// The host a downstream certificate speaks as (ADR-0016 clause 15): the one it names, else the
+/// The host a downstream certificate speaks as (ADR-0016 §15): the one it names, else the
 /// one the Server derives for it from its issuer and serial and names in its first renewal.
 #[must_use]
 pub fn speaker_of(der: &[u8]) -> Option<String> {
@@ -126,7 +126,7 @@ pub fn speaker_of(der: &[u8]) -> Option<String> {
     })
 }
 
-/// Where a downstream certificate ends, as the Gateway keeps it for its host (ADR-0016 clause 16):
+/// Where a downstream certificate ends, as the Gateway keeps it for its host (ADR-0016 §16):
 /// its `notAfter`, and the certificate as the revocation list names it.
 #[must_use]
 pub fn end_of(der: &[u8]) -> Option<End> {
@@ -155,7 +155,7 @@ struct Held {
     copy: u64,
 }
 
-/// What one line of a host is to the log (ADR-0033 clause 44).
+/// What one line of a host is to the log (ADR-0033 §44).
 #[derive(Debug, PartialEq, Eq)]
 enum Note {
     /// Log it.
@@ -217,7 +217,7 @@ impl RefusalLog {
 /// Answered once the changes it waits for are written and synced, with whether they were.
 pub type Ticket = tokio::sync::oneshot::Receiver<bool>;
 
-/// What a report's binding came to before the store is asked (ADR-0016 clause 16).
+/// What a report's binding came to before the store is asked (ADR-0016 §16).
 pub enum Begun {
     /// Bound to the reporting host, with nothing new to write.
     Bound,
@@ -231,7 +231,7 @@ pub enum Begun {
 
 #[derive(Default)]
 struct Inner {
-    /// Each `instance_uid` to the host of its first report (ADR-0016 clause 15).
+    /// Each `instance_uid` to the host of its first report (ADR-0016 §15).
     bindings: Bindings,
     /// The changes to the bindings not yet handed to the store, in the order they were made.
     queue: Vec<Change>,
@@ -288,7 +288,7 @@ impl Inner {
 }
 
 /// The artifacts to delete so that `need` more bytes fit within `capacity` beside `other` bytes
-/// already counted (ADR-0033 clause 45): those no current offer names first, then offered ones,
+/// already counted (ADR-0033 §45): those no current offer names first, then offered ones,
 /// each least recently used first. `None` when deleting every held artifact is not enough.
 fn victims(
     held: &HashMap<Vec<u8>, Held>,
@@ -313,7 +313,7 @@ fn victims(
 
 /// Why a fetch stored nothing.
 enum Failure {
-    /// Past the bound of ADR-0033 clause 45: remembered for the run, and not fetched again.
+    /// Past the bound of ADR-0033 §45: remembered for the run, and not fetched again.
     TooLarge(u64),
     Other(String),
 }
@@ -449,7 +449,7 @@ pub struct PackageCache {
     /// Wakes the one task that writes the store ([`write_store`]).
     wake: Arc<tokio::sync::Notify>,
     /// Why the store could not be read at start, while it cannot: the Gateway then carries no
-    /// downstream Agent (ADR-0016 clause 16).
+    /// downstream Agent (ADR-0016 §16).
     unreadable: Option<String>,
     inner: Mutex<Inner>,
 }
@@ -488,8 +488,8 @@ enum Opened {
 }
 
 /// Opens the Gateway's directory `dir` without following a link, empties it of every artifact an
-/// earlier run left (ADR-0033 clause 45) and keeps the store, reads the bindings from it and
-/// rewrites it whole from what they are with `create` (ADR-0016 clause 16). A store that cannot
+/// earlier run left (ADR-0033 §45) and keeps the store, reads the bindings from it and
+/// rewrites it whole from what they are with `create` (ADR-0016 §16). A store that cannot
 /// be read or rewritten is [`Opened::Unreadable`]: the Gateway does not rely on it.
 fn open_dir(
     dir: &Path,
@@ -519,7 +519,7 @@ fn open_dir(
         Err(e) => return Ok(Opened::Unreadable(format!("{}: {e}", path.display()))),
     };
     // What ended while the Gateway was down ends now, and the rewrite below leaves it out
-    // (ADR-0016 clause 17); the revocation list is asked once the Gateway holds one.
+    // (ADR-0016 §17); the revocation list is asked once the Gateway holds one.
     for (host, uids) in bindings.end(now(), None) {
         log_ended(&host, uids.len());
     }
@@ -541,7 +541,7 @@ pub(crate) fn now() -> i64 {
         })
 }
 
-/// Logs that a host's bindings ended with its certificate (ADR-0016 clause 17).
+/// Logs that a host's bindings ended with its certificate (ADR-0016 §17).
 fn log_ended(host: &str, count: usize) {
     info!(
         %host, bindings = count,
@@ -550,7 +550,7 @@ fn log_ended(host: &str, count: usize) {
 }
 
 /// Logs that the Gateway carries no downstream Agent while its store cannot be read, and what
-/// lets it start again: at start, and once an hour (ADR-0016 clause 16).
+/// lets it start again: at start, and once an hour (ADR-0016 §16).
 pub fn log_unreadable(why: &str, store: &Path) {
     error!(
         reason = %why,
@@ -561,8 +561,8 @@ pub fn log_unreadable(why: &str, store: &Path) {
 }
 
 impl PackageCache {
-    /// The cache of the Gateway `config` arms, its directory emptied of artifacts (ADR-0033
-    /// clause 45) and its bindings read from the store (ADR-0016 clause 16).
+    /// The cache of the Gateway `config` arms, its directory emptied of artifacts (ADR-0033 §45)
+    /// and its bindings read from the store (ADR-0016 §16).
     ///
     /// # Errors
     /// Returns an error when a directory left by an earlier run cannot be emptied. A store that
@@ -643,7 +643,7 @@ impl PackageCache {
     }
 
     /// Binds `uid` to `host` unless it is bound already: the first report wins, and every report
-    /// refreshes when it was last reported (ADR-0016 clause 15). `host` is the one a downstream
+    /// refreshes when it was last reported (ADR-0016 §15). `host` is the one a downstream
     /// certificate speaks as ([`speaker_of`]), `end` where that certificate ends ([`end_of`]). A host
     /// binds at most `max_carried_agents`, the Gateway at most its global cap; past either the
     /// host's own least recently reported binding whose `instance_uid` has neither a route
@@ -727,14 +727,14 @@ impl PackageCache {
         ticket
     }
 
-    /// Whether the changes `ticket` waits for are written and synced (ADR-0016 clause 16): by the
+    /// Whether the changes `ticket` waits for are written and synced (ADR-0016 §16): by the
     /// store's one writer, off the async workers, with whatever else is queued by then.
     pub async fn written(ticket: Ticket) -> bool {
         ticket.await.unwrap_or(false)
     }
 
     /// The second half of a bind: whether `uid` is now bound to `host` and its report may be
-    /// forwarded and its reply routed back (ADR-0016 clause 13). A new binding the store could not
+    /// forwarded and its reply routed back (ADR-0016 §13). A new binding the store could not
     /// take, `written` false, is not made, and that is logged. Called under the same lock as the
     /// route it decides on, so no binding gives way between the two.
     pub fn finish_bind(&self, uid: InstanceUid, host: &str, written: bool) -> bool {
@@ -758,7 +758,7 @@ impl PackageCache {
     /// Writes the queued changes and answers who waits for them. A store that cannot take an
     /// append is rewritten whole from the bindings, which hold the queued changes too; so is one
     /// that has grown to twice the lines it holds live, or whose lines of reports have outgrown
-    /// [`REPORT_LINES_PER_LIVE`] times them (ADR-0016 clause 16). Each call is announced once its
+    /// [`REPORT_LINES_PER_LIVE`] times them (ADR-0016 §16). Each call is announced once its
     /// moved ends are settled.
     fn flush(&self) {
         let mut guard = self
@@ -831,8 +831,8 @@ impl PackageCache {
         written
     }
 
-    /// Writes the order in which the bindings were reported since the last call (ADR-0016
-    /// clause 16): once a minute and at shutdown.
+    /// Writes the order in which the bindings were reported since the last call (ADR-0016 §16):
+    /// once a minute and at shutdown.
     pub async fn write_reports(&self) {
         let reports = self.inner().bindings.reports();
         if reports.is_empty() {
@@ -849,7 +849,7 @@ impl PackageCache {
     }
 
     /// Ends every binding of each host whose kept certificate end has passed by `now`, or, when
-    /// `revoked` is given, whose certificate it says the revocation list names (ADR-0016 clause 16), each host logged with how many went. Their current offers go with them, and their
+    /// `revoked` is given, whose certificate it says the revocation list names (ADR-0016 §16), each host logged with how many went. Their current offers go with them, and their
     /// removals are queued for the store. Returns the `instance_uid`s whose bindings ended, whose
     /// routes and places upstream the caller releases, and the ticket their removals are written
     /// under.
@@ -942,7 +942,7 @@ impl PackageCache {
 
     /// Records what a `ServerToAgent` relayed to `uid` offers, over a downstream connection whose
     /// certificate names `host`, and starts fetching each Server-hosted artifact it names that may
-    /// be fetched (ADR-0033 clause 41 and ADR-0016 clause 15). A message without `packages_available` leaves the offer
+    /// be fetched (ADR-0033 §41 and ADR-0016 §15). A message without `packages_available` leaves the offer
     /// standing; an offer over a certificate that names no host, or for an `instance_uid` bound to
     /// another host, is not recorded and starts nothing.
     pub fn observe(
@@ -1020,7 +1020,7 @@ impl PackageCache {
             .cloned()
     }
 
-    /// What a request for an offered artifact gets (ADR-0016 clause 15): the held file, opened;
+    /// What a request for an offered artifact gets (ADR-0016 §15): the held file, opened;
     /// `Busy` while a fetch of it runs, or once a request starts the one refetch the current offer
     /// allows; otherwise `Nothing`. A held copy whose file is gone when it is opened — evicted in
     /// between, or removed from under the cache — is forgotten, and the request decided again.
@@ -1167,7 +1167,7 @@ impl PackageCache {
     }
 
     /// Reserves `need` bytes for the fetch of `hash`, deleting held artifacts to make room
-    /// (ADR-0033 clause 45). Files whose deletion failed before are deleted again first. The
+    /// (ADR-0033 §45). Files whose deletion failed before are deleted again first. The
     /// victims are chosen under the lock and deleted after it is released; until they are gone
     /// they stay counted.
     async fn reserve(&self, hash: &[u8], need: u64) -> Result<(), String> {
@@ -1238,14 +1238,14 @@ impl PackageCache {
     }
 
     /// Streams the artifact from the Server into `staged`, hashing on the way, and checks the hash
-    /// (ADR-0033 clauses 41, 43 and 45). Returns its length.
+    /// (ADR-0033 §41, §43 and §45). Returns its length.
     async fn download(&self, artifact: &Artifact, staged: &Path) -> Result<u64, Failure> {
         use tokio::io::AsyncWriteExt as _;
 
         let config = self.config.clone();
         let path = artifact.path.clone();
         // This Gateway's own certificate to its Server's origin, as every Client's download
-        // (ADR-0033 clause 51), and no offered headers. The material is read from disk, so off the
+        // (ADR-0033 §51), and no offered headers. The material is read from disk, so off the
         // async workers.
         let (url, origin, identified) = tokio::task::spawn_blocking(move || {
             let url = crate::packages::resolve_url(&path, &config.endpoint)?;
@@ -1350,7 +1350,7 @@ impl PackageCache {
     }
 
     /// Why the bindings' store could not be read at start, while the Gateway carries no downstream
-    /// Agent for it (ADR-0016 clause 16).
+    /// Agent for it (ADR-0016 §16).
     #[must_use]
     pub fn unreadable(&self) -> Option<&str> {
         self.unreadable.as_deref()
@@ -1362,13 +1362,13 @@ impl PackageCache {
         self.dir.join(store::NAME)
     }
 
-    /// Whether `uid` is bound to a host (ADR-0016 clause 15).
+    /// Whether `uid` is bound to a host (ADR-0016 §15).
     pub fn is_bound(&self, uid: &InstanceUid) -> bool {
         self.inner().bindings.host_of(uid).is_some()
     }
 
     /// Logs one refusal of an enrolling peer's report or upgrade, aggregated per host it speaks as,
-    /// as every refusal of the Gateway is (ADR-0033 clause 44, ADR-0016 clause 24).
+    /// as every refusal of the Gateway is (ADR-0033 §44, ADR-0016 §24).
     pub fn log_enrolment_refusal(&self, speaker: &str, peer: &str, why: &str) {
         match self.inner().refusals.note(speaker, Instant::now()) {
             Note::Log => warn!(host = %speaker, %peer, "refusing an enrolling peer: {why}"),
@@ -1381,7 +1381,7 @@ impl PackageCache {
         }
     }
 
-    /// Logs one refused download request, aggregated per host (ADR-0033 clause 44).
+    /// Logs one refused download request, aggregated per host (ADR-0033 §44).
     fn log_refusal(&self, host: Option<&str>, serial: Option<&str>, path: &str) {
         let host = host.unwrap_or("none");
         let serial = serial.unwrap_or("none");
@@ -1406,13 +1406,13 @@ impl PackageCache {
 pub struct Downloads {
     pub cache: Arc<PackageCache>,
     pub revocations: RevocationList,
-    /// Tells an enrolling peer, which is served no download, from a member (ADR-0016 clause 24).
+    /// Tells an enrolling peer, which is served no download, from a member (ADR-0016 §24).
     pub members: crate::gateway::Members,
     /// The downstream hosts' buckets, which every download request takes a token from (ADR-0017).
     pub rate: Arc<crate::gateway::rate::HostRate>,
 }
 
-/// The download route on the downstream listener (ADR-0016 clause 15).
+/// The download route on the downstream listener (ADR-0016 §15).
 pub fn router(downloads: Arc<Downloads>) -> axum::Router {
     axum::Router::new()
         .route(ROUTE, axum::routing::get(serve))
@@ -1438,15 +1438,15 @@ fn busy() -> Response {
 }
 
 /// What every downstream request but an enrolling peer's is answered while the bindings' store
-/// cannot be read (ADR-0016 clause 16).
+/// cannot be read (ADR-0016 §16).
 pub const STORE_UNREADABLE: &str = "the Gateway cannot read the store of its bindings";
 
 fn store_unreadable() -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, STORE_UNREADABLE).into_response()
 }
 
-/// The answer to a download past the host's rate limit, as the Server gives it (ADR-0012
-/// clause 26, ADR-0017 clause 4).
+/// The answer to a download past the host's rate limit, as the Server gives it (ADR-0012 §26,
+/// ADR-0017 §4).
 fn over_rate() -> Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
@@ -1463,7 +1463,7 @@ async fn serve(
     axum::extract::State(downloads): axum::extract::State<Arc<Downloads>>,
     request: Request,
 ) -> Response {
-    // No Agent is carried while the bindings' store cannot be read (ADR-0016 clause 16).
+    // No Agent is carried while the bindings' store cannot be read (ADR-0016 §16).
     if downloads.cache.unreadable().is_some() {
         return store_unreadable();
     }
@@ -1473,7 +1473,7 @@ async fn serve(
         .and_then(|peer| peer.0.as_ref())
         .map(|cert| cert.as_ref().to_vec())
         .unwrap_or_default();
-    // The admission of `/v1/opamp`, and nothing beyond it (ADR-0016 clauses 11 and 14).
+    // The admission of `/v1/opamp`, and nothing beyond it (ADR-0016 §11 and §14).
     match downloads.revocations.verdict(&certificate) {
         Verdict::Admit => {}
         Verdict::Revoked => {
@@ -1489,7 +1489,7 @@ async fn serve(
         }
     }
     // The host's token, once the certificate is admitted and before anything of the package cache
-    // is looked up: past the limit the artifact is not read (ADR-0017 clauses 2 and 4).
+    // is looked up: past the limit the artifact is not read (ADR-0017 §2 and §4).
     let enrolling = downloads.members.enrolling(&certificate);
     let peer = request
         .extensions()
@@ -1508,7 +1508,7 @@ async fn serve(
         .uri()
         .path_and_query()
         .map_or("", |path| path.as_str());
-    // An enrolling peer is offered nothing, so it is served nothing (ADR-0016 clause 24), whatever
+    // An enrolling peer is offered nothing, so it is served nothing (ADR-0016 §24), whatever
     // host its certificate names.
     let host = (!enrolling).then(|| host_of(&certificate)).flatten();
     let Some(artifact) = host
@@ -1598,7 +1598,7 @@ mod tests {
     }
 
     /// Every path on the Server's own download route with a SHA-256 is an artifact the Gateway
-    /// caches; an absolute URL is not, whichever host it names (ADR-0033 clause 42).
+    /// caches; an absolute URL is not, whichever host it names (ADR-0033 §42).
     /// Verifies: ADR-0033
     #[test]
     fn only_a_path_on_the_servers_route_is_cached() {

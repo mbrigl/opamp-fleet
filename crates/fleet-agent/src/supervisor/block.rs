@@ -103,7 +103,7 @@ pub fn take_program(
     let named = settings.remove(key);
     let program_name = match (named, plugin.defaults().program) {
         // A wrapped kind knows its program, so writing it is naming a value this Client computes
-        // (ADR-0019 clause 13) — refused with what supplies it now, never quietly overridden.
+        // (ADR-0019 §13) — refused with what supplies it now, never quietly overridden.
         (Some(_), Some(derived)) => {
             return Err(format!(
                 "supervisor {:?}: `{key}` is no longer a supervisor key for type {:?} — the kind \

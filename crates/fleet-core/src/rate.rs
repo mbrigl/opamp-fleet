@@ -1,5 +1,5 @@
 //! The token buckets a sender's messages are counted in, on the Server and on a Gateway alike
-//! (ADR-0012 clauses 22 and 28, ADR-0017).
+//! (ADR-0012 §22 and §28, ADR-0017).
 //!
 //! A bucket holds `burst` tokens and gains `rate` of them a second, continuously, and a new one
 //! starts full. A table of them is bounded, and a full one forgets the bucket used least recently,

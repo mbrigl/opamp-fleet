@@ -1,7 +1,7 @@
 //! The two tests that decide G-20: a fleet is served on when one of three Server instances is lost,
 //! and the database carries the presence and the notifications of 100 000 Agents
-//! (ADR-0025
-//! clause 20 and the Enforcement).
+//! (ADR-0025 §20
+//! and the Enforcement).
 //!
 //! Each runs three `server` processes at the defaults, `max_connections` and `max_agents` raised
 //! for the fleet, on the database the `FLEET_TEST_POSTGRES_*` variables name, in a role and schema

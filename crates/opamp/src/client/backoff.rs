@@ -43,7 +43,7 @@ impl Backoff {
 
     /// The delay before the first reconnect after an established connection was lost, drawn
     /// uniformly over `[0, AFTER_LOSS)`; the failures after it start the exponential steps again
-    /// (ADR-0012 clause 4).
+    /// (ADR-0012 §4).
     ///
     /// The draw starts at zero, unlike [`advance`](Self::advance): the floor of equal jitter is
     /// what puts a whole fleet into the same half second once its Server goes away, and a fleet
@@ -64,7 +64,7 @@ impl Backoff {
 
     /// The wait after a refusal that named one — a `Retry-After`, or the wait an `Unavailable`
     /// names: what the Server named, or the next step where that is longer, so a wait of zero, or
-    /// one shorter than the step, still waits the step (ADR-0012 clause 4). It takes the step, so
+    /// one shorter than the step, still waits the step (ADR-0012 §4). It takes the step, so
     /// refusals in a row grow along the backoff.
     pub(crate) fn at_least_a_step(&mut self, named: Duration) -> Duration {
         named.max(self.advance())

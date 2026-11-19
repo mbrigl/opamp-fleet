@@ -121,14 +121,14 @@ pub struct Engine {
     /// The certificate request last queued on this connection (ADR-0026): a new one goes out at
     /// once, the same one again only with the next report.
     last_csr: Option<Vec<u8>>,
-    /// The high-water marks every Supervisor of this Client shares (ADR-0034 clause 8), kept so a
+    /// The high-water marks every Supervisor of this Client shares (ADR-0034 §8), kept so a
     /// Supervisor a set apply adds at runtime is held to the same marks.
     high_water: Option<Arc<dyn HighWaterMarks>>,
-    /// The floors every Agent of this Client is held to (ADR-0034 clause 17), kept so a Supervisor
+    /// The floors every Agent of this Client is held to (ADR-0034 §17), kept so a Supervisor
     /// a set apply adds at runtime is held to them too.
     floors: Option<Arc<dyn PackageFloors>>,
     /// The plugins this Client's Supervisors were started with, kept so a Supervisor a set apply
-    /// adds at runtime starts its Managed Process the same way (ADR-0022 clause 18).
+    /// adds at runtime starts its Managed Process the same way (ADR-0022 §18).
     plugins: Option<Arc<dyn PluginRegistry>>,
 }
 
@@ -186,7 +186,7 @@ impl Engine {
 
     /// Arms self-update (ADR-0020) with what installs a new version and commits this one if it is
     /// itself freshly installed.
-    /// Gives the Engine the high-water marks its Supervisors share (ADR-0034 clause 8).
+    /// Gives the Engine the high-water marks its Supervisors share (ADR-0034 §8).
     pub fn set_high_water(&mut self, marks: Arc<dyn HighWaterMarks>) {
         self.high_water = Some(marks);
     }
@@ -206,7 +206,7 @@ impl Engine {
     }
 
     /// Refuses each queued download whose version now lies below its Supervisor's floor — what a
-    /// fetch made right before the downloads may have raised (ADR-0034 clauses 17 and 18). Each is
+    /// fetch made right before the downloads may have raised (ADR-0034 §17 and §18). Each is
     /// reported `InstallFailed` with the reason, and nothing of it is downloaded.
     pub fn hold_downloads_to_floors(&mut self) {
         for (index, download) in std::mem::take(&mut self.pending_package_downloads) {
@@ -227,7 +227,7 @@ impl Engine {
         }
     }
 
-    /// Gives the Engine the plugins its Supervisors were started with (ADR-0022 clause 18).
+    /// Gives the Engine the plugins its Supervisors were started with (ADR-0022 §18).
     pub fn set_plugins(&mut self, plugins: Arc<dyn PluginRegistry>) {
         self.plugins = Some(plugins);
     }
@@ -341,7 +341,7 @@ impl Engine {
         }
     }
 
-    /// The enrolment report (ADR-0016 clause 24): `csr` alone, on the Client's own Agent — the one
+    /// The enrolment report (ADR-0016 §24): `csr` alone, on the Client's own Agent — the one
     /// the identity of the connection belongs to, as [`request_certificate`] rides it. `None`
     /// without such an Agent.
     ///
@@ -935,7 +935,7 @@ mod tests {
 
     /// A new certificate request is owed at once, so it never waits for a heartbeat; the same one
     /// re-sent while it waits for an operator rides the next report, so it never answers every
-    /// answer (ADR-0027 clause 9).
+    /// answer (ADR-0027 §9).
     /// Verifies: ADR-0026
     #[test]
     fn a_new_certificate_request_is_owed_at_once_and_a_repeated_one_is_not() {

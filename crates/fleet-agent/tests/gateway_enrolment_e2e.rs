@@ -60,8 +60,8 @@ impl Ca {
         (cert.pem(), key.serialize_pem())
     }
 
-    /// A bootstrap certificate naming the customer and the site an approval requires (ADR-0016
-    /// clause 23), written like [`issue`](Self::issue).
+    /// A bootstrap certificate naming the customer and the site an approval requires (ADR-0016 §23),
+    /// written like [`issue`](Self::issue).
     fn issue_bootstrap(&self, dir: &Path, file: &str) -> (String, String) {
         let key = KeyPair::generate().expect("key");
         let mut params = CertificateParams::new(vec![file.to_string()]).expect("params");

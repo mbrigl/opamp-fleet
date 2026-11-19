@@ -1,4 +1,4 @@
-//! Who shares an item chooses its crate (ADR-0008 clause 16).
+//! Who shares an item chooses its crate (ADR-0008 §16).
 //!
 //! `fleet-util` holds what the Client and the operator tool share and the Server does not use;
 //! `fleet-core` holds what the Server shares with either. This test reads the code under `src/` of

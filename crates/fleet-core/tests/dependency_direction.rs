@@ -280,7 +280,7 @@ const CORE_CRATES: &[&str] = &[
 /// no runtime and do no I/O — and ADR-0019 makes a Port a message pair over them; `tokio::select`
 /// and `tokio::pin` are how the core waits on several of them, control flow over futures that
 /// starts no task and touches nothing outside the process. `toml::Table` and
-/// `toml::Value` are the configuration's values (ADR-0024 clause 1), which ADR-0019 hands a
+/// `toml::Value` are the configuration's values (ADR-0024 §1), which ADR-0019 hands a
 /// Plugin as its block; reading and parsing the file stays at the edge. An address is a value, and
 /// `env::consts` is fixed at compile time.
 const CORE_PREFIXES: &[&[&str]] = &[

@@ -223,7 +223,7 @@ pub struct Derived {
     pub service_name: String,
     /// Every reported key outside the Server's `fleet.` space, with the value a Selector matches,
     /// `None` where the first value reported is no string or an empty one: the key is taken, and
-    /// no label can stand in for it (ADR-0029 clause 18).
+    /// no label can stand in for it (ADR-0029 §18).
     pub reported: BTreeMap<String, Option<String>>,
     /// `host.id=…` or `host.name=…`, empty when neither is reported.
     pub machine: String,
@@ -254,14 +254,14 @@ pub struct DisplayValues {
     pub version: String,
     /// `os.description`, or `os.type` where no description is reported.
     pub os: String,
-    /// The Platform the offer reads (ADR-0033 clause 14), empty where none is reported.
+    /// The Platform the offer reads (ADR-0033 §14), empty where none is reported.
     pub platform: String,
     /// The name of the remote configuration status, `UNSET` where none is reported.
     pub config: &'static str,
 }
 
-/// An Agent's service name and instance name, each read only from the attribute set ADR-0018
-/// clauses 1 and 2 give it: `service.name` from the identifying attributes,
+/// An Agent's service name and instance name, each read only from the attribute set ADR-0018 §1 and §2
+/// give it: `service.name` from the identifying attributes,
 /// `service.instance.name` from the non-identifying ones. Empty where it is not reported there.
 #[must_use]
 pub fn names(
@@ -492,7 +492,7 @@ pub struct Candidate<'a> {
     pub holder: Option<&'a str>,
     /// The Host it last arrived over.
     pub host: Option<&'a str>,
-    /// What a Selector is matched against (ADR-0029 clause 18).
+    /// What a Selector is matched against (ADR-0029 §18).
     pub effective: Option<&'a AgentDescription>,
     pub own: &'a BTreeMap<String, String>,
     pub inherited: &'a BTreeMap<String, String>,

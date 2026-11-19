@@ -35,11 +35,11 @@ pub(crate) struct Upstream<'a> {
     /// until an exchange fails, since the certificate it presents may be one an operator
     /// provisioned rather than a bootstrap certificate.
     pub enrolment_refused: bool,
-    /// The floors this Client keeps and fetches (ADR-0034 clause 17); `None` while it enrols.
+    /// The floors this Client keeps and fetches (ADR-0034 §17); `None` while it enrols.
     pub floors: Option<&'a crate::floors::FloorFile>,
 }
 
-/// Whether this Client enrols over plain HTTP (ADR-0016 clause 24): it holds no certificate the
+/// Whether this Client enrols over plain HTTP (ADR-0016 §24): it holds no certificate the
 /// Server issued, it presents one — the bootstrap certificate, or one an operator provisioned,
 /// which it cannot tell apart — and its endpoint is `https://` or `http://`. It then sends one
 /// report, its certificate signing request and nothing else, which is what a Gateway relays for an
@@ -157,7 +157,7 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 ///    certificate is in force (ADR-0026).
 /// 3. The floors are fetched when they are due — at the first reply, once an hour, and within the
 ///    minute before an offer is decided — and a queued download below its floor is refused
-///    (ADR-0034 clause 17). Offered packages are downloaded and verified (ADR-0033).
+///    (ADR-0034 §17). Offered packages are downloaded and verified (ADR-0033).
 /// 4. **The self-update restart, before anything is applied after it.** The `Installing` the
 ///    package step just owed is the last thing this version says (ADR-0020). It ends the run, so
 ///    `AfterReply::End` means exactly this.
@@ -227,7 +227,7 @@ pub async fn after_reply<S: ReportSink>(
 /// caller on the next exchange.
 ///
 /// A shutdown ends a download where it stands — on the wire or waiting out a `Retry-After`
-/// (ADR-0033 clause 47) — and nothing is reported for it.
+/// (ADR-0033 §47) — and nothing is reported for it.
 pub async fn process_package_downloads<S: ReportSink>(
     engine: &mut Engine,
     config: &ClientConfig,
@@ -314,7 +314,7 @@ pub async fn process_self_configuration<S: ReportSink>(
         return false;
     };
     // A second gate behind the capability the Agent does not declare: on a host that keeps its
-    // set no path reaches the apply (ADR-0019 clause 40).
+    // set no path reaches the apply (ADR-0019 §40).
     if !config.server_manages_set() {
         tracing::warn!(
             hash = %hex::encode(&offer.config_hash),
@@ -336,7 +336,7 @@ pub enum OfferOutcome {
     /// No offer was pending.
     None,
     /// The offer was applied — or refused — in place. The acknowledgement is owed, and the
-    /// connection stays up. A telemetry-only offer always lands here (ADR-0013 clause 6): no
+    /// connection stays up. A telemetry-only offer always lands here (ADR-0013 §6): no
     /// destination it names is reached over the OpAMP connection, so there is nothing to reconnect
     /// for.
     Applied,
@@ -363,7 +363,7 @@ pub enum OfferOutcome {
 ///    tear down exporters the Server never mentioned. `merge` is what puts those back. What it no
 ///    longer puts back is a signal left out of an offer that *does* name one: that is a stop, and
 ///    ADR-0018 is where the difference is decided.
-/// 3. **One acknowledgement for the whole message** (ADR-0013 clause 7). The Baseline hashes all
+/// 3. **One acknowledgement for the whole message** (ADR-0013 §7). The Baseline hashes all
 ///    settings together, so the Agent answers the message, not its parts: a single status whose
 ///    `error_message` names everything dropped across both halves.
 ///
@@ -379,7 +379,7 @@ pub async fn process_connection_offer(
         return OfferOutcome::None;
     };
     // Opened here rather than on the function, which is called once per exchange and would
-    // otherwise trace every poll that had nothing to do (ADR-0018 clause 20). What follows is one
+    // otherwise trace every poll that had nothing to do (ADR-0018 §20). What follows is one
     // operation with an outcome the Server is told about, which is what a span is for here.
     //
     // `reconnect` is a field and not a phase: the reconnection itself happens after this returns,
@@ -464,7 +464,7 @@ pub fn connection(config: &ClientConfig) -> Result<Connection, String> {
 /// The same connection with other TLS material — a candidate certificate under test.
 ///
 /// It carries no `Authorization`: the Server admits by the client certificate alone, and this
-/// Client sends no credential upstream (ADR-0026 clause 3).
+/// Client sends no credential upstream (ADR-0026 §3).
 #[must_use]
 pub fn connection_with(config: &ClientConfig, tls: ClientTls) -> Connection {
     Connection {
@@ -660,7 +660,7 @@ mod tests {
     }
 
     /// The Supervisor-set apply refuses to run on a host that keeps its set, whatever put a set in
-    /// front of it: nothing is written and nothing is sent (ADR-0019 clause 40).
+    /// front of it: nothing is written and nothing is sent (ADR-0019 §40).
     /// Verifies: ADR-0019
     #[tokio::test]
     async fn the_supervisor_set_apply_refuses_to_run_on_a_host_that_keeps_its_set() {

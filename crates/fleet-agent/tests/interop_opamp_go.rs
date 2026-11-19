@@ -461,7 +461,7 @@ fn our_client(dir: &Path, endpoint: &str) -> (OurClient, PathBuf) {
 /// the CA it trusts, and a member of its fleet: `member`, its certificate and key, stand in its
 /// state directory as the pair a Server issued. opamp-go signs no CSR, and a Client holding only a
 /// configured certificate enrols first over plain HTTP, sending its request and nothing else
-/// until a Server answers it (ADR-0016 clause 24), so the reports these tests read come from a
+/// until a Server answers it (ADR-0016 §24), so the reports these tests read come from a
 /// Client that has enrolled.
 fn our_client_with(
     dir: &Path,

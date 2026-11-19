@@ -1,8 +1,8 @@
-//! The bootstrap PKCS#12 file written and read with `p12-keystore` (ADR-0027 clauses 4 and 15).
+//! The bootstrap PKCS#12 file written and read with `p12-keystore` (ADR-0027 §4 and §15).
 //!
 //! Reading is bounded: a file over [`MAX_FILE_BYTES`] is refused before it is parsed, and
 //! `p12-keystore` itself refuses work factors above a million iterations. Before anything is
-//! decrypted, the file's structure is held to ADR-0027 clause 4's family: a MAC of HMAC with SHA-2,
+//! decrypted, the file's structure is held to ADR-0027 §4's family: a MAC of HMAC with SHA-2,
 //! and every encryption PBES2 with PBKDF2-HMAC-SHA-2 and AES-CBC — no PBES1, no scrypt, no AES-GCM,
 //! no key in the clear. `p12-keystore` would read several of those.
 
@@ -81,7 +81,7 @@ impl fmt::Display for OpenError {
     }
 }
 
-/// The certificate and key in `bytes`, under `password` (ADR-0027 clause 15).
+/// The certificate and key in `bytes`, under `password` (ADR-0027 §15).
 ///
 /// # Errors
 /// [`OpenError::WrongPassword`] when the MAC fails, and [`OpenError::Invalid`] for a file over
@@ -106,7 +106,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<Identity, OpenError> {
             archive.keys.len()
         )));
     };
-    // `p12-keystore` keeps its own copy, which it does not wipe (ADR-0015 clause 4).
+    // `p12-keystore` keeps its own copy, which it does not wipe (ADR-0015 §4).
     let private_key_der = Zeroizing::new(key.key.as_der().to_vec());
     let public = rcgen::KeyPair::try_from(private_key_der.as_slice())
         .map_err(|e| invalid(format!("its private key cannot be read: {e}")))?;
@@ -138,7 +138,7 @@ const PBES2: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.5
 const DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.1");
 const ENCRYPTED_DATA: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.6");
 
-/// Whether the file is of ADR-0027 clause 4's family, read from its structure before anything is
+/// Whether the file is of ADR-0027 §4's family, read from its structure before anything is
 /// decrypted: a MAC — without one anyone could swap the certificate without the password — of
 /// HMAC with SHA-2, and every encrypted part PBES2 with PBKDF2-HMAC-SHA-2 and AES-CBC. A key in the
 /// clear, and any bag but an encrypted key and a certificate, is refused.
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(*key_of(identity), [1, 2, 3]);
     }
 
-    /// The file is the scheme ADR-0027 clause 4 names: PBES2 with AES-256 and a SHA-256 MAC, at
+    /// The file is the scheme ADR-0027 §4 names: PBES2 with AES-256 and a SHA-256 MAC, at
     /// 600 000 iterations.
     /// Verifies: ADR-0027
     #[test]

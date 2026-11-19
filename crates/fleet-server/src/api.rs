@@ -79,14 +79,14 @@ impl OperatorAuth {
         Ok(OperatorAuth(Arc::new(auth.credentials()?), None, None))
     }
 
-    /// Records refused sign-ins in `audit` (ADR-0028 clause 1).
+    /// Records refused sign-ins in `audit` (ADR-0028 §1).
     #[must_use]
     pub fn with_audit(mut self, audit: Option<Arc<dyn crate::audit::Audit>>) -> Self {
         self.2 = audit;
         self
     }
 
-    /// Counts this plane's failures in a table of its own (ADR-0026 clause 19).
+    /// Counts this plane's failures in a table of its own (ADR-0026 §19).
     #[must_use]
     pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
         self.1 = Some(throttle);
@@ -95,7 +95,7 @@ impl OperatorAuth {
 }
 
 /// Records every mutating act on the Operator plane, before it runs and once it has run; an act
-/// that cannot be recorded is not run (ADR-0028 clauses 1 and 5).
+/// that cannot be recorded is not run (ADR-0028 §1 and §5).
 async fn record_act(
     State(audit): State<Arc<dyn crate::audit::Audit>>,
     request: Request,
@@ -169,7 +169,7 @@ async fn authenticate(
         }
     }
     // The attempt counts before the password is hashed, so attempts sent at once cannot all pass
-    // the back-off check first (ADR-0026 clause 2).
+    // the back-off check first (ADR-0026 §2).
     let _attempt = match (&auth.1, peer) {
         (Some(throttle), Some(peer)) => match throttle.begin(peer) {
             Some(attempt) => Some(attempt),
@@ -281,7 +281,7 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .route("/shiki.js", get(shiki_js))
         .with_state(state.clone());
     // Inside the guard, so an act is recorded only once it is authenticated, and named by the
-    // operator who made it (ADR-0028 clause 1).
+    // operator who made it (ADR-0028 §1).
     let router = match state.audit().cloned() {
         Some(audit) => router.layer(middleware::from_fn_with_state(audit, record_act)),
         None => router,
@@ -573,21 +573,21 @@ struct AgentResponse {
     /// ones it holds that fit this Agent's type (ADR-0032), in name order. Never what it runs;
     /// that is [`assigned_configurations`](Self::assigned_configurations).
     matched_configurations: Vec<String>,
-    /// The Configurations rolled out to this Agent (ADR-0032 clause 6), in name order — what its
+    /// The Configurations rolled out to this Agent (ADR-0032 §6), in name order — what its
     /// offer is composed from.
     assigned_configurations: Vec<String>,
     /// The Deployment that claims this Agent **now** — whose Selector matches it — or empty when
     /// none does.
     ///
     /// This is not [`assigned_deployment`](Self::assigned_deployment), and the difference is what
-    /// tells four states apart that would otherwise look alike (ADR-0033 clause 27). Empty here
+    /// tells four states apart that would otherwise look alike (ADR-0033 §27). Empty here
     /// with no conflict means the host is in **no channel**: label it, or give it a `channel`
     /// attribute. Set here with nothing assigned and nothing pending means the channel holds
     /// nothing this Agent can take — no Package for its type, or none for its platform. The
     /// operator's next move differs in each case, which is why the Server says which one it is
     /// rather than showing an empty row three ways.
     deployment: String,
-    /// The Deployment this Agent's release went **through** (ADR-0032 clause 6), or empty when
+    /// The Deployment this Agent's release went **through** (ADR-0032 §6), or empty when
     /// nothing has been rolled out to it. Pinned as of that act, so it may name a channel that no
     /// longer claims this Agent.
     assigned_deployment: String,
@@ -597,7 +597,7 @@ struct AgentResponse {
     /// putting a newer Package in that channel, changes what is *proposed* and never what this Agent
     /// was already given.
     assigned_package: String,
-    /// The Configurations waiting for a rollout act toward this Agent (ADR-0032 clause 8):
+    /// The Configurations waiting for a rollout act toward this Agent (ADR-0032 §8):
     /// one its Deployment holds and it is not assigned (`change: "new"`), one whose
     /// saved revision differs from the assigned one (`change: "update"`), one assigned that the
     /// next press drops from a release that keeps something else, applying the smaller map
@@ -605,13 +605,13 @@ struct AgentResponse {
     /// any more, so the next press leaves it with no assignment and it keeps running what it runs
     /// (`change: "kept"`). The Server never acts on this by itself.
     pending_configurations: Vec<PendingConfigurationResponse>,
-    /// The Package waiting for a rollout act toward this Agent (ADR-0032 clause 8) — at most one:
+    /// The Package waiting for a rollout act toward this Agent (ADR-0032 §8) — at most one:
     /// the candidate of the Deployment that claims it, when that is not what it is assigned, or
     /// the assigned one the next press drops (`change: "remove"`, or `"kept"` as for a
     /// Configuration).
     pending_packages: Vec<PendingPackageResponse>,
     /// The Deployment the next press releases through, when the assignment names another one or
-    /// none (ADR-0032 clause 9); empty otherwise. Set alone, it says the press moves only the
+    /// none (ADR-0032 §9); empty otherwise. Set alone, it says the press moves only the
     /// assignment over to the claiming Deployment, with the same content.
     pending_deployment: String,
     /// Hex hash of the composed configuration this Agent should run; empty when it is assigned
@@ -625,7 +625,7 @@ struct AgentResponse {
     /// The Agent's package installations (ADR-0033), in name order; empty until reported.
     packages: Vec<PackageStatusResponse>,
     /// Why this Agent is proposed nothing — more than one Deployment claims it, and an Agent
-    /// belongs to at most one (ADR-0033 clause 28). The message names every Deployment in the way.
+    /// belongs to at most one (ADR-0033 §28). The message names every Deployment in the way.
     /// Absent when at most one claims it.
     #[serde(skip_serializing_if = "Option::is_none")]
     package_conflict: Option<String>,
@@ -669,22 +669,22 @@ struct AgentResponse {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     shadowed_labels: Vec<String>,
     /// Labels stored with a key in `fleet.` or `supervisor.`, which no label may speak in
-    /// (ADR-0029 clause 20): ignored by every Selector and by
+    /// (ADR-0029 §20): ignored by every Selector and by
     /// package matching, and inherited by no Agent. Listed rather than dropped in silence; the next
     /// label set put without them removes them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ignored_labels: Vec<String>,
-    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0029
-    /// clause 19); empty for the Client Agent itself, for an Agent whose Client the Server cannot
+    /// The labels of this Agent's Client Agent, which hold for it below its own (ADR-0029 §19);
+    /// empty for the Client Agent itself, for an Agent whose Client the Server cannot
     /// tell, and for an ambiguous one.
     inherited_labels: BTreeMap<String, String>,
     /// The Instance UID of this Agent's Client Agent — its own, for the Client Agent — or empty
     /// when the Server cannot tell.
     client_agent: String,
     /// The group this Agent's Client is recognised in holds more than one Client Agent, so it
-    /// inherits nothing (ADR-0029 clause 19).
+    /// inherits nothing (ADR-0029 §19).
     ambiguous: bool,
-    /// The Host this Agent last arrived over (ADR-0029 clause 16), or empty. Behind a Gateway, the
+    /// The Host this Agent last arrived over (ADR-0029 §16), or empty. Behind a Gateway, the
     /// Gateway's.
     host: String,
     /// On PostgreSQL, the instance id of the Server instance that holds this Agent under a live
@@ -693,10 +693,10 @@ struct AgentResponse {
     /// The host name that instance's lease records; empty when `holder` is.
     holder_host: String,
     /// The `fleet.host.*` values Selectors match on this Agent, from the certificate of the Host it
-    /// arrived over directly (ADR-0029 clause 18); empty behind a Gateway.
+    /// arrived over directly (ADR-0029 §18); empty behind a Gateway.
     host_attributes: BTreeMap<String, String>,
     /// Reported attributes in the Server's `fleet.` space, left out of what Selectors match
-    /// (ADR-0029 clause 20).
+    /// (ADR-0029 §20).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     ignored_attributes: Vec<String>,
 }
@@ -842,8 +842,7 @@ impl From<fleet::PackageStatusView> for PackageStatusResponse {
 }
 
 /// The parameters a list that pages takes, besides its filters
-/// (ADR-0030
-/// clauses 3 and 4).
+/// (ADR-0030 §3 and §4).
 const LIMIT_DOC: &str = "How many entries a page holds, 1 to 1000; a larger value is answered as \
                          1000. Without limit and cursor the whole list is answered while it holds \
                          at most 10000 entries after its filters, and a longer one is a 400 \
@@ -995,8 +994,7 @@ fn agent_query(state: &AppState, asked: &Asked) -> Result<fleet::AgentQuery, Ref
 }
 
 /// What the fleet reports, for suggestions
-/// (ADR-0030
-/// clause 7).
+/// (ADR-0030 §7).
 #[derive(Serialize, ToSchema)]
 struct ReportedValuesResponse {
     /// The distinct `key=value` pairs the Agents report that a Selector can match, sorted, at most
@@ -1124,7 +1122,7 @@ async fn set_agent_labels(
     }
 }
 
-/// What a per-Agent rollout act names (ADR-0032 clause 9): nothing, or the Deployment that claims
+/// What a per-Agent rollout act names (ADR-0032 §9): nothing, or the Deployment that claims
 /// the Agent. An empty body releases that Deployment just the same.
 #[derive(Deserialize, ToSchema, Default)]
 #[serde(deny_unknown_fields)]
@@ -1139,7 +1137,7 @@ struct AgentRolloutSpec {
     deployment: Option<String>,
 }
 
-/// Rolls the Deployment that claims **this Agent** out to it (ADR-0032 clause 9): its Package for
+/// Rolls the Deployment that claims **this Agent** out to it (ADR-0032 §9): its Package for
 /// the Agent's type, if that is a candidate, and every Configuration it holds that fits the
 /// Agent's type, at its saved revision — replacing the Agent's assignment. The operator's press is
 /// the only thing that distributes: saving, Selector edits and label moves all merely change what
@@ -1181,7 +1179,7 @@ async fn rollout_to_agent(
 ///
 /// Reaches no host: nothing is stopped, nothing is uninstalled, and no certificate is revoked —
 /// a certificate is the host's, not the Agent's. Its `instance_uid` is released from the Host it
-/// was bound to (ADR-0029 clause 10). A Client that is still running reappears on its next report.
+/// was bound to (ADR-0029 §10). A Client that is still running reappears on its next report.
 #[utoipa::path(
     delete,
     path = "/api/v1/agents/{instance_uid}",
@@ -1236,12 +1234,12 @@ struct ConfigurationSpec {
     #[serde(default)]
     role: String,
     /// The Agent type this Configuration is written for, compared raw against the `service.name`
-    /// an Agent reports (ADR-0032 clauses 2 and 4). Required: absent or empty is refused `400`.
+    /// an Agent reports (ADR-0032 §2 and §4). Required: absent or empty is refused `400`.
     /// Read as empty when absent, so the refusal names it.
     #[serde(default)]
     #[schema(required = true)]
     service_name: String,
-    /// Read only to refuse it by name: a Configuration has no Selector (ADR-0032 clauses 2 and 23).
+    /// Read only to refuse it by name: a Configuration has no Selector (ADR-0032 §2 and §23).
     #[serde(default)]
     #[schema(ignore)]
     selector: Option<serde_json::Value>,
@@ -1258,7 +1256,7 @@ struct ConfigurationView {
     /// The Baseline's `AgentConfigObject.role` (ADR-0031); absent means top-level configuration.
     #[serde(skip_serializing_if = "String::is_empty")]
     role: String,
-    /// The Agent type this Configuration is written for (ADR-0032 clauses 2 and 4).
+    /// The Agent type this Configuration is written for (ADR-0032 §2 and §4).
     service_name: String,
     /// The Deployments that hold this Configuration, in name order — where "whom does it reach"
     /// is answered. Empty means it is saved and no rollout act can release it.
@@ -1286,7 +1284,7 @@ fn configuration_view(state: &AppState, config: Configuration) -> ConfigurationV
     ConfigurationView::of(config, deployments)
 }
 
-/// What a Deployment's rollout act did (ADR-0032 clause 9).
+/// What a Deployment's rollout act did (ADR-0032 §9).
 #[derive(Serialize, ToSchema)]
 struct RolloutOutcome {
     /// How many Agents the act assigned — every Agent the Deployment claims and the press moved.
@@ -1389,7 +1387,7 @@ async fn put_configuration(
         // Carried verbatim (ADR-0031): the values are Agent-type-specific, so the Server never
         // validates one against a vocabulary of its own. Empty is top-level configuration.
         role: spec.role,
-        // Compared raw against the reported `service.name` (ADR-0032 clause 4). Required, and not
+        // Compared raw against the reported `service.name` (ADR-0032 §4). Required, and not
         // validated against the fleet, because a Configuration may precede its first Agent.
         service_name: spec.service_name,
     };
@@ -1405,7 +1403,7 @@ async fn put_configuration(
     }
 }
 
-/// Maps a rollout refusal onto the REST contract (ADR-0032 clause 9).
+/// Maps a rollout refusal onto the REST contract (ADR-0032 §9).
 fn rollout_error(e: RolloutError) -> Response {
     match e {
         RolloutError::UnknownAgent => error(StatusCode::NOT_FOUND, "no such agent"),
@@ -1416,7 +1414,7 @@ fn rollout_error(e: RolloutError) -> Response {
 }
 
 /// Deletes a Configuration — refused with `409` while an Agent's assignment pins it, saying how
-/// many (ADR-0032 clause 12). Rolling those Agents out through a Deployment without it, or
+/// many (ADR-0032 §12). Rolling those Agents out through a Deployment without it, or
 /// forgetting them, comes first. A deleted Configuration leaves every Deployment that held it.
 #[utoipa::path(
     delete,
@@ -1708,7 +1706,7 @@ async fn put_package_set(
 }
 
 /// Deletes a Package — entries, artifacts and metadata — refused with `409` while an Agent's
-/// assignment pins it, saying how many (ADR-0032 clause 12). A deleted Package leaves every
+/// assignment pins it, saying how many (ADR-0032 §12). A deleted Package leaves every
 /// Deployment that held it; nothing is ever uninstalled (ADR-0033).
 #[utoipa::path(
     delete,
@@ -1731,13 +1729,13 @@ async fn delete_package_set(
     State(state): State<Arc<AppState>>,
     Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
-    // A Package stored under a non-SemVer version is deleted like any other (ADR-0034 clause 3).
+    // A Package stored under a non-SemVer version is deleted like any other (ADR-0034 §3).
     let id = match PackageId::load(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-0039 clause 14).
+    // (ADR-0039 §14).
     let deleted = tokio::task::spawn_blocking({
         let id = id.clone();
         move || state.delete_package_set(&id)
@@ -1890,7 +1888,7 @@ async fn delete_package_entry(
         Err((status, why)) => return error(status, why),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-0039 clause 14).
+    // (ADR-0039 §14).
     let deleted = tokio::task::spawn_blocking({
         let (id, platform) = (id.clone(), platform.clone());
         move || state.delete_package_entry(&id, &platform)
@@ -2005,7 +2003,7 @@ async fn delete_entry_signature(
     }
 }
 
-/// One floor as the operator sets it (ADR-0034 clause 15).
+/// One floor as the operator sets it (ADR-0034 §15).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct FloorSpec {
@@ -2069,7 +2067,7 @@ async fn list_package_floors(State(state): State<Arc<AppState>>) -> Response {
     Json(list).into_response()
 }
 
-/// Stores the operator's signed floor of one Agent type (ADR-0034 clause 15): below its version no
+/// Stores the operator's signed floor of one Agent type (ADR-0034 §15): below its version no
 /// Client takes a package of the type, its own update included, once it has fetched the floor.
 /// A floor is raised, or removed and set anew; a version below the one stored is `409`.
 ///
@@ -2158,7 +2156,7 @@ async fn put_package_floor(
     }
 }
 
-/// Removes the floor of one Agent type: the Server stops serving it (ADR-0034 clause 20). A Client
+/// Removes the floor of one Agent type: the Server stops serving it (ADR-0034 §20). A Client
 /// that has kept it keeps it; only its host lowers what it holds.
 #[utoipa::path(
     delete,
@@ -2213,7 +2211,7 @@ async fn download_package(
     request: Request,
 ) -> Response {
     // A read: a pinned Package an older Server stored under a non-SemVer version is still offered
-    // (ADR-0034 clause 3), so its bytes are still served.
+    // (ADR-0034 §3), so its bytes are still served.
     let id = match PackageId::load(&agent_type, &version) {
         Ok(id) => id,
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
@@ -2223,7 +2221,7 @@ async fn download_package(
         Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
     };
     // One answer for every artifact this requester may not fetch, whether or not the store holds
-    // it, so the store cannot be listed by probing (ADR-0033 clause 37).
+    // it, so the store cannot be listed by probing (ADR-0033 §37).
     let not_found = || {
         error(
             StatusCode::NOT_FOUND,
@@ -2233,8 +2231,8 @@ async fn download_package(
             ),
         )
     };
-    // A member certificate fetches only what is offered to an Agent its host speaks for (ADR-0033
-    // clause 2). The download guard admitted the certificate and hands over what it proves; a
+    // A member certificate fetches only what is offered to an Agent its host speaks for (ADR-0033 §2).
+    // The download guard admitted the certificate and hands over what it proves; a
     // request without one exists only where no certificate is required, and is tested here no
     // more than at admission.
     if let Some(proofs) = request.extensions().get::<crate::transport::Proofs>() {
@@ -2308,7 +2306,7 @@ enum Chunk {
     End,
 }
 
-/// The upload as the blob store reads it (ADR-0039 clause 13): the request's chunks, handed over a
+/// The upload as the blob store reads it (ADR-0039 §13): the request's chunks, handed over a
 /// channel to the thread the store reads on. A channel that closes before [`Chunk::End`] is a
 /// failed stream — a refused, cut-off or cancelled upload — so the store keeps nothing of it.
 struct ChunkReader {
@@ -2432,7 +2430,7 @@ struct DeploymentView {
     /// write, so nothing else would say so.
     claiming_agents: usize,
     /// Of those, the Agents a rollout act would actually move — what it would release to them
-    /// differs from what their assignment pins (ADR-0032 clause 9). Zero here with a non-zero
+    /// differs from what their assignment pins (ADR-0032 §9). Zero here with a non-zero
     /// `claiming_agents` means everyone in the channel already holds it: nothing to do, and nothing
     /// wrong.
     targeted_agents: usize,
@@ -2617,7 +2615,7 @@ async fn put_deployment(
 }
 
 /// Deletes a Deployment — refused with `409` while an Agent's assignment names it, saying how many
-/// (ADR-0032 clause 12). Rolling those Agents out through another Deployment, or forgetting them,
+/// (ADR-0032 §12). Rolling those Agents out through another Deployment, or forgetting them,
 /// comes first. Nothing is uninstalled either way (ADR-0032).
 #[utoipa::path(
     delete,
@@ -2645,7 +2643,7 @@ async fn delete_deployment(
     }
 }
 
-/// Re-aims a Deployment. Editable in every state (ADR-0032 clause 11) — moving a channel is how a
+/// Re-aims a Deployment. Editable in every state (ADR-0032 §11) — moving a channel is how a
 /// rollout proceeds. It changes whom the *next* act would reach, never a running offer.
 #[utoipa::path(
     put,
@@ -2726,7 +2724,7 @@ async fn put_deployment_package(
     }
 }
 
-/// Takes a Package out of a Deployment. Editable in every state (ADR-0032 clause 11): an Agent
+/// Takes a Package out of a Deployment. Editable in every state (ADR-0032 §11): an Agent
 /// already released keeps the Package its assignment pins until the next press, which drops it.
 #[utoipa::path(
     delete,
@@ -2760,7 +2758,7 @@ async fn delete_deployment_package(
     }
 }
 
-/// Puts a Configuration into a Deployment (ADR-0032 clause 5). A Configuration may sit in several
+/// Puts a Configuration into a Deployment (ADR-0032 §5). A Configuration may sit in several
 /// Deployments; holding it already is the same request arriving twice. **This distributes
 /// nothing**: the Agents of the channel see it waiting until the next press.
 #[utoipa::path(
@@ -2788,7 +2786,7 @@ async fn put_deployment_configuration(
     }
 }
 
-/// Takes a Configuration out of a Deployment. Editable in every state (ADR-0032 clause 11): an
+/// Takes a Configuration out of a Deployment. Editable in every state (ADR-0032 §11): an
 /// Agent already released keeps the revision its assignment pins until the next press, which drops
 /// it from the Agent's map.
 #[utoipa::path(
@@ -2822,7 +2820,7 @@ struct ReplaceQuery {
     replace: Option<bool>,
 }
 
-/// Rolls a Deployment out to **every Agent it claims and would move** (ADR-0032 clause 9).
+/// Rolls a Deployment out to **every Agent it claims and would move** (ADR-0032 §9).
 ///
 /// **This is the moment the fleet changes.** Each such Agent's assignment is replaced with this
 /// channel's release, pinned as of this press: the Package it holds for the Agent's type, if that
@@ -2880,7 +2878,7 @@ fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
     Json(DeploymentView::of(deployment, reach)).into_response()
 }
 
-/// The enrolment window as the API answers with it (ADR-0039 clause 8).
+/// The enrolment window as the API answers with it (ADR-0039 §8).
 #[derive(Serialize, ToSchema)]
 struct EnrolmentWindow {
     /// Whether a host with a bootstrap certificate may enrol now.
@@ -2897,7 +2895,7 @@ struct OpenWindow {
     open_for_secs: u64,
 }
 
-/// One enrolment request waiting for an operator (ADR-0027 clause 10).
+/// One enrolment request waiting for an operator (ADR-0027 §10).
 #[derive(Serialize, ToSchema)]
 struct PendingEnrolment {
     /// What `approve` and `reject` name: the SHA-256 fingerprint of the requested public key.
@@ -2906,20 +2904,19 @@ struct PendingEnrolment {
     /// The address the request came from, on a direct connection.
     #[serde(skip_serializing_if = "Option::is_none")]
     peer: Option<String>,
-    /// The host of the Gateway the request came through, in place of a peer address (ADR-0016
-    /// clause 11).
+    /// The host of the Gateway the request came through, in place of a peer address (ADR-0016 §11).
     #[serde(skip_serializing_if = "Option::is_none")]
     gateway: Option<String>,
     /// The SHA-256 fingerprint of the requested public key, hex — the Client logs the same value,
     /// so an operator can match a request to a host.
     key_fingerprint: String,
     /// The six subject values of the bootstrap certificate the request proves: what an
-    /// approval carries into the host certificate (ADR-0027 clause 10). The request's own subject
+    /// approval carries into the host certificate (ADR-0027 §10). The request's own subject
     /// is not listed, because it is neither trusted nor carried. Absent when that certificate's
     /// subject cannot be carried — `subject_refusal` then says why.
     #[serde(skip_serializing_if = "Option::is_none")]
     bootstrap_subject: Option<HostSubject>,
-    /// Why the bootstrap certificate's subject breaks the rules of ADR-0027 clause 1, naming the
+    /// Why the bootstrap certificate's subject breaks the rules of ADR-0027 §1, naming the
     /// attribute: an approval is refused `409` with this reason, and nothing is signed. Absent
     /// when the values can be carried.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2931,8 +2928,8 @@ struct PendingEnrolment {
     bootstrap_serial: String,
 }
 
-/// What an operator asks a bootstrap certificate for (ADR-0027 clauses 1 and 3 and
-/// ADR-0036 clause 14).
+/// What an operator asks a bootstrap certificate for (ADR-0027 §1 and §3 and
+/// ADR-0036 §14).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct IssueBootstrapRequest {
@@ -2956,7 +2953,7 @@ struct IssueBootstrapRequest {
 /// The subject of a bootstrap certificate: these attributes only, `organization` and
 /// `organizational_unit` required and the others optional; the Server sets the common name. Every
 /// host certificate issued from it carries them, and they describe and select the Host through
-/// `fleet.host.*`; they authorize nothing (ADR-0027 clause 1).
+/// `fleet.host.*`; they authorize nothing (ADR-0027 §1).
 #[derive(Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct BootstrapSubject {
@@ -2977,7 +2974,7 @@ struct BootstrapSubject {
 }
 
 /// An issued bootstrap certificate, never with its private key: the key is in the PKCS#12 file of
-/// `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0027 clause 3).
+/// `GET /api/v1/bootstrap-certificates/{serial}/p12` (ADR-0027 §3).
 #[derive(Serialize, ToSchema)]
 struct IssuedBootstrap {
     /// What a revocation names, with the authority `bootstrap`.
@@ -2988,7 +2985,7 @@ struct IssuedBootstrap {
     certificate_pem: String,
 }
 
-/// A bootstrap certificate on record (ADR-0039 clause 11).
+/// A bootstrap certificate on record (ADR-0039 §11).
 #[derive(Serialize, ToSchema)]
 struct BootstrapView {
     serial: String,
@@ -2998,7 +2995,7 @@ struct BootstrapView {
     issued_ms: u64,
     not_after_ms: u64,
     revoked: bool,
-    /// Whether its PKCS#12 file can be downloaded (ADR-0039 clause 11).
+    /// Whether its PKCS#12 file can be downloaded (ADR-0039 §11).
     p12: bool,
 }
 
@@ -3040,8 +3037,8 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
 /// Issues a bootstrap certificate with the subject an operator names, which holds at least an
 /// organization and an organizational unit, under the password the request names. The key is in no
 /// answer: the Server keeps it, encrypted under that password in a PKCS#12 file, for download
-/// (ADR-0027 clause 3). A host with it may only ask to enrol, inside an open window, and
-/// an operator approves (ADR-0027 clauses 9 and 10).
+/// (ADR-0027 §3). A host with it may only ask to enrol, inside an open window, and
+/// an operator approves (ADR-0027 §9 and §10).
 #[utoipa::path(
     post,
     path = "/api/v1/bootstrap-certificates",
@@ -3147,7 +3144,7 @@ async fn issue_bootstrap_certificate(
 }
 
 /// The PKCS#12 file of a bootstrap certificate, as often as it is asked,
-/// until the certificate ends or is revoked (ADR-0039 clause 11). Each download is on the record.
+/// until the certificate ends or is revoked (ADR-0039 §11). Each download is on the record.
 #[utoipa::path(
     get,
     path = "/api/v1/bootstrap-certificates/{serial}/p12",
@@ -3215,7 +3212,7 @@ async fn download_bootstrap_p12(
 }
 
 /// Deletes a revoked bootstrap certificate's entry, and any PKCS#12 file of it, from the record.
-/// Its revocation stays on the list, so it stays refused for as long as it is valid (ADR-0027 clause 7).
+/// Its revocation stays on the list, so it stays refused for as long as it is valid (ADR-0027 §7).
 #[utoipa::path(
     delete,
     path = "/api/v1/bootstrap-certificates/{serial}",
@@ -3420,7 +3417,7 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// The host of the Gateway a pending request came through, which every audit entry of it names
-/// (ADR-0016 clause 25).
+/// (ADR-0016 §25).
 fn through_gateway(state: &AppState, id: &str) -> Option<String> {
     state
         .enrolment()?
@@ -3441,7 +3438,7 @@ fn through_gateway(state: &AppState, id: &str) -> Option<String> {
         (status = 204, description = "Approved and signed"),
         (status = 403, description = "Refused as a cross-site request (Sec-Fetch-Site)", body = ErrorBody),
         (status = 404, description = "No such pending request, or enrolment is not configured", body = ErrorBody),
-        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, that certificate's subject breaks the rules of ADR-0027 clause 1 — the message names the attribute —, or another Server instance is deciding the request at this moment; nothing is signed", body = ErrorBody),
+        (status = 409, description = "The CA could not sign the request, its bootstrap certificate is revoked, that certificate's subject breaks the rules of ADR-0027 §1 — the message names the attribute —, or another Server instance is deciding the request at this moment; nothing is signed", body = ErrorBody),
         (status = 500, description = "The approval could not be persisted; the request still waits", body = ErrorBody),
         (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
@@ -3559,7 +3556,7 @@ async fn reject_enrolment(
     }
 }
 
-/// One certificate the client CA signed (ADR-0039 clause 9).
+/// One certificate the client CA signed (ADR-0039 §9).
 #[derive(Serialize, ToSchema)]
 struct CertificateView {
     /// `client` — the CA that signed it, as a revocation names it.
@@ -3578,17 +3575,17 @@ struct CertificateView {
     /// On a renewal, the certificate it renewed.
     #[serde(skip_serializing_if = "Option::is_none")]
     predecessor: Option<CertificateRef>,
-    /// The host it was issued to (ADR-0027 clause 11); absent on one an operator provisioned.
+    /// The host it was issued to (ADR-0027 §11); absent on one an operator provisioned.
     #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<String>,
 }
 
-/// A Host: what a client certificate's host id names (ADR-0027 clause 11, ADR-0029).
+/// A Host: what a client certificate's host id names (ADR-0027 §11, ADR-0029).
 #[derive(Serialize, ToSchema)]
 struct HostView {
     host: String,
     /// What it is shown by: the `host.name` its Client Agent reports, else the host id. Shown
-    /// only; it decides nothing (ADR-0029 clause 24).
+    /// only; it decides nothing (ADR-0029 §24).
     name: String,
     /// A Gateway speaks for any Agent; any other host only for those it reported first.
     gateway: bool,
@@ -3596,20 +3593,20 @@ struct HostView {
     instance_uids: Vec<String>,
     /// How many valid certificates it holds — at most three.
     certificates: usize,
-    /// The subject values of the client certificate it was issued (ADR-0029 clause 15), which the
+    /// The subject values of the client certificate it was issued (ADR-0029 §15), which the
     /// Agents arriving over it directly carry as `fleet.host.*`.
     subject: HostSubject,
     /// When its enrolment was approved, in milliseconds since the Unix epoch; absent for a Host a
     /// provisioned certificate made at its first report.
     #[serde(skip_serializing_if = "Option::is_none")]
     approved_ms: Option<u64>,
-    /// The Agents whose record names it as the Host they last arrived over (ADR-0029 clause 16) —
+    /// The Agents whose record names it as the Host they last arrived over (ADR-0029 §16) —
     /// for a Gateway, the Agents behind it.
     agents: Vec<HostAgent>,
 }
 
-/// The subject values a Host carries (ADR-0029 clause 15), or a bootstrap certificate carries into
-/// the host certificate an approval issues (ADR-0016 clause 23); an empty one is absent from the
+/// The subject values a Host carries (ADR-0029 §15), or a bootstrap certificate carries into
+/// the host certificate an approval issues (ADR-0016 §23); an empty one is absent from the
 /// certificate.
 #[derive(Serialize, ToSchema)]
 struct HostSubject {
@@ -3640,7 +3637,7 @@ impl From<crate::revocation::SubjectValues> for HostSubject {
     }
 }
 
-/// One Agent under the Host it arrived over (ADR-0029 clause 24).
+/// One Agent under the Host it arrived over (ADR-0029 §24).
 #[derive(Serialize, ToSchema)]
 struct HostAgent {
     instance_uid: String,
@@ -3679,14 +3676,14 @@ struct CertificateRef {
     serial: String,
 }
 
-/// What to revoke: a certificate (ADR-0026 clause 27).
+/// What to revoke: a certificate (ADR-0026 §27).
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 struct RevokeRequest {
     certificate: CertificateRef,
 }
 
-/// One revocation (ADR-0026 clause 30).
+/// One revocation (ADR-0026 §30).
 #[derive(Serialize, ToSchema)]
 struct RevocationView {
     /// What `DELETE` names.
@@ -3711,7 +3708,7 @@ impl RevocationView {
     }
 }
 
-/// Records what an operator act did, beside the act itself (ADR-0028 clause 1), and drops it where
+/// Records what an operator act did, beside the act itself (ADR-0028 §1), and drops it where
 /// the record cannot take it by then: the act was recorded before it ran. What it still records
 /// grants trust, so a restore that misses it errs toward withdrawing. The acts a restore repeats,
 /// which withdraw trust, hold their entry's place before they run instead ([`hold_place`]).
@@ -3722,8 +3719,8 @@ fn note(state: &AppState, entry: crate::audit::Entry) {
 }
 
 /// Holds a place in the record for the entry of an act about to run, which says what the act did
-/// once it has (ADR-0028
-/// clause 5): without one the act does not run, and is answered `503`. `None` where the Server
+/// once it has (ADR-0028 §5):
+/// without one the act does not run, and is answered `503`. `None` where the Server
 /// keeps no record.
 fn hold_place(state: &AppState) -> Result<Option<crate::audit::Permit>, crate::audit::Unavailable> {
     state.audit().map(|audit| audit.reserve()).transpose()
@@ -4068,7 +4065,7 @@ async fn list_revocations(State(state): State<Arc<AppState>>, RawQuery(raw): Raw
 
 /// Revokes a certificate, and every renewal of it. Every session it admitted ends at once, and no
 /// new one is admitted. There is no credential to revoke: the Agent plane admits by client
-/// certificate alone (ADR-0026 clause 29).
+/// certificate alone (ADR-0026 §29).
 #[utoipa::path(
     post,
     path = "/api/v1/revocations",
@@ -4115,8 +4112,8 @@ async fn revoke(
     match outcome {
         Ok(entry) => {
             info!(revocation = %entry.id, "revoked");
-            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0039
-            // clause 11); the download refuses it either way.
+            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0039 §11);
+            // the download refuses it either way.
             let crate::revocation::Revoked::Certificate {
                 authority,
                 issuers,
@@ -4124,7 +4121,7 @@ async fn revoke(
             } = &entry.revoked;
             let mut withdrawn = 0;
             if authority == "bootstrap" {
-                // The requests it carried wait no longer, on every instance (ADR-0026 clause 28);
+                // The requests it carried wait no longer, on every instance (ADR-0026 §28);
                 // approving one is refused either way.
                 withdrawn = state
                     .enrolment()

@@ -53,8 +53,8 @@ itself. Clients that do not report their own package version can state only the 
 
 And a Package's version need not be its program's. A repacked Package carries a version its program
 does not report
-([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
-clause 28): the second repack of an upstream 2.14.3 is Package `2.14.4-0.r.2`, and the program it
+([ADR-0036 §28](0036-the-operator-program-opamp-fleetctl.md)):
+the second repack of an upstream 2.14.3 is Package `2.14.4-0.r.2`, and the program it
 installs still reports `2.14.3`. Held against that number, a host that installed the repack would
 stay a candidate for it: the reach count would count it, the fleet view propose it, and the bulk act
 choose it on every press. So a Supervisor-backed Agent's Supervisor reports a third version, that of
@@ -94,7 +94,7 @@ Configuration, Package or Deployment that an assignment pins.
 3. **A Selector is equality, AND, over the effective description, and it aims a Deployment.**
    - It is a string-to-string map. An Agent matches when every pair equals a string-valued entry
      of its effective description, whose content
-     [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) clause 18 states.
+     [ADR-0029 §18](0029-the-fleet-record-of-agents-and-hosts.md) states.
    - An array-valued attribute (`host.ip`) is displayed but never matched.
    - There are no set-based operators. They would extend the same field compatibly.
    - A Deployment's Selector is never empty ([ADR-0033](0033-packages-signatures-and-delivery.md)),
@@ -301,28 +301,28 @@ Configuration, Package or Deployment that an assignment pins.
 
 25. **A Supervisor reports the version of the Package it installed.**
     - A Supervisor-backed Agent reports the non-identifying attribute `supervisor.package.version`
-      ([ADR-0018](0018-what-an-agent-reports-about-itself.md)
-      clause 5): the version of the Package whose program its Supervisor installed and starts,
+      ([ADR-0018 §5](0018-what-an-agent-reports-about-itself.md)):
+      the version of the Package whose program its Supervisor installed and starts,
       from the record of the last install that survived its apply grace
       ([ADR-0033](0033-packages-signatures-and-delivery.md)), restored when the Client starts.
     - It reports none before its first install, and none once that record is dropped
-      ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 10). A failed
+      ([ADR-0034 §10](0034-package-versions-high-water-mark-and-floor.md)). A failed
       install and a rollback leave the record of the predecessor, which is what then runs.
     - The Supervisor alone states it. The fold of a Managed Process's description drops every
-      `supervisor.*` key ([ADR-0018](0018-what-an-agent-reports-about-itself.md) clause 8),
+      `supervisor.*` key ([ADR-0018 §8](0018-what-an-agent-reports-about-itself.md)),
       `[attributes]` refuses one at startup
-      ([ADR-0018](0018-what-an-agent-reports-about-itself.md)
-      clause 10), and the Server refuses a label in that namespace and ignores one already stored
-      ([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)
-      clause 20), so neither a program nor the host's operator nor the Server's can state it.
+      ([ADR-0018 §10](0018-what-an-agent-reports-about-itself.md)),
+      and the Server refuses a label in that namespace and ignores one already stored
+      ([ADR-0029 §20](0029-the-fleet-record-of-agents-and-hosts.md)),
+      so neither a program nor the host's operator nor the Server's can state it.
     - The Client Agent reports none: its `service.version` is its baked version, which is what
       it runs, and its claim stays the record of clauses 15 and 18.
     - It is the Package's version, not the program's. A repacked Package carries a version its
       program does not report
-      ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
-      clause 28), and a Package carrying a program that numbers itself its own way (`1.19`)
+      ([ADR-0036 §28](0036-the-operator-program-opamp-fleetctl.md)),
+      and a Package carrying a program that numbers itself its own way (`1.19`)
       carries one written as SemVer
-      ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 6). Held against
+      ([ADR-0034 §6](0034-package-versions-high-water-mark-and-floor.md)). Held against
       the Package's own version, a host that installed a Package is no candidate for it.
 
 **Out of scope:** a fleet-wide base Configuration, and any "everyone" Deployment; releasing only a
@@ -401,7 +401,7 @@ to re-install a version the test holds back; a Server-driven downgrade.
   would carry the operator tool's numbering rule, and a program that numbers itself `1.19` would
   still give it nothing to compare.
 - **Report the Package's version as `service.version`.** That is the program's own statement
-  ([ADR-0018](0018-what-an-agent-reports-about-itself.md) clause 4) and the version the fleet view
+  ([ADR-0018 §4](0018-what-an-agent-reports-about-itself.md)) and the version the fleet view
   shows; overwriting it hides what the program says it is.
 - **Compare against `agent_has_version` alone.** Cannot reach a Client that reports no package
   version, and believes a claim the Agent's own program contradicts.

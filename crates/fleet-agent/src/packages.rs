@@ -83,7 +83,7 @@ pub async fn download_and_verify(
 }
 
 /// How long a download waits when its own Server origin answers `429` or `503` with
-/// `Retry-After` (ADR-0033 clause 47): each wait the `Retry-After`, capped, and the waits of one
+/// `Retry-After` (ADR-0033 §47): each wait the `Retry-After`, capped, and the waits of one
 /// download together bounded.
 #[derive(Debug, Clone, Copy)]
 pub struct Patience {
@@ -199,7 +199,7 @@ pub(crate) fn download_client(tls: opamp::client::ClientTls) -> Result<reqwest::
     .map_err(|e| format!("the download client: {e}"))
 }
 
-/// Where a download may go (ADR-0033 clause 51): this Client's own Server origin — the scheme, host
+/// Where a download may go (ADR-0033 §51): this Client's own Server origin — the scheme, host
 /// and port of its OpAMP endpoint, `wss` mapped to `https` (and `ws` to `http`, which the endpoint
 /// may only be on the loopback) — and nowhere else. Every URL is held to the transport rule first.
 pub struct ServerOrigin {
@@ -281,7 +281,7 @@ pub(crate) async fn send_download(
 
 /// [`send_download`], waiting out a `429` or `503` with `Retry-After` in seconds from the Server's
 /// own origin — a Gateway behind one, whose cache is still fetching, or the Server's rate limit —
-/// within `patience` (ADR-0033 clause 47). Anything else is returned as it came, for the caller to
+/// within `patience` (ADR-0033 §47). Anything else is returned as it came, for the caller to
 /// fail on.
 pub(crate) async fn send_patiently(
     origin: &ServerOrigin,
@@ -300,7 +300,7 @@ pub(crate) async fn send_patiently(
     }
 }
 
-/// The waits of one download on `Retry-After` (ADR-0033 clause 47): each one at least a second and
+/// The waits of one download on `Retry-After` (ADR-0033 §47): each one at least a second and
 /// at most [`Patience::per_wait`], and none begun that would end past the deadline set when the
 /// download began — so the requests count against the bound as well as the waits.
 pub(crate) struct Waits {
@@ -393,7 +393,7 @@ fn with_headers(
 
 /// Where an artifact is being fetched from, without whatever authorises the fetch.
 ///
-/// The span this labels leaves the host for a destination the *Server* named (ADR-0018 clause 24), and
+/// The span this labels leaves the host for a destination the *Server* named (ADR-0018 §24), and
 /// a download URL is one of the few strings here that can carry a credential in plain sight: a
 /// pre-signed URL puts its signature in the query. The scheme, host and path answer the question a
 /// trace is read for — *which artifact was fetched* — and the query answers none of it.
@@ -804,7 +804,7 @@ mod tests {
     }
 
     /// A redirect off the Server's origin is refused before the host it points at is asked: the
-    /// download fails naming that origin, and nothing is fetched from it (ADR-0033 clause 51).
+    /// download fails naming that origin, and nothing is fetched from it (ADR-0033 §51).
     /// Verifies: ADR-0033
     #[tokio::test]
     async fn a_redirect_off_the_origin_is_refused_without_a_fetch() {
@@ -841,7 +841,7 @@ mod tests {
     }
 
     /// An absolute `download_url` on another origin is refused without a byte fetched, and the
-    /// refusal names that origin (ADR-0033 clause 51) — whatever the offer's headers would have
+    /// refusal names that origin (ADR-0033 §51) — whatever the offer's headers would have
     /// carried never leaves the host.
     /// Verifies: ADR-0033
     #[tokio::test]
@@ -866,7 +866,7 @@ mod tests {
     }
 
     /// What labels the download span must not carry what authorises the download: the span goes to
-    /// a destination the Server named (ADR-0018 clause 24), and a pre-signed URL is a credential.
+    /// a destination the Server named (ADR-0018 §24), and a pre-signed URL is a credential.
     /// Verifies: ADR-0033, ADR-0018
     #[test]
     fn the_download_source_drops_whatever_authorises_it() {
@@ -1135,7 +1135,7 @@ mod tests {
     }
 
     /// A download goes to the Server's own origin and nowhere else — not another port, not
-    /// plaintext, not another host (ADR-0033 clause 51).
+    /// plaintext, not another host (ADR-0033 §51).
     /// Verifies: ADR-0033
     #[test]
     fn a_download_goes_only_to_the_servers_own_origin() {

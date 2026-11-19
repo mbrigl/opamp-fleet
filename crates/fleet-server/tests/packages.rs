@@ -43,7 +43,7 @@ async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
 }
 
 /// A host of the fleet on an Agent plane that requires a client certificate, as the binary serves
-/// it: its client presents a certificate naming the host (ADR-0027 clause 11), so a download is
+/// it: its client presents a certificate naming the host (ADR-0027 §11), so a download is
 /// tested for an offer (ADR-0033).
 struct Member {
     client: reqwest::Client,
@@ -746,7 +746,7 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
     upload(&server, support::AGENT_TYPE, "2.0.0", b"for-linux").await;
     upload(&server, support::AGENT_TYPE, "2.1.0", b"for-windows").await;
     // Two channels, disjoint by platform — which is what a partition looks like when the attribute
-    // that separates the hosts is one they all report (ADR-0033 clause 27).
+    // that separates the hosts is one they all report (ADR-0033 §27).
     let linux = ring_holding(&server, "linux-channel", &[("os.type", "linux")], "2.0.0").await;
     let windows = ring_holding(
         &server,
@@ -804,7 +804,7 @@ async fn the_aggregate_hash_an_agent_echoes_is_the_one_it_was_offered() {
 
 /// The canary shape an operator actually wants, under ADR-0033: **two channels, disjoint by a label**
 /// — because a Selector is equality and cannot say "not", so the fleet-wide-plus-narrower-override
-/// shape is a conflict (ADR-0033 clause 28). Each channel holds its own version; the rollout
+/// shape is a conflict (ADR-0033 §28). Each channel holds its own version; the rollout
 /// finishes by moving the canary host's label back and rolling the stable channel out again. Nobody
 /// moves without an act.
 /// Verifies: ADR-0033
@@ -887,7 +887,7 @@ async fn a_canary_ring_is_a_selector_aim_and_two_acts() {
     );
 }
 
-/// The one case with no defensible answer (ADR-0033 clause 28). It is not about versions or
+/// The one case with no defensible answer (ADR-0033 §28). It is not about versions or
 /// specificity — **any** two channels claiming one Agent is a conflict, however narrow or wide
 /// either is. The Server offers nothing and the fleet view names both.
 /// Verifies: ADR-0033
@@ -897,7 +897,7 @@ async fn an_agent_two_rings_claim_is_offered_nothing_and_the_view_says_why() {
     upload(&server, support::AGENT_TYPE, "2.0.0", b"one").await;
     upload(&server, support::AGENT_TYPE, "3.0.0", b"two").await;
     // Two channels that overlap on the Agent below. With a specificity ranking the second would
-    // have won by being no less specific, or lost by being no more; ADR-0033 clause 28 ranks neither.
+    // have won by being no less specific, or lost by being no more; ADR-0033 §28 ranks neither.
     ring_holding(&server, "by-platform", &[("os.type", "linux")], "2.0.0").await;
     ring_holding(
         &server,
@@ -1045,7 +1045,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
         report
     }
 
-    /// The two counts the Set view carries (ADR-0032 clause 22): whom it aims at, and whom it
+    /// The two counts the Set view carries (ADR-0032 §22): whom it aims at, and whom it
     /// would actually reach.
     async fn counts(server: &TestServer, version: &str) -> (i64, i64) {
         let list: serde_json::Value = reqwest::Client::new()
@@ -1114,7 +1114,7 @@ async fn a_set_reaches_an_agent_only_as_an_upgrade() {
     assert_eq!(offer.packages[support::AGENT_TYPE].version, "2.0.0");
 
     // And once the Agent reports it installed, the assignment keeps composing the offer — the
-    // Set the Agent runs must not vanish from its desired state (ADR-0032 clause 20).
+    // Set the Agent runs must not vanish from its desired state (ADR-0032 §20).
     let offer = exchange(&server, &running(&uid, 3, "2.0.0"))
         .await
         .packages_available
@@ -1395,7 +1395,7 @@ async fn a_set_waits_until_rolled_out_and_is_immutable_while_assigned() {
     // The Selector is not bytes, and stays editable.
     ring_holding(&server, "stable", &[("os.type", "linux")], "2.0.0").await;
 
-    // Deleting the assigned Set is refused (ADR-0032 clause 12): a deletion must not change what
+    // Deleting the assigned Set is refused (ADR-0032 §12): a deletion must not change what
     // a running Agent receives, so the offer stands.
     let deleted = reqwest::Client::new()
         .delete(set_url(&server, support::AGENT_TYPE, "2.0.0"))
@@ -1505,7 +1505,7 @@ async fn put_deployment(
 
 /// A Deployment must name the channel it aims at. There is no fleet-wide default, and the refusal
 /// says what to write instead — an empty Selector is what a forgotten field looks like, and it
-/// would collide with every other channel (ADR-0033 clause 26).
+/// would collide with every other channel (ADR-0033 §26).
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn a_deployment_without_a_selector_is_refused() {
@@ -1614,7 +1614,7 @@ async fn a_deployment_holds_one_uploaded_package_per_agent_type() {
     );
 }
 
-/// The signature belongs to the entry (ADR-0033 clause 18): written and removed through the entry's
+/// The signature belongs to the entry (ADR-0033 §18): written and removed through the entry's
 /// own route, shown on the entry with its `signature_state`, and absent from the Deployment's view.
 /// A signature for an entry that does not exist is `404`, an empty or malformed one `400`.
 /// Verifies: ADR-0033
@@ -1710,8 +1710,8 @@ async fn an_entry_carries_its_signature_and_says_its_state() {
     assert_eq!(again.status(), 404, "there is no signature left to remove");
 }
 
-/// New bytes on an entry remove its signature, because a signature covers the hash (ADR-0033
-/// clause 18): the entry is offered to nobody until it is signed again.
+/// New bytes on an entry remove its signature, because a signature covers the hash (ADR-0033 §18):
+/// the entry is offered to nobody until it is signed again.
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn new_bytes_on_an_entry_remove_its_signature() {
@@ -1726,7 +1726,7 @@ async fn new_bytes_on_an_entry_remove_its_signature() {
 }
 
 /// The routes ADR-0033 removed answer `404`, as for anything that does not exist: the entry's
-/// `…/source`, and the Deployment's `…/signatures/…` (ADR-0033 clause 12).
+/// `…/source`, and the Deployment's `…/signatures/…` (ADR-0033 §12).
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn the_source_route_and_the_deployment_signature_routes_are_gone() {
@@ -1770,7 +1770,7 @@ async fn the_source_route_and_the_deployment_signature_routes_are_gone() {
 
 /// With `[packages] verification_key` armed, the Server reports a signature over the entry's
 /// statement `valid` and a wrong one `invalid` — and stores both, because it only reports
-/// (ADR-0033 clause 19). The wrong one is offered all the same: the Agent's check decides.
+/// (ADR-0033 §19). The wrong one is offered all the same: the Agent's check decides.
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn with_a_verification_key_the_server_reports_valid_and_invalid_and_stores_both() {
@@ -1978,7 +1978,7 @@ async fn a_deployments_aim_is_editable_and_deleting_it_is_its_own_act() {
 }
 
 /// A Deployment that has released something cannot be deleted while the assignment names it, nor
-/// can the Package it pinned (ADR-0032 clause 12). The refusal says how many Agents pin it, and the
+/// can the Package it pinned (ADR-0032 §12). The refusal says how many Agents pin it, and the
 /// offer stands with the entry's own signature (ADR-0033). Once the Agent is released through
 /// another Deployment, both go, and the deleted Package leaves the channel that held it.
 /// Verifies: ADR-0033, ADR-0032
@@ -2076,7 +2076,7 @@ async fn a_deployment_that_released_a_package_refuses_to_be_deleted() {
 }
 
 /// One Package held by two Deployments is offered with the same signature through both: the
-/// signature is the entry's, and one serves every Deployment that holds it (ADR-0033 clause 18).
+/// signature is the entry's, and one serves every Deployment that holds it (ADR-0033 §18).
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn one_package_in_two_deployments_is_offered_with_the_same_signature() {
@@ -2188,7 +2188,7 @@ async fn a_conflict_takes_the_candidate_away_and_leaves_the_assignment_standing(
     assert_eq!(after.all_packages_hash, before.all_packages_hash);
 }
 
-/// The per-Agent act refuses to pick a side (ADR-0033 clause 30): naming a channel while a second
+/// The per-Agent act refuses to pick a side (ADR-0033 §30): naming a channel while a second
 /// one also claims the Agent is `409`, even though the operator has said which they mean. Honouring
 /// it would sidestep the conflict for good and make this path the way into a state the channel-wide
 /// act forbids.
@@ -2243,9 +2243,9 @@ async fn the_per_agent_act_refuses_to_pick_a_side() {
 }
 
 /// What a standing offer travels with is frozen. The entry's signature is a write to an assigned
-/// Package's entries and refused `409` like any other (ADR-0033 clause 18, ADR-0032): the re-offer
+/// Package's entries and refused `409` like any other (ADR-0033 §18, ADR-0032): the re-offer
 /// gate does not cover the signature, so one changed under a standing offer would never reach the
-/// Agent. **The channel freezes nothing** (ADR-0032 clause 11): the assignment pins the Package
+/// Agent. **The channel freezes nothing** (ADR-0032 §11): the assignment pins the Package
 /// itself, so taking it out of the channel or swapping the version it holds leaves every standing
 /// offer exactly as it was, and is how a rollout proceeds.
 /// Verifies: ADR-0033, ADR-0032
@@ -2356,7 +2356,7 @@ async fn a_released_package_freezes_its_entries_and_not_the_ring() {
     );
 }
 
-/// ADR-0033 clause 10: the hash an Agent verifies against is readable off the package, so "did this
+/// ADR-0033 §10: the hash an Agent verifies against is readable off the package, so "did this
 /// host take my bytes" is answerable without trusting a status field.
 /// Verifies: ADR-0033
 #[tokio::test]
@@ -2400,7 +2400,7 @@ async fn a_packages_entry_shows_the_hash_an_agent_verifies_against() {
     );
 }
 
-/// ADR-0033 clause 27: the fleet view tells apart the states that would otherwise be one empty row,
+/// ADR-0033 §27: the fleet view tells apart the states that would otherwise be one empty row,
 /// because the operator's next move differs in each. An Agent in **no channel** has to be labelled;
 /// one in a channel that holds nothing for it needs a package uploaded; one with something waiting
 /// needs a press.
@@ -2469,7 +2469,7 @@ async fn the_fleet_view_tells_no_ring_apart_from_a_ring_with_nothing_for_this_ag
 }
 
 /// A Deployment holding a Package with an unsigned entry is not rolled out: `409`, naming the
-/// Package and the platform, and nothing is released (ADR-0032 clause 9, ADR-0033).
+/// Package and the platform, and nothing is released (ADR-0032 §9, ADR-0033).
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn a_rollout_of_a_deployment_with_an_unsigned_package_is_refused_naming_it() {
@@ -2595,7 +2595,7 @@ fn staged_uploads(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 /// An upload that stops arriving is answered `408` and leaves nothing staged behind: the floor
-/// on every body holds on the Operator plane's longest route too (ADR-0012 clause 18).
+/// on every body holds on the Operator plane's longest route too (ADR-0012 §18).
 /// Verifies: ADR-0012
 #[tokio::test]
 async fn an_upload_that_stops_is_answered_408_and_leaves_nothing_staged() {
@@ -2923,7 +2923,7 @@ async fn a_download_past_the_limit_is_answered_429_after_thirty_seconds() {
     );
 }
 
-/// A new Package takes only a SemVer version, and the refusal says so (ADR-0034 clause 1).
+/// A new Package takes only a SemVer version, and the refusal says so (ADR-0034 §1).
 /// Verifies: ADR-0034
 #[tokio::test]
 async fn a_package_is_created_only_under_a_semver_version() {
@@ -2947,7 +2947,7 @@ async fn a_package_is_created_only_under_a_semver_version() {
 
 /// A Package an older Server stored under `1.19` is read, and nothing new is done with it: an
 /// entry, a signature and adding it to a Deployment are each refused `400`, while it can be read
-/// and deleted once nothing pins it (ADR-0034 clause 3).
+/// and deleted once nothing pins it (ADR-0034 §3).
 /// Verifies: ADR-0034
 #[tokio::test]
 async fn a_stored_package_whose_version_is_not_semver_takes_no_write_and_can_be_deleted() {

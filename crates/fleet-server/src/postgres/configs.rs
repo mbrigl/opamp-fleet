@@ -1,8 +1,7 @@
-//! Configurations in PostgreSQL (ADR-0039 clause 5): the PostgreSQL adapter behind
+//! Configurations in PostgreSQL (ADR-0039 §5): the PostgreSQL adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one row per Configuration, its retained
 //! revisions in rows of their own, each call one transaction on the rows it names
-//! (ADR-0025
-//! clause 19).
+//! (ADR-0025 §19).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -243,7 +242,7 @@ async fn save(client: &impl GenericClient, name: &str, saved: &Revision) -> Resu
 }
 
 /// Adds each pinned revision to its Configuration by its hash, inside a rollout's transaction
-/// (ADR-0039 clause 21), and deletes none; a revision already retained is left as it is, as its
+/// (ADR-0039 §21), and deletes none; a revision already retained is left as it is, as its
 /// hash names its content.
 /// Each Configuration's row is held `FOR KEY SHARE`, in name order, until the transaction ends:
 /// a collection's `FOR UPDATE` waits for it, so no instance collects a revision this transaction

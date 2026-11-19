@@ -28,7 +28,7 @@ use opamp::proto::AgentDescription;
 use crate::configs::validate_name;
 use crate::packages::PackageId;
 
-/// Does this Selector match this Agent (ADR-0032 clause 3)? Equality, AND, over every string
+/// Does this Selector match this Agent (ADR-0032 §3)? Equality, AND, over every string
 /// attribute of the effective description — identifying and non-identifying alike. An array-valued
 /// attribute never matches, and an Agent that has not described itself yet matches only the empty
 /// Selector, which no Deployment carries.
@@ -56,13 +56,13 @@ pub struct Deployment {
     /// it keeps the ADR-0021 grammar a Package gave up (ADR-0033).
     pub name: String,
     /// Equality pairs that must all match an attribute the Agent reported, labels included
-    /// (ADR-0032 clause 3). **Never empty** — see the module note.
+    /// (ADR-0032 §3). **Never empty** — see the module note.
     pub selector: BTreeMap<String, String>,
     /// At most one Package per Agent type, keyed by that type. Two of one type would collide on
     /// the wire map key *and* fit the same Agent, so the second is refused at the moment it is
     /// written rather than puzzled over at resolution.
     pub packages: BTreeMap<String, PackageId>,
-    /// The Configurations it holds, by name, in any number (ADR-0032 clause 5). A Configuration
+    /// The Configurations it holds, by name, in any number (ADR-0032 §5). A Configuration
     /// may sit in several Deployments, as a Package may; each fits the Agents of its type.
     pub configurations: BTreeSet<String>,
 }
@@ -74,7 +74,7 @@ impl Deployment {
     }
 
     /// Whether it holds nothing to release — no Package and no Configuration — which a rollout
-    /// act refuses (ADR-0032 clause 9).
+    /// act refuses (ADR-0032 §9).
     pub fn holds_nothing(&self) -> bool {
         self.packages.is_empty() && self.configurations.is_empty()
     }
@@ -170,12 +170,12 @@ pub fn deployment_for<'a>(
     }
 }
 
-/// One change to the members of one Deployment (ADR-0039 clause 2): it names the member it adds
+/// One change to the members of one Deployment (ADR-0039 §2): it names the member it adds
 /// or removes, and no other member is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Change {
     /// Adds a Package, or replaces the one held for its Agent type when `replace` is set; without
-    /// it a type already held by another Package is refused (ADR-0033 clause 25).
+    /// it a type already held by another Package is refused (ADR-0033 §25).
     PutPackage { id: PackageId, replace: bool },
     /// Removes a Package the Deployment holds; one it does not hold is `NotFound`.
     RemovePackage(PackageId),
@@ -248,8 +248,7 @@ pub(crate) fn not_held(name: &str, configuration: &str) -> DeploymentError {
     ))
 }
 
-/// A member that every Deployment holding it gives up, because it was deleted (ADR-0032
-/// clause 12).
+/// A member that every Deployment holding it gives up, because it was deleted (ADR-0032 §12).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Member {
     Configuration(String),
@@ -273,7 +272,7 @@ impl Member {
     }
 }
 
-/// The Deployment store's port (ADR-0009, ADR-0039 clause 2): where Deployments persist. It speaks
+/// The Deployment store's port (ADR-0009, ADR-0039 §2): where Deployments persist. It speaks
 /// in parts: the Selector is written on its own, and a member is added or removed by its name — a
 /// Package by its Agent type, a Configuration by its name — with no other member written. Each
 /// call answers the Deployment as the store holds it afterwards. The filesystem adapter
@@ -300,8 +299,8 @@ pub trait DeploymentBackend: Send + Sync {
     /// are stored afterwards.
     fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String>;
 
-    /// Deletes one Deployment, its members with it, unless a stored assignment names it (ADR-0032
-    /// clause 12); removing what is already absent is not an error. A database adapter counts the
+    /// Deletes one Deployment, its members with it, unless a stored assignment names it (ADR-0032 §12);
+    /// removing what is already absent is not an error. A database adapter counts the
     /// assignments in the transaction that deletes, holding the Deployment's row against every
     /// rollout through it, and refuses with a `Conflict` naming [`pinned`]; the filesystem
     /// adapter, whose one Server asked its Agent store first, deletes.
@@ -311,8 +310,7 @@ pub trait DeploymentBackend: Send + Sync {
     fn remove(&self, name: &str) -> Result<(), DeploymentError>;
 }
 
-/// The refusal of the deletion of a Deployment the assignments of `pinning` Agents name (ADR-0032
-/// clause 12).
+/// The refusal of the deletion of a Deployment the assignments of `pinning` Agents name (ADR-0032 §12).
 #[must_use]
 pub fn pinned(name: &str, pinning: usize) -> String {
     format!(
@@ -362,8 +360,8 @@ impl DeploymentStore {
 
     /// Reads every Deployment again from the backend, as another instance wrote one or changed its
     /// members
-    /// (ADR-0025
-    /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
+    /// (ADR-0025 §12):
+    /// what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap.
     ///
     /// # Errors
@@ -412,7 +410,7 @@ impl DeploymentStore {
     }
 
     /// Adds a Package to a Deployment, or replaces the one held for its Agent type when `replace`
-    /// is set. Without `replace`, a type already held is refused by name (ADR-0033 clause 25),
+    /// is set. Without `replace`, a type already held is refused by name (ADR-0033 §25),
     /// decided from what the store holds.
     pub fn put_package(
         &self,
@@ -461,13 +459,13 @@ impl DeploymentStore {
         )
     }
 
-    /// Takes a deleted Configuration out of every Deployment that held it (ADR-0032 clause 12),
+    /// Takes a deleted Configuration out of every Deployment that held it (ADR-0032 §12),
     /// and answers which those were.
     pub fn drop_configuration(&self, configuration: &str) -> Result<Vec<String>, DeploymentError> {
         self.drop_everywhere(&Member::Configuration(configuration.to_string()))
     }
 
-    /// Takes a deleted Package out of every Deployment that held it (ADR-0032 clause 12), and
+    /// Takes a deleted Package out of every Deployment that held it (ADR-0032 §12), and
     /// answers which those were.
     pub fn drop_package(&self, id: &PackageId) -> Result<Vec<String>, DeploymentError> {
         self.drop_everywhere(&Member::Package(id.clone()))
@@ -608,7 +606,7 @@ pub(crate) mod tests {
 
     /// An Agent belongs to at most one Deployment. Two claiming it is the conflict, and the
     /// message names **both** — a rollout that silently never starts is worse than one that says
-    /// why (ADR-0033 clause 28).
+    /// why (ADR-0033 §28).
     /// Verifies: ADR-0033
     #[test]
     fn two_deployments_matching_one_agent_are_a_conflict_that_names_them() {
@@ -635,7 +633,7 @@ pub(crate) mod tests {
     }
 
     /// Specificity does not break the tie, and that is the decision — not an oversight: neither
-    /// Selector wins by being narrower (ADR-0033 clause 28).
+    /// Selector wins by being narrower (ADR-0033 §28).
     /// Verifies: ADR-0033
     #[test]
     fn a_narrower_selector_does_not_win_over_a_wider_one() {
@@ -656,7 +654,7 @@ pub(crate) mod tests {
     }
 
     /// An Agent no channel claims waits, and that is not an error: after a fresh enrolment it is the
-    /// ordinary state (ADR-0033 clause 27).
+    /// ordinary state (ADR-0033 §27).
     /// Verifies: ADR-0033
     #[test]
     fn an_agent_no_ring_claims_is_not_a_conflict() {
@@ -801,7 +799,7 @@ pub(crate) mod tests {
         assert!(matches(&BTreeMap::new(), Some(&described(&[]))));
     }
 
-    /// ADR-0032 clause 3: equality, AND, over the effective description.
+    /// ADR-0032 §3: equality, AND, over the effective description.
     /// Verifies: ADR-0032
     #[test]
     fn every_selector_pair_must_equal_a_reported_attribute() {
@@ -833,9 +831,9 @@ pub(crate) mod tests {
     }
 
     /// A Deployment holds Configurations by name beside its Packages, in any number, and one
-    /// Configuration may sit in several Deployments (ADR-0032 clause 5). Taking out one it does not
+    /// Configuration may sit in several Deployments (ADR-0032 §5). Taking out one it does not
     /// hold says so; a deleted Configuration or Package leaves every Deployment that held it
-    /// (ADR-0032 clause 12).
+    /// (ADR-0032 §12).
     /// Verifies: ADR-0032
     #[test]
     fn a_deployment_holds_configurations_beside_its_packages() {

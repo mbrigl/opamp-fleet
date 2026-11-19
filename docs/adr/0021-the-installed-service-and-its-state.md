@@ -137,7 +137,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 5. **The package that carries the Client is `supervisor` too.** The self-update takes only the
    package named after the Agent type
-   ([ADR-0020](0020-the-client-updates-itself-from-a-signed-package.md) clause 2), and a Server
+   ([ADR-0020 §2](0020-the-client-updates-itself-from-a-signed-package.md)), and a Server
    offers a package under the Agent type it is built for
    ([ADR-0033](0033-packages-signatures-and-delivery.md)), so the release a fleet uploads for its
    Clients is a Package for Agent type `supervisor`, and no per-host setting is needed. A
@@ -451,7 +451,7 @@ installer only applies and names
 hosting apt and yum
 repositories; preseeding the endpoint on Linux; a macOS `.pkg`, which needs a Developer ID and
 notarization; the files an enrolment writes as root into the state directory, which no privileged
-step writes through a link ([ADR-0022](0022-the-accounts-the-service-runs-under.md) clause 11); the
+step writes through a link ([ADR-0022 §11](0022-the-accounts-the-service-runs-under.md)); the
 `[tls]` files an enrolment reads as root; `[logging] dir`, which only the service's own run uses;
 the releases and the Server's image
 ([ADR-0038](0038-releases-attestations-and-the-server-image.md)).

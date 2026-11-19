@@ -324,8 +324,8 @@ Agent plane with token buckets.
 17. **Shutdown is one bounded drain for both planes.** One `Handle` is shared by both listeners. A
     stop closes both listeners at once and tells each WebSocket session to close at an instant
     drawn uniformly over `drain_secs`
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-    clause 3); whatever has not ended 2 seconds after that window is cut, and the Agent-record flush
+    ([ADR-0025 §3](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md));
+    whatever has not ended 2 seconds after that window is cut, and the Agent-record flush
     of [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) runs afterwards.
 
 18. **No request timeout, but a floor on the pace of every body and every message; no
@@ -365,9 +365,9 @@ Agent plane with token buckets.
     over TLS 1.3.** Each outbound connection runs over the provider of clause 5, and plaintext
     only to a loopback endpoint the configuration names. The ADRs in force give it two such
     purposes, the S3 store and the PostgreSQL store
-    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md),
-    clauses 17 and 24). The Server sends no request for a package anywhere
-    ([ADR-0033](0033-packages-signatures-and-delivery.md), clause 4). This clause and clause 5
+    ([ADR-0023 §17 and §24](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+    The Server sends no request for a package anywhere
+    ([ADR-0033 §4](0033-packages-signatures-and-delivery.md)). This clause and clause 5
     bind the Server's own code. A library the operator has the Server load opens what its own
     configuration names, over its own stack, and the ADR that has the Server load it decides
     whether it may.
@@ -644,7 +644,7 @@ Agent plane with token buckets.
   rely on (Q-1). A fleet that needs more raises the numbers.
 - **Probe a package source over `https://`, with `http://` on the loopback alone.** It sets rules
   for an outbound request the Server does not make: the Server sends no request for a package
-  anywhere ([ADR-0033](0033-packages-signatures-and-delivery.md), clause 4), and its outbound
+  anywhere ([ADR-0033 §4](0033-packages-signatures-and-delivery.md)), and its outbound
   connections are those clause 21 names.
 - **The first reconnect after a lost connection on the backoff's first step, one second with equal
   jitter, and no bound on the Server's new connections.** After a restart every Agent of a fleet
@@ -937,8 +937,7 @@ These tests carry `Verifies: ADR-0012`:
   (clauses 7, 9), `the_operator_plane_requires_authentication_off_the_loopback` (clause 8),
   `max_connections_defaults_per_plane_and_zero_is_refused` (clause 19).
 - The store connections of clause 21 are verified under
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md),
-  clauses 17 and 24.
+  [ADR-0023 §17 and §24](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md).
 
 The Operator plane's own certificate (clauses 9 to 13), each test marked as verifying this ADR:
 
@@ -981,7 +980,7 @@ Tests of the rate limit, each marked `Verifies: ADR-0012`:
 - `crates/fleet-server/tests/packages.rs`:
   `a_download_past_the_limit_is_answered_429_after_thirty_seconds`. A member over its rate gets
   `429` with `Retry-After: 30`, its next download is admitted once the bucket refills, and the
-  refusal counts no failure toward the failed-admission throttle of ADR-0026 (clauses 24, 26).
+  refusal counts no failure toward the failed-admission throttle of ADR-0026 §24, §26.
 - `crates/fleet-server/tests/mutual_tls.rs`:
   - `a_throttled_message_leaves_an_aggregated_refusal_naming_the_host`: beyond ten a second, the
     entries are counted in `agent_rate.throttled.aggregated` (clause 29);

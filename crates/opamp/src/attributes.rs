@@ -29,15 +29,15 @@ pub const SERVICE_NAMESPACE: &str = "service.namespace";
 pub const SERVICE_VERSION: &str = "service.version";
 /// The namespace that is the Supervisor's own statement — the kinds a Client carries, the version
 /// of the Package a Supervisor installed — which neither a Managed Process nor an operator's
-/// `[attributes]` may state (ADR-0018 clauses 8 and 10).
+/// `[attributes]` may state (ADR-0018 §8 and §10).
 pub const SUPERVISOR_PREFIX: &str = "supervisor.";
 /// The prefix of the kinds a Client's own Agent reports, one `supervisor.kind.<kind> = "true"` per
-/// kind its build carries (ADR-0019 clause 18). Only the Client Agent reports a key under it, and
-/// the Server recognises the Client Agent by it (ADR-0029 clause 19).
+/// kind its build carries (ADR-0019 §18). Only the Client Agent reports a key under it, and
+/// the Server recognises the Client Agent by it (ADR-0029 §19).
 pub const SUPERVISOR_KIND_PREFIX: &str = "supervisor.kind.";
 /// The version of the Package a Supervisor installed for its Managed Process — the Supervisor's
-/// statement, never the process's (ADR-0018 clause 8) — and what a Package is held against
-/// where it is reported (ADR-0032 clauses 14 and 25).
+/// statement, never the process's (ADR-0018 §8) — and what a Package is held against
+/// where it is reported (ADR-0032 §14 and §25).
 pub const SUPERVISOR_PACKAGE_VERSION: &str = "supervisor.package.version";
 /// The operating system in the semantic-convention spelling (`linux`, `darwin`, `windows`) — half
 /// of the platform a package artifact is chosen by (ADR-0033).
@@ -187,7 +187,7 @@ mod tests {
 
     /// The kind prefix is the wire spelling both ends share, and it sits inside the Supervisor's
     /// namespace, so refusing every `supervisor.*` key of `[attributes]` also refuses a forged kind
-    /// (ADR-0018 clause 10, ADR-0029 clause 19).
+    /// (ADR-0018 §10, ADR-0029 §19).
     // Verifies: ADR-0018
     #[test]
     fn the_kind_prefix_lies_in_the_supervisors_namespace() {

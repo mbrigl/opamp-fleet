@@ -1,4 +1,4 @@
-// The product's name and title, fixed at build time (ADR-0021 clause 2).
+// The product's name and title, fixed at build time (ADR-0021 §2).
 //
 // `PRODUCT_NAME` names the installation: the directory under the platform's base, the service, the
 // `.deb`/`.rpm` package, the `/usr/libexec` payload directory and the `PATH` symlink. A second
@@ -11,7 +11,7 @@
 //
 // The grammar is the one ADR-0021 set for instance names, for the same reason: the value must be
 // simultaneously a systemd unit name, a launchd label, an SCM service name and a directory name on
-// every platform. Breaking it fails *this build* — the class of failure ADR-0021 clause 2 moves
+// every platform. Breaking it fails *this build* — the class of failure ADR-0021 §2 moves
 // from a runtime parse of operator input to a compile-time check, so an illegal name cannot reach
 // a service manager at all.
 

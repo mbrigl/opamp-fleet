@@ -1,4 +1,4 @@
-//! Artifact bytes on the filesystem (ADR-0039 clause 13): the default adapter behind
+//! Artifact bytes on the filesystem (ADR-0039 §13): the default adapter behind
 //! [`BlobStore`](crate::blobs::BlobStore).
 
 use std::collections::BTreeMap;
@@ -22,7 +22,7 @@ pub struct FsBlobStore {
 
 impl FsBlobStore {
     /// Opens the store in the data directory `root`, creating `blobs/` owner-only. The package
-    /// store lists it once when it opens, which hashes every blob again (ADR-0039 clause 13).
+    /// store lists it once when it opens, which hashes every blob again (ADR-0039 §13).
     ///
     /// # Errors
     /// Returns an error when the directory cannot be created.
@@ -112,7 +112,7 @@ impl BlobStore for FsBlobStore {
         super::remove_file(&self.path(sha256)?)
     }
 
-    /// Every blob, each hashed again by streaming it — the startup check of ADR-0039 clause 13. A
+    /// Every blob, each hashed again by streaming it — the startup check of ADR-0039 §13. A
     /// blob whose content does not match its name fails naming it, and so does anything in the
     /// directory that is not a blob; a staging file a crash left is removed.
     fn list(&self) -> Result<Vec<(String, u64)>, String> {

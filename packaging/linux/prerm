@@ -1,5 +1,5 @@
 #!/bin/sh
-# Pre-removal for the `.deb` and the `.rpm` alike (ADR-0022 clause 4).
+# Pre-removal for the `.deb` and the `.rpm` alike (ADR-0022 §4).
 #
 # The mirror of the post-install: what `service install` registered, `service uninstall` removes.
 # `service uninstall` itself deletes nothing (ADR-0021); the cleanup a *package* removal owes —
@@ -20,7 +20,7 @@ upgrade | failed-upgrade | deconfigure) exit 0 ;;
 [1-9]*) exit 0 ;;
 esac
 
-# `service stop`, then `service uninstall` (ADR-0022 clause 4): the stop takes the second service
+# `service stop`, then `service uninstall` (ADR-0022 §4): the stop takes the second service
 # down too where a process account is registered (ADR-0022), which a stop of the Client's unit
 # alone would leave running.
 #

@@ -81,11 +81,10 @@ tag, a mutable reference accepted with its risk in
 ## Fleet trust model
 
 **Admission is a fleet-wide trust boundary; within it the host is the only bound between Agents**
-([ADR-0027](docs/adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-clause 11,
-[ADR-0026](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-clause 12, and
-[ADR-0016](docs/adr/0016-client-modes-and-the-gateway.md) clause 18). A peer reaches the OpAMP
+([ADR-0027 §11](docs/adr/0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md),
+[ADR-0026 §12](docs/adr/0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md),
+and
+[ADR-0016 §18](docs/adr/0016-client-modes-and-the-gateway.md)). A peer reaches the OpAMP
 endpoint by proving *fleet membership* with a client certificate
 in the TLS handshake, the one proof the Agent plane admits by. The certificate also names the
 **host** it was issued to, and an

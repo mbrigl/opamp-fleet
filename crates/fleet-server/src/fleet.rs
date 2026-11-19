@@ -139,33 +139,32 @@ pub struct AgentRecord {
     /// When the connection that carries it last carried a report of it, in milliseconds since the
     /// epoch — runtime-only. An older connection of its host takes it back once this is a
     /// heartbeat interval old
-    /// (ADR-0025
-    /// clause 8).
+    /// (ADR-0025 §8).
     pub carried_ms: u64,
     /// Whether this Server heard the Agent report since it started — runtime-only. What it holds
     /// of one it did not is what it loaded, which on a shared store another instance may have
     /// written since.
     pub heard: bool,
-    /// The operator's labels for this Agent (ADR-0029), part of its persisted record (ADR-0029
-    /// clause 21): they follow a re-key and leave with a forget.
+    /// The operator's labels for this Agent (ADR-0029), part of its persisted record (ADR-0029 §21):
+    /// they follow a re-key and leave with a forget.
     pub labels: BTreeMap<String, String>,
-    /// The Host this Agent last arrived over (ADR-0029 clause 16): its own on a direct connection,
+    /// The Host this Agent last arrived over (ADR-0029 §16): its own on a direct connection,
     /// the Gateway's behind one. For the fleet view and label inheritance; it grants nothing.
     pub host: Option<String>,
     /// Where the Host and the Client Agent place this Agent — derived, never persisted.
     pub placement: Placement,
     /// The instance that holds it, as a shared store read it
-    /// (ADR-0025
-    /// clause 13); `None` for what this Server holds in memory.
+    /// (ADR-0025 §13);
+    /// `None` for what this Server holds in memory.
     pub holder: Option<crate::agent_store::Holder>,
-    /// What the operator's last rollout released to this Agent (ADR-0032 clause 6). **Every offer
+    /// What the operator's last rollout released to this Agent (ADR-0032 §6). **Every offer
     /// is composed from this**; matching only proposes. Written by the rollout acts, persisted like
     /// `restart_pending` — operator intent that survives a restart (ADR-0029). `None` is what it
     /// says: nothing has been rolled out.
     pub assignment: Option<Assignment>,
 }
 
-/// One Agent's assignment (ADR-0032 clause 6): one release, pinned as of the press that wrote it
+/// One Agent's assignment (ADR-0032 §6): one release, pinned as of the press that wrote it
 /// and replaced whole by the next.
 ///
 /// The Deployment is carried alongside the release rather than derived from it, because a
@@ -187,7 +186,7 @@ pub struct Assignment {
 
 impl Assignment {
     /// Whether a stored assignment keeps the rules its write met, which both stores ask on load
-    /// (ADR-0039 clause 4): the Deployment's and each Configuration's name keep the name grammar
+    /// (ADR-0039 §4): the Deployment's and each Configuration's name keep the name grammar
     /// of [`validate_name`](crate::configs::validate_name), and each pinned revision is named by
     /// a content hash, the form [`revision_hash`](crate::configs::revision_hash) gives. Whether
     /// the revision is still retained is not asked. Each store names the record before the
@@ -217,7 +216,7 @@ impl Assignment {
 static NO_CONFIGURATIONS: BTreeMap<String, String> = BTreeMap::new();
 
 impl AgentRecord {
-    /// What a Selector is matched against (ADR-0029 clause 18): the Host's values, what the Agent
+    /// What a Selector is matched against (ADR-0029 §18): the Host's values, what the Agent
     /// reported, its own labels and its Client Agent's, each key from the first that has it.
     ///
     /// Borrowed when it adds nothing to the report, which is the overwhelming majority of Agents —
@@ -269,8 +268,7 @@ impl AgentRecord {
     /// operator-queued, never what a live connection knows.
     /// Where it is connected, as a presence batch writes it.
     /// What its derived values come from
-    /// (ADR-0030
-    /// clause 8).
+    /// (ADR-0030 §8).
     fn source<'a>(&'a self, uid: &'a InstanceUid) -> crate::listing::Source<'a> {
         crate::listing::Source {
             uid,
@@ -364,7 +362,7 @@ pub enum ForgetError {
     Storage(String),
 }
 
-/// Why a rollout act (ADR-0032 clause 9) was refused.
+/// Why a rollout act (ADR-0032 §9) was refused.
 #[derive(Debug)]
 pub enum RolloutError {
     /// No Agent of that identity is known.
@@ -380,7 +378,7 @@ pub enum RolloutError {
     Storage(String),
 }
 
-/// Why deleting a Configuration was refused (ADR-0032 clause 12).
+/// Why deleting a Configuration was refused (ADR-0032 §12).
 #[derive(Debug)]
 pub enum DeleteError {
     /// An Agent's assignment pins it; the message says how many.
@@ -434,8 +432,8 @@ pub trait Clock: Send + Sync {
 }
 
 /// The port of the time that has passed, as a lease and a sweep measure it
-/// (ADR-0025
-/// clause 3, ADR-0039 clause 14): a clock that counts the time the host was suspended, which the
+/// (ADR-0025 §3,
+/// ADR-0039 §14): a clock that counts the time the host was suspended, which the
 /// binary hands the lease and the package store (on Linux `CLOCK_BOOTTIME`). A reading is the time since an origin of the
 /// clock's own: two readings of one clock compare, readings of two clocks do not. The adapters'
 /// constructors are in [`crate::clock`].
@@ -487,10 +485,9 @@ impl UseCase {
 pub trait CertificateSigner: Send + Sync {
     /// The signed certificate, PEM, for a CSR in PEM, and what it says about itself. Its subject
     /// carries `subject` — the values copied from the bootstrap certificate or the predecessor
-    /// (ADR-0016 clause 23 and ADR-0027 clause 12) — and never the request's. `use_case` is what
+    /// (ADR-0016 §23 and ADR-0027 §12) — and never the request's. `use_case` is what
     /// asked for it, which the audit entry of a signature with a token key names
-    /// (ADR-0026
-    /// clause 38).
+    /// (ADR-0026 §38).
     ///
     /// # Errors
     /// Returns an error when the request does not parse or cannot be signed.
@@ -502,15 +499,15 @@ pub trait CertificateSigner: Send + Sync {
         use_case: UseCase,
     ) -> Result<Signed, String>;
 
-    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0016
-    /// clause 18); `Ok(None)` when it carries none.
+    /// The certificate a CSR proves it renews, when it carries a renewal proof (ADR-0016 §18);
+    /// `Ok(None)` when it carries none.
     ///
     /// # Errors
     /// Returns the `BadRequest` text for a proof that does not hold.
     fn renewal_proof(&self, csr_pem: &str) -> Result<Option<Facts>, String>;
 
-    /// The issuer and serial of the bootstrap certificate a CSR's bootstrap proof names (ADR-0016
-    /// clause 18), read without checking the proof; `Ok(None)` when it carries none.
+    /// The issuer and serial of the bootstrap certificate a CSR's bootstrap proof names (ADR-0016 §18),
+    /// read without checking the proof; `Ok(None)` when it carries none.
     ///
     /// # Errors
     /// Returns the `BadRequest` text for a proof that does not parse.
@@ -591,7 +588,7 @@ pub struct AppState {
     /// certificate (ADR-0026); this is the backstop that bounds what an admitted peer can do.
     max_agents: usize,
     /// How often an instance on a shared store writes the presence of the Agents it carries
-    /// (ADR-0029 clause 4); zero where the store keeps none.
+    /// (ADR-0029 §4); zero where the store keeps none.
     /// What is stored may be one interval old, so it adds to the staleness budget (clause 8).
     presence_interval: Duration,
     /// The lease this instance serves under on a shared store, whose instance id the presence
@@ -601,7 +598,7 @@ pub struct AppState {
     /// is answered; unset where there is no lease.
     proof: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
     /// The Agents forgotten while a WebSocket carried them, by that connection, until its loop
-    /// takes them and ends their session (ADR-0029 clause 10). Locked strictly after `fleet`.
+    /// takes them and ends their session (ADR-0029 §10). Locked strictly after `fleet`.
     forgotten: Mutex<HashMap<ConnId, Vec<InstanceUid>>>,
     /// Each Agent's own lock, one of [`AGENT_LOCKS`] by its `instance_uid`. A report holds its
     /// Agent's from its start to its answer, across what it reads and writes in the store, and
@@ -648,8 +645,7 @@ impl AppState {
         //
         // On a shared store an instance holds only the Agents it carries, each loaded at its first
         // report here, and loads none at startup
-        // (ADR-0025
-        // clause 8).
+        // (ADR-0025 §8).
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
         let restored = if agent_store.is_shared() {
@@ -664,8 +660,8 @@ impl AppState {
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
         }
-        // A rollout cut short leaves at most a revision no assignment references (ADR-0039
-        // clause 2); it is collected here, before anything is offered.
+        // A rollout cut short leaves at most a revision no assignment references (ADR-0039 §2);
+        // it is collected here, before anything is offered.
         for config in configs.list() {
             configs.retain_only(
                 &config.name,
@@ -764,7 +760,7 @@ impl AppState {
     }
 
     /// Sets the most Agent records the fleet holds at once — the backstop against a peer minting
-    /// fresh UIDs to exhaust memory and disk (ADR-0026 clause 12).
+    /// fresh UIDs to exhaust memory and disk (ADR-0026 §12).
     #[must_use]
     pub fn with_max_agents(mut self, max_agents: usize) -> Self {
         self.max_agents = max_agents;
@@ -772,7 +768,7 @@ impl AppState {
     }
 
     /// Sets how often the presence of the Agents this instance carries is written to a shared
-    /// store (ADR-0029 clause 4), which the staleness budget
+    /// store (ADR-0029 §4), which the staleness budget
     /// adds (clause 8).
     #[must_use]
     pub fn with_presence_interval(mut self, interval: Duration) -> Self {
@@ -782,7 +778,7 @@ impl AppState {
 
     /// Names the lease this instance serves under on a shared store: the presence it writes when
     /// an Agent connects here names that lease's instance id as the holder, at once
-    /// (ADR-0029 clause 11). Set once; a later call is
+    /// (ADR-0029 §11). Set once; a later call is
     /// ignored.
     pub fn serve_under(&self, lease: watch::Receiver<Option<String>>) {
         let _ = self.lease.set(lease);
@@ -790,8 +786,8 @@ impl AppState {
 
     /// Answers the messages of Agents only while `holds` answers that the lease is held by its
     /// clock
-    /// (ADR-0025
-    /// clause 3). Set once; a later call is ignored.
+    /// (ADR-0025 §3).
+    /// Set once; a later call is ignored.
     pub fn answer_while(&self, holds: impl Fn() -> bool + Send + Sync + 'static) {
         let _ = self.proof.set(Box::new(holds));
     }
@@ -807,15 +803,14 @@ impl AppState {
     /// one — the period it actually asked for — else the configured default. Three of them, not
     /// one: a single missed heartbeat is a lost packet, and a fleet view that flickers on every
     /// hiccup is one nobody trusts. On a shared store the presence interval besides, since what is
-    /// stored may be one interval old (ADR-0029 clause 8).
+    /// stored may be one interval old (ADR-0029 §8).
     fn stale_after(&self) -> Duration {
         self.heartbeat_budget() + self.presence_interval
     }
 
     /// One heartbeat interval: the one this Server offers, else 30 seconds, the default interval
     /// a WebSocket's silence is judged by without one
-    /// (ADR-0014
-    /// clause 2).
+    /// (ADR-0014 §2).
     fn heartbeat_interval(&self) -> Duration {
         self.connection_offer
             .as_ref()
@@ -885,7 +880,7 @@ impl AppState {
     }
 
     /// The fleet as the Operator plane reads it
-    /// (ADR-0039 clause 3): on a shared store every record as
+    /// (ADR-0039 §3): on a shared store every record as
     /// stored, connected as its stored presence says, placed among the others, and nothing of what
     /// this instance holds in memory; on a store this Server alone writes, what it holds.
     ///
@@ -1008,7 +1003,7 @@ impl AppState {
     }
 
     /// Records a decision this Server is about to act on; without a record it is not taken
-    /// (ADR-0028 clause 5).
+    /// (ADR-0028 §5).
     fn audited(&self, entry: Entry) -> Result<(), String> {
         match &self.audit {
             Some(audit) => audit
@@ -1054,7 +1049,7 @@ impl AppState {
     /// declared one never hollow.
     fn capabilities(&self) -> u64 {
         let mut caps = SERVER_CAPABILITIES;
-        // All three ways a `ConnectionSettingsOffers` leaves this Server (ADR-0013 clause 3): the
+        // All three ways a `ConnectionSettingsOffers` leaves this Server (ADR-0013 §3): the
         // standing `[connection_offer]`, the own-telemetry destinations of `[telemetry_offer]`, and
         // the certificate a `[client_ca]` issues in answer to a CSR — which travels as an ordinary
         // offer. Keying the bit on the first alone left the other two exercising a capability this

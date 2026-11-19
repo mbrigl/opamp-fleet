@@ -590,7 +590,7 @@ async fn a_downstream_connection_that_never_finishes_its_headers_is_hung_up_on()
 
 /// A Gateway serves on its download route only what it relayed an offer of: the Server behind it
 /// serves the artifact, and the Gateway, which relayed no offer of it, answers `404`
-/// (ADR-0016 clause 15).
+/// (ADR-0016 §15).
 /// Verifies: ADR-0033
 #[tokio::test]
 async fn the_gateway_serves_no_artifact_it_relayed_no_offer_for() {

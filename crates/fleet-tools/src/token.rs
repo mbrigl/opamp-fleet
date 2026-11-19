@@ -1,6 +1,6 @@
 //! The keys `opamp-fleetctl pki token-init` and `pki bootstrap-ca --pkcs11-module` make on a
 //! PKCS#11 token, on the Server host
-//! (ADR-0036 clauses 5, 8 and 12): P-256, generated on the
+//! (ADR-0036 §5, §8 and §12): P-256, generated on the
 //! token with `CKA_EXTRACTABLE` false and `CKA_SENSITIVE` true, and used only through `C_Sign`. The
 //! CA certificates are built here and signed by the token with their own key. The module, the
 //! slot, the login, the curve and the signature's DER are `fleet_core::pkcs11`'s, the Server's own.

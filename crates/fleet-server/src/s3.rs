@@ -2,7 +2,7 @@
 //! behind [`BlobStore`](crate::blobs::BlobStore), beside the filesystem's.
 //!
 //! The port is synchronous and `object_store` is not, so the adapter bridges inside itself
-//! (ADR-0039 clause 13) through a [`Bridge`]: a small Tokio runtime of its own, onto which every
+//! (ADR-0039 §13) through a [`Bridge`]: a small Tokio runtime of its own, onto which every
 //! operation is spawned while the calling thread waits on a plain channel. The callers stay as they
 //! are — the upload and the download stream run on blocking threads, the rest on whatever thread
 //! calls.
@@ -32,7 +32,7 @@ use crate::config::S3BlobsConfig;
 /// upload holds this much in memory while it is streamed.
 const PART_SIZE: usize = 8 * 1024 * 1024;
 
-/// The only `AWS_*` variables the Server reads (ADR-0039 clause 18): those of its platform's
+/// The only `AWS_*` variables the Server reads (ADR-0039 §18): those of its platform's
 /// workload identity, each with the setting it feeds. None of them names an endpoint, a bucket, a
 /// region or whether plaintext is allowed.
 const WORKLOAD_IDENTITY: [(&str, AmazonS3ConfigKey); 5] = [
@@ -56,7 +56,7 @@ const WORKLOAD_IDENTITY: [(&str, AmazonS3ConfigKey); 5] = [
     ),
 ];
 
-/// How long an S3 request may wait (ADR-0039 clause 17), so a store that stops answering fails the
+/// How long an S3 request may wait (ADR-0039 §17), so a store that stops answering fails the
 /// one call that needs it instead of holding it — and whatever lock its caller holds — forever.
 #[derive(Clone, Copy, Debug)]
 struct Limits {
@@ -93,7 +93,7 @@ pub(crate) const LONGEST_CALL: Duration = Duration::from_secs(
 );
 
 /// Whose uploads a store's staging keys are
-/// (ADR-0039 clause 16): `<prefix>staging/<lease>/<random>`.
+/// (ADR-0039 §16): `<prefix>staging/<lease>/<random>`.
 #[derive(Clone)]
 pub enum Uploader {
     /// The one Server on the filesystem record store, which holds no lease: `<lease>` is `fs`.
@@ -107,7 +107,7 @@ pub enum Uploader {
 pub type LiveLeases = Arc<dyn Fn() -> Result<HashSet<String>, String> + Send + Sync>;
 
 /// One object per blob at `<prefix>blobs/<sha256>`, an upload in progress at
-/// `<prefix>staging/<lease>/<random>`, and no key outside `<prefix>` (ADR-0039 clause 16).
+/// `<prefix>staging/<lease>/<random>`, and no key outside `<prefix>` (ADR-0039 §16).
 #[derive(Clone)]
 pub struct S3BlobStore {
     store: Arc<AmazonS3>,
@@ -130,7 +130,7 @@ pub struct S3BlobStore {
 
 impl S3BlobStore {
     /// Connects to the bucket `config` names and checks that it can be listed. Nothing is created:
-    /// a bucket that does not exist fails here, naming it (ADR-0039 clause 16).
+    /// a bucket that does not exist fails here, naming it (ADR-0039 §16).
     ///
     /// # Errors
     /// Returns an error naming the key when the secret or the CA file cannot be read, and naming
@@ -209,7 +209,7 @@ impl S3BlobStore {
     }
 
     /// Deletes the staging objects of every lease that is not live, and never those of a live one
-    /// (ADR-0039 clause 16): what a starting instance does, and
+    /// (ADR-0039 §16): what a starting instance does, and
     /// one that takes over a lapsed lease. Answers how many it deleted.
     ///
     /// The keys are listed before `live` is asked. A key is written only under a lease its writer
@@ -376,12 +376,12 @@ impl S3BlobStore {
 }
 
 /// How the blob store's lock is held alone
-/// (ADR-0039 clause 14).
+/// (ADR-0039 §14).
 pub type HoldBlobs = Arc<dyn Fn() -> Result<crate::blobs::BlobHold, String> + Send + Sync>;
 
 /// The cleanup of the staging objects of leases that are no longer live, kept for an instance to
 /// run again whenever it takes over a lapsed lease
-/// (ADR-0039 clause 16).
+/// (ADR-0039 §16).
 #[derive(Clone)]
 pub struct StagingCleanup {
     store: S3BlobStore,
@@ -423,7 +423,7 @@ enum Kind {
 
 impl BlobStore for S3BlobStore {
     /// The upload goes to a staging key; once its hash is known it is copied to its blob's key
-    /// unless that is stored already, and the staging object is deleted (ADR-0039 clause 16). A
+    /// unless that is stored already, and the staging object is deleted (ADR-0039 §16). A
     /// stream that fails leaves no object under `blobs/`.
     fn put(&self, bytes: &mut dyn Read) -> Result<(String, u64), String> {
         let staging = self.staging_key()?;
@@ -497,7 +497,7 @@ impl BlobStore for S3BlobStore {
         }
     }
 
-    /// Every blob with its size, from the listing alone: nothing is downloaded (ADR-0039 clause 16).
+    /// Every blob with its size, from the listing alone: nothing is downloaded (ADR-0039 §16).
     /// A staging object is passed over, as it may be an upload another instance is still writing
     /// ([`clean_staging_with`](S3BlobStore::clean_staging_with) deletes those of leases that are
     /// not live);
@@ -580,8 +580,8 @@ impl Read for ObjectReader {
     }
 }
 
-/// The S3 client for `config`, with the credentials of ADR-0039 clause 18 and the HTTP client of
-/// ADR-0039 clause 17. `variable` reads the environment, and is asked for the names of
+/// The S3 client for `config`, with the credentials of ADR-0039 §18 and the HTTP client of
+/// ADR-0039 §17. `variable` reads the environment, and is asked for the names of
 /// [`WORKLOAD_IDENTITY`] alone.
 fn builder(
     config: &S3BlobsConfig,
@@ -604,7 +604,7 @@ fn builder(
             let secret =
                 crate::config::read_secret_file("[blobs.s3] secret_access_key_file", file)?;
             // `object_store` takes the key as its own `String`: the copy is made at this call, and
-            // the one read is wiped when it is dropped (ADR-0015 clauses 3 and 4).
+            // the one read is wiped when it is dropped (ADR-0015 §3 and §4).
             builder = builder
                 .with_access_key_id(key_id.clone())
                 .with_secret_access_key(secret.as_str());
@@ -621,7 +621,7 @@ fn builder(
 }
 
 /// The HTTP client `object_store` is handed: the project's TLS 1.3, *ring*-only configuration with
-/// the public roots and the optional `ca_file` root (ADR-0039 clause 17). Plaintext only where the
+/// the public roots and the optional `ca_file` root (ADR-0039 §17). Plaintext only where the
 /// client's own options allow it: the loopback endpoint `[blobs.s3]` checked, and the platform's
 /// credential endpoints on their link-local addresses. No proxy and no other setting is taken from
 /// the environment.
@@ -681,7 +681,7 @@ impl HttpConnector for TlsConnector {
     }
 }
 
-/// Copies what the bucket lacks from `data_dir/blobs/` (ADR-0039 clause 19): every blob of
+/// Copies what the bucket lacks from `data_dir/blobs/` (ADR-0039 §19): every blob of
 /// `referenced` that `store` does not hold and `dir` does, hashed again on the way — a file whose
 /// content does not match its name fails, naming it — and uploaded as `put` does. Each is logged.
 /// `dir` is only read: removing it is the operator's. Answers how many it uploaded.
@@ -750,7 +750,7 @@ pub(crate) mod tests {
     use crate::fs::FsBlobStore;
     use crate::packages::{PackageId, PackageStore, Platform};
 
-    /// The store the S3 tests run against (ADR-0039 clause 20), under a prefix of its own so that
+    /// The store the S3 tests run against (ADR-0039 §20), under a prefix of its own so that
     /// tests running at once never see each other's keys; `None`, said aloud, where none is named.
     pub(crate) fn named_store() -> Option<S3BlobsConfig> {
         let variable = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
@@ -851,7 +851,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The blob port's contract, which every store keeps (ADR-0039 clause 13): identical bytes are
+    /// The blob port's contract, which every store keeps (ADR-0039 §13): identical bytes are
     /// one blob named by their hash; what was stored reads back, an upload of several parts and an
     /// empty one included; `list` names every blob with its size; deleting an absent blob is no
     /// error; and a stream that fails stores nothing.
@@ -935,7 +935,7 @@ pub(crate) mod tests {
 
     /// A failed upload leaves nothing under `blobs/`; the listing passes a staging object over, and
     /// with the filesystem record store, which holds no lease, the cleanup at startup deletes every
-    /// one; any other key under the prefix fails startup, naming the key (ADR-0039 clause 16).
+    /// one; any other key under the prefix fails startup, naming the key (ADR-0039 §16).
     /// Verifies: ADR-0039
     #[test]
     fn leftover_staging_objects_go_and_unknown_keys_fail_startup_on_s3() {
@@ -981,7 +981,7 @@ pub(crate) mod tests {
     /// An upload in progress on instance A, staged under A's lease, survives B's start, whose
     /// cleanup deletes the staging objects of a lease that lapsed and keeps those of every live
     /// one; A's upload then completes. An instance that holds no lease takes no upload
-    /// (ADR-0039 clause 16).
+    /// (ADR-0039 §16).
     /// Verifies: ADR-0039
     #[test]
     fn the_cleanup_leaves_the_staging_objects_of_a_live_lease_and_deletes_a_lapsed_ones() {
@@ -1051,7 +1051,7 @@ pub(crate) mod tests {
     /// on any instance, and once: two instances on one database and one bucket each delete a
     /// Package's entry at once, and each act's sweep runs. The second waits for the first's hold on
     /// the blob store's lock, so the staging object is deleted by the sweep that held the lock
-    /// first, and each sweep deletes the blob its act let go (ADR-0039 clauses 13, 14 and 16). Which
+    /// first, and each sweep deletes the blob its act let go (ADR-0039 §13, §14 and §16). Which
     /// sweep found staging objects to delete is counted where it asks which leases are live, which
     /// a sweep does only once its listing found one.
     /// Verifies: ADR-0039, ADR-0025
@@ -1194,7 +1194,7 @@ pub(crate) mod tests {
 
     /// Two instances whose staging cleanups, the ones each runs when it takes over a lapsed lease,
     /// run at once delete a staging object of a released lease once: the second waits for the
-    /// first's hold on the blob store's lock and then finds nothing (ADR-0039 clauses 14 and 16).
+    /// first's hold on the blob store's lock and then finds nothing (ADR-0039 §14 and §16).
     /// Verifies: ADR-0039, ADR-0025
     #[test]
     fn two_staging_cleanups_at_once_delete_a_released_leases_staging_object_once() {
@@ -1264,7 +1264,7 @@ pub(crate) mod tests {
     /// An instance on PostgreSQL opens the store before it takes its lease: until the lease is
     /// named it takes no upload, and never stages one under `fs`, which every instance's cleanup
     /// deletes on sight; once named, every clone of the store stages under it
-    /// (ADR-0039 clause 16).
+    /// (ADR-0039 §16).
     /// Verifies: ADR-0039
     #[test]
     fn a_store_opened_before_its_lease_takes_no_upload_until_the_lease_is_named() {
@@ -1307,7 +1307,7 @@ pub(crate) mod tests {
     /// in between survives whether or not the answer names its lease: one under a lease the
     /// answer names live, and one under a lease taken after the question, which it cannot name.
     /// Asked first, the cleanup would list that second key and delete it
-    /// (ADR-0039 clause 16).
+    /// (ADR-0039 §16).
     /// Verifies: ADR-0039
     #[test]
     fn the_cleanup_lists_the_staging_keys_before_it_asks_which_leases_are_live() {
@@ -1335,7 +1335,7 @@ pub(crate) mod tests {
     }
 
     /// The Server does not create its bucket: one that does not exist fails startup naming it
-    /// (ADR-0039 clause 16).
+    /// (ADR-0039 §16).
     /// Verifies: ADR-0039
     #[test]
     fn a_bucket_that_does_not_exist_fails_startup_naming_it() {
@@ -1399,7 +1399,7 @@ pub(crate) mod tests {
 
     /// Switching to S3 copies every referenced artifact the bucket lacks, verified against its
     /// name, and leaves the file where it is; the reverse — an entry whose blob neither the bucket
-    /// nor the copy can supply — fails startup naming the entry (ADR-0039 clause 19).
+    /// nor the copy can supply — fails startup naming the entry (ADR-0039 §19).
     /// Verifies: ADR-0039
     #[test]
     fn switching_to_s3_copies_what_the_bucket_lacks_and_leaves_the_file() {
@@ -1451,7 +1451,7 @@ pub(crate) mod tests {
         clear(&bucket);
     }
 
-    /// The copy of ADR-0039 clause 19 reads `data_dir/blobs/` and nothing else: a referenced file
+    /// The copy of ADR-0039 §19 reads `data_dir/blobs/` and nothing else: a referenced file
     /// the target lacks is hashed and uploaded, the file stays, a second run copies nothing, and a
     /// file whose content does not match its name fails, naming it. Run against a filesystem
     /// target, so it needs no store.
@@ -1511,8 +1511,7 @@ pub(crate) mod tests {
     }
 
     /// A `ca_file` that holds no certificate fails startup naming the key, as one that cannot be
-    /// read does, rather than leaving the store verified against the public roots alone (ADR-0039
-    /// clause 17).
+    /// read does, rather than leaving the store verified against the public roots alone (ADR-0039 §17).
     /// Verifies: ADR-0039
     #[test]
     fn a_ca_file_without_a_certificate_fails_startup() {
@@ -1533,7 +1532,7 @@ pub(crate) mod tests {
 
     /// `AWS_ENDPOINT`, `AWS_ALLOW_HTTP` and their kin, set in the Server's environment, change
     /// neither the endpoint nor whether plaintext is allowed; the only `AWS_*` variables read are
-    /// those of the workload identity (ADR-0039 clauses 17 and 18). The environment is the real one
+    /// those of the workload identity (ADR-0039 §17 and §18). The environment is the real one
     /// of a child process, so whatever reads it — this module or the S3 client — is held to it.
     /// Verifies: ADR-0039
     #[test]
@@ -1624,7 +1623,7 @@ pub(crate) mod tests {
 
     /// A store that takes the connection and never answers fails the call within the limits —
     /// the silence of each attempt, retried — rather than holding it, and whatever lock its caller
-    /// holds, forever (ADR-0039 clause 17). The call is the listing at startup; every request goes
+    /// holds, forever (ADR-0039 §17). The call is the listing at startup; every request goes
     /// through the same client. Needs no store.
     /// Verifies: ADR-0039
     #[test]
@@ -1674,7 +1673,7 @@ pub(crate) mod tests {
     }
 
     /// A static key pair's secret comes from its file, which its owner and group alone may read
-    /// (ADR-0039 clause 18).
+    /// (ADR-0039 §18).
     /// Verifies: ADR-0039
     #[test]
     fn the_secret_file_is_read_and_must_be_the_servers_alone() {

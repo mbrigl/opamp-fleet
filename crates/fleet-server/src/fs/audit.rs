@@ -328,7 +328,7 @@ fn rotated_in(file: &Path) -> Result<Option<(u64, String)>, String> {
 
 /// The newest checkpoint the record in `dir` holds, or, where rotation deleted every one, the
 /// last one an `audit.rotated` names
-/// (ADR-0028 clause 10): where
+/// (ADR-0028 §10): where
 /// the Server's next checkpoint goes on from.
 ///
 /// # Errors
@@ -358,7 +358,7 @@ pub fn last_checkpoint(dir: &Path) -> Result<Option<crate::checkpoint::Tip>, Str
 }
 
 /// The record in `dir` checked against its checkpoints with `check`
-/// (ADR-0028 clause 13): its one
+/// (ADR-0028 §13): its one
 /// chain is named `fs`, and the entries the oldest rotation deleted are linked by a signed
 /// `audit.rotated` that names the hash of their last one.
 ///

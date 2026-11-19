@@ -3,7 +3,7 @@
 //! the Client's end, through which [`Spawner::Channel`](super::process::Spawner) starts a Managed
 //! Process.
 //!
-//! The protocol is private to the build (ADR-0022 clause 20): both ends run from the same `current`,
+//! The protocol is private to the build (ADR-0022 §20): both ends run from the same `current`,
 //! so a message is a length-prefixed JSON document — a four-byte big-endian length, then the body —
 //! and the first message each way is a handshake that names the build. A peer that names another
 //! build is refused.
@@ -12,7 +12,7 @@
 //! credentials or the pipe client's token, and serves one connection at a time. When that
 //! connection closes it stops every program it started, by the program's process group on Unix and
 //! its job object on Windows, so a Client that restarts finds no process it did not start
-//! (ADR-0022 clause 19).
+//! (ADR-0022 §19).
 //!
 //! On Linux and macOS the channel is a Unix socket and an account is its uid; on Windows it is a
 //! named pipe ([`windows`]) and an account is its SID. The protocol, and everything the two ends do
@@ -132,7 +132,7 @@ pub(crate) const TREES_END: Duration = Duration::from_secs(5);
 
 /// Ends every process the trees hold and waits, up to [`TREES_END`], until none holds one — so that
 /// a stop that reports the second service stopped leaves nothing it started holding a handle
-/// (ADR-0022 clause 19). Unix holds no tree and waits for nothing.
+/// (ADR-0022 §19). Unix holds no tree and waits for nothing.
 async fn end_trees(trees: Vec<Tree>) {
     for tree in &trees {
         tree.end();
@@ -187,8 +187,8 @@ impl Captured {
 /// directories of the Supervisors one apply purges, all of them together and reaching the service
 /// included: as long as a program has to end when the Client's connection closes. However many
 /// Supervisors are purged and however much the process account wrote, a purge that
-/// outlasts it leaves an orphan, as one the Client cannot delete does (ADR-0019 clause 34), and
-/// the Client's management goes on (ADR-0022 clause 17).
+/// outlasts it leaves an orphan, as one the Client cannot delete does (ADR-0019 §34), and
+/// the Client's management goes on (ADR-0022 §17).
 pub(crate) const PURGE_ANSWER: Duration = CLOSE_GRACE;
 
 /// What the Client asks of the second service.
@@ -206,7 +206,7 @@ pub(crate) enum Request {
     /// Kill the program, and its process group where it was asked to lead one.
     Stop { id: u64 },
     /// Remove what the process account wrote under `dir`, the directory of the Supervisor named
-    /// `supervisor`, when the Supervisor is purged (ADR-0022 clause 20): what the Client cannot
+    /// `supervisor`, when the Supervisor is purged (ADR-0022 §20): what the Client cannot
     /// remove itself. `shared` names, relative to `dir`, the Client's directories the process
     /// account's group writes, where alone the process account can have written; the service
     /// looks for its own entries there itself. Answered by [`Reply::Purged`].
@@ -255,7 +255,7 @@ pub(crate) enum Reply {
     },
     /// The program ended: its raw wait status, or why waiting for it failed. `closing` says that
     /// the service stopped it because the connection or the service itself ends: the program went
-    /// with the service and did not exit on its own (ADR-0022 clause 17).
+    /// with the service and did not exit on its own (ADR-0022 §17).
     Exited {
         id: u64,
         status: Result<i32, String>,
@@ -281,7 +281,7 @@ impl Stream {
     }
 }
 
-/// The build both ends must share (ADR-0022 clause 20).
+/// The build both ends must share (ADR-0022 §20).
 fn this_build() -> &'static str {
     fleet_core::version::current()
 }
@@ -372,7 +372,7 @@ where
 // The second service
 // ---------------------------------------------------------------------------------------------
 
-/// Whether a connecting peer is the Client's account (ADR-0022 clause 19): only its uid is served.
+/// Whether a connecting peer is the Client's account (ADR-0022 §19): only its uid is served.
 ///
 /// # Errors
 /// Returns why the peer is refused.
@@ -388,7 +388,7 @@ pub fn admit(peer_uid: u32, client_uid: u32) -> Result<(), String> {
 }
 
 /// Whether the service, running as `own_uid`, may serve `client_uid` as the Client's account
-/// (ADR-0022 clause 16): the service itself never runs as root, the Client's account is never root,
+/// (ADR-0022 §16): the service itself never runs as root, the Client's account is never root,
 /// and never the process account the service runs as — a service that served its own account
 /// would separate nothing.
 ///
@@ -418,7 +418,7 @@ pub fn check_client_uid(client_uid: u32, own_uid: u32) -> Result<(), String> {
 ///
 /// A socket left behind by an earlier run is removed first; anything else at that path is not, and
 /// the bind fails on it. The socket is made `0660`: the Client's account reaches it through the
-/// process account's group (ADR-0022 clause 21), and the peer check decides who is served.
+/// process account's group (ADR-0022 §21), and the peer check decides who is served.
 ///
 /// # Errors
 /// Returns an error when the path holds something other than a socket, or the bind fails.
@@ -448,13 +448,13 @@ pub enum Served {
     /// The Client's connection ended — it is another build, or the self-update restarts it — and
     /// `current` no longer names the version this service runs: the self-update switched it. The
     /// process exits non-zero so the service manager starts the version `current` names, as it does
-    /// for the Client (ADR-0022 clause 17).
+    /// for the Client (ADR-0022 §17).
     Superseded,
 }
 
 /// `supervisor run --agents <socket> --client-uid <uid>`: the second service (ADR-0022), until
 /// `SIGTERM` or `SIGINT`, or until a self-update leaves it behind. `SIGHUP` is ignored, as the
-/// Client ignores it (ADR-0021 clause 18): its default disposition would end the service and leave
+/// Client ignores it (ADR-0021 §18): its default disposition would end the service and leave
 /// its programs running.
 ///
 /// # Errors
@@ -522,7 +522,7 @@ pub fn named_client_sid(mut args: impl Iterator<Item = std::ffi::OsString>) -> O
     None
 }
 
-/// Closes the second service's process to the Managed Processes (ADR-0022 clause 19): marked not
+/// Closes the second service's process to the Managed Processes (ADR-0022 §19): marked not
 /// dumpable, no process of its account without `CAP_SYS_PTRACE` attaches to it, reads or writes its
 /// memory, or takes its descriptors, whatever `kernel.yama.ptrace_scope` says. The first thing its
 /// program does, before it parses its command line or sets up its log; the programs it starts are
@@ -534,7 +534,7 @@ pub fn mark_not_dumpable() {
     unsafe { libc::prctl(libc::PR_SET_DUMPABLE, libc::c_ulong::from(0u8)) };
 }
 
-/// Whether the second service's process is closed (ADR-0022 clause 19): it is not dumpable, and no
+/// Whether the second service's process is closed (ADR-0022 §19): it is not dumpable, and no
 /// process traces it. A tracer attached before the mark stays attached, so a service that is traced
 /// does not listen, and the service manager starts it again.
 ///
@@ -812,7 +812,7 @@ async fn serve_connection<F: Future<Output = ()>>(
     // connection ends.
     let mut left_behind: Vec<JoinHandle<()>> = Vec::new();
     // The process trees of programs that ended while something they started still runs: held, so
-    // that it ends with the connection too (ADR-0022 clause 19).
+    // that it ends with the connection too (ADR-0022 §19).
     let mut trees: Vec<Tree> = Vec::new();
     let ended = loop {
         tokio::select! {
@@ -916,7 +916,7 @@ async fn serve_connection<F: Future<Output = ()>>(
             () = shutdown.as_mut() => break Ended::Shutdown,
         }
     };
-    // Whatever ended the connection, nothing it started outlives it (ADR-0022 clause 19).
+    // Whatever ended the connection, nothing it started outlives it (ADR-0022 §19).
     for control in programs.values() {
         let _ = control.send(Control::Close);
     }
@@ -927,7 +927,7 @@ async fn serve_connection<F: Future<Output = ()>>(
         }
     }
     // What the programs left running ends here, and is waited for: before a stop reports the
-    // service stopped, nothing it started holds a handle any more (ADR-0022 clause 19).
+    // service stopped, nothing it started holds a handle any more (ADR-0022 §19).
     end_trees(trees).await;
     // A process that left its program's group — through `setsid` — outlives the stop, and its pipe
     // would hold a relay and a descriptor of the service's for as long as it keeps the pipe open.
@@ -1001,7 +1001,7 @@ impl Replies {
 ///
 /// Its environment is the service's own, with the process account's `HOME`, `USER` and `LOGNAME`,
 /// and the request's environment laid over it — the block's `env`, then the Supervisor Endpoint's
-/// token (ADR-0022 clause 22).
+/// token (ADR-0022 §22).
 #[cfg(unix)]
 fn start(launch: &Launch) -> io::Result<(Child, Tree)> {
     let mut command = Command::new(&launch.program);
@@ -1018,7 +1018,7 @@ fn start(launch: &Launch) -> io::Result<(Child, Tree)> {
         command.current_dir(dir);
     }
     // The program keeps the service's own umask, never one widened for the Client's sake
-    // (ADR-0022 clause 20): what it makes that the Client cannot remove, the service removes for
+    // (ADR-0022 §20): what it makes that the Client cannot remove, the service removes for
     // it when the Supervisor is purged (`Request::Purge`).
     let child = command.spawn()?;
     let group = child.id();
@@ -1044,7 +1044,7 @@ impl Tree {
 }
 
 /// Removes what the process account wrote under `dir`, the directory of the Supervisor named
-/// `supervisor`, which the Client purges (ADR-0022 clause 20): every entry this service's account
+/// `supervisor`, which the Client purges (ADR-0022 §20): every entry this service's account
 /// owns in each of the directories `shared` names relative to `dir`, and in the directories beneath
 /// them it can read, with everything beneath it. The service holds the request to that and no
 /// more:
@@ -1194,7 +1194,7 @@ fn remove_own(dir: &std::os::fd::OwnedFd, path: &Path) -> Result<(), String> {
 /// Under systemd this repeats what the service manager already sets for a unit with `User=`
 /// (`SetLoginEnvironment=`, systemd.exec(5)), unless an operator's drop-in turns that off. It
 /// stays for launchd, whose plist names the account in `UserName` and whose manual does not say
-/// that it sets these variables for it, and so that ADR-0022 clause 22 holds whatever the service
+/// that it sets these variables for it, and so that ADR-0022 §22 holds whatever the service
 /// manager does.
 #[cfg(unix)]
 fn account_env() -> &'static [(String, std::ffi::OsString)] {
@@ -1427,15 +1427,15 @@ pub struct Channel {
 
 struct Shared {
     socket: PathBuf,
-    /// The account the socket must be served by: the process account (ADR-0022 clause 19).
+    /// The account the socket must be served by: the process account (ADR-0022 §19).
     service: Account,
-    /// Who names the process the socket must be served by: the second service's (ADR-0022 clause 19).
+    /// Who names the process the socket must be served by: the second service's (ADR-0022 §19).
     process: ServiceProcess,
     state: tokio::sync::Mutex<State>,
     /// Whether `current` names a version other than the one this Client runs from.
     superseded: fn() -> bool,
     /// Set once the second service is another build and `current` no longer names this Client's
-    /// version: the self-update left this Client behind (ADR-0022 clause 17).
+    /// version: the self-update left this Client behind (ADR-0022 §17).
     left_behind: tokio::sync::watch::Sender<bool>,
 }
 
@@ -1449,7 +1449,7 @@ struct State {
     refusals: Refusals,
     /// The peers refused as not the second service, logged sparingly too, apart from the
     /// refusals: a warning about a build or an account never holds back the error that names an
-    /// impostor (ADR-0022 clause 19).
+    /// impostor (ADR-0022 §19).
     impostors: Refusals,
 }
 
@@ -1530,7 +1530,7 @@ impl Channel {
     /// Resolves once the second service turned out to be another build while `current` no longer
     /// names the version this Client runs: the self-update left the Client behind, and it ends for
     /// the restart that starts the version `current` names, as the service does in its place
-    /// (ADR-0022 clause 17). Only the process account's socket can tell it so (clause 4).
+    /// (ADR-0022 §17). Only the process account's socket can tell it so (clause 4).
     pub async fn left_behind(&self) {
         let mut left_behind = self.shared.left_behind.subscribe();
         let _ = left_behind.wait_for(|left| *left).await;
@@ -1571,7 +1571,7 @@ impl Channel {
 
     /// Asks the service to run `launch` for the Supervisor named `supervisor` to its end, and
     /// returns what it wrote — the last [`CAPTURED`] bytes of each stream — with how it ended: the
-    /// version probe and the preflight, run under the process account (ADR-0022 clause 18).
+    /// version probe and the preflight, run under the process account (ADR-0022 §18).
     ///
     /// Cancel-safe: dropped before the end, it asks the service to stop the program.
     ///
@@ -1639,8 +1639,8 @@ impl Channel {
     }
 
     /// Asks the service to remove what the process account wrote in each of `removed` — the
-    /// Supervisor's name and its directory — and the Client cannot remove itself (ADR-0022
-    /// clause 20), one request per Supervisor: the service looks for its own entries in the
+    /// Supervisor's name and its directory — and the Client cannot remove itself (ADR-0022 §20),
+    /// one request per Supervisor: the service looks for its own entries in the
     /// directories the Client shares for writing beneath the directory
     /// ([`crate::storage::handle::shared_for_writing`]). A file the process account owns in a
     /// directory of the Client's is the Client's to remove too, and the purge that follows removes
@@ -1744,7 +1744,7 @@ impl Channel {
                 Err(e) => {
                     waiting.in_vain = true;
                     // Whoever serves the socket is not the second service: it heard nothing, and
-                    // the service is waited for as one that is away (ADR-0022 clause 19).
+                    // the service is waited for as one that is away (ADR-0022 §19).
                     if let Some(peer) = other_process(&e) {
                         if let Some(unlogged) =
                             waiting.state.impostors.note(std::time::Instant::now())
@@ -1790,8 +1790,8 @@ impl Connection {
     ///
     /// The socket's peer is checked before anything is written: whoever serves it learns every
     /// program's command line and environment, the Supervisor Endpoint's token among them, so only
-    /// the process account is told (ADR-0022 clause 19), and of its processes only the one `process`
-    /// names as the second service (ADR-0022 clause 19).
+    /// the process account is told (ADR-0022 §19), and of its processes only the one `process`
+    /// names as the second service (ADR-0022 §19).
     async fn open(
         socket: &Path,
         service: &Account,
@@ -2062,8 +2062,8 @@ impl Connection {
                     started
                 };
                 if let Some(started) = started {
-                    // Quoted as a refusal is: whoever serves the socket says it (ADR-0022
-                    // clauses 19 and 20), and from here it reaches the log and the Server.
+                    // Quoted as a refusal is: whoever serves the socket says it (ADR-0022 §19 and §20),
+                    // and from here it reaches the log and the Server.
                     let error = match os_error {
                         Some(code) => io::Error::from_raw_os_error(code),
                         None => io::Error::other(peer_text(&error)),
@@ -2243,7 +2243,7 @@ fn unreachable(error: io::Error) -> io::Error {
 
 /// Whether `error` says that the second service was not reached, rather than that a program did
 /// not start or failed: a start or a wait that ended so is no failure of the program's, and a
-/// Supervisor tries again once the service is back (ADR-0022 clause 17).
+/// Supervisor tries again once the service is back (ADR-0022 §17).
 #[must_use]
 pub fn is_unreachable(error: &io::Error) -> bool {
     error
@@ -2262,7 +2262,7 @@ pub fn is_refused(error: &io::Error) -> bool {
         .is_some_and(|unreachable| unreachable.refused)
 }
 
-/// Whether the socket is served by the process account (ADR-0022 clause 19). Its directory belongs
+/// Whether the socket is served by the process account (ADR-0022 §19). Its directory belongs
 /// to that account, so any process the account runs could put a socket of its own in its place;
 /// only one of another account is told apart here — the Managed Processes share the account, and
 /// read one another's environment already (ADR-0022, Consequences).
@@ -2290,7 +2290,7 @@ const ACCOUNT_IS: &str = "uid";
 #[cfg(windows)]
 const ACCOUNT_IS: &str = "SID";
 
-/// Names the process the service manager runs as the second service (ADR-0022 clause 19): systemd
+/// Names the process the service manager runs as the second service (ADR-0022 §19): systemd
 /// the unit's `MainPID`, launchd the job's `pid`, the SCM the service's process id — `None` where
 /// it runs none. Asked anew at every connection; a test names one in its place.
 #[derive(Clone)]
@@ -2321,7 +2321,7 @@ impl ServiceProcess {
     }
 }
 
-/// The process at the other end of a connection, as the platform reports it (ADR-0022 clause 19).
+/// The process at the other end of a connection, as the platform reports it (ADR-0022 §19).
 pub(crate) struct PeerProcess {
     pub(crate) pid: u32,
     /// On Linux from 6.5, a pidfd for that process: it refers to that process alone, never to a
@@ -2462,7 +2462,7 @@ fn process_id(pid: libc::pid_t) -> io::Result<u32> {
 }
 
 /// Whether the socket is served by the process the service manager runs as the second service
-/// (ADR-0022 clause 19). The account alone cannot tell: the Managed Processes run under the process
+/// (ADR-0022 §19). The account alone cannot tell: the Managed Processes run under the process
 /// account too, and can put a socket of their own in its place, or an instance of the pipe beside
 /// its own. A peer whose process cannot be read, or for which the manager names no process, is
 /// refused as one whose process differs. With a pidfd, and on Windows with the handle the peer's
@@ -2532,7 +2532,7 @@ async fn check_process(
 }
 
 /// The socket is served by a process other than the second service's, or by one that cannot be
-/// read (ADR-0022 clause 19).
+/// read (ADR-0022 §19).
 #[derive(Debug)]
 struct OtherProcess {
     pid: Option<u32>,
@@ -2765,7 +2765,7 @@ pub(crate) mod peer {
     }
 
     /// The process this test runs as, named as the second service's: it serves the stand-ins and
-    /// the in-process services (ADR-0022 clause 19).
+    /// the in-process services (ADR-0022 §19).
     pub(crate) fn this_process() -> ServiceProcess {
         ServiceProcess::named(|| Ok(Some(std::process::id())))
     }
@@ -2928,7 +2928,7 @@ mod tests {
 
     /// A program the service starts has the process account's `HOME`, `USER` and `LOGNAME` from
     /// the password database, the block's `env` over the service's own environment, and the
-    /// Supervisor Endpoint's token last, so no `env` can replace it (ADR-0022 clause 22). Its output
+    /// Supervisor Endpoint's token last, so no `env` can replace it (ADR-0022 §22). Its output
     /// comes back to the one who ran it.
     /// Verifies: ADR-0022
     #[tokio::test]
@@ -2966,7 +2966,7 @@ mod tests {
     }
 
     /// A program the second service starts keeps the service's own umask, never one widened for
-    /// the Client's sake (ADR-0022 clause 20): what it creates has the modes what the service
+    /// the Client's sake (ADR-0022 §20): what it creates has the modes what the service
     /// itself creates has.
     /// Verifies: ADR-0022
     #[tokio::test]
@@ -3009,7 +3009,7 @@ mod tests {
 
     /// The second service removes what a purged Supervisor's Managed Processes wrote — read-only
     /// directories included, a link as a link — so the Client's purge that follows leaves
-    /// nothing (ADR-0022 clause 20, ADR-0034 clause 13).
+    /// nothing (ADR-0022 §20, ADR-0034 §13).
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn the_second_service_removes_what_a_purged_supervisors_processes_wrote() {
@@ -3037,7 +3037,7 @@ mod tests {
 
     /// The service removes no more than a purge asks of it: its own entries in directories beneath
     /// the tombstone of the Supervisor it names, of plain names, reached through no link, in a
-    /// directory the Client's account owns (ADR-0022 clause 20).
+    /// directory the Client's account owns (ADR-0022 §20).
     /// Verifies: ADR-0022
     #[test]
     fn a_purge_removes_nothing_outside_the_supervisors_directory() {
@@ -3083,7 +3083,7 @@ mod tests {
     /// The service purges the tombstone of the Supervisor it names, a directory the Client moved
     /// aside beneath the Supervisors' root, and nothing that only looks like one: another
     /// Supervisor's tombstone, a name of no tombstone, a link of that name, or the Supervisor's
-    /// own directory, which a Supervisor added again under the same name holds (ADR-0022 clause 20, ADR-0034 clause 13).
+    /// own directory, which a Supervisor added again under the same name holds (ADR-0022 §20, ADR-0034 §13).
     /// Verifies: ADR-0022
     #[test]
     fn a_purge_takes_only_the_tombstone_of_the_supervisor_it_names() {
@@ -3127,7 +3127,7 @@ mod tests {
     }
 
     /// The second service passes through the Supervisors' root and the tombstone, which the
-    /// process account may search and not read (`0710`, ADR-0022 clause 21), to the data its
+    /// process account may search and not read (`0710`, ADR-0022 §21), to the data its
     /// programs wrote: on Linux through a path-only handle, on macOS through `O_SEARCH`. Run
     /// unprivileged, the test's own account holds the search right alone on both.
     /// Verifies: ADR-0022
@@ -3157,7 +3157,7 @@ mod tests {
 
     /// A tombstone a start and a purge both set out to remove is gone for whichever comes second:
     /// neither the service nor the Client asking it takes that for what the process account
-    /// wrote and could not be removed (ADR-0022 clause 25).
+    /// wrote and could not be removed (ADR-0022 §25).
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn a_tombstone_gone_already_is_no_error() {
@@ -3179,7 +3179,7 @@ mod tests {
     /// root's and the Client's account's — and not its own: it runs as the process account, which
     /// is not the Client's. Run unprivileged, a link of this test's own account is refused where
     /// the Client is another account; run as root, a link of the Client's account is followed and
-    /// one of a third account is refused (ADR-0022 clause 20, ADR-0019 clause 33).
+    /// one of a third account is refused (ADR-0022 §20, ADR-0019 §33).
     /// Verifies: ADR-0022
     #[test]
     fn a_purge_follows_the_clients_links_above_the_root_and_not_the_services() {
@@ -3220,7 +3220,7 @@ mod tests {
     /// so whoever serves the process account's socket holds it [`PURGE_ANSWER`] and no longer,
     /// however many entries the process account wrote: a service that answers each request just
     /// before the Client gives up on it is asked once, and one that never answers is given up on
-    /// (ADR-0022 clause 17, ADR-0019 clause 34).
+    /// (ADR-0022 §17, ADR-0019 §34).
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn a_purge_waits_for_the_service_once_however_much_was_written() {
@@ -3284,7 +3284,7 @@ mod tests {
     }
 
     /// A purge the service does not answer in time is forgotten with the wait: the connection
-    /// keeps no route for an answer nobody waits for (ADR-0022 clause 17).
+    /// keeps no route for an answer nobody waits for (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn a_purge_given_up_on_leaves_no_route_behind() {
@@ -3449,7 +3449,7 @@ mod tests {
 
     /// Only a peer of the Client's account can make a superseded service end: one of another
     /// account that names another build is refused before it is served, and the service goes on
-    /// (ADR-0022 clauses 17 and 19).
+    /// (ADR-0022 §17 and §19).
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn a_peer_of_another_account_ends_no_superseded_service() {
@@ -3473,7 +3473,7 @@ mod tests {
     }
 
     /// The service goes while a start is on its way: the start goes to the service that comes back
-    /// rather than failing on the connection that went (ADR-0022 clause 17).
+    /// rather than failing on the connection that went (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn a_start_the_service_cut_short_goes_to_the_service_that_comes_back() {
@@ -3578,7 +3578,7 @@ mod tests {
 
     /// A Client that meets a second service of another build while `current` no longer names its
     /// own version is the one a self-update left behind, and is told so; one that `current` still
-    /// names is only refused (ADR-0022 clause 17).
+    /// names is only refused (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn a_client_left_behind_by_a_self_update_is_told_so() {
@@ -3913,7 +3913,7 @@ mod tests {
     }
 
     /// A second service whose program did not mark it not dumpable does not listen: this test's
-    /// process, which nothing marked, is refused as dumpable (ADR-0022 clause 19).
+    /// process, which nothing marked, is refused as dumpable (ADR-0022 §19).
     /// Verifies: ADR-0022
     #[cfg(target_os = "linux")]
     #[test]
@@ -3924,7 +3924,7 @@ mod tests {
 
     /// The second service's command line is told by `--agents` alone, before it is parsed, so
     /// that its program marks itself not dumpable first; the Client's `--agents-socket` is not it
-    /// (ADR-0022 clause 19).
+    /// (ADR-0022 §19).
     /// Verifies: ADR-0022
     #[test]
     fn the_second_services_command_line_is_known_before_it_is_parsed() {
@@ -4029,7 +4029,7 @@ mod tests {
 
     /// Both ends read the other's account on Linux and on macOS alike: `peer_cred` is
     /// `SO_PEERCRED` on Linux and `getpeereid` on macOS, and either end finds the other's uid there
-    /// for the checks of ADR-0022 clause 19. Run as one account, the test cannot tell an effective
+    /// for the checks of ADR-0022 §19. Run as one account, the test cannot tell an effective
     /// uid from a real one: that both calls give the effective uid is their documentation's.
     /// Verifies: ADR-0022
     #[tokio::test]
@@ -4769,7 +4769,7 @@ mod tests {
     }
 
     /// The shutdown of the service is a close too: what it started does not outlive it, and its
-    /// end is the service's going, not an exit of the program's own (ADR-0022 clause 17).
+    /// end is the service's going, not an exit of the program's own (ADR-0022 §17).
     /// Verifies: ADR-0022
     #[tokio::test]
     async fn the_service_stops_its_programs_when_it_shuts_down() {

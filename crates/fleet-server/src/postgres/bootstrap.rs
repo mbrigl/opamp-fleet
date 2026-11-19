@@ -1,4 +1,4 @@
-//! The bootstrap certificates the Server issued, in PostgreSQL (ADR-0039 clause 11): the
+//! The bootstrap certificates the Server issued, in PostgreSQL (ADR-0039 §11): the
 //! PostgreSQL adapter behind [`BootstrapStore`](crate::bootstrap::BootstrapStore) — one row per
 //! certificate, its PKCS#12 file in the same row, an issuance written in one transaction.
 
@@ -414,7 +414,7 @@ mod tests {
     }
 
     /// With PostgreSQL the record and the file are one row, written in one transaction: an
-    /// issuance that cannot be written leaves neither (ADR-0039 clause 11).
+    /// issuance that cannot be written leaves neither (ADR-0039 §11).
     /// Verifies: ADR-0039
     #[test]
     fn an_issuance_is_one_row_or_none() {

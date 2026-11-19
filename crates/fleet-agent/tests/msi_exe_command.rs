@@ -1,7 +1,7 @@
 //! The MSI's custom-action command lines, parsed the way Windows will parse them
 //! (`packaging/windows/supervisor.wxs`, ADR-0021, ADR-0022).
 //!
-//! A guard on the hazard ADR-0021 clause 12 rules out.
+//! A guard on the hazard ADR-0021 §12 rules out.
 //!
 //! `[INSTALLFOLDER]` always resolves with a trailing backslash, and the C runtime that builds a
 //! process's argv treats a backslash before a quote as an escaped, literal quote — so
@@ -193,7 +193,7 @@ fn register_service_survives_the_crt() {
     assert_eq!(args.endpoint, None);
 }
 
-/// ADR-0021 clause 12: the MSI names neither root, so the install takes the platform defaults —
+/// ADR-0021 §12: the MSI names neither root, so the install takes the platform defaults —
 /// `%ProgramData%\opamp-fleet` for both halves — and `Program Files` holds only the payload.
 ///
 /// This is also what keeps error 1722 out. A directory property resolves with a trailing backslash,
@@ -205,7 +205,7 @@ fn the_msi_names_no_root_so_no_directory_property_reaches_a_command_line() {
         assert!(
             !command.contains("[INSTALLFOLDER]"),
             "{id} passes a directory property again — the trailing backslash that resolves into \
-             it is what produced error 1722 (ADR-0021 clause 12)"
+             it is what produced error 1722 (ADR-0021 §12)"
         );
         assert!(
             !command.contains("--root") && !command.contains("--data-root"),

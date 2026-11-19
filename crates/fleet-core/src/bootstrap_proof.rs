@@ -3,7 +3,7 @@
 //! bootstrap certificate a request rests on from the proof, so a request holds over any hop — a
 //! Gateway in between included (ADR-0016).
 //!
-//! It has the renewal proof's shape (ADR-0016 clause 18): a requested SAN URI, [`URI_PREFIX`] and
+//! It has the renewal proof's shape (ADR-0016 §18): a requested SAN URI, [`URI_PREFIX`] and
 //! the base64url (no padding) of [`encode`]'s bytes, with a statement of its own so that neither
 //! proof can stand for the other.
 

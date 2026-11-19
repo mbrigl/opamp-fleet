@@ -54,7 +54,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long one call — every round trip of its transaction, the wait for a connection included —
 /// may take before it fails. The Server's callers hold their own locks while a record is written
-/// (ADR-0029 clause 4), so a database that stops answering holds them this long at most. The
+/// (ADR-0029 §4), so a database that stops answering holds them this long at most. The
 /// database's own timeouts below end a statement it is still working on; this one ends a call
 /// whose database, or the network to it, does not answer at all.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -80,7 +80,7 @@ const KEEPALIVES_INTERVAL: Duration = Duration::from_secs(5);
 const KEEPALIVES_RETRIES: u32 = 3;
 
 /// How long after its last renewal a sweep's mark of a lease that is not live, or of none, is
-/// kept (ADR-0039 clause 14). A renewal that answered was stamped by the database at most one
+/// kept (ADR-0039 §14). A renewal that answered was stamped by the database at most one
 /// call's bound, [`CALL_TIMEOUT`], before its answer; one call to the blob store follows, at most
 /// [`LONGEST_CALL`](crate::s3::LONGEST_CALL); [`MARKS_MARGIN`] covers the waits between that
 /// call's retries and the clocks of two primaries after a failover.
@@ -97,8 +97,8 @@ const APPLICATION_NAME: &str = "opamp-fleet-server";
 /// Whether an instance must be the only one on its database, and why.
 ///
 /// An instance whose blobs or CA keys are files must be alone
-/// (ADR-0025
-/// clause 2): what it keeps on its own disk no other instance can reach.
+/// (ADR-0025 §2):
+/// what it keeps on its own disk no other instance can reach.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Exclusive {
     /// Alone, because of the key this names, such as `[blobs] store = "fs"`.
@@ -144,8 +144,8 @@ pub struct Database {
     /// sessions ended at all.
     holds_lost: Arc<std::sync::atomic::AtomicUsize>,
     holds_ended: Arc<std::sync::atomic::AtomicUsize>,
-    /// The instance id under which this instance's sweeps mark the blobs they delete (ADR-0039
-    /// clause 14): the lease it holds, or the one it is about to take; `None` for a Server that
+    /// The instance id under which this instance's sweeps mark the blobs they delete (ADR-0039 §14):
+    /// the lease it holds, or the one it is about to take; `None` for a Server that
     /// takes no lease, such as a command.
     sweeps_under: std::sync::Mutex<Option<String>>,
     /// The release this instance is, `MAJOR.MINOR.PATCH`: what its lease records and what the
@@ -153,8 +153,7 @@ pub struct Database {
     release: &'static str,
     /// Set once a lease taken after a lost one found a schema that needs a newer Server: the
     /// refusal, naming both versions, and the instance stops
-    /// (ADR-0025
-    /// clause 16).
+    /// (ADR-0025 §16).
     outdated: std::sync::Mutex<Option<String>>,
     /// The notifications of the calls whose answer was lost, which the listener hands on
     /// ([`notify::Unsure`]).
@@ -193,7 +192,7 @@ pub struct Opening<'a> {
     #[doc(hidden)]
     pub bound: Duration,
     /// The instance id its first lease is taken under, which its sweeps mark the blobs they delete
-    /// under until then (ADR-0039 clause 14); `None` for a Server that takes no lease, such as a
+    /// under until then (ADR-0039 §14); `None` for a Server that takes no lease, such as a
     /// command. Each lease it takes sets it anew.
     pub instance_id: Option<String>,
 }
@@ -214,7 +213,7 @@ impl Default for Opening<'_> {
 impl Database {
     /// Connects to the database `config` names as `opening` says: takes the exclusive lock when
     /// this instance must be alone, and brings its schema up to date unless it is to touch
-    /// nothing (ADR-0039 clauses 22 to 24).
+    /// nothing (ADR-0039 §22–§24).
     ///
     /// # Errors
     /// Returns an error naming the key when the password or CA file cannot be read, naming the host
@@ -256,7 +255,7 @@ impl Database {
         )?;
         let tls = tls(config)?;
         // `tokio-postgres` copies the password into its own `Config`; the one read is wiped when it
-        // is dropped (ADR-0015 clauses 3 and 4).
+        // is dropped (ADR-0015 §3 and §4).
         let origin = new_origin()?;
         let mut pg = pg_config(config, &password, schema);
         // Every connection names this instance as the origin of what it announces
@@ -401,10 +400,9 @@ impl Database {
         self.lock.as_ref().is_some_and(SessionLock::lost)
     }
 
-    /// Applies `migrations` in one transaction (ADR-0039 clause 22), once the schema and the
+    /// Applies `migrations` in one transaction (ADR-0039 §22), once the schema and the
     /// releases of the live leases are checked under the migrations' lock
-    /// (ADR-0025
-    /// clause 16).
+    /// (ADR-0025 §16).
     ///
     /// # Errors
     /// Returns an error naming the database when the schema needs a newer Server, when a live
@@ -489,7 +487,7 @@ impl Database {
     }
 
     /// The connections the pool holds at most, as `[database] pool_size` set them
-    /// (ADR-0039 clause 24).
+    /// (ADR-0039 §24).
     #[must_use]
     pub fn pool_size(&self) -> usize {
         self.pool.status().max_size
@@ -547,8 +545,7 @@ impl Database {
             return Err(lost_lock(&self.name));
         }
         // What the call announced is counted as it is sent: where its answer is lost, it may have
-        // committed, and the instance reads again what it names (ADR-0025
-        // clause 10).
+        // committed, and the instance reads again what it names (ADR-0025 §10).
         let call = notify::Call::new(self.afterwards.clone());
         let answer = self.bridge.run(notify::sending(
             call.clone(),
@@ -698,8 +695,8 @@ pub(crate) fn blob_lock_refused(error: tokio_postgres::Error) -> String {
 
 /// A session-level advisory lock on a connection of its own, outside the pool: the one way the
 /// Server holds such a lock. It is the exclusive lock of an instance that must be alone
-/// (ADR-0025 clause 2), the blob store's lock (ADR-0039 clause 14), the audit prune lock (ADR-0039
-/// clause 12), or the lock of the audit's signer (ADR-0028 clause 11).
+/// (ADR-0025 §2), the blob store's lock (ADR-0039 §14), the audit prune lock (ADR-0039 §12),
+/// or the lock of the audit's signer (ADR-0028 §11).
 ///
 /// The lock goes with its session, so the session's connection is watched: when it ends while the
 /// lock is held, the lock is gone, and [`lost`](Self::lost) says so from then on. A holder that
@@ -895,14 +892,14 @@ pub(crate) const EXCLUSIVE_LOCK: &str =
     "hashtextextended('opamp-fleet-server:' || coalesce(current_schema(), ''), 0)";
 
 /// Why an instance that shares the database neither migrates nor starts while another Server
-/// holds it alone (ADR-0039 clause 22).
+/// holds it alone (ADR-0039 §22).
 const HELD_ALONE_BEFORE_MIGRATING: &str = "another Server holds the database alone — a Server of \
      0.7.1 or earlier, an instance that keeps its blobs as files ([blobs] store = \"fs\") or a CA \
      key in a file ([client_ca] key_file, [enrolment] bootstrap_ca_key_file), or a `server \
      migrate-to-postgres` or `server blobs-to-s3` still running; stop the instance, or let the \
      command finish, before this one starts, which changed nothing in the database";
 
-/// The lock of the blob store (ADR-0039 clause 14), by the key
+/// The lock of the blob store (ADR-0039 §14), by the key
 /// its schema gives it: a sweep or a staging cleanup holds it alone, an upload shared in the
 /// transaction that checks its blob and writes its entry, and `server blobs-to-s3` alone for its
 /// run.
@@ -923,7 +920,7 @@ pub(crate) const MIGRATION_LOCK: &str =
 fn lost_lock(name: &str) -> String {
     format!(
         "this Server lost its lock on the {name} — another instance may hold it now (ADR-0039 \
-         clause 23), so this one writes nothing more; restart it once the database answers"
+         §23), so this one writes nothing more; restart it once the database answers"
     )
 }
 
@@ -1070,7 +1067,7 @@ uncached!(tokio_postgres::Client);
 uncached!(tokio_postgres::Transaction<'_>);
 
 /// A pooled connection, or why there is none: a database lost while the Server runs fails the
-/// calls that need it (ADR-0039 clause 24).
+/// calls that need it (ADR-0039 §24).
 ///
 /// # Errors
 /// Returns an error when no connection can be had within the pool's timeouts.
@@ -1099,7 +1096,7 @@ pub(crate) async fn snapshot(
 /// [`client`] for a creation of an Agent's record, which waits for a pooled connection up to the
 /// bound of its whole call, [`CALL_TIMEOUT`], rather than [`WAIT_TIMEOUT`]: a new Agent is not
 /// answered `Unavailable` while the calls of a connecting fleet hold every connection for a few
-/// seconds (ADR-0039 clause 24).
+/// seconds (ADR-0039 §24).
 pub(crate) async fn creating_client(pool: &Pool) -> Result<Object, String> {
     let mut timeouts = pool.timeouts();
     timeouts.wait = Some(CALL_TIMEOUT);
@@ -1136,7 +1133,7 @@ fn new_origin() -> Result<String, String> {
     Ok(hex::encode(bytes))
 }
 
-/// The connection's settings, every one from `[database.postgres]` (ADR-0039 clause 24) — nothing
+/// The connection's settings, every one from `[database.postgres]` (ADR-0039 §24) — nothing
 /// from the environment, and nothing from a connection string. `schema`, when named, is the only
 /// schema the connection sees.
 fn pg_config(
@@ -1168,7 +1165,7 @@ fn pg_config(
     pg
 }
 
-/// The TLS client of ADR-0039 clause 24: TLS 1.3 on *ring* alone, the database's certificate
+/// The TLS client of ADR-0039 §24: TLS 1.3 on *ring* alone, the database's certificate
 /// verified against the public roots, or against the roots of `ca_file` alone when it names one,
 /// and its host name checked by rustls. `None` — plaintext — only where `tls = false`, which the
 /// configuration allows on a loopback IP literal alone.
@@ -1244,7 +1241,7 @@ pub(crate) fn unsigned(value: i64) -> u64 {
 
 #[cfg(test)]
 pub(crate) mod testing {
-    //! The database the PostgreSQL tests run against (ADR-0039 clause 25): the one the
+    //! The database the PostgreSQL tests run against (ADR-0039 §25): the one the
     //! `FLEET_TEST_POSTGRES_*` variables name, never one the tests start. Each test works in a
     //! schema of its own and drops it afterwards.
 
@@ -1840,7 +1837,7 @@ mod tests {
 
     /// `PGHOST`, `PGSSLMODE` and their kin, set in the Server's environment, change neither the
     /// database nor whether plaintext is allowed: the connection is built from
-    /// `[database.postgres]` alone (ADR-0039 clause 24). The environment is the real one of a child
+    /// `[database.postgres]` alone (ADR-0039 §24). The environment is the real one of a child
     /// process.
     /// Verifies: ADR-0039
     #[test]
@@ -2013,7 +2010,7 @@ mod tests {
     }
 
     /// A database that takes the connection and never answers fails startup within the bound of
-    /// one call, naming it, rather than holding the Server forever (ADR-0039 clause 24).
+    /// one call, naming it, rather than holding the Server forever (ADR-0039 §24).
     /// Verifies: ADR-0039
     #[test]
     fn a_database_that_never_answers_fails_startup_within_the_bound() {
@@ -2146,7 +2143,7 @@ mod tests {
 
     /// A database that stops answering while the Server runs fails the one call that needs it
     /// within that call's bound, and the call after it as fast; the Server is held no longer
-    /// (ADR-0039 clause 24). The database is reached through a proxy that is frozen mid-run.
+    /// (ADR-0039 §24). The database is reached through a proxy that is frozen mid-run.
     /// Verifies: ADR-0039
     #[test]
     fn a_database_that_stops_answering_fails_the_call_within_the_bound() {
@@ -2277,7 +2274,7 @@ mod tests {
     /// The connection is what libpq calls `verify-full`: a database whose certificate a root of
     /// `ca_file` signed but that does not name `host`, or that names it but no root of
     /// `ca_file` signed, is refused before a password is sent; one that a root signed for `host`
-    /// is accepted (ADR-0039 clause 24). Run against a listener that speaks the start of the
+    /// is accepted (ADR-0039 §24). Run against a listener that speaks the start of the
     /// protocol, so it needs no database.
     /// Verifies: ADR-0039
     #[test]
@@ -2336,8 +2333,8 @@ mod tests {
     use crate::test_support::logged;
 
     /// A Server whose lock's connection ends while it runs notices: it logs why and refuses every
-    /// call from then on, rather than writing on while a second Server may start (ADR-0039
-    /// clause 23). The session is ended from the database's side, as a restart or an operator
+    /// call from then on, rather than writing on while a second Server may start (ADR-0039 §23).
+    /// The session is ended from the database's side, as a restart or an operator
     /// would end it.
     /// Verifies: ADR-0039
     #[test]
@@ -2560,7 +2557,7 @@ mod tests {
     /// A Server of 0.7.1 takes the schema of migrations 1 and 2, which it knows, and refuses the
     /// schema once any migration of 0.8.0 is applied, naming 0.8.0 and changing nothing: it holds
     /// no lease, so it must not serve beside the instances of 0.8.0
-    /// (ADR-0039 clause 22). It is asked through the check of
+    /// (ADR-0039 §22). It is asked through the check of
     /// [`schema::apply`], which 0.7.1 runs as it stands here.
     /// Verifies: ADR-0039
     #[test]
@@ -2620,7 +2617,7 @@ mod tests {
     /// An instance that shares the database neither migrates nor starts while another Server holds
     /// the database alone, as a running Server of 0.7.1 does for its whole run under the same key:
     /// that Server checked the schema only at its own start, and would serve on in a schema it
-    /// refuses (ADR-0039 clause 22). Once the lock is free, the
+    /// refuses (ADR-0039 §22). Once the lock is free, the
     /// instance migrates and starts.
     /// Verifies: ADR-0039
     #[test]
@@ -2704,8 +2701,7 @@ mod tests {
     /// A lease of 0.8.0 counts as 0.8.0 by the column's default; a lapsed lease, and the live one
     /// of an instance that had to be alone and whose lock is free, count as none; with no such
     /// lease the instance applies every migration it lacks
-    /// (ADR-0025
-    /// clause 16).
+    /// (ADR-0025 §16).
     /// Verifies: ADR-0025
     #[test]
     fn an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves() {
@@ -2841,9 +2837,8 @@ mod tests {
     /// which its migration of the contract pair's defaults names: the refusal names the lease's
     /// release, 0.8.4 and its own, and the schema 0.8.4 left is left as it was. Beside a lease
     /// of 0.8.4 it migrates and serves
-    /// (ADR-0039 clause 22,
-    /// ADR-0025
-    /// clause 16).
+    /// (ADR-0039 §22,
+    /// ADR-0025 §16).
     /// Verifies: ADR-0039
     #[test]
     fn an_instance_of_0_8_5_refuses_to_start_beside_a_live_lease_older_than_0_8_4() {
@@ -2891,8 +2886,8 @@ mod tests {
     /// Of a lease taken while a Server two releases on migrates, the later sees the earlier: the
     /// lease waits for the migrations' lock, then finds the schema that needs a newer Server and
     /// is refused, naming both versions, taking nothing and keeping the refusal
-    /// (ADR-0025
-    /// clause 16). The other order, the lease first, is
+    /// (ADR-0025 §16).
+    /// The other order, the lease first, is
     /// `an_instance_refuses_its_start_while_a_live_lease_is_older_than_the_schema_it_leaves`.
     /// Verifies: ADR-0025
     #[test]

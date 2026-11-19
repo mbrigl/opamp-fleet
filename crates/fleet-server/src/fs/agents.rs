@@ -18,7 +18,7 @@ use crate::packages::PackageId;
 /// The default adapter (ADR-0029, ADR-0039): one JSON file per Agent under `<data_dir>/agents/`,
 /// owner-only — temp file plus atomic rename, loud failure on a file that does not parse or a name
 /// that is not an Instance UID. A rollout's revisions go to `<data_dir>/configurations/` first
-/// (ADR-0039 clause 2), and the integrity queries are answered from the assignments this adapter
+/// (ADR-0039 §2), and the integrity queries are answered from the assignments this adapter
 /// last read or wrote.
 pub struct FsAgentStore {
     dir: PathBuf,
@@ -53,13 +53,13 @@ struct Envelope {
     package_statuses: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     available_components: Option<String>,
-    /// What the last rollout released to this Agent (ADR-0032 clause 6). Absent means nothing was.
+    /// What the last rollout released to this Agent (ADR-0032 §6). Absent means nothing was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     assignment: Option<AssignmentMeta>,
-    /// The operator's labels (ADR-0029 clause 21). Absent means none.
+    /// The operator's labels (ADR-0029 §21). Absent means none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     labels: BTreeMap<String, String>,
-    /// The Host the Agent last arrived over (ADR-0029 clause 16). Absent means none.
+    /// The Host the Agent last arrived over (ADR-0029 §16). Absent means none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     host: Option<String>,
 }
@@ -76,7 +76,7 @@ struct AssignmentMeta {
     configurations: BTreeMap<String, String>,
 }
 
-/// Version 4 carries the Agent's labels and the Host it last arrived over (ADR-0029 clauses 16 and 21) beside ADR-0032's assignment shape, and there is **no reader for an earlier version**: an
+/// Version 4 carries the Agent's labels and the Host it last arrived over (ADR-0029 §16 and §21) beside ADR-0032's assignment shape, and there is **no reader for an earlier version**: an
 /// envelope this Server did not write is named rather than guessed at.
 const ENVELOPE_VERSION: u32 = 4;
 
@@ -180,7 +180,7 @@ impl Envelope {
 impl FsAgentStore {
     /// Opens the store in the data directory `root`, creating `agents/` owner-only — reported
     /// effective configurations may hold credentials (ADR-0029), the same reasoning that guards
-    /// every other store (ADR-0039 clause 1).
+    /// every other store (ADR-0039 §1).
     pub fn open(root: &std::path::Path) -> Result<Self, String> {
         let dir = root.join(super::AGENTS);
         let configurations = root.join(super::CONFIGURATIONS);
@@ -314,7 +314,7 @@ impl AgentStore for FsAgentStore {
     }
 
     /// The revisions first, then each record: a crash in between leaves revisions nothing
-    /// references, which the next load collects (ADR-0039 clause 2). A record that cannot be
+    /// references, which the next load collects (ADR-0039 §2). A record that cannot be
     /// written puts every record this call already wrote back as it was, so a failure leaves the
     /// records as they were; one that cannot be put back stays as written, and so does what the
     /// store answers about it.
@@ -525,7 +525,7 @@ mod tests {
         assert!(restored.contains_key(&new) && !restored.contains_key(&old));
     }
 
-    /// The integrity questions are the store's (ADR-0039 clause 2): what the stored assignments
+    /// The integrity questions are the store's (ADR-0039 §2): what the stored assignments
     /// pin and which revisions they reference, kept as records are written, removed and loaded.
     /// Verifies: ADR-0039
     #[test]
@@ -563,7 +563,7 @@ mod tests {
     }
 
     /// An assignment an older Server wrote, pinning a Package whose version is not SemVer, loads
-    /// as it was: the assignment stays in force (ADR-0034 clause 3), and it still pins the Package.
+    /// as it was: the assignment stays in force (ADR-0034 §3), and it still pins the Package.
     /// Verifies: ADR-0034
     #[test]
     fn an_assignment_pinning_a_non_semver_package_loads() {

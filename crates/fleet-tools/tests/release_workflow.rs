@@ -1,4 +1,4 @@
-//! The release workflow, read as data (ADR-0036 clauses 2 to 4): which rows build and publish the
+//! The release workflow, read as data (ADR-0036 §2–§4): which rows build and publish the
 //! operator tool, how its archives are named, packed and checked, and that what selects the
 //! Client's archives never picks up one of the operator tool's. Read as text, step by step — the
 //! workflow is the contract, and parsing its YAML would add a dependency to state what a line says.
@@ -250,7 +250,7 @@ fn words_after<'w>(text: &'w str, prefix: &str) -> Vec<&'w str> {
         .collect()
 }
 
-/// What every release publishes, as the `publish` job's globs name it (ADR-0038 clause 5).
+/// What every release publishes, as the `publish` job's globs name it (ADR-0038 §5).
 const PUBLISHED: [&str; 6] = [
     "*.tar.gz",
     "*.deb",
@@ -273,7 +273,7 @@ fn only_the_publish_job_may_attest() {
 
     let publish = job(&workflow, "publish");
     let permissions = permissions(publish);
-    // `packages: write` pushes the image's attestation and tags the image (ADR-0038 clause 10).
+    // `packages: write` pushes the image's attestation and tags the image (ADR-0038 §10).
     for grant in [
         "id-token: write",
         "attestations: write",
@@ -639,7 +639,7 @@ fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and
 
     // It sets nothing but the two listen addresses: no data directory, which a Server on
     // PostgreSQL and S3 refuses, and no secret
-    // (ADR-0038 clause 16).
+    // (ADR-0038 §16).
     let env: Vec<&str> = all(&instructions, "ENV")
         .iter()
         .flat_map(|args| args.split_whitespace())

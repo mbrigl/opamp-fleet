@@ -134,8 +134,8 @@ Six crates in one workspace
   ADR-0033)
   — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
-  of a PKCS#12 file (ADR-0036). `gpgv` verifies an upstream's OpenPGP signature (ADR-0036 clause
-  29); no command calls it yet. It depends on neither end: what it shares with the Client — the 7z
+  of a PKCS#12 file (ADR-0036). `gpgv` verifies an upstream's OpenPGP signature (ADR-0036 §29);
+  no command calls it yet. It depends on neither end: what it shares with the Client — the 7z
   Unix-mode convention (`archive::unix_mode_attributes`; its tests also use the unpacker), the
   links a tree package keeps (`tree::KeptLink`, `tree::is_kept`), the PKCS#12 reader
   (`identity::pkcs12::open`), and the reads of an administrator's file
@@ -236,7 +236,7 @@ no module.
   locks — is the core module `fleet::held`, behind the same `AppState` entry points. What it keeps
   of each Agent beside its record is one entry, `Kept`, which a forget drops and a re-key moves as
   one. How the Agents of one Client are placed under its Client Agent
-  ([ADR-0029](adr/0029-the-fleet-record-of-agents-and-hosts.md) clause 19) is the core module
+  ([ADR-0029 §19](adr/0029-the-fleet-record-of-agents-and-hosts.md)) is the core module
   `fleet::placement`, behind the same `AppState` entry points: the rule for one group, which the
   fleet in memory and a page `postgres::agent_page` reads share; the index of the groups this
   instance holds members of; whether the Client Agents of a group another instance carries are read
@@ -318,15 +318,13 @@ no module.
   chains while it holds the prune's advisory lock, recording each `audit.pruned` through the
   instance's writer and waiting for it before it deletes, in rounds of a bounded number of entries,
   every chain of one round in one transaction
-  ([ADR-0039](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
-  clause 12).
+  ([ADR-0039 §12](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)).
   With `[audit.export]`, `audit_export` sends every line a store has accepted, the writer's and
   those a lease's transaction writes, as an OTLP log record to the receiver it names: a queue of
   its own, a thread that sends through `opentelemetry-otlp` over the TLS 1.3 *ring* client and
   tries again until the receiver takes a batch, and the count of what the full queue dropped
   written back as `audit.export_dropped`
-  ([ADR-0028](adr/0028-the-audit-record.md)
-  clause 15).
+  ([ADR-0028 §15](adr/0028-the-audit-record.md)).
   With `[audit] key_label`, the writer signs a checkpoint of every chain's head at its start,
   each minute and at the shutdown's close. `checkpoint` owns the signer port `CheckpointSigner`,
   which the token key of `pkcs11` implements, and the port `CheckpointSource`, which answers the
@@ -349,8 +347,8 @@ no module.
   as a lease and a sweep measure it: `PackageStore::with_backend` takes it, and `instance`'s
   `Lease::take_as`. `clock::Elapsed::monotonic` is the adapter on `std::time::Instant`, and
   `main.rs` hands both of them `CLOCK_BOOTTIME`, which counts a suspend of the host, on Linux
-  ([ADR-0025](adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-  clause 3). The `[connection_offer]` and `[telemetry_offer]` sections become the fleet's offers in
+  ([ADR-0025 §3](adr/0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
+  The `[connection_offer]` and `[telemetry_offer]` sections become the fleet's offers in
   `config`.
 - **Server configuration** — `config` builds one TOML document from the defaults, `server.toml`
   when one is read, and the `FLEET_SERVER__…` variables over it, and deserializes it once, so the
@@ -594,7 +592,7 @@ alone by the peer's credentials or the pipe client's token, and stops every prog
 process group on Unix, by job object on Windows — when that connection closes. Before it writes
 anything, the Client accepts the connection only from the process the service manager runs as the
 second service, which `service::manager::agents_process` asks of systemd, launchd or the SCM
-([ADR-0022](adr/0022-the-accounts-the-service-runs-under.md) clause 19).
+([ADR-0022 §19](adr/0022-the-accounts-the-service-runs-under.md)).
 Both ends refuse a peer of another build, and the one that `current` no longer names exits so its
 service manager starts it from the new version. While the second service is away, a delivered
 package is staged and

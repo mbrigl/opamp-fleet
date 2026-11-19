@@ -313,7 +313,7 @@
       </section>
       </div>
 
-      <!-- Enrolments (ADR-0027 clause 10): the hosts that asked for a certificate with the fleet's
+      <!-- Enrolments (ADR-0027 §10): the hosts that asked for a certificate with the fleet's
            bootstrap certificate, waiting for an operator. The key fingerprint is shown whole so it
            can be matched against the `key_fingerprint` the Client logs on the host it came from;
            approving and rejecting are per-row presses, never part of a form. -->
@@ -356,7 +356,7 @@
            an operator names, which every host certificate issued from one carries. The Server keeps
            a PKCS#12 file of the pair under the password the operator types, which any page offers
            for download; the page never holds a private key, and the typed password is sent once
-           and kept nowhere (ADR-0027 clause 8). -->
+           and kept nowhere (ADR-0027 §8). -->
       <section id="boot-section" class="card config" style="display: none">
         <h2>Bootstrap certificates — one per customer, site or batch; each opens nothing without an open window and an approval</h2>
         <div class="config-fields">
@@ -586,7 +586,7 @@
       window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
       showTab(location.hash.slice(1));
 
-      // One page of the fleet at a time, as ADR-0030 clause 7 says:
+      // One page of the fleet at a time, as ADR-0030 §7 says:
       // the Server filters by the field, sorts by the column, counts what matches and links the
       // next page. `pageCursors` holds the cursor each page on the way here began at, the first
       // page's none, so Previous goes back without a link the Server does not give.
@@ -617,7 +617,7 @@
       // reported strings (names, attributes, health text) flow through here before reaching the DOM.
       const esc = (s) => (s ?? "").toString().replace(/[&<>"'`]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" }[c]));
       // The grammar an Agent's effective configuration is coloured with, chosen by the type the
-      // Agent reports (ADR-0035 clause 3); any other type is shown plain.
+      // Agent reports (ADR-0035 §3); any other type is shown plain.
       const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["fluent-bit", "ini"]]);
       const configGrammar = (type) => ((type || "").startsWith("otelcol") ? "yaml" : CONFIG_GRAMMARS.get(type) || null);
       // Coloured configurations by grammar and text: the refresh every two seconds draws an
@@ -795,7 +795,7 @@
         // which is what makes a rollout channel a Server-side decision instead of an edit on the host.
         for (const [key, value] of Object.entries(a.labels || {})) {
           // A stored label in fleet. or supervisor. matches nothing
-          // (ADR-0029 clause 20): shown as ignored, and left
+          // (ADR-0029 §20): shown as ignored, and left
           // out of the label editor, so the next set put removes it.
           if ((a.ignored_labels || []).includes(key)) {
             chips.push(`<span class="pill amber" title="a label in fleet. or supervisor. — no label may speak there, so selectors and package matching ignore it and nothing inherits it; setting this Agent's labels removes it">⚠ ignored ${esc(key)}=${esc(value)}</span>`);
@@ -804,7 +804,7 @@
           const dead = (a.shadowed_labels || []).includes(key);
           chips.push(`<span class="chip${dead ? " " : " selected"}" title="${dead ? "the Agent reports this attribute itself, so the label matches nothing" : "a label: Selectors match it like a reported attribute"}">${dead ? "⚠ " : "🏷 "}${esc(key)}=${esc(value)}</span>`);
         }
-        // Its Client Agent's labels hold for it below its own (ADR-0029 clause 19): set on the Client
+        // Its Client Agent's labels hold for it below its own (ADR-0029 §19): set on the Client
         // Agent's row, marked here as inherited, and dimmed where its own label or a report wins.
         const own = a.labels || {};
         const reported = { ...(a.identifying_attributes || {}), ...(a.non_identifying_attributes || {}) };
@@ -815,7 +815,7 @@
         if (a.ambiguous) {
           chips.push(`<span class="pill amber" title="more than one client agent arrives over this host for this machine, so no agent of it inherits labels">client: ambiguous</span>`);
         }
-        // The values of the host's certificate (ADR-0029 clause 18): matched by selectors, and no
+        // The values of the host's certificate (ADR-0029 §18): matched by selectors, and no
         // agent can report them.
         for (const [key, value] of Object.entries(a.host_attributes || {})) {
           chips.push(`<span class="chip" title="from the certificate of host ${esc(a.host)} — selectors match it, and no agent can claim it">🔒 ${esc(key)}=${esc(value)}</span>`);
@@ -863,7 +863,7 @@
           chips.push(`<span class="chip" title="rolled out to this agent — pinned as of that act, so putting a newer package in the channel changes nothing here">pkg ${esc(a.assigned_package)}</span>`);
         }
         // Three states that would otherwise be the same empty cell, and the operator's next move
-        // differs in each (ADR-0033 clause 27). Calm, not alarming: a freshly enrolled host is in
+        // differs in each (ADR-0033 §27). Calm, not alarming: a freshly enrolled host is in
         // no channel yet, which is the ordinary state and not a fault.
         const pending = (a.pending_configurations || []).length + (a.pending_packages || []).length + (a.pending_deployment ? 1 : 0);
         if (!a.package_conflict) {
@@ -1385,7 +1385,7 @@
         return `<span class="pill ${tone}" title="${esc(why)}">${label}</span>`;
       }
 
-      // Whether every entry carries a valid signature (ADR-0033 clause 13), in one pill per row.
+      // Whether every entry carries a valid signature (ADR-0033 §13), in one pill per row.
       function signaturesCell(p) {
         const entries = p.entries || [];
         if (!entries.length) return "";
@@ -1586,7 +1586,7 @@
       // The signing file's one format (ADR-0033): written by the download, required by the import.
       const SIGNING_FORMAT = "opamp-fleet-signing-v1";
 
-      // What a signature covers (ADR-0033 clause 52), as a file to take to where the key is: the
+      // What a signature covers (ADR-0033 §52), as a file to take to where the key is: the
       // Agent type, the version and each entry's SHA-256. Built from what the page already read —
       // the Server is not asked again, so the file is exactly what the operator saw.
       $("set-signing").addEventListener("click", () => {
@@ -1664,9 +1664,9 @@
       // A signed signing file (ADR-0033) matched to the package it names and to each entry by its
       // platform and SHA-256: a signature for other bytes than the entry's is not taken. Each goes
       // through the entry's signature route, one request each, and the Server's answer is reported
-      // per entry with what its check found (ADR-0033 clause 24). Nothing is checked against a key
+      // per entry with what its check found (ADR-0033 §24). Nothing is checked against a key
       // here — the Server does when it holds one, and every Client does before it opens the
-      // artifact (ADR-0033 clause 52).
+      // artifact (ADR-0033 §52).
       $("set-sig-import").addEventListener("click", async () => {
         const file = $("set-sig-file").files[0];
         if (!file) {
@@ -2182,12 +2182,12 @@
         if (currentDep || creatingDep) renderDepConfigs(currentDepView());
       }
 
-      // Enrolments (ADR-0027 clause 10; the UI as a client of the API, ADR-0031). A Server without
+      // Enrolments (ADR-0027 §10; the UI as a client of the API, ADR-0031). A Server without
       // [enrolment] answers 404 on both routes, and the tab says so instead of showing an empty
       // queue that could never fill.
       let enrolments = [];
       let enrolmentsShown = null;
-      // The bootstrap certificates on record (ADR-0039 clause 11). A request names the one it carries
+      // The bootstrap certificates on record (ADR-0039 §11). A request names the one it carries
       // by serial, since the record keeps the key's fingerprint and the request the certificate's.
       let boots = [];
       let bootsShown = null;
@@ -2205,7 +2205,7 @@
         const b = boots.find((b) => b.serial === e.bootstrap_serial);
         const tip = (lines) => esc(lines.join("\n"));
         // The values the approval carries into the host certificate, or why it will be refused
-        // (ADR-0027 clause 10) — shown before the operator presses Approve.
+        // (ADR-0027 §10) — shown before the operator presses Approve.
         const values = e.subject_refusal
           ? `<span class="pill red" title="Approving this request is refused, and nothing is signed: ${esc(e.subject_refusal)}. Reject it, and give the host a bootstrap certificate whose subject follows the rules.">subject cannot be carried: ${esc(e.subject_refusal)}</span>`
           : SUBJECT_FIELDS.filter(([field]) => e.bootstrap_subject && e.bootstrap_subject[field])
@@ -2351,7 +2351,7 @@
         const btn = e.target.closest(".enrolment-act");
         if (!btn) return;
         e.preventDefault();
-        // The id is the requested key's fingerprint (ADR-0027 clause 10).
+        // The id is the requested key's fingerprint (ADR-0027 §10).
         const fingerprint = btn.dataset.id;
         const approve = btn.dataset.act === "approve";
         const question = approve
@@ -2367,8 +2367,8 @@
         await refreshEnrolments();
       });
 
-      // The ISO 3166-1 alpha-2 codes a bootstrap certificate's country is chosen from (ADR-0027
-      // clause 8), each named in the browser's language where it knows the name.
+      // The ISO 3166-1 alpha-2 codes a bootstrap certificate's country is chosen from (ADR-0027 §8),
+      // each named in the browser's language where it knows the name.
       const COUNTRIES = ("AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS "
         + "BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET "
         + "FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO "
@@ -2417,7 +2417,7 @@
           $("boot-error").textContent = body.error || (res ? `HTTP ${res.status}` : "the Server could not be reached");
           return;
         }
-        // The page keeps no password once it is sent (ADR-0027 clause 8).
+        // The page keeps no password once it is sent (ADR-0027 §8).
         $("boot-pass").value = "";
         $("boot-pass2").value = "";
         $("boot-result").textContent = `Issued ${body.subject}, serial ${body.serial}: save bootstrap.p12 from its row, now or later.`;
@@ -2530,7 +2530,7 @@
         const client = a.client ? ` <span class="pill violet">client</span>` : "";
         return `<strong>${esc(hostAgentName(a))}</strong>${client} <span class="sub">${esc(a.service_name)} · ${esc(a.instance_uid)}</span> ${status}`;
       }
-      // Grouped as the Server places the agents (ADR-0029 clause 19): under their client agent, the
+      // Grouped as the Server places the agents (ADR-0029 §19): under their client agent, the
       // ones whose client cannot be told apart under the machine they report. Presentation only.
       function renderHostDetail() {
         const h = hosts.find((x) => x.host === currentHost);

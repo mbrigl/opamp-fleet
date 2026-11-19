@@ -408,7 +408,7 @@ impl rcgen::SigningKey for TokenKey {
 }
 
 /// The audit key signs checkpoints through the signer port
-/// (ADR-0028 clause 10): one
+/// (ADR-0028 §10): one
 /// `C_Sign` over the digest the writer computes. The checkpoint is its own signature's entry, so
 /// no `pkcs11.signed` is written beside it.
 impl crate::checkpoint::CheckpointSigner for TokenKey {

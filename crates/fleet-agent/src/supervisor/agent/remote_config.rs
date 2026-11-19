@@ -18,7 +18,7 @@ impl AgentState {
     ///
     /// A verdict on a hash other than the one the status holds is on an offer the status has
     /// moved past, to one applying or one that failed before its hand-over: it leaves the status
-    /// as it is, so the Server's offer of the held hash again stays a repeat (ADR-0019, clause 56).
+    /// as it is, so the Server's offer of the held hash again stays a repeat (ADR-0019 §56).
     pub fn config_applied(&mut self, hash: Vec<u8>, result: Result<(), String>) {
         let held = self.protocol.remote_config_status();
         if held.is_some_and(|held| held.last_remote_config_hash != hash) {
@@ -42,7 +42,7 @@ impl AgentState {
     }
 
     /// A configuration still `APPLYING` names `reason` as what it waits for, the second service,
-    /// or nothing once `reason` is empty (ADR-0022 clause 17). Any other status stays as it is.
+    /// or nothing once `reason` is empty (ADR-0022 §17). Any other status stays as it is.
     pub(super) fn config_waits(&mut self, reason: &str) {
         let Some(status) = self.protocol.remote_config_status() else {
             return;
@@ -60,7 +60,7 @@ impl AgentState {
     }
 
     /// An offer of the hash this Agent is applying or has applied is a report, not an apply
-    /// (ADR-0019, clause 56):
+    /// (ADR-0019 §56):
     /// the status it holds is owed again and nothing is stored, handed over or restarted. A Server answers a heartbeat that crossed its push with the offer again, so
     /// one offer arriving twice is the normal case. A hash whose apply `FAILED` is not held this
     /// way and is applied again. Returns whether `hash` was such a repeat.

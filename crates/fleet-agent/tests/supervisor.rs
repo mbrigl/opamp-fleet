@@ -264,7 +264,7 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
     common::stop_client(&mut client);
 }
 
-/// ADR-0019 clause 50 end to end: a listed Collector runs on the files the operator placed in its
+/// ADR-0019 §50 end to end: a listed Collector runs on the files the operator placed in its
 /// `config/` directory, and the Server's last configuration stored there before the switch is not
 /// among what it is started with.
 /// Verifies: ADR-0019
@@ -369,10 +369,10 @@ fn sigterm_stops_the_managed_process_and_the_client_cleanly() {
 
 /// Where the Client's command line names the second service — as the unit `service install
 /// --process-account` writes does — the shipped Client starts its Managed Process through it, not
-/// itself (ADR-0022 clause 18): the stub's parent is the second service. Run without a second
+/// itself (ADR-0022 §18): the stub's parent is the second service. Run without a second
 /// account: the service runs in this test, under this test's uid, which the Client is told is the
 /// process account's, and as this test's process, which a `systemctl` on the Client's `PATH`
-/// names as the one systemd runs as the second service (ADR-0022 clause 19).
+/// names as the one systemd runs as the second service (ADR-0022 §19).
 /// Verifies: ADR-0022
 #[cfg(target_os = "linux")]
 #[tokio::test]

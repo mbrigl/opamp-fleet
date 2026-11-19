@@ -1,4 +1,4 @@
-//! What an install on Windows left to finish, kept until it is done (ADR-0022 clauses 16 and 21): a
+//! What an install on Windows left to finish, kept until it is done (ADR-0022 §16 and §21): a
 //! withdrawal that is due, and the services it stopped that are to run again.
 //!
 //! What a former account was granted is withdrawn after the SCM names its successor: before, the
@@ -271,7 +271,7 @@ pub enum HaltFailed {
     Stopped(String),
 }
 
-/// Stops both services for a change, recorded around it in `store` (ADR-0022 clauses 16 and 17):
+/// Stops both services for a change, recorded around it in `store` (ADR-0022 §16 and §17):
 /// what `running` says runs is added to what `pending` already names to run again, and written —
 /// with the withdrawal due — before `halt` stops anything; what `halt` found running beyond that is
 /// added after it. Where `halt` fails, what is to run again is set from what the SCM reports then,
@@ -329,7 +329,7 @@ pub fn halt_recorded(
     }
 }
 
-/// What an uninstall does, over its seams (ADR-0022 clauses 16 and 21): it stops both services
+/// What an uninstall does, over its seams (ADR-0022 §16 and §21): it stops both services
 /// through `halt`, which starts nothing again; completes the recorded withdrawal through
 /// `complete`, and then removes the record through `remove` — only where it holds the install lock
 /// (`locked`) and both services stopped; and deregisters both through `deregister`, always: an
@@ -490,7 +490,7 @@ impl Store for Registry {
     }
 }
 
-/// The roots a withdrawal walks (ADR-0022 clause 26): the layout root, the data root, the state
+/// The roots a withdrawal walks (ADR-0022 §26): the layout root, the data root, the state
 /// directory, the configuration file and the fleet files copied beside it, and the Supervisors'
 /// root where it lies beneath the first three. One outside them all stays the operator's, and is
 /// not among them.
@@ -568,7 +568,7 @@ mod tests {
 
     /// A withdrawal that failed — an install interrupted after the SCM switched — is still
     /// recorded, and the next install, which finds no former account of its own, completes it from
-    /// the record and removes it; one that succeeds leaves no record (ADR-0022 clauses 16 and 21).
+    /// the record and removes it; one that succeeds leaves no record (ADR-0022 §16 and §21).
     /// Verifies: ADR-0022
     #[test]
     fn an_interrupted_withdrawal_is_completed_by_the_next_install() {
@@ -640,7 +640,7 @@ mod tests {
     /// The services a stop left stopped are recorded with the withdrawal, and an install that
     /// fails after the stop leaves them recorded: the next install, whose own stop finds them
     /// stopped, starts again what ran before the first. They are struck once they run, after the
-    /// withdrawal, and the record goes with them (ADR-0022 clauses 16 and 17).
+    /// withdrawal, and the record goes with them (ADR-0022 §16 and §17).
     /// Verifies: ADR-0022
     #[test]
     fn what_a_failed_install_stopped_is_started_by_the_next() {
@@ -683,7 +683,7 @@ mod tests {
     /// An operator's `service start` or `service stop` after a failed install strikes what that
     /// install recorded to start again — the operator decides when the services run from then on,
     /// and the next install does not start what was stopped by hand — while a withdrawal still due
-    /// stays recorded (ADR-0022 clauses 16 and 17).
+    /// stays recorded (ADR-0022 §16 and §17).
     /// Verifies: ADR-0022
     #[test]
     fn an_operators_start_or_stop_strikes_what_is_to_run_again() {
@@ -738,7 +738,7 @@ mod tests {
 
     /// What runs is recorded before anything is stopped: the stop finds it written, and a record
     /// that cannot be written stops nothing. What the stop found running beyond it is added after
-    /// it (ADR-0022 clauses 16 and 17).
+    /// it (ADR-0022 §16 and §17).
     /// Verifies: ADR-0022
     #[test]
     fn what_runs_is_recorded_before_the_stop_and_amended_after_it() {
@@ -784,7 +784,7 @@ mod tests {
     /// Where the stop fails, what is to run again is set from what the SCM reports then: what ran
     /// before this install, and what ran when it began and runs no more — a restart that failed,
     /// or a stop that timed out and completed after all — and nothing that runs again or never ran
-    /// (ADR-0022 clauses 16 and 17).
+    /// (ADR-0022 §16 and §17).
     /// Verifies: ADR-0022
     #[test]
     fn a_failed_stop_records_what_runs_no_more() {
@@ -895,8 +895,7 @@ mod tests {
 
     /// An uninstall withdraws only once both services are stopped and the install lock is held,
     /// and leaves the record alone otherwise; it deregisters both always — after a failed stop,
-    /// without the lock, after a failed withdrawal — and reports every step that failed (ADR-0022
-    /// clauses 16 and 21).
+    /// without the lock, after a failed withdrawal — and reports every step that failed (ADR-0022 §16 and §21).
     /// Verifies: ADR-0022
     #[test]
     fn an_uninstall_always_deregisters_and_withdraws_only_once_both_are_stopped() {

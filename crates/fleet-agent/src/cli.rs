@@ -5,7 +5,7 @@
 //! working unchanged. The Client is file-configured (ADR-0024) — there are no environment
 //! fallbacks; the flags only say where the file and the state directory are.
 //!
-//! There is no `--instance` (ADR-0021 clause 10). One build installs one service under the
+//! There is no `--instance` (ADR-0021 §10). One build installs one service under the
 //! product's name, so the service verbs have nothing to look up and take no name at all; a second
 //! installation is a second build. The *grammar* that flag used survives as
 //! [`parse_instance_name`], because `[[supervisor]]` block names still need it.
@@ -163,8 +163,8 @@ pub struct RunArgs {
         )
     )]
     pub agents: Option<PathBuf>,
-    /// The uid of the Client's account, the one peer the second service serves (ADR-0022
-    /// clause 19). Never root's (ADR-0022 clause 16); the service refuses its own as well.
+    /// The uid of the Client's account, the one peer the second service serves (ADR-0022 §19).
+    /// Never root's (ADR-0022 §16); the service refuses its own as well.
     #[cfg(unix)]
     #[arg(
         long,
@@ -175,7 +175,7 @@ pub struct RunArgs {
     )]
     pub client_uid: Option<u32>,
     /// The SID of the Client's account, the one client the second service serves on Windows
-    /// (ADR-0022 clause 19). The service refuses `LocalSystem` and its own.
+    /// (ADR-0022 §19). The service refuses `LocalSystem` and its own.
     #[cfg(windows)]
     #[arg(
         long,
@@ -186,7 +186,7 @@ pub struct RunArgs {
     )]
     pub client_sid: Option<crate::win32::Sid>,
     /// The second service's socket, through which the Client starts every Managed Process
-    /// (ADR-0022 clause 18). Hidden: `service install --process-account` writes it into the
+    /// (ADR-0022 §18). Hidden: `service install --process-account` writes it into the
     /// Client's unit, and it is how the running Client learns that a process account is
     /// registered. On Windows it is the second service's named pipe.
     #[cfg_attr(
@@ -210,8 +210,8 @@ pub struct RunArgs {
         )
     )]
     pub agents_socket: Option<PathBuf>,
-    /// The uid of the process account, the one the Client accepts as the socket's peer (ADR-0022
-    /// clause 19). Never root's.
+    /// The uid of the process account, the one the Client accepts as the socket's peer (ADR-0022 §19).
+    /// Never root's.
     #[cfg(unix)]
     #[arg(
         long,
@@ -222,7 +222,7 @@ pub struct RunArgs {
     )]
     pub process_uid: Option<u32>,
     /// The SID of the process account, the one the Client accepts as the owner of the second
-    /// service's pipe on Windows (ADR-0022 clause 19).
+    /// service's pipe on Windows (ADR-0022 §19).
     #[cfg(windows)]
     #[arg(
         long,
@@ -270,7 +270,7 @@ pub enum ServiceAction {
     /// Register this instance as a system (or `--user`) service and lay out the versioned
     /// install.
     Install(InstallArgs),
-    // ADR-0021 clauses 23 and 24 and ADR-0027 clause 16.
+    // ADR-0021 §23 and §24 and ADR-0027 §16.
     /// Ask the questionnaire of `install --interactive` again, offering what the configuration
     /// holds as the defaults, and enrol with the Server if this Client holds no certificate yet.
     ///
@@ -293,14 +293,14 @@ pub struct InstallArgs {
     #[command(flatten)]
     pub scope: ScopeArgs,
     /// The layout root, holding `versions/` and the `current` pointer. Defaults to
-    /// `<base>/<PRODUCT_NAME>` for the scope — no path is ever fixed (ADR-0021 clause 11).
+    /// `<base>/<PRODUCT_NAME>` for the scope — no path is ever fixed (ADR-0021 §11).
     ///
     /// Given **alone** it collapses layout and data into the one directory it names, exactly as
     /// ADR-0021 defined it, and the labeling and permissions of that directory are then yours to
     /// manage.
     #[arg(long)]
     pub root: Option<PathBuf>,
-    // ADR-0021 clause 12.
+    // ADR-0021 §12.
     /// The data root, holding `supervisor.toml` and the state directory — everything a reinstall
     /// cannot recreate.
     ///
@@ -402,7 +402,7 @@ pub struct InstallArgs {
 }
 
 /// Arguments for `service config`: where the installed configuration is, named as `install`
-/// named it (ADR-0021 clause 23).
+/// named it (ADR-0021 §23).
 #[derive(Debug, clap::Args)]
 pub struct ConfigArgs {
     /// System or `--user` scope.
@@ -418,7 +418,7 @@ pub struct ConfigArgs {
 
 impl ConfigArgs {
     /// The data root these flags name, if they name one: `--data-root`, else `--root`, the way
-    /// `install` resolves them (ADR-0021 clause 12).
+    /// `install` resolves them (ADR-0021 §12).
     #[must_use]
     pub fn data_root(&self) -> Option<&PathBuf> {
         self.data_root.as_ref().or(self.root.as_ref())
@@ -472,7 +472,7 @@ mod tests {
         assert_eq!(cli.config, PathBuf::from("supervisor.toml"));
     }
 
-    /// ADR-0021 clause 10: removed, not hidden and not accepted-and-ignored. A unit written by an
+    /// ADR-0021 §10: removed, not hidden and not accepted-and-ignored. A unit written by an
     /// older install would carry it, and this is what makes that fail loudly instead of running a
     /// Client whose paths silently mean something else.
     /// Verifies: ADR-0021
@@ -533,7 +533,7 @@ mod tests {
         );
     }
 
-    /// The second service is `run` with a flag, not a subcommand of its own (ADR-0022 clause 17),
+    /// The second service is `run` with a flag, not a subcommand of its own (ADR-0022 §17),
     /// and names the one uid it serves; neither half parses without the other.
     /// Verifies: ADR-0022
     #[cfg(unix)]
@@ -561,7 +561,7 @@ mod tests {
 
     /// The second service is no Client: a flag that only means something to the Client is
     /// refused next to `--agents`, not silently ignored, and root is never the Client's account
-    /// it serves (ADR-0022 clause 16).
+    /// it serves (ADR-0022 §16).
     /// Verifies: ADR-0022
     #[cfg(unix)]
     #[test]
@@ -600,7 +600,7 @@ mod tests {
     }
 
     /// The Client's unit names the second service's socket and the process account's uid; the
-    /// Client learns from them that a process account is registered (ADR-0022 clause 18). Neither
+    /// Client learns from them that a process account is registered (ADR-0022 §18). Neither
     /// half parses without the other, root is never the process account, and the Client is not
     /// the second service.
     /// Verifies: ADR-0022
@@ -655,7 +655,7 @@ mod tests {
 
     /// On Windows the second service is the pipe and the Client's SID, and the Client is told the
     /// pipe and the process account's SID; each half needs the other, a SID is read as the system
-    /// writes it, and the two ends are never one run (ADR-0022 clauses 17 to 19).
+    /// writes it, and the two ends are never one run (ADR-0022 §17–§19).
     /// Verifies: ADR-0022
     #[cfg(windows)]
     #[test]
@@ -735,7 +735,7 @@ mod tests {
         assert!(parse_sid("998").is_err());
     }
 
-    /// `--process-account` names the account at system scope only (ADR-0022 clause 16).
+    /// `--process-account` names the account at system scope only (ADR-0022 §16).
     /// Verifies: ADR-0022
     #[test]
     fn the_process_account_conflicts_with_user() {
@@ -766,8 +766,7 @@ mod tests {
         .is_err());
     }
 
-    /// `--no-process-account` drops the process account, and conflicts with naming one (ADR-0022
-    /// clause 16).
+    /// `--no-process-account` drops the process account, and conflicts with naming one (ADR-0022 §16).
     /// Verifies: ADR-0022
     #[test]
     fn no_process_account_conflicts_with_naming_one() {
@@ -791,7 +790,7 @@ mod tests {
     }
 
     /// The process account's flags are in the help: the Managed Processes' files are split from
-    /// the Client's (ADR-0022 clause 21), so the separation they name holds.
+    /// the Client's (ADR-0022 §21), so the separation they name holds.
     /// Verifies: ADR-0022
     #[test]
     fn the_process_account_flags_are_shown() {
@@ -832,7 +831,7 @@ mod tests {
         ));
     }
 
-    /// ADR-0021 clause 12: the two halves can be named apart, which is what the Linux system-scope
+    /// ADR-0021 §12: the two halves can be named apart, which is what the Linux system-scope
     /// split needs and what the manual tells an operator to do on a host that wants them apart.
     /// Verifies: ADR-0021
     #[test]
@@ -957,7 +956,7 @@ mod tests {
         }
     }
 
-    /// ADR-0027 clause 17: a packaged install passes the answer it collected. The endpoint is not
+    /// ADR-0027 §17: a packaged install passes the answer it collected. The endpoint is not
     /// validated here — the loader's own rule does that, once, in `config_init`.
     /// Verifies: ADR-0021, ADR-0027
     #[test]

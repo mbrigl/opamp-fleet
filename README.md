@@ -135,7 +135,7 @@ What still needs a human, per platform:
 - starting at **boot**, the service's [log](docs/manual/client.md#where-the-services-logs-are), and
   the Agent in the fleet UI;
 - an **SELinux-enforcing host**: the `.rpm` install must start, and a service dying with
-  `status=203/EXEC` and an AVC denial is the failure ADR-0021 clause 12 prevents;
+  `status=203/EXEC` and an AVC denial is the failure ADR-0021 §12 prevents;
 - each wrapped kind under the packaged account `opamp-fleet` and under `--run-as root`: it starts,
   reports, and its `sudo` or setuid helpers still work (ADR-0022).
 

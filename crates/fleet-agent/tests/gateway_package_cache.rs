@@ -1,4 +1,4 @@
-//! A Gateway's package cache (ADR-0033 clauses 41 to 46 and ADR-0016 clause 15): the Gateway
+//! A Gateway's package cache (ADR-0033 §41–§46 and ADR-0016 §15): the Gateway
 //! fetches each uploaded artifact it relays an offer of once, verifies it against the offered hash,
 //! and passes it on only to a downstream host whose Agent it relayed that offer to. Most tests run
 //! against an upstream the test controls, which counts and can hold back every fetch; the last one

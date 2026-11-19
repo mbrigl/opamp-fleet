@@ -140,7 +140,7 @@ pub fn configure(
     Ok(())
 }
 
-/// The privileges the second service keeps (ADR-0022 clause 17): `SeChangeNotifyPrivilege` alone,
+/// The privileges the second service keeps (ADR-0022 §17): `SeChangeNotifyPrivilege` alone,
 /// which the SCM never removes anyway and which lets the Managed Processes pass through the
 /// Client's directories to what is shared with them. Every other privilege of its account —
 /// `SeImpersonatePrivilege` first, which a `LocalService`-like account holds — is removed from the
@@ -151,7 +151,7 @@ pub const AGENTS_PRIVILEGES: &[&str] = &["SeChangeNotifyPrivilege"];
 
 /// Configure the second service as [`configure`] configures the Client — recovery actions, display
 /// name, description, the logon account `account` — and cut its privileges to
-/// [`AGENTS_PRIVILEGES`] (ADR-0022 clause 17).
+/// [`AGENTS_PRIVILEGES`] (ADR-0022 §17).
 ///
 /// # Errors
 /// Returns an error if the service cannot be opened or reconfigured. Never on Unix.
@@ -276,7 +276,7 @@ pub fn activity(service_name: &str) -> Result<super::manager::Activity, String> 
 
 /// The process the SCM runs as the service `service_name` (`QueryServiceStatusEx`,
 /// `SERVICE_STATUS_PROCESS.dwProcessId`): `None` where it runs none, or knows no such service
-/// (ADR-0022 clause 19).
+/// (ADR-0022 §19).
 ///
 /// # Errors
 /// Returns every other refusal of the SCM.
@@ -345,7 +345,7 @@ fn confirmed_process<H>(
 /// terminated at any time" after it (SetServiceStatus) — still running then, under the service's
 /// account. So the process is opened before the stop is sent, and its end is what the wait ends
 /// on. For the second service that end is also the end of every program it started: the last
-/// handle to each job closes with it, and the job kills what it holds (ADR-0022 clause 19).
+/// handle to each job closes with it, and the job kills what it holds (ADR-0022 §19).
 ///
 /// # Errors
 /// Returns why the SCM cannot be asked or the service stopped, and that it, or its process, had
@@ -433,7 +433,7 @@ pub fn stop_and_wait(service_name: &str, within: std::time::Duration) -> Result<
 }
 
 /// The registration of the service `service_name` as the SCM holds it: its registry key, and the
-/// logon account it names (ADR-0022 clause 16). `None` where no such service is registered.
+/// logon account it names (ADR-0022 §16). `None` where no such service is registered.
 ///
 /// # Errors
 /// Returns an error if the SCM cannot be asked.
@@ -513,7 +513,7 @@ mod tests {
     /// A stop waits for the process it confirmed: the one opened, named again by the SCM and the
     /// service not stopped. One that changed is looked at again, and one that changed at every one
     /// of three looks fails the stop, so that a stop for a change starts again what it stopped
-    /// (ADR-0022 clauses 16 and 17).
+    /// (ADR-0022 §16 and §17).
     /// Verifies: ADR-0022
     #[test]
     fn a_stop_waits_for_the_process_it_confirmed_and_fails_on_one_that_keeps_changing() {

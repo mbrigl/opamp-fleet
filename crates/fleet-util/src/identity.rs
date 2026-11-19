@@ -1,4 +1,4 @@
-//! A bootstrap certificate and its key as PEM (ADR-0027 clause 15), and one PEM block written from
+//! A bootstrap certificate and its key as PEM (ADR-0027 §15), and one PEM block written from
 //! DER. Every key is held in a buffer wiped when it is dropped
 //! (ADR-0015). A value only, so a core module of the Client
 //! may name it (ADR-0009); [`pkcs12`] opens one from a file.
@@ -7,7 +7,7 @@ pub mod pkcs12;
 
 use zeroize::Zeroizing;
 
-/// A bootstrap certificate and its key as PEM, held in memory (ADR-0027 clause 15), the key in a
+/// A bootstrap certificate and its key as PEM, held in memory (ADR-0027 §15), the key in a
 /// buffer wiped when it is dropped (ADR-0015). Its `Debug` names neither.
 #[derive(Clone, PartialEq, Eq)]
 pub struct BootstrapIdentity {

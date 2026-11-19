@@ -48,7 +48,7 @@ tag from the file, and treat the build metadata as provenance that is recorded e
 compared nowhere.
 
 1. **`Cargo.toml` decides the number.** The base is `[workspace.package] version`, the product's
-   release number, which the `opamp` crate does not carry (ADR-0008 clause 2), and Cargo hands it
+   release number, which the `opamp` crate does not carry (ADR-0008 §2), and Cargo hands it
    to the build script as `CARGO_PKG_VERSION`. Bumping it is an ordinary reviewed commit. The
    grammar is strict semantic versioning: exactly three non-negative integers without leading
    zeros, no pre-release, no build metadata; a value that breaks it fails the build. The

@@ -1,4 +1,4 @@
-//! `server migrate` as an operator runs it (ADR-0039 clause 26): three named directories, what it
+//! `server migrate` as an operator runs it (ADR-0039 §26): three named directories, what it
 //! did on standard output, and an exit code a script can act on.
 
 use std::process::Command;
@@ -52,7 +52,7 @@ fn migrate_writes_a_new_data_directory_once_and_says_so() {
 /// `server migrate-to-postgres` takes no `--data-dir` when the configuration names S3, as a Server
 /// on PostgreSQL and S3 keeps nothing on its disk, and refuses one before it reaches the database
 /// or the bucket, naming the flag; with the filesystem blob store a call without it is a usage
-/// error (ADR-0039 clause 27).
+/// error (ADR-0039 §27).
 /// Verifies: ADR-0039
 #[cfg(unix)]
 #[test]

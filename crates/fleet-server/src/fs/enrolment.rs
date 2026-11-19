@@ -1,4 +1,4 @@
-//! The enrolment window and its queue on the filesystem (ADR-0039 clause 8): the default adapter
+//! The enrolment window and its queue on the filesystem (ADR-0039 §8): the default adapter
 //! behind [`EnrolmentStore`](crate::enrolment::EnrolmentStore).
 
 use std::path::{Path, PathBuf};

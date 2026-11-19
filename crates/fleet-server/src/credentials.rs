@@ -1,6 +1,6 @@
-//! The Operator plane's credential check (ADR-0026 clause 2).
+//! The Operator plane's credential check (ADR-0026 §2).
 //!
-//! Nothing configured authenticates on its own (ADR-0026 clause 21): a Basic password is kept as an
+//! Nothing configured authenticates on its own (ADR-0026 §21): a Basic password is kept as an
 //! Argon2id hash and verified against it, and a success is remembered for a while by the hash of
 //! the whole header, so a browser that re-sends the header with every request pays the password
 //! hash once and not per request.

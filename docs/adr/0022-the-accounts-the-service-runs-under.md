@@ -95,8 +95,8 @@ Forces:
 
 The enrolment that `service install` and `service config` run connects to the Server with the
 bootstrap identity the administrator provided
-([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-clause 16). Its endpoint and trust (`[tls] ca_file`) stand in `supervisor.toml`, which the
+([ADR-0027 §16](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+Its endpoint and trust (`[tls] ca_file`) stand in `supervisor.toml`, which the
 questionnaire or `--endpoint` wrote. That file and the CA copy beside it lie in the data root,
 which the service's account owns (clause 1). Clause 11 keeps a privileged step from going through
 a link the account placed, and the enrolment reads the CA file and the bootstrap pair once,
@@ -117,8 +117,7 @@ Four runs enrol, and they differ in what the administrator said:
   its defaults come from the file, and the administrator sees and confirms each.
 - **`service install --endpoint` writing a new file:** the administrator names the endpoint; the
   CA comes from beside the program
-  ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-  clause 17).
+  ([ADR-0027 §17](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
 - **`service install --endpoint` over an existing file:** the file is kept as it is
   ([ADR-0021](0021-the-installed-service-and-its-state.md)), so the service runs with its
   endpoint, not the one named. The MSI's custom action runs this way on an upgrade that is given

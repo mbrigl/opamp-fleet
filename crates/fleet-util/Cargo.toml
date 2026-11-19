@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 # Only `fleet-core` of the workspace: the Server never links this crate, and the Client and the
-# operator tool both do (ADR-0008 clause 16).
+# operator tool both do (ADR-0008 §16).
 [dependencies]
 # `identity::pkcs12::open` opens a bootstrap PKCS#12 file through `fleet_core::pkcs12::file`
 # (ADR-0027).
@@ -31,7 +31,7 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-# The tests read the workspace's manifests and, as a syntax tree, its sources (ADR-0008 clause 16).
+# The tests read the workspace's manifests and, as a syntax tree, its sources (ADR-0008 §16).
 toml.workspace = true
 syn.workspace = true
 quote.workspace = true

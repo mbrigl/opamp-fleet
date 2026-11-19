@@ -1,4 +1,4 @@
-//! The floors in PostgreSQL (ADR-0034 clause 15): the PostgreSQL adapter behind
+//! The floors in PostgreSQL (ADR-0034 §15): the PostgreSQL adapter behind
 //! [`FloorStore`](crate::floors::FloorStore) — one row per Agent type.
 
 use std::collections::BTreeMap;

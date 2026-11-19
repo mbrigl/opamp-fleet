@@ -1,4 +1,4 @@
-//! The product's name and title, fixed at build time (ADR-0021 clause 2).
+//! The product's name and title, fixed at build time (ADR-0021 §2).
 //!
 //! Three names sit side by side in this program, each naming a different thing, and conflating any
 //! two of them couples things that must be free to move apart:

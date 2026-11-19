@@ -29,7 +29,7 @@ use super::runtime::{self, RunSpec};
 
 /// The own-process service name handed to the dispatcher. For an `OWN_PROCESS` service the SCM
 /// does not match on this string — the installed service is registered under the product's name
-/// (ADR-0022 clause 17) — so it only needs to be stable.
+/// (ADR-0022 §17) — so it only needs to be stable.
 const SERVICE_NAME: &str = "supervisor";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 

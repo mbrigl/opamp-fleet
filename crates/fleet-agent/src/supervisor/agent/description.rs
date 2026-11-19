@@ -8,7 +8,7 @@ use tracing::warn;
 
 use super::{AgentState, Local};
 
-/// How much of a type a Managed Process reports reaches the warning about it (ADR-0018 clause 9):
+/// How much of a type a Managed Process reports reaches the warning about it (ADR-0018 §9):
 /// enough for any reverse FQDN, and no more of what a process can make as long as it likes.
 const LOGGED_TYPE_CHARS: usize = 128;
 
@@ -33,8 +33,8 @@ impl AgentState {
         for attr in &description.non_identifying_attributes {
             upsert_attr(&mut merged.non_identifying_attributes, attr);
         }
-        // The type is the Supervisor's, and the fold drops the process's `service.name` (ADR-0018
-        // clause 9). A value that differs is said once, when the process starts to report it, so
+        // The type is the Supervisor's, and the fold drops the process's `service.name` (ADR-0018 §9).
+        // A value that differs is said once, when the process starts to report it, so
         // an operator whose Collector states a `dist.name` learns where to set it, and a report
         // repeated every few seconds does not flood the log. Only the merged report's values are
         // compared, so nothing grows however many values a process cycles through. The value is
@@ -57,7 +57,7 @@ impl AgentState {
         self.protocol.force_full();
     }
 
-    /// Attaches the operator-defined attributes this Agent reports (ADR-0018 clause 10).
+    /// Attaches the operator-defined attributes this Agent reports (ADR-0018 §10).
     #[must_use]
     pub fn with_attributes(
         mut self,
@@ -143,7 +143,7 @@ impl Local {
             }
         }
         // The version of the Package this Supervisor installed, from the record of its last
-        // install (ADR-0032 clause 25). It is the Package's version, not
+        // install (ADR-0032 §25). It is the Package's version, not
         // the program's: a repack is a Package its program does not report, and the Server holds
         // the next Package against this one. The Client Agent reports none, since its
         // `service.version` is what it runs.
@@ -159,7 +159,7 @@ impl Local {
             identifying_attributes,
             non_identifying_attributes,
         };
-        // Operator-defined attributes (ADR-0018 clause 10) — added only where nothing is reported
+        // Operator-defined attributes (ADR-0018 §10) — added only where nothing is reported
         // under the same key, so what the code reports always wins. A key added here stands
         // against the Managed Process: the fold below leaves it alone.
         let mut operators_keys = Vec::new();
@@ -174,7 +174,7 @@ impl Local {
                 operators_keys.push(key.as_str());
             }
         }
-        // Fold in what the Managed Process reported about itself (ADR-0018 clause 8) — its
+        // Fold in what the Managed Process reported about itself (ADR-0018 §8) — its
         // `service.*` attributes alone. A process is code the Supervisor does not vouch for, and
         // where the Agent runs (`host.*`, `os.*`) and what kind of Agent it is (`supervisor.*`)
         // decide which Selectors match and which artifact is offered; those stay the
@@ -243,7 +243,7 @@ fn fold_attr(description: &mut AgentDescription, attr: &KeyValue, identifying: b
 }
 
 /// The `service.name` values a Managed Process's merged report carries, in either list — what
-/// ADR-0018 clause 9 compares against the Supervisor's type. An empty string is no value.
+/// ADR-0018 §9 compares against the Supervisor's type. An empty string is no value.
 fn reported_types(reported: Option<&AgentDescription>) -> Vec<String> {
     let mut types: Vec<String> = Vec::new();
     for list in reported.into_iter().flat_map(|reported| {

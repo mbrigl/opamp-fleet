@@ -1,5 +1,5 @@
-//! How the Agents of one Client are placed under its Client Agent (ADR-0029 clauses 18 and 19,
-//! ADR-0025 clause 8): the rule for one group, which the fleet in memory and a page read from the
+//! How the Agents of one Client are placed under its Client Agent (ADR-0029 §18 and §19,
+//! ADR-0025 §8): the rule for one group, which the fleet in memory and a page read from the
 //! store share, the index of the groups this instance holds members of, how the Client Agents of a
 //! group another instance carries are read, and the placing again after a notice or a catch-up.
 //! Its entry points are methods of `AppState`.
@@ -16,7 +16,7 @@ use crate::revocation::SpeaksFor;
 
 use super::{parse_hex_uid, AgentRecord, AppState};
 
-/// The Agents one Client presents (ADR-0029 clause 19), as far as the Server can tell them apart.
+/// The Agents one Client presents (ADR-0029 §19), as far as the Server can tell them apart.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Group {
     /// On a direct connection: the Agents arriving over the same Host.
@@ -27,7 +27,7 @@ pub enum Group {
 }
 
 /// What the Host an Agent arrived over and its Client Agent add to its effective description
-/// (ADR-0029 clauses 18 and 19). Derived from the records and the host register whenever either
+/// (ADR-0029 §18 and §19). Derived from the records and the host register whenever either
 /// changes; never persisted.
 #[derive(Clone, Debug, Default)]
 pub struct Placement {
@@ -43,7 +43,7 @@ pub struct Placement {
     pub ambiguous: bool,
 }
 
-/// Which Agents each [`Group`] holds (ADR-0029 clause 19), so placing one Agent touches its group
+/// Which Agents each [`Group`] holds (ADR-0029 §19), so placing one Agent touches its group
 /// alone. Locked strictly after `fleet`, and only while it is held.
 #[derive(Default)]
 pub(super) struct Groups(Mutex<HashMap<Group, HashSet<InstanceUid>>>);
@@ -64,9 +64,8 @@ impl Groups {
 pub(super) type ClientsByGroup = HashMap<Group, Vec<(InstanceUid, BTreeMap<String, String>)>>;
 
 /// How a placement reads the Client Agents of a group that this instance does not hold
-/// (ADR-0029 clause 19,
-/// ADR-0025
-/// clause 8).
+/// (ADR-0029 §19,
+/// ADR-0025 §8).
 pub(super) enum Elsewhere {
     /// From the store as the group is placed, under the fleet lock.
     Now,
@@ -82,7 +81,7 @@ pub(super) enum Elsewhere {
 /// labels it inherits.
 pub type Placed = (Option<InstanceUid>, bool, BTreeMap<String, String>);
 
-/// Where the Agents that arrived over one Host place each other (ADR-0029 clause 19): on a direct
+/// Where the Agents that arrived over one Host place each other (ADR-0029 §19): on a direct
 /// connection they are one group, behind a Gateway one group per machine they report. A group with
 /// exactly one Client Agent places the others under it, and they inherit its labels but those in a
 /// reserved space (clause 20); one with more places nobody and marks every member ambiguous.
@@ -122,7 +121,7 @@ pub fn place_on_host(
     placed
 }
 
-/// The one rule of ADR-0029 clause 19, for one group: `members` placed by the group's Client Agents
+/// The one rule of ADR-0029 §19, for one group: `members` placed by the group's Client Agents
 /// `clients`, with their labels. Exactly one places every member under it, and the others inherit
 /// its labels but those in a reserved space (clause 20); more place nobody and mark every member
 /// ambiguous; none places nobody. Answers each member's Client Agent, whether the group is
@@ -153,7 +152,7 @@ pub fn place_group(
 }
 
 impl AppState {
-    /// Where the Host an Agent arrived over places it (ADR-0029 clauses 18 and 19): the
+    /// Where the Host an Agent arrived over places it (ADR-0029 §18 and §19): the
     /// `fleet.host.*` values of a Host it arrived over directly, and the group its Client is
     /// recognised in. Nothing without a host register, and nothing for an Agent that names no
     /// Host.
@@ -213,8 +212,8 @@ impl AppState {
     /// does. On a shared store the Client Agent of a Host may be carried by another instance, so
     /// the Agents the host register binds to the Host that this instance does not hold are read
     /// from the store, and a Client Agent among them counts as one of the group
-    /// (ADR-0025
-    /// clause 8). Behind a Gateway, where the register binds no Agent, the Agents that arrived
+    /// (ADR-0025 §8).
+    /// Behind a Gateway, where the register binds no Agent, the Agents that arrived
     /// over the Gateway's Host are read instead ([`arrived_over`](Self::arrived_over)).
     ///
     /// What is read of a group's Client Agents held elsewhere is read as `elsewhere` says: at once,
@@ -297,8 +296,8 @@ impl AppState {
     /// Places again every group of each of `hosts` that this instance holds members of: of a Host,
     /// the group under the Host, and of a Gateway's Host, every group behind it. What a notice that
     /// a binding of the Host changed, or that a Client Agent first arrived over it, calls for
-    /// (ADR-0025
-    /// clause 8). Nothing on a store this Server alone writes, whose own acts place what they
+    /// (ADR-0025 §8).
+    /// Nothing on a store this Server alone writes, whose own acts place what they
     /// change.
     pub fn place_hosts_again(&self, hosts: &BTreeSet<String>) {
         if hosts.is_empty() || !self.agent_store.is_shared() {
@@ -321,8 +320,8 @@ impl AppState {
     /// stored; none on a store this Server alone writes. Of a Host, those the host register binds
     /// to it; behind a Gateway, which the register binds none to, those that arrived over the
     /// Gateway's Host and report the group's machine, read through the port's `query_page`
-    /// (ADR-0025
-    /// clause 8). One that cannot be read is logged, and the group is placed from what this
+    /// (ADR-0025 §8).
+    /// One that cannot be read is logged, and the group is placed from what this
     /// instance holds.
     fn client_agents_elsewhere(
         &self,
@@ -485,8 +484,8 @@ impl AppState {
 
     /// The records of the Agents that last arrived over `host`, as stored, through
     /// [`AgentStore::query_page`](crate::agent_store::AgentStore::query_page) filtered on that Host
-    /// (ADR-0030
-    /// clause 9): the Agents behind a Gateway, whichever instance carries them.
+    /// (ADR-0030 §9):
+    /// the Agents behind a Gateway, whichever instance carries them.
     pub(super) fn arrived_over(
         &self,
         host: &str,
@@ -576,7 +575,7 @@ impl AppState {
 
     /// What a catch-up reads before the fleet lock of the Client Agents behind each Gateway whose
     /// groups this instance holds members of: the Agents that arrived over each Gateway's Host, read
-    /// once per Gateway, not yet sifted of what is held (ADR-0025 clause 10).
+    /// once per Gateway, not yet sifted of what is held (ADR-0025 §10).
     pub(super) fn read_behind_gateways(&self) -> ClientsByGroup {
         let gateways: Vec<Group> = self
             .groups
@@ -696,7 +695,7 @@ fn clients_of_host<'a>(
     clients
 }
 
-/// Places the members of one group under their Client Agent (ADR-0029 clause 19): with exactly one,
+/// Places the members of one group under their Client Agent (ADR-0029 §19): with exactly one,
 /// the others inherit its labels but those in a reserved space (clause 20); with more than one,
 /// nobody inherits and every member is marked ambiguous; with none, nobody inherits. `elsewhere`
 /// are the group's Client Agents that `fleet` does not hold, with their labels.

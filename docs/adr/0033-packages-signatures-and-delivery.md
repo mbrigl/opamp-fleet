@@ -152,12 +152,12 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 1. **A Package is one release: one Agent type, one version, fixed at creation.** How a Package is
    identified and which versions it may carry is
-   [ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 1. Both are stated when the
+   [ADR-0034 §1](0034-package-versions-high-water-mark-and-floor.md). Both are stated when the
    Package is created and never edited; a new version is a **new Package**, never a change to an old
    one. There is no untyped Package and no moment in which one exists. The store keeps every version
    openly as its own Package until an operator deletes it: there is no hidden "previous" artifact
    and no automatic pruning, and the store is not where rollback happens
-   ([ADR-0032](0032-deployments-and-rollouts.md) clause 21: rollback is not a rollout). The type is
+   ([ADR-0032 §21](0032-deployments-and-rollouts.md): rollback is not a rollout). The type is
    compared **raw** (clause 14); the version orders as [ADR-0037](0037-the-products-version.md)
    orders versions.
 
@@ -740,8 +740,8 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
       with another target, a relative one, and one outside the program's directory. So does any
       member at or beneath a kept link, so nothing is written through it. A zip or 7z tree keeps
       no link at all, since the repacks that need one are `.tar.gz`
-      ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
-      clause 27). The program is never a kept link. Both ends hold a link against the kind's list
+      ([ADR-0036 §27](0036-the-operator-program-opamp-fleetctl.md)).
+      The program is never a kept link. Both ends hold a link against the kind's list
       by one rule, `fleet_util::tree::is_kept`.
 
 58. **The swap is a rename, and the apply grace gates it.** On disk, per Supervisor:

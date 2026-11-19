@@ -277,8 +277,7 @@ impl Connection {
     /// that drives the socket itself. The name's resolution gets one silence bound, and each
     /// address it resolves to, in turn, one for the TCP connection, the TLS handshake and the
     /// upgrade together, so an endpoint that accepts and never answers fails the call
-    /// (ADR-0014
-    /// clause 3).
+    /// (ADR-0014 §3).
     ///
     /// # Errors
     /// Returns an error when the material cannot be used, no address of the server can be
@@ -409,8 +408,7 @@ mod tests {
     /// Verifies: ADR-0008, ADR-0012
     /// The probe of an offered endpoint that accepts the TCP connection and never answers fails
     /// once the bound has passed, rather than holding the session that asked for it
-    /// (ADR-0014
-    /// clause 3).
+    /// (ADR-0014 §3).
     /// Verifies: ADR-0014
     #[tokio::test]
     async fn a_probe_of_an_endpoint_that_never_answers_fails_within_the_bound() {

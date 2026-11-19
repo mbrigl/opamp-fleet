@@ -1,5 +1,5 @@
 //! How long the audit record on PostgreSQL goes back
-//! (ADR-0039 clause 12): once a day each instance removes from
+//! (ADR-0039 §12): once a day each instance removes from
 //! its own chain, and the one that holds the prune lock from every closed chain, the longest run of
 //! entries from the chain's start that are all older than `[audit] retain_days`, by the database's
 //! time when each was stored.
@@ -110,7 +110,7 @@ fn entries(
     }
     // The last checkpoint the prune removes, or that an entry it removes named as removed, which a
     // verifier goes on from
-    // (ADR-0028 clause 10).
+    // (ADR-0028 §10).
     if let (Some(first), Some((seq, hash))) = (entries.first_mut(), checkpoint) {
         *first = first
             .clone()
@@ -151,7 +151,7 @@ fn predecessor_named(value: &Value, chain_key: &str) -> Option<Predecessor> {
 }
 
 /// How often an instance prunes the record: at its start and once a day after
-/// (ADR-0039 clause 12).
+/// (ADR-0039 §12).
 const PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Prunes the record on `database` to `retain_days` at once and then once a day, for the chain
@@ -459,7 +459,7 @@ async fn plan(
         // elsewhere, so the checkpoints left follow each other. Nor does the one checkpoint that
         // named a closed chain closed while that chain still holds entries this round leaves:
         // without it no checkpoint names the chain
-        // (ADR-0028 clause 10).
+        // (ADR-0028 §10).
         let held_back: Option<i64> = client
             .query_one(
                 "SELECT min(c.seq) FROM audit_entries c \

@@ -54,8 +54,8 @@ object_store.workspace = true
 reqwest.workspace = true
 webpki-roots.workspace = true
 # The audit record's export as OTLP/HTTP log records
-# (ADR-0028
-# clause 15): the OpenTelemetry crates the Client's own telemetry is built on (ADR-0018), already
+# (ADR-0028 §15):
+# the OpenTelemetry crates the Client's own telemetry is built on (ADR-0018), already
 # in the lock. The exporter sends through the reqwest client above, on TLS 1.3 *ring*, behind the
 # `opentelemetry-http` client trait, which drops every header the configuration does not set.
 opentelemetry.workspace = true
@@ -76,8 +76,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 # A Gateway in front of two instances in one test process
-# (ADR-0025
-# clause 21). The Client depends on the Server only for its own tests, so this is no cycle.
+# (ADR-0025 §21).
+# The Client depends on the Server only for its own tests, so this is no cycle.
 fleet-agent = { path = "../fleet-agent" }
 tokio-tungstenite.workspace = true
 tempfile = "3"

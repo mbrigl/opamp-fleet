@@ -1,4 +1,4 @@
-//! The PKCS#11 primitives are written once, in `fleet_core::pkcs11`, as ADR-0008 clause 16 has
+//! The PKCS#11 primitives are written once, in `fleet_core::pkcs11`, as ADR-0008 §16 has
 //! code both an end and the operator tool would implement identically live, and clause 18 has a
 //! measurement that finds one written twice move it there. The Server's token adapter, the
 //! operator program's, and the operator program's test token all use it, and none restates the
@@ -43,7 +43,7 @@ fn code(source: &str) -> String {
         .join("\n")
 }
 
-/// ADR-0008 clauses 16 and 18: one PKCS#11 adapter, which every token user calls.
+/// ADR-0008 §16 and §18: one PKCS#11 adapter, which every token user calls.
 /// Verifies: ADR-0008
 #[test]
 fn every_user_of_a_token_calls_the_primitives_of_the_core_and_restates_none() {

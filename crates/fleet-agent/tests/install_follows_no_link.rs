@@ -337,7 +337,7 @@ mod unix {
     /// privileged write: the load `service install` and `service config` read the file with
     /// refuses it, naming it, and an install that keeps an existing file leaves what it points at
     /// with its bytes and its mode. The run-time Client, in its own account's directory, still
-    /// reads through a link its operator made (ADR-0022 clause 21).
+    /// reads through a link its operator made (ADR-0022 §21).
     /// Verifies: ADR-0022
     #[test]
     fn the_configuration_is_read_through_no_link() {

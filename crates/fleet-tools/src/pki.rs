@@ -2,7 +2,7 @@
 //!
 //! `token-init`, run on the Server host, makes the client CA's, the bootstrap CA's and the audit
 //! key on the Server's PKCS#11 token instead, and `init --ca-keys-on-token` leaves those CAs to it
-//! (ADR-0036 clauses 7 and 8).
+//! (ADR-0036 §7 and §8).
 //!
 //! `init` makes the three certificate authorities — the server CA, the client CA and the bootstrap
 //! CA — the Server's certificate and the package signing key; `server-cert` makes another server certificate, for the
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use fleet_core::naming;
-// The serial and the start every certificate gets, as the client CA's (ADR-0036 clause 5).
+// The serial and the start every certificate gets, as the client CA's (ADR-0036 §5).
 use fleet_core::x509::issue::{self, random_serial, Role, CLOCK_SKEW};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
@@ -26,17 +26,17 @@ use time::{Duration, OffsetDateTime};
 use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
 
-/// How long the server CA and the client CA live unless told otherwise (ADR-0036 clause 13).
+/// How long the server CA and the client CA live unless told otherwise (ADR-0036 §13).
 pub const CA_DAYS: u32 = 3650;
 /// How long the bootstrap CA lives unless told otherwise: its key is on the Server, and replacing
-/// it touches nothing but the Server (ADR-0036 clause 13).
+/// it touches nothing but the Server (ADR-0036 §13).
 pub const BOOTSTRAP_CA_DAYS: u32 = 365;
 /// How long a server certificate lives unless told otherwise: within every browser's limit.
 pub const SERVER_DAYS: u32 = 397;
-/// The product the certificates are named for unless told otherwise (ADR-0036 clause 17).
+/// The product the certificates are named for unless told otherwise (ADR-0036 §17).
 pub const DEFAULT_PRODUCT: &str = naming::DEFAULT_PRODUCT;
 
-/// The commands of `opamp-fleetctl pki` (ADR-0036 clause 6, ADR-0034 clause 22).
+/// The commands of `opamp-fleetctl pki` (ADR-0036 §6, ADR-0034 §22).
 #[derive(Subcommand)]
 pub enum Command {
     /// Make a fleet's certificates from nothing: what the Server host needs into --server-dir,
@@ -163,7 +163,7 @@ pub enum Command {
     },
 }
 
-/// The organization a certificate names for audit (ADR-0036 clause 18).
+/// The organization a certificate names for audit (ADR-0036 §18).
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Organization {
     /// The organization (O) the certificates name: 1 to 64 characters.
@@ -315,9 +315,9 @@ pub struct InitOptions {
     pub server_path: Option<PathBuf>,
     /// Where a host's files will live; the fragment names them there.
     pub host_path: Option<PathBuf>,
-    /// What the certificates are named for (ADR-0036 clause 17).
+    /// What the certificates are named for (ADR-0036 §17).
     pub product: String,
-    /// What every CA and the server certificate name for audit (ADR-0036 clause 18).
+    /// What every CA and the server certificate name for audit (ADR-0036 §18).
     pub organization: Organization,
     pub names: Vec<String>,
     /// The server CA's and the client CA's life.
@@ -377,7 +377,7 @@ struct Made {
     cut: bool,
 }
 
-/// `pki init` (ADR-0036 clause 7): the three CAs, the server certificate and the package signing
+/// `pki init` (ADR-0036 §7): the three CAs, the server certificate and the package signing
 /// key, split into what the Server host needs — the bootstrap CA's key among it — and what stays
 /// offline, the server CA's key and the package signing key. Returns the lines
 /// to print.
@@ -401,8 +401,7 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
         organization,
         options.ca_days,
     )?;
-    // With the CA keys on the token, `token-init` makes both CAs on the Server host (clause 7 of
-    // ADR-0036).
+    // With the CA keys on the token, `token-init` makes both CAs on the Server host (ADR-0036 §7).
     let cas = if options.ca_keys_on_token {
         None
     } else {
@@ -429,7 +428,7 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
         &Organization::default(),
         options.server_days,
     )?;
-    // The package signing key stays with the server CA's (ADR-0036 clause 7).
+    // The package signing key stays with the server CA's (ADR-0036 §7).
     let (signing_key, verification_key) = crate::package::signing_key()?;
 
     let server_path = destination(&options.server_dir, options.server_path.as_deref())?;
@@ -527,9 +526,9 @@ pub fn init(options: &InitOptions) -> Result<Vec<String>, String> {
     Ok(lines)
 }
 
-/// `pki server-cert` (ADR-0036 clause 11): a server certificate from the offline server CA,
+/// `pki server-cert` (ADR-0036 §11): a server certificate from the offline server CA,
 /// for the Server or for a Gateway. It carries the CA's O and OU unless `organization` replaces
-/// either (ADR-0036 clause 10).
+/// either (ADR-0036 §10).
 ///
 /// # Errors
 /// Returns the message to print when an option is invalid, the CA cannot be read, a file exists,
@@ -562,7 +561,7 @@ pub fn server_cert(
     Ok(lines)
 }
 
-/// `pki bootstrap-ca` (ADR-0036 clause 12): a new bootstrap CA, for the operator to put on the
+/// `pki bootstrap-ca` (ADR-0036 §12): a new bootstrap CA, for the operator to put on the
 /// Server host in place of `[enrolment]`'s files.
 ///
 /// # Errors
@@ -595,7 +594,7 @@ pub fn bootstrap_ca(
 }
 
 /// `pki token-init`
-/// (ADR-0036 clause 8): on the Server host, the client CA's,
+/// (ADR-0036 §8): on the Server host, the client CA's,
 /// the bootstrap CA's and the audit key made on the token, none extractable; both CA certificates
 /// signed through the token with their own key; and into `--out` the two certificates and
 /// `token.toml.fragment`. No key is written to a file.
@@ -705,7 +704,7 @@ fn write_token_init(
 }
 
 /// `pki bootstrap-ca --pkcs11-module`
-/// (ADR-0036 clause 12): a new bootstrap CA whose key is made
+/// (ADR-0036 §12): a new bootstrap CA whose key is made
 /// on the token under a new label, and its certificate into `--out`.
 ///
 /// # Errors
@@ -770,7 +769,7 @@ fn ca_on_token(
         .map_err(|e| format!("cannot sign the {common_name} through the token: {e}"))
 }
 
-/// Refuses, before anything is made, a file of `names` in `dir` that exists (ADR-0036 clause 15).
+/// Refuses, before anything is made, a file of `names` in `dir` that exists (ADR-0036 §15).
 fn refuse_existing(dir: &Path, names: &[&str]) -> Result<(), String> {
     for name in names {
         let path = dir.join(name);
@@ -786,7 +785,7 @@ fn toml_path(path: &Path) -> String {
     toml::Value::String(path.display().to_string()).to_string()
 }
 
-/// The password of `pki p12-extract` (ADR-0036 clause 25): the first line of `--password-file`,
+/// The password of `pki p12-extract` (ADR-0036 §25): the first line of `--password-file`,
 /// or a hidden question on a terminal. Without either it fails before the file is read.
 fn p12_password(
     password_file: Option<&Path>,
@@ -811,7 +810,7 @@ fn p12_password(
         .map_err(|e| format!("cannot ask for the password: {e}"))
 }
 
-/// `pki p12-extract` (ADR-0036 clauses 24 and 26): the certificate and key of a bootstrap PKCS#12
+/// `pki p12-extract` (ADR-0036 §24 and §26): the certificate and key of a bootstrap PKCS#12
 /// file, opened with the reader the Client's install uses, written as `bootstrap.pem` and
 /// `bootstrap-key.pem` into `out` — both or neither, the key owner-only. Returns the lines to
 /// print, which name the certificate and never the key.
@@ -879,7 +878,7 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
     Ending::read(file, der.as_ref())
 }
 
-/// `pki status` (ADR-0036 clause 22): the server CA in the offline directory, with its end.
+/// `pki status` (ADR-0036 §22): the server CA in the offline directory, with its end.
 ///
 /// # Errors
 /// Returns the message to print when the directory holds no server CA or it cannot be read.
@@ -909,7 +908,7 @@ pub fn exit_code(endings: &[Ending], now: OffsetDateTime) -> u8 {
 // Making certificates
 // ---------------------------------------------------------------------------------------------
 
-/// A self-signed CA (ADR-0036 clauses 9 and 18): `CA:TRUE` with a path length of 0,
+/// A self-signed CA (ADR-0036 §9 and §18): `CA:TRUE` with a path length of 0,
 /// `keyCertSign` and `cRLSign`, named O, OU and CN. Returns its certificate and key as PEM, the
 /// key wiped when it is dropped (ADR-0015), and the authority that signs with it.
 fn authority(
@@ -942,7 +941,7 @@ fn authority(
     ))
 }
 
-/// A subject of O, OU and CN in that order, as `UTF8String`s (ADR-0036 clause 18).
+/// A subject of O, OU and CN in that order, as `UTF8String`s (ADR-0036 §18).
 fn subject(organization: &Organization, common_name: &str) -> DistinguishedName {
     let mut name = DistinguishedName::new();
     if let Some(value) = &organization.organization {
@@ -955,7 +954,7 @@ fn subject(organization: &Organization, common_name: &str) -> DistinguishedName 
     name
 }
 
-/// A server certificate (ADR-0036 clause 10): every name and both loopback addresses in its SAN,
+/// A server certificate (ADR-0036 §10): every name and both loopback addresses in its SAN,
 /// its role in its subject, and the CA's O and OU unless `organization` replaces either.
 fn server_certificate(
     ca: &Authority,
@@ -982,7 +981,7 @@ fn server_certificate(
 }
 
 /// Signs a server certificate's leaf: `CA:FALSE`, `digitalSignature`, `serverAuth`, a random
-/// serial, and a life that never reaches past the CA's end (ADR-0036 clause 13).
+/// serial, and a life that never reaches past the CA's end (ADR-0036 §13).
 fn leaf(mut params: CertificateParams, ca: &Authority, days: u32) -> Result<Made, String> {
     let key = KeyPair::generate().map_err(|e| format!("cannot make a key: {e}"))?;
     let (not_before, not_after, cut) = life(days, Some(ca.end))?;
@@ -1066,7 +1065,7 @@ fn load_authority(dir: &Path, stem: &str) -> Result<Authority, String> {
 // Checking what is asked for
 // ---------------------------------------------------------------------------------------------
 
-/// A product name (ADR-0036 clause 17).
+/// A product name (ADR-0036 §17).
 fn check_product(product: &str) -> Result<(), String> {
     naming::check_product(product).map_err(|e| format!("--product {e}"))
 }
@@ -1079,7 +1078,7 @@ fn check_days(days: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// The `--name`s of a server certificate (ADR-0036 clause 10): at least one, each a DNS name or an
+/// The `--name`s of a server certificate (ADR-0036 §10): at least one, each a DNS name or an
 /// IP address, no wildcard.
 fn names(names: &[String]) -> Result<Vec<SanType>, String> {
     if names.is_empty() {
@@ -1161,7 +1160,7 @@ fn quoted(dir: &Path, file: &str) -> String {
     toml::Value::String(dir.join(file).display().to_string()).to_string()
 }
 
-/// Writes every target or none (ADR-0036 clause 15): refuses when any file exists, writes each
+/// Writes every target or none (ADR-0036 §15): refuses when any file exists, writes each
 /// directory's files into a temporary directory inside it, and renames them into place only once
 /// all are written. Directories it creates are `0700`, keys `0600`.
 fn write_all(targets: &[Target]) -> Result<(), String> {
@@ -1224,8 +1223,8 @@ fn create_private_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot create {}: {e}", dir.display()))
 }
 
-/// Writes the private key `contents` at `path` by the rule [`write_all`] keeps (ADR-0036 clause
-/// 15): refused when `path` exists, written `0600` into a new temporary directory beside it, and
+/// Writes the private key `contents` at `path` by the rule [`write_all`] keeps (ADR-0036 §15):
+/// refused when `path` exists, written `0600` into a new temporary directory beside it, and
 /// linked into place only once complete, so a process killed part-way leaves no half-written key at
 /// `path`, only the staging directory. The link, unlike a rename, refuses a file that appeared at
 /// `path` in the meantime; where the file system has no links, such as FAT, the key is renamed
@@ -1275,7 +1274,7 @@ pub(crate) fn write_key(path: &Path, contents: &[u8]) -> Result<(), String> {
 }
 
 /// Writes a new file; a key is `0600` from the moment it exists, and an existing file is never
-/// replaced (ADR-0036 clause 15). The one writer of every private key the tool makes, through
+/// replaced (ADR-0036 §15). The one writer of every private key the tool makes, through
 /// [`write_all`] or [`write_key`]. A write that fails part-way removes what it wrote.
 fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
     use std::io::Write as _;
@@ -1300,7 +1299,7 @@ fn write_file(path: &Path, contents: &[u8], key: bool) -> Result<(), String> {
         })
 }
 
-/// Whether two directories sit on one file system (ADR-0036 clause 8).
+/// Whether two directories sit on one file system (ADR-0036 §8).
 fn same_file_system(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -1407,7 +1406,7 @@ mod tests {
     }
 
     /// The package signing key lands offline, and what it signs passes the Client's check under
-    /// the `verification_key` the fragment names (ADR-0036 clause 7).
+    /// the `verification_key` the fragment names (ADR-0036 §7).
     // Verifies: ADR-0036
     #[test]
     fn init_makes_the_package_signing_key_offline_and_names_its_public_half() {
@@ -1530,7 +1529,7 @@ mod tests {
     }
 
     /// Every CA and the server certificate are named by product and role, with the operator's
-    /// organization, in the order O, OU, CN (ADR-0036 clauses 9, 10 and 18).
+    /// organization, in the order O, OU, CN (ADR-0036 §9, §10 and §18).
     // Verifies: ADR-0036
     #[test]
     fn init_names_every_certificate_by_product_role_and_organization() {
@@ -1562,8 +1561,7 @@ mod tests {
         }
     }
 
-    /// `server-cert` carries the server CA's O and OU, and a flag replaces one alone (ADR-0036
-    /// clause 10).
+    /// `server-cert` carries the server CA's O and OU, and a flag replaces one alone (ADR-0036 §10).
     // Verifies: ADR-0036
     #[test]
     fn server_cert_takes_the_cas_organization_and_a_flag_replaces_it() {
@@ -1601,7 +1599,7 @@ mod tests {
     }
 
     /// A product or an organization outside its grammar is refused, and nothing is written
-    /// (ADR-0036 clauses 17 and 18).
+    /// (ADR-0036 §17 and §18).
     // Verifies: ADR-0036
     #[test]
     fn a_bad_product_or_organization_is_refused() {
@@ -1769,7 +1767,7 @@ mod tests {
         assert!(status(root.path()).is_err());
     }
 
-    /// The bootstrap CA lives a year, the server CA and the client CA ten (ADR-0036 clause 13).
+    /// The bootstrap CA lives a year, the server CA and the client CA ten (ADR-0036 §13).
     // Verifies: ADR-0036
     #[test]
     fn the_bootstrap_ca_lives_a_year_and_the_others_ten() {

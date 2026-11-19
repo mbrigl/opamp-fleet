@@ -71,7 +71,7 @@ const KEEPERS: [(&str, &str); 2] = [("S-1-5-18", "SY"), ("S-1-5-32-544", "BA")];
 #[cfg(any(windows, test))]
 const FULL: u32 = 0x001f_01ff;
 
-/// The Administrators group, by alias: the owner of a system-scope data root (ADR-0021 clause 25).
+/// The Administrators group, by alias: the owner of a system-scope data root (ADR-0021 §25).
 #[cfg(any(windows, test))]
 const OWNER: &str = "BA";
 
@@ -110,7 +110,7 @@ fn taken_over(parent: &crate::win32::acl::Dacl, dir: bool) -> crate::win32::acl:
 /// Administrators, the root is cut off ([`cut`]) and every entry keeps only what the root passes
 /// on to it ([`taken_over`]). Each entry is changed through a handle of its own: a link is changed
 /// as itself and never entered, and what the process account `process` owns, with everything
-/// beneath it, is left as it is (ADR-0022 clause 1). An entry that cannot be taken over fails the
+/// beneath it, is left as it is (ADR-0022 §1). An entry that cannot be taken over fails the
 /// install instead of staying behind.
 #[cfg(windows)]
 fn take_over(
@@ -243,7 +243,7 @@ pub enum Treatment {
 /// is the platform default, cut when the operator named it — and the state directory and the
 /// Supervisors' root wherever one lies outside every directory already listed. A state directory
 /// outside the data root is always cut: the install has taken it beneath its roots, from the
-/// operator's `--state-dir` or from the registration (ADR-0021 clause 14). A Supervisors' root
+/// operator's `--state-dir` or from the registration (ADR-0021 §14). A Supervisors' root
 /// outside both is cut when the install creates it (`exists` says it does not exist yet) and
 /// `ours` says it lies beneath the install's roots, and
 /// left untouched otherwise: `supervisor.toml` is the service account's to rewrite, and a directory
@@ -498,7 +498,7 @@ mod tests {
         );
     }
 
-    /// `supervisor.toml` is the service account's to rewrite (ADR-0022 clause 1). A Supervisors'
+    /// `supervisor.toml` is the service account's to rewrite (ADR-0022 §1). A Supervisors'
     /// root it places outside every root of the install is never created, cut or handed over by
     /// the install — not even when it does not exist yet — or the account would choose where an
     /// Administrator makes a directory and grants it Modify.

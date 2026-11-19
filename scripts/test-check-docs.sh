@@ -963,42 +963,42 @@ d="$(repo clause-forms)"
 clauses "$d" 1 4
 mkdir -p "$d/src"
 {
-  echo "// $(adr_id 1) clause 4 and $(adr_id 1), clause 1; $(adr_id 1) (clause 2)."
-  echo "// $(adr_id 1) clauses 1, 2 and 3, $(adr_id 1) clauses 1 to 4, clause 3 of $(adr_id 1)."
-  echo "// [$(adr_id 1)](docs/adr/0001-decision.md) clause 2, and wrapped: $(adr_id 1)"
-  echo "// clause 3."
+  echo "// $(adr_id 1) §4 and $(adr_id 1) §1; $(adr_id 1) §2, §3."
+  echo "// $(adr_id 1) §1, §2 and §3, $(adr_id 1) §1, §2, and §4, $(adr_id 1) §1–§4."
+  echo "// [$(adr_id 1) §2](docs/adr/0001-decision.md), and wrapped: $(adr_id 1)"
+  echo "// §3."
 } > "$d/src/lib.rs"
 layout "$d" "src/"
 expect pass "a clause cited in every form a citation takes, within the Decision" "$d"
 
 d="$(repo clause-beyond)"
 clauses "$d" 1 3
-echo "Decided by $(adr_id 1) clause 4." >> "$d/README.md"
+echo "Decided by $(adr_id 1) §4." >> "$d/README.md"
 expect fail "a clause beyond the Decision's numbered clauses" "$d" \
   "README.md:6: $(adr_id 1) clause 4 is cited, and its Decision has 3"
 
 d="$(repo clause-range-beyond)"
 clauses "$d" 1 3
-echo "Decided by $(adr_id 1) clauses 1, 2 and 2 to 5." >> "$d/README.md"
+echo "Decided by $(adr_id 1) §1, §2, and §2–§5." >> "$d/README.md"
 expect fail "a range whose end lies beyond the Decision" "$d" \
   "README.md:6: $(adr_id 1) clause 5 is cited, and its Decision has 3"
 
 d="$(repo clause-of-beyond)"
 clauses "$d" 1 3
 echo "As clause 7 of [$(adr_id 1)](docs/adr/0001-decision.md) says." >> "$d/README.md"
-expect fail "a clause named before 'of' and the identifier" "$d" \
-  "README.md:6: $(adr_id 1) clause 7 is cited, and its Decision has 3"
+expect fail "a clause named before 'of' and the identifier, the older form" "$d" \
+  "README.md:6: $(adr_id 1) is cited by clause N of, a place a normalization cannot follow"
 
 d="$(repo clause-wrapped)"
 clauses "$d" 1 3
 mkdir -p "$d/src"
-printf '/// Held as %s\n/// clause 9 says.\n' "$(adr_id 1)" > "$d/src/lib.rs"
+printf '/// Held as %s\n/// §9 says.\n' "$(adr_id 1)" > "$d/src/lib.rs"
 layout "$d" "src/"
 expect fail "a citation wrapped under a '///' comment is joined" "$d" \
   "src/lib.rs:1: $(adr_id 1) clause 9 is cited, and its Decision has 3"
 
 d="$(repo clause-none)"
-echo "Decided by $(adr_id 1) clause 1." >> "$d/README.md"
+echo "Decided by $(adr_id 1) §1." >> "$d/README.md"
 expect fail "a clause of an ADR whose Decision numbers none" "$d" \
   "README.md:6: $(adr_id 1) clause 1 is cited, and its Decision numbers no clauses"
 
@@ -1012,7 +1012,7 @@ d="$(repo clause-superseded)"
 consolidation "$d" yes
 clauses "$d" 1 3
 clauses "$d" 3 3
-echo "Decided by $(adr_id 1) clause 2." >> "$d/README.md"
+echo "Decided by $(adr_id 1) §2." >> "$d/README.md"
 expect fail "a clause of a superseded ADR, outside the record" "$d" \
   "README.md:6: $(adr_id 1) is no longer in force"
 
@@ -1020,10 +1020,10 @@ d="$(repo clause-superseded-history)"
 consolidation "$d" yes
 clauses "$d" 1 3
 clauses "$d" 3 3
-echo "It restates $(adr_id 1) clause 2." >> "$d/docs/adr/0003-decision.md"
-printf '# Changelog\n\n- Changed as %s clause 3 and %s, point 1 said.\n' "$(adr_id 1)" "$(adr_id 1)" \
+echo "It restates $(adr_id 1) §2." >> "$d/docs/adr/0003-decision.md"
+printf '# Changelog\n\n- Changed as %s §3 and %s, point 1 said.\n' "$(adr_id 1)" "$(adr_id 1)" \
   > "$d/CHANGELOG.md"
-echo "The successor's $(adr_id 3) clause 9." >> "$d/docs/adr/0001-decision.md"
+echo "The successor's $(adr_id 3) §9." >> "$d/docs/adr/0001-decision.md"
 layout "$d" "CHANGELOG.md"
 expect pass "a superseded ADR cited by the record and the changelog; a superseded ADR not read" "$d"
 
@@ -1031,14 +1031,14 @@ d="$(repo clause-forms-beyond)"
 clauses "$d" 1 2
 mkdir -p "$d/src"
 {
-  echo "// $(adr_id 1) (clause 3)."
-  echo "// [$(adr_id 1)](docs/adr/0001-decision.md) clause 4."
-  echo "// Clause 5 of $(adr_id 1)."
-  echo "// $(adr_id 1) clauses 1, 2, and 6."
+  echo "// $(adr_id 1) §3."
+  echo "// [$(adr_id 1) §4](docs/adr/0001-decision.md)."
+  echo "// $(adr_id 1) §1 and §5."
+  echo "// $(adr_id 1) §1, §2, and §6."
   echo "// $(adr_id 1)"
-  echo "// clause 7."
+  echo "// §7."
   echo "let s = \"per $(adr_id 1) \\"
-  echo "    clause 8\";"
+  echo "    §8\";"
 } > "$d/src/lib.rs"
 layout "$d" "src/"
 for want in "src/lib.rs:1: $(adr_id 1) clause 3 " "src/lib.rs:2: $(adr_id 1) clause 4 " \
@@ -1049,7 +1049,7 @@ done
 
 d="$(repo clause-zero)"
 clauses "$d" 1 3
-echo "Decided by $(adr_id 1) clause 0." >> "$d/README.md"
+echo "Decided by $(adr_id 1) §0." >> "$d/README.md"
 expect fail "clause 0, below the Decision's first" "$d" \
   "README.md:6: $(adr_id 1) clause 0 is cited, and its Decision has 3"
 
@@ -1060,7 +1060,7 @@ d="$(repo clause-fenced)"
 clauses "$d" 1 2
 printf '\n~~~markdown\n## Example\n\n3. x\n4. x\n~~~\n\n3. **Clause 3.** We will.\n' \
   >> "$d/docs/adr/0001-decision.md"
-echo "Decided by $(adr_id 1) clause 4." >> "$d/README.md"
+echo "Decided by $(adr_id 1) §4." >> "$d/README.md"
 expect fail "a numbered line or a heading inside a fence in the Decision is no clause" "$d" \
   "README.md:6: $(adr_id 1) clause 4 is cited, and its Decision has 3"
 
@@ -1068,18 +1068,32 @@ d="$(repo clause-separators)"
 clauses "$d" 1 3
 mkdir -p "$d/src"
 {
-  echo "// $(adr_id 1) clause 2"
+  echo "// $(adr_id 1) §2"
   echo "// 404 answers it."
-  echo "// $(adr_id 1) clause 3, 2026-11-14 was the day."
+  echo "// $(adr_id 1) §3, 2026-11-14 was the day."
 } > "$d/src/lib.rs"
 layout "$d" "src/"
 expect pass "a number after bare space or one a date goes on from is no clause" "$d"
 
-for place in "paragraph 2" "line 2" "rule 2" "item 2" "step 2" "section 2" "$(printf '\302\2472')"; do
+d="$(repo clause-older-word)"
+clauses "$d" 1 3
+echo "Decided by $(adr_id 1) clause 2." >> "$d/README.md"
+expect fail "the older word clause instead of the section sign" "$d" \
+  "README.md:6: $(adr_id 1) is cited by the older word clause, a place"
+
+d="$(repo clause-after-link)"
+clauses "$d" 1 3
+mkdir -p "$d/src"
+echo "// [$(adr_id 1)](docs/adr/0001-decision.md) §2." > "$d/src/lib.rs"
+layout "$d" "src/"
+expect fail "the section sign after a link instead of in its text" "$d" \
+  "src/lib.rs:1: $(adr_id 1) is cited by the section sign after its link, a place"
+
+for place in "paragraph 2" "line 2" "rule 2" "item 2" "step 2" "section 2"; do
   d="$(repo "clause-place-${place%% *}")"
   clauses "$d" 1 3
   echo "Decided by $(adr_id 1) $place." >> "$d/README.md"
-  word="${place% 2}"; [[ "$place" == *' '* ]] || word="${place%2}"
+  word="${place% 2}"
   expect fail "a place cited instead of a clause: $word" "$d" \
     "README.md:6: $(adr_id 1) is cited by $word, a place"
 done
@@ -1096,11 +1110,11 @@ clauses "$d" 1 3
   echo "|-----|-------|------------|--------|"
   index_row 1 "🔴 rejected"
 } > "$d/docs/adr/README.md"
-echo "Decided by $(adr_id 1) clause 2." >> "$d/README.md"
+echo "Decided by $(adr_id 1) §2." >> "$d/README.md"
 expect fail "a clause of a rejected ADR" "$d" "README.md:6: $(adr_id 1) is no longer in force"
 
 d="$(repo clause-template)"
-echo "As $(adr_id 1) clause 9 says." >> "$d/docs/adr/template.md"
+echo "As $(adr_id 1) §9 says." >> "$d/docs/adr/template.md"
 expect pass "the template is not read" "$d"
 
 # --- cases: drafts (checks 1, 2, 5, 6, 8, and 16) ---------------------------------------
@@ -1172,7 +1186,7 @@ GITHUB_BASE_REF="" expect fail "a link that cites a draft and points at another 
 d="$(repo draft-clause)"
 drafted "$d"
 printf '\n1. **One.** We will.\n\n2. **Two.** We will.\n' >> "$d/docs/adr/$DRAFT-next.md"
-echo "Held by $(draft_id next) clause 3." >> "$d/README.md"
+echo "Held by $(draft_id next) §3." >> "$d/README.md"
 GITHUB_BASE_REF="" expect fail "a clause beyond a draft's Decision" "$d" \
   "$(draft_id next) clause 3 is cited, and its Decision has 2"
 

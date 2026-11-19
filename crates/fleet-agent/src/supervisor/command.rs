@@ -30,7 +30,7 @@ struct CommandSettings {
     /// 2.0.0 version in its output becomes the Agent's `service.version`. A Foreign Agent's
     /// version flag is its own convention — hence opt-in, unlike the Collector's.
     ///
-    /// They are also this kind's **preflight** (ADR-0019 clause 54): a package's staged program is run with
+    /// They are also this kind's **preflight** (ADR-0019 §54): a package's staged program is run with
     /// them before the running one is stopped, and a non-zero exit refuses the package with the
     /// program's own message. Same arguments, same contract — a check that is cheap and touches
     /// no state — asked where a refusal costs nothing rather than after the swap.
@@ -101,7 +101,7 @@ impl Plugin for CommandPlugin {
             args,
             working_dir: None,
             // A Foreign Agent's version flag is its own convention, and so is its banner: the
-            // strict SemVer read stays the default here (ADR-0019 clause 55).
+            // strict SemVer read stays the default here (ADR-0019 §55).
             parse: None,
             env: Vec::new(),
         });
@@ -151,7 +151,7 @@ impl Plugin for CommandPlugin {
             // configuration by restarting, which is ADR-0019's generic behaviour.
             reload_signal: None,
             // The Client itself, or the second service where a process account is registered
-            // (ADR-0022 clause 18): the registry says which.
+            // (ADR-0022 §18): the registry says which.
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
             supervisor_dir: ctx.supervisor_dir.clone(),

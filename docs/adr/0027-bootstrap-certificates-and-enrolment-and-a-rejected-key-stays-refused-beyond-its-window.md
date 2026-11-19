@@ -102,7 +102,7 @@ find the bootstrap identity beside its program and enrol with it.
    `POST /api/v1/bootstrap-certificates` with a JSON body
    `{"subject": {…}, "validity_days": n, "password": "…"}` (`Content-Type: application/json`, as
    `POST /api/v1/revocations`; `validity_days` as
-   [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clause 14 bounds it), `password` required
+   [ADR-0036 §14](0036-the-operator-program-opamp-fleetctl.md) bounds it), `password` required
    — a request without it is answered `400`, naming it — makes a fresh ECDSA P-256 key and signs a
    certificate with the bootstrap CA's key. The certificate is `CA:FALSE`, `digitalSignature`,
    `clientAuth`, with a 16-byte random serial
@@ -535,8 +535,8 @@ find the bootstrap identity beside its program and enrol with it.
 - **The CSR's subject in the host certificate, or the client CA's O and OU in every host
   certificate.** The first shows the Agent's name in the register, but that name is self-asserted,
   and the register already lists the host and the `instance_uid` of each certificate
-  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-  clause 9); the second repeats the issuer in the subject and takes the place the bootstrap
+  ([ADR-0023 §9](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md));
+  the second repeats the issuer in the subject and takes the place the bootstrap
   certificate's subject is carried into.
 - **An enrolment request matched to its bootstrap certificate by the certificate's
   fingerprint.** The record would keep the SHA-256 of the whole certificate as well, but the
@@ -655,8 +655,8 @@ Tests that carry `Verifies: ADR-0027`:
   character with its `400` text. The Server's issuing route answers `400` for a password of 7
   characters and issues one of 8 (clause 5).
 - Issuance and download write their audit entries
-  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-  clause 11), and neither entry nor any log line holds the password (clause 5).
+  ([ADR-0023 §11](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+  and neither entry nor any log line holds the password (clause 5).
 - Issuing with all six attributes yields a bootstrap certificate whose subject holds them in the
   order of clause 1, with `country` as a `PrintableString`. A lower-case or three-letter country,
   an empty or 65-character value, a control character and an unknown key are each `400`
@@ -678,8 +678,7 @@ Tests that carry `Verifies: ADR-0027`:
   `enrolment.bootstrap_deleted`, and leaves the revocation on the list: the certificate is still
   refused at the handshake. Deleting a valid entry answers `409` and an unknown serial `404`
   (clause 7); a refused audit answers `503` with the entry kept
-  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-  clause 11).
+  ([ADR-0023 §11](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
 - `bootstrap.p12` is found beside the program; lying beside a file of the pair, neither is taken.
   With `--fleet-files <dir>` the files are found in `<dir>` and not beside the program, and
   `--endpoint` copies `server-ca.pem` from it; a `<dir>` that is no readable directory fails the

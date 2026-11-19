@@ -226,7 +226,7 @@ configured once by a maintainer and worth re-checking after a repository move or
   [`.github/CODEOWNERS`](.github/CODEOWNERS); it allows the merge method merge commit only, and
   the admin role bypasses it for pull requests only, so the maintainer merges their own reviewed
   pull request without an approval GitHub would refuse them
-  ([ADR-0007](docs/adr/0007-the-harness.md), clause 4);
+  ([ADR-0007 §4](docs/adr/0007-the-harness.md));
 - enable **secret scanning with push protection**, the only mechanical backstop behind the secrets
   rule ([`AGENTS.md` §7](AGENTS.md#7-secrets)), which is otherwise carried by review alone;
 - enable **private vulnerability reporting** (see [`SECURITY.md`](SECURITY.md)).

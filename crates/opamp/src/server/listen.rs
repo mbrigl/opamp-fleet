@@ -64,11 +64,11 @@ pub const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Shuts listeners down. One handle may drain several; how long a drain may take is the caller's
-/// to state (ADR-0008 clause 6).
+/// to state (ADR-0008 §6).
 ///
 /// It is `axum_server`'s handle plus what that one cannot reach: the WebSocket sessions, which
 /// outlive the HTTP connection they were upgraded from and so are not counted by its drain. A
-/// shutdown tells them at once, and the same deadline bounds them (ADR-0012 clause 17).
+/// shutdown tells them at once, and the same deadline bounds them (ADR-0012 §17).
 #[derive(Clone, Debug)]
 pub struct Handle {
     server: axum_server::Handle<SocketAddr>,
@@ -111,8 +111,8 @@ impl Handle {
 
     /// Stops accepting at once and tells each WebSocket session to close at an instant drawn
     /// uniformly over `over`
-    /// (ADR-0025
-    /// clause 3), so the
+    /// (ADR-0025 §3),
+    /// so the
     /// peers come back spread rather than all at once; what is still open [`SPREAD_GRACE`] after
     /// the window is cut. A window of zero tells them all at once.
     pub fn drain_spread(&self, over: Duration) {
@@ -297,7 +297,7 @@ impl Listener {
     }
 
     /// Sets the floor on the pace of bodies and messages, [`PACE_WINDOW`] and [`MIN_PACE_BYTES`]
-    /// unless stated. For a test to drive it short: the floor is no setting (ADR-0012 clause 18).
+    /// unless stated. For a test to drive it short: the floor is no setting (ADR-0012 §18).
     #[doc(hidden)]
     #[must_use]
     pub fn with_pace(mut self, window: Duration, min_bytes: u64) -> Self {
@@ -314,7 +314,7 @@ impl Listener {
     }
 
     /// Takes at most `rate` new connections a second
-    /// (ADR-0012 clause 4). A connection past it is served
+    /// (ADR-0012 §4). A connection past it is served
     /// nothing but `503` with a `Retry-After` of whole seconds drawn from 1 to 30, so a fleet that
     /// comes back at once is spread rather than turned away together; the connections already
     /// held keep working. Without it, a listener takes new connections as fast as they come; a rate

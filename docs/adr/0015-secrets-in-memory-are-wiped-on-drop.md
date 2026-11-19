@@ -51,8 +51,8 @@ What the crates around the secrets do, read in the locked sources:
   as a `String`. Neither names `zeroize`.
 
 `opamp::tls::Identity` carries the key as PEM into every connection
-([ADR-0008](0008-six-crates-on-tokio-and-axum.md)
-clause 4). ADR-0008 clause 3 lists the
+([ADR-0008 §4](0008-six-crates-on-tokio-and-axum.md)).
+ADR-0008 §3 lists the
 dependencies each feature of `opamp` adds, and `zeroize` is not among them.
 
 ## Decision
@@ -63,8 +63,8 @@ a `bootstrap.p12` while the Client reads it, and the Supervisor Endpoint token) 
 buffer from the moment it is read or made until it is dropped.
 
 1. **One dependency, default features.** `zeroize` is pinned once in `[workspace.dependencies]`
-   ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)
-   clause 11) with its default `alloc` feature
+   ([ADR-0008 §11](0008-six-crates-on-tokio-and-axum.md))
+   with its default `alloc` feature
    and no derive, and named by `fleet-core`, `fleet-util`, `fleet-agent`, `fleet-server` and
    `fleet-tools` where they hold a secret. It pulls no TLS or crypto backend, so the rule of
    [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) on the TLS and crypto backend holds.
@@ -83,8 +83,8 @@ buffer from the moment it is read or made until it is dropped.
    outside the reach of this project's code. This decision makes no claim about them.
 
 **Out of scope:** `opamp`. Wiping the key `opamp::tls::Identity` carries adds `zeroize` to both
-features of the publishable crate and changes a public field's type, which changes ADR-0008
-clause 3, supersedes ADR-0008, and is its own decision. Also out of scope: locking secret pages
+features of the publishable crate and changes a public field's type, which changes ADR-0008 §3,
+supersedes ADR-0008, and is its own decision. Also out of scope: locking secret pages
 against swap (`mlock`), excluding them from core dumps, and the ciphertext the Server keeps of a
 bootstrap certificate, which lies on disk under `config_dir` anyway.
 
@@ -129,7 +129,7 @@ bootstrap certificate, which lies on disk under `config_dir` anyway.
   a secret buffer is read at its final size.
 - Negative / trade-offs: the signatures that carry a secret inside the application crates take
   and return `Zeroizing` types.
-- Follow-ups: wiping `opamp::tls::Identity`'s key, which changes ADR-0008 clause 3 and so
+- Follow-ups: wiping `opamp::tls::Identity`'s key, which changes ADR-0008 §3 and so
   supersedes ADR-0008; keeping secret pages out of swap and core dumps.
 
 ## Enforcement

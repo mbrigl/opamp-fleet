@@ -171,7 +171,7 @@ pub use crate::span::{failed, succeeded, STATUS_CODE, STATUS_DESCRIPTION};
 /// when nothing is being traced, which is every run with no destination offered.
 ///
 /// Exists so a caller can persist a trace across something a span cannot survive: the self-update's
-/// restart (ADR-0018 clause 21), where the process that stages a version is not the process that
+/// restart (ADR-0018 §21), where the process that stages a version is not the process that
 /// commits or rolls back one. The OpenTelemetry types stay here; what leaves this module is two
 /// strings.
 #[must_use]
@@ -538,7 +538,7 @@ fn endpoint_of(settings: Option<&TelemetryConnectionSettings>) -> Option<String>
 /// Client logs, so plaintext is refused anywhere but on the host itself: the loopback literals
 /// `127.0.0.1` and `::1` (ADR-0018). A private address is not a private network, and a name is
 /// not an address. `tls` and `proxy` are refused for the same reasons they are on the OpAMP
-/// settings (ADR-0013 clause 8).
+/// settings (ADR-0013 §8).
 fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), String> {
     let endpoint = &settings.destination_endpoint;
     if endpoint.starts_with("http://") && opamp::endpoint::check_url(endpoint).is_err() {
@@ -560,7 +560,7 @@ fn check(settings: &TelemetryConnectionSettings, field: &str) -> Result<(), Stri
     if settings.proxy.is_some() {
         unhonoured.push("proxy");
     }
-    // An offered certificate *is* honoured (ADR-0018 clause 33) — but only its `cert`, paired with
+    // An offered certificate *is* honoured (ADR-0018 §33) — but only its `cert`, paired with
     // the key this Client already holds. A `private_key` in the offer is a key the Server generated
     // for us, and ADR-0026's rule is that this Client's private key never leaves its host and is
     // never handed to it: that is the whole point of asking for a certificate through a CSR.
@@ -645,7 +645,7 @@ impl std::fmt::Debug for RuntimeBoundClient {
 /// the fleet identity is for the Server, not for a telemetry destination (ADR-0018) — and it
 /// follows no redirect, so a destination cannot steer the export to another host or to plaintext.
 ///
-/// The certificate machinery is ADR-0026's, reused as-is (ADR-0018 clause 33): the offered `cert`
+/// The certificate machinery is ADR-0026's, reused as-is (ADR-0018 §33): the offered `cert`
 /// is paired with the key already on disk — the one the CSR was made for — because that key is what
 /// proves the certificate belongs to this host, and it never travels.
 ///
@@ -907,7 +907,7 @@ mod tests {
         telemetry.shutdown();
     }
 
-    /// A destination offered with an empty endpoint is a withdrawal (ADR-0018 clause 29): the
+    /// A destination offered with an empty endpoint is a withdrawal (ADR-0018 §29): the
     /// exporter is shut down and **nothing is refused**. Reporting it back as a malformed URL
     /// would answer "stop" with `FAILED`, which is the one answer the Server cannot act on.
     /// Verifies: ADR-0018
@@ -959,7 +959,7 @@ mod tests {
         assert!(!telemetry.reporting());
     }
 
-    /// ADR-0018 clause 33: the offered `certificate` is *honoured*, not refused — the ADR-0026
+    /// ADR-0018 §33: the offered `certificate` is *honoured*, not refused — the ADR-0026
     /// machinery is reused as-is, which means the offered `cert` is paired with the key this Client
     /// already generated for its CSR. With that key present, an offer naming a certificate builds
     /// an exporter that presents it.
@@ -1474,7 +1474,7 @@ mod tests {
         );
     }
 
-    /// ADR-0018 clause 21: an operation that outlives the process it started in stays **one** trace.
+    /// ADR-0018 §21: an operation that outlives the process it started in stays **one** trace.
     ///
     /// Asserted through the two functions the self-update uses — the ids it writes into its marker,
     /// and the parent it builds from them afterwards — because what the restart breaks is exactly

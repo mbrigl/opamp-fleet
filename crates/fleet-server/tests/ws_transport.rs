@@ -75,7 +75,7 @@ async fn a_framed_report_is_answered() {
 
 /// The Server answers a WebSocket ping with a pong carrying its payload, on a session that has
 /// sent nothing yet and after a report: the sign of life an Agent waits for
-/// (ADR-0014 clause 1).
+/// (ADR-0014 §1).
 /// Verifies: ADR-0014
 #[tokio::test]
 async fn the_server_answers_a_ping_with_a_pong() {
@@ -570,7 +570,7 @@ async fn forget_once_silent(server: &support::TestServer, uid: &InstanceUid) {
     }
 }
 
-/// Forgetting an Agent that went quiet ends its session (ADR-0029 clause 10): the socket that
+/// Forgetting an Agent that went quiet ends its session (ADR-0029 §10): the socket that
 /// carried it alone is closed, normally and saying why, and one that carries other Agents as well,
 /// as a Gateway's does, stays open and serves them.
 /// Verifies: ADR-0029

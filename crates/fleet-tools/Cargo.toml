@@ -8,7 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 # One binary, `opamp-fleetctl`, and no library: nothing in this workspace depends on this crate —
-# the arrow points the other way (ADR-0036 clause 1, ADR-0008).
+# the arrow points the other way (ADR-0036 §1, ADR-0008).
 [[bin]]
 name = "opamp-fleetctl"
 path = "src/main.rs"
@@ -17,7 +17,7 @@ path = "src/main.rs"
 clap.workspace = true
 # The ring provider every binary installs at startup (ADR-0008, ADR-0012).
 opamp = { workspace = true, features = ["client"] }
-# What the tool shares with the Client, and never the Client itself (ADR-0008 clause 22):
+# What the tool shares with the Client, and never the Client itself (ADR-0008 §22):
 # `archive` — the 7z Unix-mode convention, used when packing, and the unpackers, used by the tests
 # to open what these tools produce; `tree`, the links a kind's tree keeps; and the readers of the
 # operator's PKCS#12 and password files. Checking an artifact against the code that will install it
@@ -48,7 +48,7 @@ dialoguer.workspace = true
 rcgen.workspace = true
 # `pki token-init` and `pki bootstrap-ca --pkcs11-module` make keys on the Server's PKCS#11 token
 # through the wrapper the Server signs with
-# (ADR-0036 clause 5).
+# (ADR-0036 §5).
 cryptoki.workspace = true
 time.workspace = true
 x509-parser.workspace = true

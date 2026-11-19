@@ -73,7 +73,7 @@ pub struct Args {
     /// Which repack of this version it is, for an agent whose artifact this tool repacks: 1, the
     /// default, for the first, 2 and on for a later one of the same version. The second repack of
     /// 2.14.3 is uploaded as Package `2.14.4-0.r.2`, above the first and below upstream's next
-    /// release (ADR-0036 clause 28).
+    /// release (ADR-0036 §28).
     #[arg(long, value_name = "N", default_value_t = 1)]
     repack: u32,
 }
@@ -155,7 +155,7 @@ impl AgentKind {
 
     /// What one upstream version is called on each side: the tag it is fetched under, in
     /// upstream's own spelling, and the Package version it is uploaded as, written as SemVer
-    /// (ADR-0034 clause 6) — `1.19` is fetched as `v1.19` and becomes Package `1.19.0`.
+    /// (ADR-0034 §6) — `1.19` is fetched as `v1.19` and becomes Package `1.19.0`.
     ///
     /// # Errors
     /// Returns the message to print when upstream's number cannot be written as SemVer.
@@ -165,7 +165,7 @@ impl AgentKind {
 
     /// Whether this tool repacks the agent's artifact, rather than uploading it as upstream
     /// publishes it: only then can one version have a later repack
-    /// (ADR-0036 clause 28).
+    /// (ADR-0036 §28).
     fn repacked(self) -> bool {
         match self {
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
@@ -241,7 +241,7 @@ impl AgentKind {
     }
 }
 
-/// An upstream version written as a Package version (ADR-0034 clause 6): a number with fewer than
+/// An upstream version written as a Package version (ADR-0034 §6): a number with fewer than
 /// three numeric components is completed with `.0` (`1.19` becomes `1.19.0`), and a leading zero
 /// is dropped from a numeric component (`24.04.1` becomes `24.4.1`). Both keep upstream's order.
 ///
@@ -260,11 +260,11 @@ fn package_version(upstream: &str) -> Result<String, String> {
 }
 
 /// The Package version of the `repack`-th repack of one upstream version, whose Package version
-/// is `version` (ADR-0036 clause 28). The first is the version
+/// is `version` (ADR-0036 §28). The first is the version
 /// itself. A later one is `<major>.<minor>.<patch+1>-0.r.<n>`: a pre-release of the next patch, so
 /// it orders above the first repack and below upstream's next release, and its repack number is a
 /// numeric identifier, compared as a number. Build metadata would not do, since two versions that
-/// differ only in it compare equal (ADR-0034 clause 2), and the program keeps reporting the
+/// differ only in it compare equal (ADR-0034 §2), and the program keeps reporting the
 /// version it is, which the Server offers a Package only above.
 ///
 /// # Errors
@@ -316,7 +316,7 @@ struct DefaultConfiguration {
     /// The Configuration's name — also the file name its entry gets in the Supervisor's config
     /// directory, which is what the `[[supervisor]]` block has to name.
     name: &'static str,
-    /// The Agent type this is for (ADR-0032 clause 4); empty is every type.
+    /// The Agent type this is for (ADR-0032 §4); empty is every type.
     service_name: &'static str,
     body: &'static str,
 }
@@ -392,7 +392,7 @@ struct Release<'a> {
     )]
     tag: &'a str,
     /// The Package version the artifacts are uploaded as, a later repack's included — what a
-    /// repacked artifact is named by (ADR-0034 clause 6).
+    /// repacked artifact is named by (ADR-0034 §6).
     #[allow(dead_code, reason = "a kind that repacks names its artifact by it")]
     package_version: &'a str,
     /// The release's assets as `(name, url)`, empty for an agent that does not need them.
@@ -614,7 +614,7 @@ fn select_platforms<'p>(available: &'p [Plan], wanted: &[String]) -> Result<Vec<
                     .split_once('/')
                     .ok_or_else(|| format!("{w:?} is not an os/arch pair"))?;
                 // Folded as an asset's platform is, so the words an operator knows pick the
-                // artifact the menu names canonically (ADR-0033 clause 6).
+                // artifact the menu names canonically (ADR-0033 §6).
                 let os = fleet_core::platform::os_token(os)?;
                 let arch = fleet_core::platform::arch_token(arch)?;
                 available
@@ -806,7 +806,7 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
 }
 
 /// The platform an asset named `<prefix><os>_<arch>.tar.gz` is for, folded by the table an Agent's
-/// report and the Server's store fold through (ADR-0033 clause 6) — or `None` when the name has
+/// report and the Server's store fold through (ADR-0033 §6) — or `None` when the name has
 /// another shape or a token that cannot be canonical.
 fn platform_of(name: &str, prefix: &str) -> Option<(String, String)> {
     let (os, arch) = name
@@ -1017,7 +1017,7 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 /// pointing at nothing inside the tree is dropped.
 ///
 /// The one exception is `kept`, the absolute links the kind names by their exact path in the tree
-/// and their exact target (ADR-0036 clause 27): each is packed
+/// and their exact target (ADR-0036 §27): each is packed
 /// as that link, read from the tree and never followed, and the Client creates exactly those. A
 /// link at a named path with another target leads out like any other.
 #[allow(
@@ -1354,7 +1354,7 @@ fn resolve_inside(root: &Path, base: &Path, path: &Path) -> Result<Resolution, S
     })
 }
 
-/// The mode to store, normalized (ADR-0036 clause 27):
+/// The mode to store, normalized (ADR-0036 §27):
 /// `0o755` for a file any execute bit is set on, `0o644` for every other, so no write bit beyond
 /// the owner's and no setuid, setgid or sticky bit upstream set reaches the signed artifact. Off
 /// Unix it is a decision rather than a reading: a tar written on Windows has no mode to carry, and
@@ -1690,7 +1690,7 @@ mod tests {
     /// A later repack of one version is numbered as a pre-release of the next patch, so it orders
     /// above the first repack and below upstream's next release, its repack number compared as a
     /// number; the first keeps the version
-    /// (ADR-0036 clause 28).
+    /// (ADR-0036 §28).
     /// Verifies: ADR-0036
     #[test]
     fn a_later_repack_orders_between_the_version_and_the_next_release() {
@@ -1775,7 +1775,7 @@ mod tests {
     }
 
     /// Upstream `1.19` is fetched under its own tag and named Package `1.19.0`, and a number that
-    /// cannot be written as SemVer is refused, naming it (ADR-0034 clause 6). How a number is
+    /// cannot be written as SemVer is refused, naming it (ADR-0034 §6). How a number is
     /// written is tested with `fleet_core::version::written_as_semver`.
     /// Verifies: ADR-0034
     #[test]
@@ -1853,7 +1853,7 @@ mod tests {
     /// An asset's platform folds through the one table both ends read, so a fetched artifact is
     /// stored under the Platform an Agent reports. A token the table has never heard of passes
     /// through, as the Server keeps it, and only one that cannot be a canonical token is passed
-    /// over (ADR-0033 clause 6).
+    /// over (ADR-0033 §6).
     /// Verifies: ADR-0033
     #[test]
     fn an_asset_platform_folds_through_the_core_table() {
@@ -1883,7 +1883,7 @@ mod tests {
     }
 
     /// A platform asked for with `--platform` folds through the same table as an asset's, so
-    /// `macos/x86_64` picks the artifact the menu lists as `darwin/amd64` (ADR-0033 clause 6).
+    /// `macos/x86_64` picks the artifact the menu lists as `darwin/amd64` (ADR-0033 §6).
     /// Verifies: ADR-0033
     #[test]
     fn a_platform_asked_for_folds_through_the_core_table() {
@@ -1938,8 +1938,8 @@ mod tests {
     }
 
     /// The release also carries the operator tool's archives, named like the Client's
-    /// (ADR-0036 clause 3); they are selected by stem, never by version and platform alone, so none
-    /// of them becomes the `supervisor` Package's entry for its platform (ADR-0038 clause 5).
+    /// (ADR-0036 §3); they are selected by stem, never by version and platform alone, so none
+    /// of them becomes the `supervisor` Package's entry for its platform (ADR-0038 §5).
     // Verifies: ADR-0036
     #[test]
     fn the_supervisor_passes_over_the_operator_tools_archives() {

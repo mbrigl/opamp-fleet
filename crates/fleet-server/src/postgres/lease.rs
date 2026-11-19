@@ -1,6 +1,5 @@
 //! The lease every instance on one database holds while it serves
-//! (ADR-0025
-//! clauses 1 to 3).
+//! (ADR-0025 §1–§3).
 //!
 //! A lease is a row of `leases` whose `expires_at` the database sets from its own clock, so every
 //! instance reads one time. An instance takes one under a new instance id before it opens either
@@ -33,20 +32,18 @@ pub struct Taken {
 pub struct Terms {
     /// The `[audit] key_label` this instance names, which its lease records and every other live
     /// lease must name too
-    /// (ADR-0028
-    /// clause 16).
+    /// (ADR-0028 §16).
     pub audit_key_label: Option<String>,
     /// The `seq` and the hash of the last entry of the file record under `data_dir/audit/` this
     /// Server kept before its record moved into the database
     /// ([`archive_in`](super::audit::archive_in)): the take that opens the first chain the database
     /// holds records it, unless an archive is recorded already, and the chain names it as its
     /// predecessor
-    /// (ADR-0028 clause 9).
+    /// (ADR-0028 §9).
     pub archive: Option<(u64, String)>,
     /// Where the lines a lease's transaction writes into a chain are exported to, where
     /// `[audit.export]` names a receiver
-    /// (ADR-0028
-    /// clause 15).
+    /// (ADR-0028 §15).
     pub export: Option<crate::audit_export::Sink>,
 }
 
@@ -54,8 +51,7 @@ pub struct Terms {
 #[derive(Clone, Copy, Debug)]
 pub struct Renewal {
     /// The revocation list's version as the database held it at the renewal
-    /// (ADR-0025
-    /// clause 10).
+    /// (ADR-0025 §10).
     pub list_version: u64,
 }
 
@@ -94,8 +90,8 @@ impl Database {
     ///
     /// The lease is taken under the migrations' lock and refused, naming both versions, on a
     /// schema that needs a newer Server than this instance's release, which it records
-    /// (ADR-0025
-    /// clause 16). Such a refusal is kept: [`Database::outdated`] answers it from then on.
+    /// (ADR-0025 §16).
+    /// Such a refusal is kept: [`Database::outdated`] answers it from then on.
     ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached, and the refusals above.
@@ -132,8 +128,7 @@ impl Database {
             // The schema again, under the migrations' lock: of this lease and a migration that
             // runs at once, the one later sees the other, so no instance serves on a schema it
             // does not understand
-            // (ADR-0025
-            // clause 16).
+            // (ADR-0025 §16).
             transaction
                 .execute(
                     &format!("SELECT pg_advisory_xact_lock({MIGRATION_LOCK})"),
@@ -195,8 +190,7 @@ impl Database {
             // Every live lease that is not taken over names the same audit key as this one, or
             // none as this one does; at a start and at a new lease after a lapse alike, a
             // differing one stops the instance
-            // (ADR-0028
-            // clause 16).
+            // (ADR-0028 §16).
             if let Some(theirs) = live
                 .iter()
                 .filter(|row| !row.get::<_, bool>(1))
@@ -229,8 +223,7 @@ impl Database {
                 .map(|row| (row.get(0), row.get(1)))
                 .collect();
             // Each removed lease's chain is closed for it, and this lease's chain opened, in the
-            // same transaction (clause 7 of
-            // ADR-0028).
+            // same transaction (ADR-0028 §7).
             let mut written = Vec::new();
             for (lapsed, by_time) in &removed {
                 let ended = if *by_time {
@@ -276,7 +269,7 @@ impl Database {
             refusal
         })?;
         // From now on this instance's sweeps mark under the lease, so that a sweep of another
-        // instance leaves their marks while it lives (ADR-0039 clause 14).
+        // instance leaves their marks while it lives (ADR-0039 §14).
         self.sweep_under(&id);
         Ok(Taken {
             instance_id: id,
@@ -321,8 +314,8 @@ impl Database {
     /// Takes over every lease other than `instance_id`'s that has lapsed, waiting at most `bound`
     /// for the answer, the lines it writes exported as `terms` say: what an instance does after
     /// each renewal
-    /// (ADR-0025
-    /// clause 18). Each lease is removed in one transaction with the closing of its audit chain,
+    /// (ADR-0025 §18).
+    /// Each lease is removed in one transaction with the closing of its audit chain,
     /// `closed_by` the chain of `instance_id`; the removal locks the lease, so one instance alone
     /// takes it. Answers the leases taken over.
     ///
@@ -371,7 +364,7 @@ impl Database {
     }
 
     /// The instance ids of the leases that are live: what the cleanup of the staging objects in
-    /// the bucket keeps (ADR-0039 clause 16).
+    /// the bucket keeps (ADR-0039 §16).
     ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached.
@@ -712,8 +705,7 @@ mod tests {
     /// An instance that takes over the lapsed lease of another logs its own instance id and the
     /// lapsed one as a takeover; one that takes a new lease after losing its own logs the lapsed
     /// one as its own, never as an instance that is gone
-    /// (ADR-0025
-    /// clauses 1 and 3).
+    /// (ADR-0025 §1 and §3).
     /// Verifies: ADR-0025
     #[test]
     fn a_take_names_a_lapsed_lease_as_a_takeover_or_as_its_own() {

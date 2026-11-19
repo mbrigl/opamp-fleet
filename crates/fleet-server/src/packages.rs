@@ -161,7 +161,7 @@ pub fn validate_identity_token(value: &str, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The refusal of a Package version that is a token but not SemVer (ADR-0034 clause 1): it names
+/// The refusal of a Package version that is a token but not SemVer (ADR-0034 §1): it names
 /// the version and the rule. It starts with `the ` so the REST API answers it `400`.
 pub fn not_semver(version: &str) -> String {
     format!(
@@ -191,7 +191,7 @@ pub struct PackageId {
 }
 
 impl PackageId {
-    /// Validates both parts, and that the version is SemVer (ADR-0034 clause 1): the gate every
+    /// Validates both parts, and that the version is SemVer (ADR-0034 §1): the gate every
     /// write goes through — creating a Package, an entry, a signature, adding it to a Deployment.
     ///
     /// # Errors
@@ -207,7 +207,7 @@ impl PackageId {
 
     /// Validates both parts as tokens only: the gate for what the store already holds and for a
     /// route that only reads or deletes. A Package an older Server stored under a version that is
-    /// not SemVer loads through here, inert (ADR-0034 clause 3).
+    /// not SemVer loads through here, inert (ADR-0034 §3).
     ///
     /// # Errors
     /// Returns an error when either part breaks the token rule of [`validate_identity_token`].
@@ -220,7 +220,7 @@ impl PackageId {
         })
     }
 
-    /// Whether the version is SemVer (ADR-0034 clause 2). A Package for which it is not was stored
+    /// Whether the version is SemVer (ADR-0034 §2). A Package for which it is not was stored
     /// by an older Server: it is no candidate, and nothing is written to it.
     pub fn is_semver(&self) -> bool {
         fleet_core::version::is_semver(&self.version)
@@ -328,7 +328,7 @@ pub trait SignatureVerifier: Send + Sync {
 }
 
 /// Checks one entry's signature over the statement a Client verifies
-/// (`fleet_core::package::statement`, ADR-0033 clause 52) with `verifier`, the operator's public
+/// (`fleet_core::package::statement`, ADR-0033 §52) with `verifier`, the operator's public
 /// key when the Server holds it (ADR-0033).
 pub fn signature_state(
     verifier: Option<&dyn SignatureVerifier>,
@@ -381,7 +381,7 @@ impl Package {
         PackageAvailable {
             // Always top-level. An Agent has one binary to replace, its Deployment holds one
             // Package for its type, and no Client this project ships installs an addon — so the
-            // kind is structural rather than a flag anyone could set (ADR-0033 clause 11).
+            // kind is structural rather than a flag anyone could set (ADR-0033 §11).
             r#type: PackageType::TopLevel as i32,
             version: self.id.version.clone(),
             file: Some(file),
@@ -437,7 +437,7 @@ impl PackageSummary {
 
 /// The package store's port (ADR-0009, ADR-0039): where Packages persist — each one's identity
 /// and entries, every entry naming its artifact by the hash of its bytes. The bytes are the
-/// [`BlobStore`]'s. It speaks in parts (ADR-0039 clause 2): a Package's entries are written and
+/// [`BlobStore`]'s. It speaks in parts (ADR-0039 §2): a Package's entries are written and
 /// removed by platform, and no call writes an entry it does not name. The filesystem adapter
 /// ([`FsPackageBackend`](crate::fs::FsPackageBackend)) is what the composition root wires.
 pub trait PackageBackend: Send + Sync {
@@ -452,7 +452,7 @@ pub trait PackageBackend: Send + Sync {
     /// blob it names stored: an upload's entry, never one naming a blob a sweep deleted. A
     /// backend that other Servers write too asks `stored` inside the entry's transaction, holding
     /// the blob store's lock shared, so no sweep runs between the answer and the commit
-    /// (ADR-0039 clause 14). A Package the store does not hold
+    /// (ADR-0039 §14). A Package the store does not hold
     /// is an error, and so is a blob `stored` does not find, or one a sweep marked
     /// ([`mark`](Self::mark)): removed while it was uploaded.
     fn put_entry(&self, id: &PackageId, entry: &Entry, stored: Stored) -> Result<(), PackageError>;
@@ -477,7 +477,7 @@ pub trait PackageBackend: Send + Sync {
     /// transaction; on the filesystem the fleet takes it out of the Deployments after.
     fn remove(&self, id: &PackageId) -> Result<(), PackageError>;
 
-    /// Holds the blob store's lock alone (ADR-0039 clause 14)
+    /// Holds the blob store's lock alone (ADR-0039 §14)
     /// until the hold is dropped: what a sweep holds. A backend that other Servers write too
     /// holds it in the database; one whose one Server is its only writer holds nothing, which the
     /// default does.
@@ -489,7 +489,7 @@ pub trait PackageBackend: Send + Sync {
     }
 
     /// Marks, under the hold of a sweep, each of `hashes` that no stored entry names, and answers
-    /// those it marked: the only blobs the sweep deletes (ADR-0039 clauses 13 and 14). A backend
+    /// those it marked: the only blobs the sweep deletes (ADR-0039 §13 and §14). A backend
     /// that other Servers write too decides from what it stores, so a blob an entry written
     /// through another Server names is kept, and marks on the hold's own session, so that nothing
     /// is marked once the lock is gone; an upload refuses a marked blob. Its marks are known by
@@ -600,11 +600,11 @@ pub struct PackageStore {
 
 impl PackageStore {
     /// Opens the store on `backend` and `blobs`, loading every persisted Package. Every blob is
-    /// read once (and the filesystem adapter hashes it again on the way, ADR-0039 clause 13); an
+    /// read once (and the filesystem adapter hashes it again on the way, ADR-0039 §13); an
     /// entry naming a blob that is not stored, or of another size, fails the open, and a blob no
     /// entry names is deleted, as are the staging objects of every lease that is not live. The
     /// blobs are listed, the Packages read and the sweep made under the blob store's lock, held
-    /// alone, and the sweep deletes only what it marked, while the lock holds (ADR-0039 clause 14).
+    /// alone, and the sweep deletes only what it marked, while the lock holds (ADR-0039 §14).
     /// Every sweep measures the time between the renewal of a mark and its deletion on `clock`, the
     /// one that counts a suspend.
     ///
@@ -643,7 +643,7 @@ impl PackageStore {
                     }
                 }
             }
-            // Kept and read, never a candidate and never written to (ADR-0034 clause 3).
+            // Kept and read, never a candidate and never written to (ADR-0034 §3).
             if !package.id.is_semver() {
                 tracing::warn!(
                     package = %package.id,
@@ -664,7 +664,7 @@ impl PackageStore {
             clock,
             key: None,
         };
-        // A blob no entry names is deleted at startup (ADR-0039 clause 13): an upload whose entry
+        // A blob no entry names is deleted at startup (ADR-0039 §13): an upload whose entry
         // was never written, or an entry whose deletion stopped short of its blob.
         let unnamed: Vec<String> = stored
             .keys()
@@ -742,7 +742,7 @@ impl PackageStore {
         self.sets.read().expect("sets lock").is_empty()
     }
 
-    /// The total bytes of the stored blobs (ADR-0039 clause 13): bytes two entries share count
+    /// The total bytes of the stored blobs (ADR-0039 §13): bytes two entries share count
     /// once. An upload still in flight is deliberately not counted — it is not yet an artifact,
     /// and the per-upload limit already bounds it.
     pub fn total_bytes(&self) -> u64 {
@@ -756,8 +756,8 @@ impl PackageStore {
 
     /// Reads every Package again from the backend, as another instance created, deleted or
     /// changed one
-    /// (ADR-0025
-    /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
+    /// (ADR-0025 §12):
+    /// what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap. The blobs
     /// are not read: they are the blob store's, which every instance shares.
     ///
@@ -834,7 +834,7 @@ impl PackageStore {
                 // The backend asks whether the blob is stored as it writes the entry: on a store
                 // other Servers write too, in the entry's transaction under the blob store's lock,
                 // so no sweep of another Server deletes the blob between the answer and the commit
-                // (clause 14 of ADR-0039). No deletion of this
+                // (ADR-0039 §14). No deletion of this
                 // blob starts here while the upload holds it, and one that ran before has answered.
                 let unanswered = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let stored: Stored = {
@@ -988,7 +988,7 @@ impl PackageStore {
         // Under the lock of the writes, as every write of a Package is: the store must hold what
         // memory holds, in the order it changed. Not under `sets`: the backend asks the blob
         // store, which may take as long as the store answers. A PostgreSQL call is bounded
-        // (ADR-0039 clause 24).
+        // (ADR-0039 §24).
         let _writes = self.writes.lock().expect("writes lock");
         if !self.sets.read().expect("sets lock").contains_key(id) {
             return Err(no_set(id));
@@ -1009,7 +1009,7 @@ impl PackageStore {
     /// refuses this before calling here when the Package is assigned to an Agent (ADR-0032). The
     /// last entry taken away leaves an **empty Package**, kept: a Package being reassembled is a
     /// normal state, and deleting the Package is its own act. Its blob goes with the last entry
-    /// that names it (ADR-0039 clause 13).
+    /// that names it (ADR-0039 §13).
     pub fn delete_entry(&self, id: &PackageId, platform: &Platform) -> Result<bool, PackageError> {
         let writes = self.writes.lock().expect("writes lock");
         let mut sets = self.sets.write().expect("sets lock");
@@ -1047,7 +1047,7 @@ impl PackageStore {
     /// [`delete_set`](Self::delete_set) without its sweep, which it answers instead, `None` when
     /// no Package of that identity exists: for a caller that holds a lock of its own, which the
     /// sweep must not wait under, as it may wait for the blob store's lock
-    /// (ADR-0039 clause 14). The caller hands the sweep to
+    /// (ADR-0039 §14). The caller hands the sweep to
     /// [`sweep_after`](Self::sweep_after) once it has let its lock go.
     ///
     /// # Errors
@@ -1098,7 +1098,7 @@ impl PackageStore {
     }
 
     /// Chooses the blob `sha256` for deletion when no entry of `sets` names it and no upload
-    /// holds it (ADR-0039 clause 13); [`sweep`](Self::sweep) deletes it once the lock on `sets`
+    /// holds it (ADR-0039 §13); [`sweep`](Self::sweep) deletes it once the lock on `sets`
     /// is released. Decided under that lock, so no entry naming it can be recorded meanwhile.
     fn doom(&self, sets: &BTreeMap<PackageId, Package>, sha256: &str) -> Option<String> {
         if referenced(sets, sha256) {
@@ -1111,10 +1111,10 @@ impl PackageStore {
         Some(sha256.to_string())
     }
 
-    /// The sweep after an act (ADR-0039 clause 13): deletes the blobs [`doom`](Self::doom) chose
+    /// The sweep after an act (ADR-0039 §13): deletes the blobs [`doom`](Self::doom) chose
     /// that no stored entry names either, and the staging objects of every lease that is not
     /// live, under the blob store's lock held alone and with no lock on the Packages held
-    /// (ADR-0039 clauses 14 and 16). The backend marks under the hold what no stored entry names,
+    /// (ADR-0039 §14 and §16). The backend marks under the hold what no stored entry names,
     /// so a blob that an entry written through another Server names is kept, and only what it
     /// marked is deleted, while the lock holds ([`delete_under`](Self::delete_under)).
     /// A failure is logged and left to the next startup, which deletes every blob no entry names.
@@ -1138,7 +1138,7 @@ impl PackageStore {
 
     /// Deletes, under `hold`, each of `unnamed` that the backend marks as named by no stored entry,
     /// and then the staging objects of every lease that is not live, and takes the marks away
-    /// once it is done, or once its marking failed (ADR-0039 clauses 13, 14 and 16). Before each
+    /// once it is done, or once its marking failed (ADR-0039 §13, §14 and §16). Before each
     /// deletion it asks whether the lock still holds, and the backend whether the blob is still
     /// marked, renewing the marks: once the lock is lost or the backend cannot answer, the sweep
     /// deletes nothing more and says so, and what it would have deleted stays for a later sweep.
@@ -1177,7 +1177,7 @@ impl PackageStore {
                     }
                 }
                 // Past the bound of the renewal's call, a suspend perhaps, the time a mark outlives
-                // its renewal no longer covers the deletion (ADR-0039 clause 14).
+                // its renewal no longer covers the deletion (ADR-0039 §14).
                 if self.clock.now().saturating_sub(asked) > DELETED_WITHIN {
                     tracing::warn!(
                         blob = %sha256,
@@ -1225,7 +1225,7 @@ impl PackageStore {
 
     /// Tries again to take away the marks of every sweep of this store that is done and could not
     /// take them away: what each sweep does first, and the instance every lease renewal interval
-    /// (ADR-0039 clause 14).
+    /// (ADR-0039 §14).
     pub fn retry_unmarks(&self) {
         let left = std::mem::take(&mut *self.unmarked.lock().expect("unmarked lock"));
         for sweep in left {
@@ -1259,7 +1259,7 @@ impl PackageStore {
     /// names, plus the `all_packages_hash` over it (the Baseline's per-Agent aggregate). `None`
     /// when the Agent is offered nothing — it keeps running what it runs. An assignment whose
     /// Package is gone composes nothing rather than failing: a pinned Package cannot be deleted
-    /// (ADR-0032 clause 12), so the case is a race, not a state.
+    /// (ADR-0032 §12), so the case is a race, not a state.
     pub fn offer_for_assigned(
         &self,
         assigned: Option<&PackageId>,
@@ -1292,7 +1292,7 @@ impl PackageStore {
     }
 
     /// The artifact `(id, platform)`, when this Server holds it and it carries a signature — the
-    /// half of the download route's test that needs no Agent (ADR-0033 clause 35).
+    /// half of the download route's test that needs no Agent (ADR-0033 §35).
     pub fn offerable(&self, id: &PackageId, platform: &Platform) -> Option<Offerable> {
         let sets = self.sets.read().expect("sets lock");
         let entry = sets.get(id)?.entries.get(platform)?;
@@ -1351,7 +1351,7 @@ impl PackageStore {
     ) -> Result<(), String> {
         let sets = self.sets.read().expect("sets lock");
         let set = sets.get(id).ok_or_else(|| no_set(id).message)?;
-        // Nobody's candidate, whatever the Agent reports (ADR-0034 clause 5).
+        // Nobody's candidate, whatever the Agent reports (ADR-0034 §5).
         if !set.id.is_semver() {
             return Err(format!(
                 "set {id} is no candidate for any Agent: {}",
@@ -1382,8 +1382,8 @@ impl PackageStore {
             ));
         }
         if !upgrades(set, installed, description) {
-            // *Which* of the two versions decided is the operator's first question here (ADR-0032
-            // clause 19): the running one wherever it can be ordered, the claim only where it
+            // *Which* of the two versions decided is the operator's first question here (ADR-0032 §19):
+            // the running one wherever it can be ordered, the claim only where it
             // cannot. A refusal naming a number without saying which of the two it was would read
             // like the wrong rule applied — and where both are reported and they disagree, saying
             // that the claim was not consulted is the whole explanation.
@@ -1422,8 +1422,8 @@ impl PackageStore {
 }
 
 /// The entry one Agent is offered, with the signature it travels with — the one test of "offered"
-/// that the offer and the download share (ADR-0033 clause 35). The Agent's assignment names the
-/// Package; the Package must be built for the Agent type the Agent reports (ADR-0033 clause 14) and
+/// that the offer and the download share (ADR-0033 §35). The Agent's assignment names the
+/// Package; the Package must be built for the Agent type the Agent reports (ADR-0033 §14) and
 /// hold an entry for the Platform it reports; and that entry must carry a signature, because the
 /// Server never offers a Package unsigned (ADR-0033). Whether the Agent accepts packages at all is
 /// its record's, and the fleet asks that first.
@@ -1475,12 +1475,12 @@ enum Deletion {
 
 /// How long after it sent the renewal of a blob's mark a sweep may still call the blob store to
 /// delete that blob, on the clock that counts a suspend: the bound of the renewal's own call, which
-/// the time a mark outlives its renewal allows for (ADR-0039 clause 14). The PostgreSQL adapter's
+/// the time a mark outlives its renewal allows for (ADR-0039 §14). The PostgreSQL adapter's
 /// bound of a call, which its tests hold equal to this.
 pub(crate) const DELETED_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Says that a sweep lost the blob store's lock, or could not ask whether it still holds it,
-/// before its deletions were done (ADR-0039 clause 14).
+/// before its deletions were done (ADR-0039 §14).
 fn lost_while_sweeping(error: Option<&str>) {
     tracing::warn!(
         error,
@@ -1496,8 +1496,8 @@ fn referenced(sets: &BTreeMap<PackageId, Package>, sha256: &str) -> bool {
         .any(|entry| hex::encode(&entry.content_hash) == sha256)
 }
 
-/// The refusal every write to the entries of an assigned Package answers with (ADR-0032 clause
-/// 13), whether the Server found the assignment in what it holds or in what is stored.
+/// The refusal every write to the entries of an assigned Package answers with (ADR-0032 §13),
+/// whether the Server found the assignment in what it holds or in what is stored.
 #[must_use]
 pub fn assigned(id: &PackageId) -> PackageError {
     PackageError::refused(
@@ -1574,7 +1574,7 @@ pub fn no_set(id: &PackageId) -> PackageError {
 }
 
 /// The refusal of the deletion of a Package that the assignments of `pinning` Agents pin
-/// (ADR-0032 clause 12).
+/// (ADR-0032 §12).
 #[must_use]
 pub fn pinned(id: &PackageId, pinning: usize) -> PackageError {
     PackageError::refused(
@@ -1626,7 +1626,7 @@ fn changed_entry(id: &PackageId, platform: &Platform) -> PackageError {
 }
 
 /// A signed artifact this Server holds, as [`PackageStore::offerable`] found it: what the download
-/// route tests each Agent of a host against (ADR-0033 clause 35).
+/// route tests each Agent of a host against (ADR-0033 §35).
 pub struct Offerable {
     id: PackageId,
     platform: Platform,
@@ -1651,8 +1651,8 @@ impl Offerable {
 /// package it was offered — means *nothing is installed under that name*.
 pub type InstalledVersions = BTreeMap<String, String>;
 
-/// The fourth matching test: a Package reaches an Agent only as an **upgrade** (ADR-0032 clauses 14
-/// to 16, ADR-0032 clauses 14 and 25).
+/// The fourth matching test: a Package reaches an Agent only as an **upgrade** (ADR-0032 §14
+/// to 16, ADR-0032 §14 and §25).
 ///
 /// An Agent reports up to three versions, and they can contradict each other. **What it runs
 /// decides** — the version of the Package its Supervisor installed, where the Supervisor reports
@@ -1704,7 +1704,7 @@ fn upgrades(
 }
 
 /// The version of the Package an Agent's Supervisor reports it installed, as the non-identifying
-/// `supervisor.package.version` (ADR-0032 clause 25), where it can be
+/// `supervisor.package.version` (ADR-0032 §25), where it can be
 /// ordered. One that cannot says nothing, as an unorderable `service.version` says nothing.
 fn installed_package_version(description: Option<&AgentDescription>) -> Option<&str> {
     opamp::attributes::string_value(
@@ -1743,7 +1743,7 @@ fn reported_service_version(description: Option<&AgentDescription>) -> Option<&s
 /// report has an "unknown, so anything goes" case — an Agent reporting neither fits nothing. The
 /// type needs no second comparison: a Deployment holds each Package under its own Agent type.
 ///
-/// There is no ranking. The Deployment holds at most one Package per Agent type (ADR-0033 clause 25), so a specificity comparison or a version tie-break would have nothing to choose between — an
+/// There is no ranking. The Deployment holds at most one Package per Agent type (ADR-0033 §25), so a specificity comparison or a version tie-break would have nothing to choose between — an
 /// ambiguous state is one a write refuses to create.
 fn resolve<'a>(
     sets: &'a BTreeMap<PackageId, Package>,
@@ -1754,7 +1754,7 @@ fn resolve<'a>(
     let platform = Platform::reported(description)?;
     let set = sets.get(deployment.package_for(reported_agent_type(description)?)?)?;
     // A Package an older Server stored under a version that is not SemVer is nobody's candidate
-    // (ADR-0034 clause 5).
+    // (ADR-0034 §5).
     if !set.id.is_semver() {
         return None;
     }
@@ -1791,7 +1791,7 @@ mod tests {
 
     /// An entry stored under a spelling the table now folds is named with the way out, and one a
     /// second spelling hides says so; one stored under its canonical tokens is not named
-    /// (ADR-0033 clause 6).
+    /// (ADR-0033 §6).
     /// Verifies: ADR-0033
     #[test]
     fn an_entry_stored_under_an_older_spelling_is_named() {
@@ -2028,7 +2028,7 @@ mod tests {
 
     /// A signature is written on an entry, offered to an Agent of that Platform with exactly those
     /// bytes, and removed when new bytes are uploaded to the entry — a signature covers the hash
-    /// (ADR-0033 clause 18). Removing it takes the offer away.
+    /// (ADR-0033 §18). Removing it takes the offer away.
     /// Verifies: ADR-0033
     #[test]
     fn a_signature_lives_on_its_entry_and_new_bytes_remove_it() {
@@ -2128,7 +2128,7 @@ mod tests {
     }
 
     /// A signature has to name an entry the Package holds (`no entry`, a `404`), and has to be
-    /// one: empty or not 64 bytes is refused (a `400`) and nothing is stored (ADR-0033 clause 18).
+    /// one: empty or not 64 bytes is refused (a `400`) and nothing is stored (ADR-0033 §18).
     /// Verifies: ADR-0033
     #[test]
     fn a_signature_needs_an_entry_and_the_shape_of_one() {
@@ -2172,7 +2172,7 @@ mod tests {
 
     /// With the operator's public key the Server reports a signature over the statement `valid` and
     /// any other `invalid` — and stores both; without the key every signature is `unchecked`
-    /// (ADR-0033 clause 19). The state is checked again when the store is reopened.
+    /// (ADR-0033 §19). The state is checked again when the store is reopened.
     /// Verifies: ADR-0033
     #[test]
     fn the_server_checks_a_signature_against_its_key_and_only_reports() {
@@ -2424,7 +2424,7 @@ mod tests {
         );
     }
 
-    /// ADR-0032 clauses 14 and 15: **what an Agent runs decides, in both directions**, and the
+    /// ADR-0032 §14 and §15: **what an Agent runs decides, in both directions**, and the
     /// claim is not consulted beside it. The record a package status comes from outlives the binary
     /// it describes; the program's own number is the statement about the present.
     ///
@@ -2524,7 +2524,7 @@ mod tests {
         );
 
         // A program that cannot be ordered says nothing, and the claim becomes the whole test
-        // (ADR-0032 clause 16) — which here refuses the Set the claim already names.
+        // (ADR-0032 §16) — which here refuses the Set the claim already names.
         assert!(
             candidates_for(&store, &running_agent("nightly"), &claims_041).is_empty(),
             "an unorderable program version says nothing, and the claim stands"
@@ -2566,7 +2566,7 @@ mod tests {
         );
     }
 
-    /// ADR-0032 clause 16: a running version that cannot be ordered says nothing, rather than
+    /// ADR-0032 §16: a running version that cannot be ordered says nothing, rather than
     /// refusing, and the claim becomes the whole test. One agent numbers itself `1.19` and an
     /// appliance `24.04.1`; failing closed on those would make a program's numbering habit into a
     /// fleet that cannot deliver to it at all.
@@ -2592,7 +2592,7 @@ mod tests {
         );
     }
 
-    /// ADR-0032 clauses 14 and 25: where a Supervisor reports the version
+    /// ADR-0032 §14 and §25: where a Supervisor reports the version
     /// of the Package it installed, a Package is held against that, and the program's own number
     /// and the claim are not read. A repack's Package carries a version its program does not
     /// report — the second repack of 2.14.3 is `2.14.4-0.r.2`, and the program it installs still
@@ -2701,7 +2701,7 @@ mod tests {
 
     /// A store an older Server wrote, holding `otelcol@1.19`: it opens and warns naming the
     /// Package, the Package is nobody's candidate, and a rollout act aimed at it is refused naming
-    /// the version and the SemVer rule (ADR-0034 clauses 3 and 5).
+    /// the version and the SemVer rule (ADR-0034 §3 and §5).
     /// Verifies: ADR-0034
     #[test]
     fn a_stored_package_whose_version_is_not_semver_loads_and_is_no_candidate() {
@@ -2750,7 +2750,7 @@ mod tests {
             refusal.contains("\"1.19\"") && refusal.contains("SemVer"),
             "the refusal names the version and the rule: {refusal}"
         );
-        // An assignment that already pins it is still offered (ADR-0032 clause 20): the Client
+        // An assignment that already pins it is still offered (ADR-0032 §20): the Client
         // refuses the offer, and reports why.
         assert!(store
             .offer_for_assigned(Some(&legacy), Some(&host))
@@ -2894,7 +2894,7 @@ mod tests {
         assert!(!store.delete_set(&set).expect("gone already"));
     }
 
-    /// The blobs under one entry's bytes (ADR-0039 clause 13): two entries with identical bytes
+    /// The blobs under one entry's bytes (ADR-0039 §13): two entries with identical bytes
     /// store one blob, counted once against the store's size; it stays while an entry names it and
     /// goes with the last one — replaced or deleted — and a blob no entry names is deleted when
     /// the store opens.
@@ -2955,7 +2955,7 @@ mod tests {
     }
 
     /// A corrupt artifact fails the reopen loudly, naming its blob — a corrupt distribution
-    /// artifact must never ship (ADR-0033 clause 8, ADR-0039 clause 13).
+    /// artifact must never ship (ADR-0033 §8, ADR-0039 §13).
     /// Verifies: ADR-0033, ADR-0039
     #[test]
     fn a_corrupt_artifact_fails_reopen() {
@@ -2986,7 +2986,7 @@ mod tests {
     }
 
     /// The store's directories, each Package's metadata and each blob are owner-only (ADR-0033,
-    /// ADR-0039 clause 1).
+    /// ADR-0039 §1).
     /// Verifies: ADR-0033
     #[cfg(unix)]
     #[test]
@@ -3016,7 +3016,7 @@ mod tests {
     }
 
     /// There is no legacy reader: a store holding what an older layout wrote is **named at
-    /// startup**, never skipped (ADR-0039 clause 6). Skipping is the dangerous
+    /// startup**, never skipped (ADR-0039 §6). Skipping is the dangerous
     /// half — a store that merely looks empty offers nothing and says nothing about why, which an
     /// operator reads as "nothing uploaded yet".
     ///
@@ -3048,7 +3048,7 @@ mod tests {
         );
     }
 
-    /// Every artifact is uploaded (ADR-0033 clause 3): an entry an older Server stored as a
+    /// Every artifact is uploaded (ADR-0033 §3): an entry an older Server stored as a
     /// reference to a source is not read as something else — the open fails naming the file.
     /// Verifies: ADR-0033
     #[test]
@@ -3126,7 +3126,7 @@ mod tests {
     }
 
     /// A write takes only a SemVer version, while what the store holds loads as a token
-    /// (ADR-0034 clauses 1 and 3) — an assignment that pins an older Package parses back.
+    /// (ADR-0034 §1 and §3) — an assignment that pins an older Package parses back.
     /// Verifies: ADR-0034
     #[test]
     fn a_write_takes_a_semver_version_and_a_load_any_token() {
@@ -3179,7 +3179,7 @@ mod tests {
 
     /// Every artifact `offer_for_assigned` names is one `offers` answers yes for, and nothing else
     /// is — across assignments, Agent types, Platforms, signed and unsigned entries, and artifacts
-    /// the store does not hold (ADR-0033 clause 35). Whether the Agent accepts packages is the
+    /// the store does not hold (ADR-0033 §35). Whether the Agent accepts packages is the
     /// record's, asked by the fleet before either; `fleet` tests that half.
     /// Verifies: ADR-0033
     #[test]
@@ -3243,7 +3243,7 @@ mod tests {
     }
 
     /// An Agent that reports another Agent type than its assigned Package's is offered nothing, and
-    /// cannot fetch it (ADR-0033 clause 14).
+    /// cannot fetch it (ADR-0033 §14).
     /// Verifies: ADR-0033
     #[test]
     fn an_agent_reporting_another_type_is_offered_nothing() {
@@ -3268,7 +3268,7 @@ mod tests {
     }
 
     /// An entry that carries no signature is neither offered nor fetched, though another entry of
-    /// the same Package is signed (ADR-0033 clause 18).
+    /// the same Package is signed (ADR-0033 §18).
     /// Verifies: ADR-0033
     #[test]
     fn an_unsigned_entry_is_not_offered_though_another_is_signed() {
@@ -3647,7 +3647,7 @@ mod tests {
 
     /// No request to the blob store runs under the lock every offer and listing waits for: while
     /// an upload asks whether its blob is stored, and while a deletion deletes one, the Packages
-    /// are still read (ADR-0039 clause 13).
+    /// are still read (ADR-0039 §13).
     /// Verifies: ADR-0039
     #[test]
     fn a_slow_blob_store_holds_no_reader_of_the_packages() {
@@ -3693,7 +3693,7 @@ mod tests {
 
     /// An upload of bytes whose blob is being deleted — the last entry naming it went just
     /// before — is refused rather than recorded on a blob the deletion then takes; no entry ever
-    /// names a blob that is not stored (ADR-0039 clause 13).
+    /// names a blob that is not stored (ADR-0039 §13).
     /// Verifies: ADR-0039
     #[test]
     fn an_upload_never_records_a_blob_a_deletion_takes() {
@@ -3735,7 +3735,7 @@ mod tests {
 
     /// A store that cannot say whether it holds an uploaded blob fails the upload with its own
     /// error, and the blob stays: neither "removed while it was uploaded" nor a deletion on a
-    /// guess (ADR-0039 clause 13).
+    /// guess (ADR-0039 §13).
     /// Verifies: ADR-0039
     #[test]
     fn a_store_that_cannot_be_asked_fails_the_upload_and_keeps_the_blob() {

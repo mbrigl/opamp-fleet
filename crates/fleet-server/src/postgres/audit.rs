@@ -46,7 +46,7 @@ impl PgAuditStore {
     /// A `checkpoint`, its `checkpoint_seq` and the hash of the checkpoint before, is the one line
     /// written: it is inserted only while the newest checkpoint is that one, and the head row moves
     /// to it in the same transaction
-    /// (ADR-0028 clause 11).
+    /// (ADR-0028 §11).
     fn write(
         &mut self,
         seq: u64,
@@ -304,10 +304,9 @@ pub(crate) struct Written {
 }
 
 impl Written {
-    /// Emits the `tracing` copy of the line (ADR-0028 clause 6), and hands it to `export` where
+    /// Emits the `tracing` copy of the line (ADR-0028 §6), and hands it to `export` where
     /// `[audit.export]` names a receiver
-    /// (ADR-0028
-    /// clause 15).
+    /// (ADR-0028 §15).
     pub(crate) fn emit(&self, export: Option<&crate::audit_export::Sink>) {
         crate::audit_log::emit(self.seq, self.event, "recorded", &self.line);
         if let Some(export) = export {
@@ -415,11 +414,11 @@ impl Ended {
 
 /// Closes the chain of the lease `chain` taken over, for the instance whose own chain is
 /// `closed_by`
-/// (ADR-0025
-/// clause 18): `audit.chain_closed` with the `reason` `ended` names after its last entry, and that
+/// (ADR-0025 §18):
+/// `audit.chain_closed` with the `reason` `ended` names after its last entry, and that
 /// entry's hash and the time in its record
-/// (ADR-0028
-/// clause 7). A chain already closed, or a lease that opened none, is left as it is.
+/// (ADR-0028 §7).
+/// A chain already closed, or a lease that opened none, is left as it is.
 pub(crate) async fn close_lapsed(
     transaction: &impl GenericClient,
     chain: &str,
@@ -499,9 +498,9 @@ struct Snapshot {
 }
 
 /// Walks every chain of the record on `database` without changing anything
-/// (ADR-0028 clauses 8 and 9); with `archive`, checks that the file record there ends on the entry
+/// (ADR-0028 §8 and §9); with `archive`, checks that the file record there ends on the entry
 /// the first chain names as its predecessor; and with `check`, checks every chain against the
-/// checkpoints (ADR-0028 clause 13). The chain records and every entry are read in one read-only
+/// checkpoints (ADR-0028 §13). The chain records and every entry are read in one read-only
 /// snapshot, so a chain an instance closes meanwhile is seen either open or closed, never half of
 /// each. `server audit-verify` opens the database with the Server's own credentials, touching
 /// nothing ([`Opening::migrations`](super::Opening::migrations)).
@@ -553,7 +552,7 @@ pub fn verify(
             .collect();
         // The checkpoints, the failed ones and what removed checkpoints first, then every entry
         // as the chains are walked
-        // (ADR-0028 clause 13).
+        // (ADR-0028 §13).
         if let Some(check) = check.as_mut() {
             for row in transaction
                 .query(
@@ -825,7 +824,7 @@ async fn walk(
 
 /// The end of the file record in `dir`, a Server's `data_dir/audit/` from before its record moved
 /// into the database, as the archive the first chain names
-/// ([`Terms::archive`](super::lease::Terms::archive), ADR-0028 clause 9), while the database holds
+/// ([`Terms::archive`](super::lease::Terms::archive), ADR-0028 §9), while the database holds
 /// no chain; once it holds one, the archive would be moot, and `dir` is not read.
 ///
 /// # Errors

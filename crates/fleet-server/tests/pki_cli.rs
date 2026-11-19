@@ -226,10 +226,10 @@ fn the_server_warns_at_startup_about_a_ca_that_is_ending_and_serves_on() {
     }
 }
 
-/// `server pki status` reads the configuration every command reads (ADR-0024 clause 2): without
+/// `server pki status` reads the configuration every command reads (ADR-0024 §2): without
 /// `--config`, the file `FLEET_SERVER_CONFIG` names, or no file at all and its keys from
 /// `FLEET_SERVER__…` variables; and it logs the keys its environment set, never their values
-/// (ADR-0024 clause 7).
+/// (ADR-0024 §7).
 // Verifies: ADR-0024
 #[test]
 fn status_reads_its_configuration_without_config_from_the_variable_or_the_environment() {
@@ -307,7 +307,7 @@ fn status_reads_its_configuration_without_config_from_the_variable_or_the_enviro
 }
 
 /// The Server itself logs, at startup and before it serves, every key its environment set and
-/// none of their values (ADR-0024 clause 7).
+/// none of their values (ADR-0024 §7).
 // Verifies: ADR-0024
 #[test]
 fn the_server_logs_the_keys_its_environment_set_before_it_serves() {

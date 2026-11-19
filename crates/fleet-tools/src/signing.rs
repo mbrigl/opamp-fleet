@@ -6,8 +6,8 @@
 //! bytes `package sign` signs from an artifact, so the Client cannot tell the two forms apart.
 //!
 //! What it does **not** do is check a hash against anything: the hashes are the Server's, and
-//! comparing them with upstream's checksums or with the files is the operator's duty (ADR-0033
-//! clause 23). The tool prints each one as it signs it so the comparison has something to look at.
+//! comparing them with upstream's checksums or with the files is the operator's duty (ADR-0033 §23).
+//! The tool prints each one as it signs it so the comparison has something to look at.
 
 use ring::signature::Ed25519KeyPair;
 use serde::{Deserialize, Serialize};
@@ -77,7 +77,7 @@ impl SigningFile {
         if self.agent_type.is_empty() || self.version.is_empty() {
             return Err("the agent_type and the version must both be named".to_string());
         }
-        // The key never signs a version a Client would refuse (ADR-0034 clause 4).
+        // The key never signs a version a Client would refuse (ADR-0034 §4).
         crate::package::require_semver(&self.version)?;
         if self.entries.is_empty() {
             return Err("there are no entries to sign".to_string());

@@ -11,7 +11,7 @@ use fleet_util::nofollow::HeldDir;
 impl ClientConfig {
     /// Loads the file, or the defaults when it does not exist. A file that exists but does not
     /// parse is an error — never silently ignored. What the run-time Client reads, in a directory
-    /// its own account owns, which ADR-0022 clause 11 does not cover; a privileged step reads
+    /// its own account owns, which ADR-0022 §11 does not cover; a privileged step reads
     /// through [`load_held`](Self::load_held).
     pub fn load(path: &Path) -> Result<Self, String> {
         Self::load_with(path, |path| std::fs::read_to_string(path))
@@ -19,7 +19,7 @@ impl ClientConfig {
 
     /// [`load`](Self::load) for a step that runs as root or an Administrator: the file is read
     /// through its held directory and never through a link the service's account could have put
-    /// at its name (ADR-0022 clause 11). A link there is refused, naming it.
+    /// at its name (ADR-0022 §11). A link there is refused, naming it.
     pub fn load_held(path: &Path) -> Result<Self, String> {
         Self::load_with(path, |path| {
             let held = read_held(path).map_err(std::io::Error::other)?;
@@ -64,15 +64,15 @@ impl ClientConfig {
         config.checked(path)
     }
 
-    /// The state directory a service installed from this file runs with (ADR-0021 clause 14):
+    /// The state directory a service installed from this file runs with (ADR-0021 §14):
     /// `--state-dir`, else the one the service's registration carries, else the absolute one the
     /// file names, else `<data root>/state`.
     ///
-    /// The file is the service account's to rewrite (ADR-0022 clause 1), and the install that reads
+    /// The file is the service account's to rewrite (ADR-0022 §1), and the install that reads
     /// it runs as root or an Administrator and hands the state directory over to that account. So
     /// a directory the file names is taken only beneath the data root or the layout root, and one
     /// from any source that lies beneath them is reached through directories only, as
-    /// [`beneath`](crate::service::layout::beneath) decides (ADR-0021 clause 15). The flag and the
+    /// [`beneath`](crate::service::layout::beneath) decides (ADR-0021 §15). The flag and the
     /// registration are an administrator's word and may name one outside them.
     ///
     /// Decided on the value as written, because [`state_dir`](Self::state_dir) is already resolved
@@ -115,7 +115,7 @@ impl ClientConfig {
         self.state_dir_candidate(roots).1.describe()
     }
 
-    /// The state directory ADR-0021 clause 14 names, before it is checked, and its source.
+    /// The state directory ADR-0021 §14 names, before it is checked, and its source.
     fn state_dir_candidate(
         &self,
         roots: &crate::service::layout::Roots,
@@ -154,7 +154,7 @@ impl ClientConfig {
 
     /// Whether the state directory holds a certificate the Server issued, with its key — what
     /// makes this Client a member of the fleet rather than a host still to enrol (ADR-0026). The
-    /// questionnaire asks for a bootstrap pair only while this is `false` (ADR-0027 clause 16).
+    /// questionnaire asks for a bootstrap pair only while this is `false` (ADR-0027 §16).
     #[must_use]
     pub fn is_enrolled(&self) -> bool {
         self.state_dir.join(crate::tls::ISSUED_CERT_FILE).exists()
@@ -180,7 +180,7 @@ impl ClientConfig {
     }
 }
 
-/// Where an installed Client's state directory comes from (ADR-0021 clause 14).
+/// Where an installed Client's state directory comes from (ADR-0021 §14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StateDirSource {
     /// `--state-dir`.
@@ -205,7 +205,7 @@ impl StateDirSource {
 }
 
 /// Refuses to carry on when the file this Client looks for is absent and a `client.toml` sits
-/// beside where it would be (ADR-0021 clause 8).
+/// beside where it would be (ADR-0021 §8).
 ///
 /// Everywhere else a missing configuration is not an error: a Client comes up on defaults, says so,
 /// and manages nothing until one exists (ADR-0021). That is exactly the wrong answer here, and the
@@ -258,7 +258,7 @@ pub(crate) fn absolute(path: &Path) -> PathBuf {
 /// only as the parent of a masked one comes out written as its own. A secret key is found wherever
 /// and however it is written (a table, a dotted or quoted key, an inline table, an array of tables)
 /// and its whole value is replaced, a multi-line string to its closing quotes, together with a
-/// comment beside it. A leftover `[auth]` section, which the Client ignores (ADR-0026 clause 3),
+/// comment beside it. A leftover `[auth]` section, which the Client ignores (ADR-0026 §3),
 /// has every value masked, whatever its keys are called. Text that does not parse cannot be taken
 /// apart, so it is reported as a placeholder — over-redaction is the cheap failure here, a leaked
 /// credential the expensive one.
@@ -358,10 +358,10 @@ pub(crate) fn read_held(path: &Path) -> Result<zeroize::Zeroizing<Vec<u8>>, Stri
 /// apply as the service's own account. Written whole to a new temporary name in the held
 /// directory, with `mode` and, on Unix, `owner` set through its descriptor, synced, and renamed
 /// over the name, so a Client starting meanwhile reads the old file or the new one, never half of
-/// either, and a link at either name is replaced and never written through (ADR-0022 clause 11).
+/// either, and a link at either name is replaced and never written through (ADR-0022 §11).
 /// The directory is synced after the rename, so an apply reported applied survives a power loss.
-/// The mode is the caller's: owner-only for an install or a `service config` (ADR-0021 clause
-/// 25), the operator's own for an apply (ADR-0019 clause 30).
+/// The mode is the caller's: owner-only for an install or a `service config` (ADR-0021 §25),
+/// the operator's own for an apply (ADR-0019 §30).
 pub(crate) fn replace(
     path: &Path,
     contents: &[u8],
@@ -566,7 +566,7 @@ mod tests {
         }
     }
 
-    /// `supervisor.toml` is the service account's to rewrite (ADR-0022 clause 1), and the install
+    /// `supervisor.toml` is the service account's to rewrite (ADR-0022 §1), and the install
     /// that reads it runs as root or an Administrator and hands the state directory over to that
     /// account. With nothing registered and no `--state-dir`, a state directory the file names
     /// outside the data root and the layout root, or one that leaves them by `..`, is refused, so

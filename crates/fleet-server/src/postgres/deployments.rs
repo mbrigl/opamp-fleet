@@ -1,8 +1,7 @@
-//! Deployments in PostgreSQL (ADR-0039 clause 6): the PostgreSQL adapter behind
+//! Deployments in PostgreSQL (ADR-0039 §6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
-//! (ADR-0025
-//! clause 19).
+//! (ADR-0025 §19).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -54,8 +53,7 @@ impl DeploymentBackend for PgDeploymentBackend {
             let transaction = client.transaction().await.map_err(sql)?;
             // `packages` and `configurations` mirrored the member rows; no release reads them,
             // so a new row takes their defaults and nothing names them after
-            // (ADR-0039
-            // clause 22).
+            // (ADR-0039 §22).
             transaction
                 .execute(
                     "INSERT INTO deployments (name, selector) VALUES ($1, $2) \
@@ -195,8 +193,8 @@ impl DeploymentBackend for PgDeploymentBackend {
 /// Takes `member` out of every Deployment that holds it inside the transaction that deletes it,
 /// which holds the member's row `FOR UPDATE`: an add that holds that row `FOR KEY SHARE` has
 /// committed before this reads the member rows, and every later one finds the member gone
-/// (ADR-0025
-/// clause 19). The Deployments' rows are not held, so this takes no lock in the order of an add,
+/// (ADR-0025 §19).
+/// The Deployments' rows are not held, so this takes no lock in the order of an add,
 /// which holds the Deployment's row before the member's.
 pub(super) async fn drop_member_rows(
     client: &impl GenericClient,
@@ -650,7 +648,7 @@ mod tests {
         contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
     }
 
-    /// A stored Deployment is loaded by the rules it was written by (ADR-0039 clause 6). A
+    /// A stored Deployment is loaded by the rules it was written by (ADR-0039 §6). A
     /// Package reference with a field no write puts there is refused. A second Package of one
     /// Agent type is refused in the words the write refuses it with, rather than loaded with the
     /// last one kept. Each refusal names the file.
@@ -837,8 +835,7 @@ mod tests {
     /// their defaults, what a release before wrote into them stays as it was through every change
     /// of the members, and with the columns dropped, as the release after this one drops them,
     /// every change and the load still succeed
-    /// (ADR-0039
-    /// clause 22).
+    /// (ADR-0039 §22).
     /// Verifies: ADR-0039
     #[test]
     fn the_mirror_columns_are_written_no_more() {
@@ -1041,7 +1038,7 @@ mod tests {
         );
     }
 
-    /// A row that does not decode fails the load naming it (ADR-0039 clause 6).
+    /// A row that does not decode fails the load naming it (ADR-0039 §6).
     /// Verifies: ADR-0039
     #[test]
     fn a_deployment_row_that_does_not_decode_fails_the_load_naming_it() {

@@ -19,8 +19,8 @@ impl AgentState {
     /// rollout is aimed centrally rather than from this host's file.
     ///
     /// For a Supervisor the restored record also seeds the high-water mark of its Agent type
-    /// (ADR-0034 clause 9), and a record whose version is not SemVer is dropped with a warning
-    /// (ADR-0034 clause 10): nothing enters the mark from it, and the Agent reports no version for
+    /// (ADR-0034 §9), and a record whose version is not SemVer is dropped with a warning
+    /// (ADR-0034 §10): nothing enters the mark from it, and the Agent reports no version for
     /// it.
     pub fn accept_packages(&mut self) {
         self.local.accepts_packages = true;
@@ -33,7 +33,7 @@ impl AgentState {
     }
 
     /// Hands this Supervisor the high-water marks it shares with every other Supervisor of the
-    /// Client (ADR-0034 clause 8). Set before [`accept_packages`](Self::accept_packages), which
+    /// Client (ADR-0034 §8). Set before [`accept_packages`](Self::accept_packages), which
     /// seeds the mark from the installed record.
     #[must_use]
     pub fn with_high_water(mut self, marks: std::sync::Arc<dyn HighWaterMarks>) -> Self {
@@ -41,14 +41,14 @@ impl AgentState {
         self
     }
 
-    /// Hands this Agent the floors every Agent of the Client shares (ADR-0034 clause 17).
+    /// Hands this Agent the floors every Agent of the Client shares (ADR-0034 §17).
     pub fn set_floors(&mut self, floors: std::sync::Arc<dyn PackageFloors>) {
         self.local.floors = Some(floors);
     }
 
-    /// Why an offer of `version` is refused by this Supervisor's floor (ADR-0034 clause 18): it
+    /// Why an offer of `version` is refused by this Supervisor's floor (ADR-0034 §18): it
     /// orders below the floor kept for its Agent type, or the floors cannot be read. `None` for
-    /// the Client's own Agent, whose self-update holds it to its floor (ADR-0034 clause 21).
+    /// the Client's own Agent, whose self-update holds it to its floor (ADR-0034 §21).
     pub fn floor_refusal(&self, version: &str) -> Option<String> {
         self.local.floor_refusal(version)
     }
@@ -136,7 +136,7 @@ impl AgentState {
     }
 
     /// A package `Installing` names `reason` as what it waits for, the second service, or nothing
-    /// once `reason` is empty (ADR-0022 clause 17); the outcome replaces it. A package still
+    /// once `reason` is empty (ADR-0022 §17); the outcome replaces it. A package still
     /// downloading, and a status other than `Installing`, stay as they are.
     pub(super) fn package_waits(&mut self, reason: &str) {
         let local = &mut self.local;
@@ -172,7 +172,7 @@ impl AgentState {
                     warn!(error = %e, "cannot persist the installed package record");
                 }
                 // The program survived the apply grace: its Agent type's mark rises to it
-                // (ADR-0034 clause 8). A rollback is an `Err` and moves nothing.
+                // (ADR-0034 §8). A rollback is an `Err` and moves nothing.
                 if local.expected_package.is_none() {
                     if let Some(marks) = &local.high_water {
                         marks.raise(&local.service_name, &version);
@@ -182,7 +182,7 @@ impl AgentState {
                 local.installed_package = Some(installed);
                 local.package_error.clear();
                 // The description states the installed Package's version
-                // (ADR-0032 clause 25), and only a full report carries
+                // (ADR-0032 §25), and only a full report carries
                 // the description.
                 self.protocol.force_full();
             }
@@ -369,7 +369,7 @@ impl Local {
         }
         // A Supervisor takes a package for its own Agent type and nothing else, only under a
         // SemVer version, and never one below what it runs or below the highest version this
-        // Client has installed for the type (ADR-0034 clause 7). The signature binds the artifact
+        // Client has installed for the type (ADR-0034 §7). The signature binds the artifact
         // to its type and version, but says nothing about how that version orders against
         // another, so the order is this side's to hold — against a Server that offers an old,
         // validly signed build.
@@ -442,10 +442,10 @@ impl Local {
                 self.refuse_offer(offer, error, handled);
                 return;
             }
-            // The operator's floor stands beside the mark; the stricter one decides (ADR-0034
-            // clause 18). Refused before anything is downloaded, and reported as the package's
+            // The operator's floor stands beside the mark; the stricter one decides (ADR-0034 §18).
+            // Refused before anything is downloaded, and reported as the package's
             // own failure. An offer of what is installed is no install, and is answered below
-            // as installed: what runs below the floor stays (ADR-0034 clause 19).
+            // as installed: what runs below the floor stays (ADR-0034 §19).
             if let Some(reason) = self
                 .floor_refusal(&available.version)
                 .filter(|_| !self.already_has(available))
@@ -524,7 +524,7 @@ impl Local {
         handled.send_report = true;
     }
 
-    /// Refuses an offer below the floor (ADR-0034 clause 18) as a failure of the package it names:
+    /// Refuses an offer below the floor (ADR-0034 §18) as a failure of the package it names:
     /// `InstallFailed`, with `reason` naming the version and the floor, the offered version and
     /// hash reported beside it, and the aggregate echoed at once so the Server stops re-offering.
     fn refuse_below_floor(
@@ -568,8 +568,8 @@ impl Local {
         }
     }
 
-    /// What the health says while the installed version lies below its type's floor (ADR-0034
-    /// clause 19), naming both; empty otherwise, and for the Client's own Agent.
+    /// What the health says while the installed version lies below its type's floor (ADR-0034 §19),
+    /// naming both; empty otherwise, and for the Client's own Agent.
     pub(super) fn floor_note(&self) -> String {
         let (Some(installed), Some(floors), true) =
             (&self.installed_package, &self.floors, self.managed)

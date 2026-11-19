@@ -42,7 +42,7 @@ impl HostFacts for SystemHost {
 /// The host's network addresses, enumerated live from the platform (ADR-0018).
 fn host_addresses() -> (Vec<String>, Vec<String>) {
     // An error is `sysinfo` unable to enumerate interfaces at all: what the platform cannot answer
-    // is left out (ADR-0018 clause 5), so both lists stay empty.
+    // is left out (ADR-0018 §5), so both lists stay empty.
     let Ok(networks) = sysinfo::Networks::new_with_refreshed_list() else {
         return (Vec::new(), Vec::new());
     };

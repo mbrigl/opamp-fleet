@@ -9,7 +9,7 @@
 //! `ServiceSpecific(10)` on exit so the SCM reads a failure rather than a clean stop. Nothing has
 //! ever proved that this brings a Client back.
 //!
-//! It also installs as a script enrols a host after the package (ADR-0027 clause 19): from
+//! It also installs as a script enrols a host after the package (ADR-0027 §19): from
 //! `--fleet-files` with a `bootstrap.p12`, against a Server in the test that the service it
 //! registers then reaches on the certificate the enrolment was issued.
 //!
@@ -43,7 +43,7 @@ use fleet_server::fleet::{AgentView, AppState};
 /// Deliberately not `service.name`: that carries the Agent *type*, which for this Client is always
 /// `supervisor` (ADR-0021).
 ///
-/// There is no `--instance` to isolate this run under (ADR-0021 clause 10), and the service it
+/// There is no `--instance` to isolate this run under (ADR-0021 §10), and the service it
 /// registers carries the product's name like any other install. This test therefore takes over the
 /// host's one service for its duration, which is what `Registered` exists to undo.
 const AGENT_NAME: &str = "service-smoke-client";
@@ -118,7 +118,7 @@ fn agent(state: &AppState) -> Option<AgentView> {
 /// The service's process id, asked of the platform's own manager. `None` when nothing is running
 /// under that name — which is itself an answer the assertions below use.
 fn service_pid() -> Option<u32> {
-    // One name on every platform (ADR-0022 clause 17), so this is what systemd, launchd, and the SCM
+    // One name on every platform (ADR-0022 §17), so this is what systemd, launchd, and the SCM
     // are each asked about.
     let qualified = service_name();
     #[cfg(windows)]
@@ -552,7 +552,7 @@ fn a_reregistration_keeps_the_account_and_the_service_keeps_its_privileges() {
 }
 
 /// Adds the account `member` to the group `group`, as the operator does before naming a process
-/// account (ADR-0022 clause 21).
+/// account (ADR-0022 §21).
 #[cfg(target_os = "linux")]
 fn add_to_group(member: &str, group: &str) {
     let status = Command::new("usermod")
@@ -670,7 +670,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     let data = supervisor.join("data");
     std::fs::create_dir_all(&program).expect("program/");
     std::fs::create_dir_all(&config_dir).expect("config/");
-    // A data directory as ADR-0022 clause 21 gives it: the process account's group, `2770`. The
+    // A data directory as ADR-0022 §21 gives it: the process account's group, `2770`. The
     // command kind names none, so the test makes it as a kind would.
     std::fs::create_dir_all(&data).expect("data/");
     let chgrp = Command::new("chgrp")
@@ -792,7 +792,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(user_of(&again["pid"]), process_account.0, "{again:?}");
 
     // Re-registered without either flag, as every package upgrade does: both accounts are kept,
-    // and the hand-over leaves the process account its data (ADR-0022 clause 1).
+    // and the hand-over leaves the process account its data (ADR-0022 §1).
     let again_pid: u32 = again["pid"].parse().expect("a pid");
     client(&["service", "stop"], &config).expect("stop the service");
     let reinstalled = client(&["service", "install", "--root", &root_arg], &config)
@@ -819,7 +819,7 @@ fn a_managed_process_runs_under_the_process_account_and_reaches_only_what_it_run
     assert_eq!(upgraded["key"], "denied", "{upgraded:?}");
 
     // Dropped while both run: the install stops them before it re-owns, and starts the Client
-    // again once it has succeeded, with no `service start` (ADR-0022 clause 26). The Client then
+    // again once it has succeeded, with no `service start` (ADR-0022 §26). The Client then
     // starts its program itself again, under its own account.
     let again_pid: u32 = upgraded["pid"].parse().expect("a pid");
     let dropping = client(
@@ -913,7 +913,7 @@ fn restart(name: &str) {
     assert!(restarted.success(), "cannot restart {name}");
 }
 
-/// A Managed Process takes the second service's place (ADR-0022 clause 19): it leaves its process
+/// A Managed Process takes the second service's place (ADR-0022 §19): it leaves its process
 /// group, so it outlives the Client's connection, removes the second service's socket and listens
 /// at its name. The Client, restarted, finds a peer of the process account there and refuses it —
 /// it writes it nothing and logs the impostor's process id — and starts no Managed Process until
@@ -1293,7 +1293,7 @@ fn acl_names(path: &Path, who: &str) -> bool {
 /// On Windows a first install without `--run-as` registers the service's own virtual account and
 /// grants it the root; a re-install without the flag, as an MSI upgrade makes, keeps it;
 /// `--run-as LocalSystem` registers `LocalSystem` and withdraws what the virtual account was
-/// granted; and a re-install without the flag then keeps `LocalSystem` (ADR-0022 clause 1). The
+/// granted; and a re-install without the flag then keeps `LocalSystem` (ADR-0022 §1). The
 /// runner's shell is elevated, as `service install` needs.
 /// Verifies: ADR-0022
 #[cfg(windows)]
@@ -1776,7 +1776,7 @@ impl Drop for ScheduledTask {
 }
 
 /// On Windows a pipe of the second service's name, made by a task under the process account, `NT
-/// AUTHORITY\LocalService`, while the second service is stopped (ADR-0022 clause 19): the Client,
+/// AUTHORITY\LocalService`, while the second service is stopped (ADR-0022 §19): the Client,
 /// restarted, refuses it as a peer the SCM names no process for, writes it nothing and logs it, and
 /// starts no Managed Process; once the task has ended and the second service runs again, the Client
 /// reaches it and the program runs. The second service is stopped first because a client that opens
@@ -2235,7 +2235,7 @@ Set-Content -Path $out -Value $lines
 /// The password of the `bootstrap.p12` the enrolment smoke test installs with.
 const P12_PASSWORD: &str = "a password of the operator";
 
-/// The fleet's files a script puts in the directory `--fleet-files` names (ADR-0027 clause 19),
+/// The fleet's files a script puts in the directory `--fleet-files` names (ADR-0027 §19),
 /// made from what `served` issued: its bootstrap certificate and key as `bootstrap.p12` under
 /// [`P12_PASSWORD`], and the CA of its certificate as `server-ca.pem`. Answers the bootstrap key.
 fn fleet_files(served: &enrolling::Served, dir: &Path) -> rcgen::KeyPair {
@@ -2361,7 +2361,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-/// The arguments of the install a script runs after the package (ADR-0027 clause 19).
+/// The arguments of the install a script runs after the package (ADR-0027 §19).
 fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path) -> Vec<String> {
     vec![
         "service".into(),
@@ -2377,7 +2377,7 @@ fn install_args(root: &Path, port: u16, fleet_files: &Path, password_file: &Path
     ]
 }
 
-/// The install a script runs after the package (ADR-0027 clause 19): `service install --endpoint
+/// The install a script runs after the package (ADR-0027 §19): `service install --endpoint
 /// --fleet-files --bootstrap-password-file` opens the `bootstrap.p12` in that directory, waits for
 /// an operator's approval with nothing staged or registered, and only then stages and registers.
 /// The configuration it wrote names a copy of the CA and no bootstrap identity, the Client's
@@ -2430,7 +2430,7 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
                 .map(|pending| pending.id.clone())
         },
     );
-    // Enrolled before anything is staged or registered (ADR-0021 clause 26).
+    // Enrolled before anything is staged or registered (ADR-0021 §26).
     assert_eq!(
         service().state().expect("query the service"),
         ServiceState::NotInstalled,
@@ -2505,13 +2505,13 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
         "the state directory holds another certificate than the one issued"
     );
 
-    // The fleet's files are read, never copied, changed or removed (ADR-0027 clauses 17 and 18).
+    // The fleet's files are read, never copied, changed or removed (ADR-0027 §17 and §18).
     assert!(
         (read(&p12), read(&password_file)) == before,
         "the install changed bootstrap.p12 or the password file"
     );
     // The decrypted bootstrap key — as PKCS#8, in DER or in PEM however it is wrapped — the
-    // `bootstrap.p12` and its password are in no file under the root (ADR-0027 clause 15).
+    // `bootstrap.p12` and its password are in no file under the root (ADR-0027 §15).
     let key_der = key.serialize_der();
     let key_body: String = key
         .serialize_pem()
@@ -2588,7 +2588,7 @@ fn an_install_enrols_with_a_bootstrap_p12_and_the_service_runs_on_the_issued_cer
 
 /// A `bootstrap.p12` that does not open under the password `--bootstrap-password-file` names fails
 /// the install before anything is written, staged or registered, saying so of the file and naming
-/// the flag (ADR-0027 clause 18, ADR-0021 clause 26).
+/// the flag (ADR-0027 §18, ADR-0021 §26).
 /// Verifies: ADR-0027, ADR-0021
 #[test]
 #[ignore = "installs a real system service; run with --ignored in the service-smoke job"]

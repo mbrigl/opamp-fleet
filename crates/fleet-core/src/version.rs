@@ -121,11 +121,11 @@ fn is_dot_identifiers(field: &str) -> bool {
 }
 
 /// The longest version [`is_semver`] takes: the bound a Package's identity tokens carry
-/// (ADR-0034 clause 1), so a version that passes here also fits a Package.
+/// (ADR-0034 §1), so a version that passes here also fits a Package.
 pub const MAX_SEMVER_LEN: usize = 64;
 
 /// Whether `raw` is a SemVer 2.0.0 version — the one predicate the Server, `opamp-fleetctl` and the
-/// Client ask of a Package version (ADR-0034 clause 2).
+/// Client ask of a Package version (ADR-0034 §2).
 ///
 /// [`parse`] already holds the core and both identifier sets to SemVer. The one rule it does not
 /// check is added here: a numeric pre-release identifier has no leading zero (SemVer 2.0.0 §9).
@@ -143,8 +143,8 @@ pub fn is_semver(raw: &str) -> bool {
         })
 }
 
-/// An upstream program's number written as SemVer, the way a Package is numbered (ADR-0034
-/// clause 6): fewer than three numeric components are completed with `.0` (`1.19` becomes
+/// An upstream program's number written as SemVer, the way a Package is numbered (ADR-0034 §6):
+/// fewer than three numeric components are completed with `.0` (`1.19` becomes
 /// `1.19.0`), and a leading zero is dropped from a numeric component (`24.04.1` becomes `24.4.1`).
 /// Both keep the program's own order. A pre-release or build suffix is carried as it is. `None`
 /// when the number cannot be written so.
@@ -425,7 +425,7 @@ mod tests {
 
     /// An upstream number is written as SemVer in its own order: completed with `.0`, a leading
     /// zero dropped, a suffix carried, and a number that cannot be written so refused
-    /// (ADR-0034 clause 6).
+    /// (ADR-0034 §6).
     /// Verifies: ADR-0034
     #[test]
     fn an_upstream_number_is_written_as_semver_in_its_own_order() {
@@ -442,7 +442,7 @@ mod tests {
         }
     }
 
-    /// The one predicate every end asks of a Package version (ADR-0034 clause 2).
+    /// The one predicate every end asks of a Package version (ADR-0034 §2).
     /// Verifies: ADR-0034
     #[test]
     fn a_package_version_is_semver() {

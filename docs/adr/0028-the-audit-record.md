@@ -44,8 +44,8 @@ long it goes back are part of the Server's state and its stores
 On the filesystem store the files live under `data_dir/audit/` and rotate by size: a file reaching
 `max_file_bytes` is closed, `keep_files` are kept, and the deleted file's last hash is recorded
 first
-([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-clause 12). Size is the wrong bound for a database. A table has no file to close, and an operator
+([ADR-0023 §12](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+Size is the wrong bound for a database. A table has no file to close, and an operator
 asked how long the record goes back answers in time, not in megabytes.
 
 On PostgreSQL several Server instances write to one database
@@ -54,8 +54,8 @@ One chain cannot be extended by two writers without serialising every security d
 fleet on one lock across processes, and a chain that a process takes up from another's tail mixes
 two processes' orders into one sequence that neither wrote. Every Server on PostgreSQL holds a
 lease, and takes a new one, under a new instance id, after it could not renew the old
-([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-clauses 1 and 3). A chain drawn with each lease therefore ends where the lease ends, and an
+([ADR-0025 §1 and §3](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
+A chain drawn with each lease therefore ends where the lease ends, and an
 instance that takes a new lease does not chain on from entries it wrote under a lease another
 instance may already have closed. A chain of a lease opens and ends with the lease: an instance
 that takes a lease without its chain open, or removes a lapsed lease and leaves its chain open,
@@ -80,8 +80,8 @@ hashes, and `server audit-verify` finds nothing. With PostgreSQL the people who 
 are not only those who hold the Server's host: a database administrator, a stolen dump, a replica.
 A key that signs the record is no help when it lives on the same host as the record, since whoever
 can rewrite the record can read the key and re-sign. A key on a PKCS#11 token cannot be read
-([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-clauses 35 and 37): whoever holds the store but not the token cannot sign. A signature on every
+([ADR-0026 §35 and §37](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)):
+whoever holds the store but not the token cannot sign. A signature on every
 entry would put the token in the path of every admission. A signature on the heads at intervals
 bounds what can be rewritten unseen to one interval, off the decision path. With several Server
 instances on one database, one instance at a time signs, by an advisory lock any instance can
@@ -140,8 +140,8 @@ token.
 3. **The chains.**
    - Each Server process writes the entries of its decisions through one writer thread of its
      own, which takes them from the channel of clause 5 in the order the decisions were taken.
-     [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-     clause 12 says where the entries are kept.
+     [ADR-0023 §12](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+     says where the entries are kept.
    - On the PostgreSQL store two entries are written in the transaction of a lease instead: a
      chain's `audit.chain_opened` in the one that takes its lease, and the `audit.chain_closed` of
      a lease another instance takes over in the one that removes that lease (clause 7). No lease
@@ -171,8 +171,8 @@ token.
      `audit.chain_broken` whose `last_whole` links to the last whole entry before the run; a run
      closed by an `audit.chain_broken` that names no `last_whole`, or a run nothing closes, fails.
    - On the PostgreSQL store each lease
-     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-     clauses 1 and 3) opens a chain of its own, which ends with the lease. A Server instance draws
+     ([ADR-0025 §1 and §3](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md))
+     opens a chain of its own, which ends with the lease. A Server instance draws
      a random chain identifier with each lease it takes and opens its chain: a chain record with
      the identifier, the host name and the time it was opened, and a first entry
      `audit.chain_opened` whose `prev` is 64 zeros. The first chain the store ever opens names, as
@@ -232,11 +232,11 @@ token.
      instance writes it into its own chain at an orderly shutdown, with `reason` `shutdown`. For a
      lease that lapsed, the instance that takes it over writes it into the chain the lease names,
      with `reason` `lease_lapsed` and `closed_by` the identifier of its own chain
-     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-     clause 18). For the lease of an instance that had to be alone and whose process is gone, which
+     ([ADR-0025 §18](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
+     For the lease of an instance that had to be alone and whose process is gone, which
      the next instance to take a lease takes over before it lapses
-     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-     clause 2), it writes it with `reason` `holder_gone` and `closed_by` the identifier of its own
+     ([ADR-0025 §2](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)),
+     it writes it with `reason` `holder_gone` and `closed_by` the identifier of its own
      chain. No other entry is written into a chain by an instance that did not open it. Entries
      missing from its end, a last entry that is not the recorded one, or an entry after it fail
      verification.
@@ -255,8 +255,8 @@ token.
    - An entry whose decision was taken while the instance held no lease carries `taken_under`
      `none`, in whichever chain it is written into, that of the lease that just lapsed included. The
      instance holds no lease from the moment its lease is lapsed by the clock it measures it on
-     ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-     clause 3), and after it released it, until it holds a new one. The entries the writer adds of
+     ([ADR-0025 §3](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)),
+     and after it released it, until it holds a new one. The entries the writer adds of
      its own, the aggregates, `audit.resumed`, `audit.chain_broken` and the closing
      `audit.chain_closed`, carry no `taken_under`.
    - The store itself does not detect the removal of a whole chain together with its record. The
@@ -289,8 +289,8 @@ token.
    that a Server wrote on the filesystem store stay where they are as a closed archive. The Server
    neither moves them nor writes to them again, `server audit-verify <dir>` verifies them as
    before, and deleting them is the operator's. `server migrate-to-postgres`
-   ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-   clause 27) records the `seq` and the hash of the archive's last entry in the database, and the
+   ([ADR-0023 §27](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md))
+   records the `seq` and the hash of the archive's last entry in the database, and the
    first chain the database store opens names them in its `audit.chain_opened` as its
    `predecessor`. `server audit-verify --config <server.toml> --archive <dir>` checks that the
    archive ends on the entry the predecessor names; without `--archive` it reports the
@@ -314,12 +314,12 @@ token.
       `SubjectPublicKeyInfo`;
     - `sig`: the signature, ECDSA P-256 over the SHA-256 of the entry's line as written without
       `sig`, made with one `C_Sign` as
-      [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-      clause 37 makes every signature, as a DER `ECDSA-Sig-Value` in base64.
+      [ADR-0026 §37](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+      makes every signature, as a DER `ECDSA-Sig-Value` in base64.
 
     The entry is the audit entry that
-    [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-    clause 38 asks for every signature, and it chains as any other entry: its `prev` covers it,
+    [ADR-0026 §38](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+    asks for every signature, and it chains as any other entry: its `prev` covers it,
     and the next entry covers its hash. A checkpoint is rotated and pruned with the record. An
     `audit.rotated` or `audit.pruned` entry that removes checkpoints names, besides what it names
     of the entries, the `checkpoint_seq` and the hash of the last checkpoint it removed. A prune
@@ -386,8 +386,8 @@ token.
     - every head any checkpoint names, not only the newest one's, is in the store: its chain
       reaches at least the `seq` it names and has at that `seq` the hash it names, unless a signed
       removal recorded the removal of that part
-      ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-      clause 12). A chain whose first entries are gone begins right after the last entry a signed
+      ([ADR-0023 §12](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+      A chain whose first entries are gone begins right after the last entry a signed
       removal names;
     - an entry written more than three intervals after the newest checkpoint, with no
       `audit.checkpoint_failed` between, fails as an unsigned tail: a running signer would have
@@ -413,7 +413,7 @@ token.
 
 15. **The audit record may be exported, off by default.** `[audit.export]` names an OTLP/HTTP
     endpoint. The Server sends every entry to it as an OTLP log record. The export is an outbound
-    connection of [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 21. The
+    connection of [ADR-0012 §21](0012-tls-1-3-two-planes-and-bounded-input.md). The
     configuration names it, and this clause decides its purpose. It runs over TLS 1.3 by the
     provider of that ADR's clause 5, and in plaintext only to a loopback endpoint. The section has
     two keys:
@@ -446,8 +446,8 @@ token.
     naming the key. An instance checks it again whenever it takes a new lease after its own
     lapsed, and one that finds a differing label stops as at a failed start, as it does on a
     schema it does not understand
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-    clause 16). The audit key has no file form (clause 14).
+    ([ADR-0025 §16](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)).
+    The audit key has no file form (clause 14).
 
 **Out of scope:** an audit record on the Client; shipping the record to a remote store other than
 the export of clause 15; signing individual entries, and signing with a key outside a PKCS#11
@@ -621,8 +621,7 @@ no lease, and its authentication is shell access on a Server host.
   only against a checkpoint that left the store.
 - Negative / trade-offs: a compromised Server can have the token sign whatever it wrote; the
   export and the log copy are what show that afterwards, beside the `pkcs11.signed` entries of
-  [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-  clause 38.
+  [ADR-0026 §38](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md).
 - Negative / trade-offs: a checkpoint entry a minute while the fleet is busy, and a read of every
   chain's head per checkpoint on PostgreSQL.
 - Follow-ups: reading the record through the REST API; an audit record of the Client's own
@@ -632,8 +631,8 @@ no lease, and its authentication is shell access on a Server host.
 ## Enforcement
 
 Tests that carry `Verifies: ADR-0028`, against SoftHSM2
-([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-clause 39) where a token is needed:
+([ADR-0026 §39](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md))
+where a token is needed:
 
 - `crates/fleet-server/src/audit_log.rs` tests: `each_entry_carries_the_hash_of_the_one_before`,
   `the_chain_survives_a_restart_and_a_rotation`, `a_truncated_file_is_recorded_as_a_broken_chain`,

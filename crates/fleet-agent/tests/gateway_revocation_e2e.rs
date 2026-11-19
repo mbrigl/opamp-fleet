@@ -1,7 +1,7 @@
-//! A Gateway refuses what its Server revoked, end to end (ADR-0016 clause 14, ADR-0026 clause 34):
+//! A Gateway refuses what its Server revoked, end to end (ADR-0016 §14, ADR-0026 §34):
 //! the real Server on mutual TLS with its register, the real Gateway fetching the list from it,
 //! and a downstream peer whose certificate the Server revokes. The floors the Gateway hands down
-//! are held to the same admission (ADR-0034 clause 16).
+//! are held to the same admission (ADR-0034 §16).
 
 use std::path::Path;
 use std::sync::Arc;

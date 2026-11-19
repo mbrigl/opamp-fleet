@@ -94,7 +94,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    - `create_within(uid, &PersistedAgent, max_records)` — create the record of an Agent first heard
      of unless the store holds `max_records` already, counted where the records are stored in the
      step that creates it, so the Agent-record ceiling `max_agents`, which
-     [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 19 counts for the whole fleet,
+     [ADR-0012 §19](0012-tls-1-3-two-planes-and-bounded-input.md) counts for the whole fleet,
      holds for every instance; a record stored already is answered as it is stored, and passes no
      bound;
    - `write_report(uid, &PersistedAgent)` — write the part of a stored record a report decides, as
@@ -115,8 +115,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      stored count of takes is still the one it comes with, so it never undoes a take made since,
      by this instance or another;
    - `take(uid, holder, last_seen_ms)` — the take at a connecting report of
-     [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-     clause 8: names `holder`, raises the record's count of takes by one and answers it, answers
+     [ADR-0025 §8](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md):
+     names `holder`, raises the record's count of takes by one and answers it, answers
      the holder it replaced and whether this change of holder is the eleventh within a minute,
      counted on the database's clock, and announces the take where it replaced another instance,
      whether or not its lease is live; the take that commits last holds the record;
@@ -126,8 +126,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      stored presence lets it go, read and removed in one step (clause 11);
    - `set_labels(uid, labels)` and `set_restart_pending(uid, pending)` — the acts that decide them,
      each writing what it names alone; the assignments are written by the rollout operation of
-     [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-     clause 2. The instance that delivers a restart clears `restart_pending` only while no later
+     [ADR-0023 §2](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md).
+     The instance that delivers a restart clears `restart_pending` only while no later
      request set it again;
    - `remove(uid)` — forget one record; removing what is absent is not an error;
    - `rekey(old, new, &PersistedAgent)` — an identity reassignment, one operation so an adapter
@@ -140,8 +140,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    `AppState` takes a `Box<dyn AgentStore>`; the binary wires the adapter, and
    another backend is a new adapter plus one wiring line. Which reads a Server makes follows its
    store, by the one rule of
-   [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-   clause 3: on the filesystem store `load()` and the memory it fills, on PostgreSQL `get` and
+   [ADR-0023 §3](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md):
+   on the filesystem store `load()` and the memory it fills, on PostgreSQL `get` and
    `query`.
 
 3. **What a report or an operator decided persists; so does where an Agent is connected.**
@@ -161,8 +161,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    holding instance — in one batch every `[database] presence_interval_secs` (default 30, from 10 to
    60), so a heartbeat reaches the database at most once per interval and Agent. A change of the
    holding instance and a disconnect are written in the next batch, except as
-   [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-   clause 8 says. On graceful shutdown every record and every presence is flushed, so an ordinary
+   [ADR-0025 §8](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+   says. On graceful shutdown every record and every presence is flushed, so an ordinary
    restart restores current values; on PostgreSQL the flush writes only the records of the Agents
    this instance heard report, and of those only the ones whose stored holder is this instance, or
    is none and whose stored count of takes is still the one this instance was last answered, and the
@@ -315,8 +315,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
     - A label whose key starts with `supervisor.` is refused (`400`), naming the key, the same way.
       That space is a Supervisor's own statement: the kinds its Client carries and the version of
       the Package it installed
-      ([ADR-0018](0018-what-an-agent-reports-about-itself.md)
-      clauses 5 and 10). A label there would let a Selector match an Agent as if it stated one.
+      ([ADR-0018 §5 and §10](0018-what-an-agent-reports-about-itself.md)).
+      A label there would let a Selector match an Agent as if it stated one.
     - A label the record already holds in either space is ignored: it enters no effective
       description (clause 18), so no Selector and no package match reads it, no Agent inherits it
       (clause 19), and the fleet row lists it in `ignored_labels`. The next label set put without
@@ -459,7 +459,7 @@ which approvals and provisioned certificates already limit.
   `supervisor.` space would then be set like any other and matched where the Agent reports no such
   key. That space is a Supervisor's own statement: the kinds its Client carries and the version of
   the Package it installed
-  ([ADR-0018](0018-what-an-agent-reports-about-itself.md) clauses 5 and 10). A label there would
+  ([ADR-0018 §5 and §10](0018-what-an-agent-reports-about-itself.md)). A label there would
   let a Selector or a package match take an Agent for one that states a kind or a version it never
   stated. Rejected; clause 20 refuses such a label as it refuses one in `fleet.`, and ignores one
   the record already holds in either space rather than match it.

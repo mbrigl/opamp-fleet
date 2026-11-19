@@ -110,7 +110,7 @@ fn sigterm_shuts_the_server_down_gracefully() {
         "the server ended with {status:?} instead of shutting down"
     );
 
-    // Started on an empty data_dir, the Server laid out every directory of ADR-0034 clause 23,
+    // Started on an empty data_dir, the Server laid out every directory of ADR-0034 §23,
     // each owner-only, and nothing else.
     let data = dir.path().join("data");
     let mut found: Vec<String> = std::fs::read_dir(&data)

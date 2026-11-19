@@ -7,7 +7,7 @@
 //! hosts' Agents, so a message through it takes a token from the bucket of the Agent it names and
 //! one from the Gateway's aggregate. An enrolment request through it takes from neither but from
 //! the Gateway's enrolment aggregate and, once its bootstrap certificate is one of a bootstrap CA,
-//! from that certificate's bucket (ADR-0016 clause 26). Both tables are bounded, and a full one
+//! from that certificate's bucket (ADR-0016 §26). Both tables are bounded, and a full one
 //! forgets the bucket used least recently, which can only grant tokens.
 
 use std::net::IpAddr;
@@ -18,7 +18,7 @@ use fleet_core::rate::{Table, TOKEN};
 use crate::fleet::Clock;
 use crate::revocation::CertId;
 
-/// The `[agent_rate_limit]` values (ADR-0012 clause 22).
+/// The `[agent_rate_limit]` values (ADR-0012 §22).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub messages_per_sec: u32,
@@ -38,7 +38,7 @@ impl Default for Limits {
     }
 }
 
-/// Who a message or a download is counted for (ADR-0016 clause 26).
+/// Who a message or a download is counted for (ADR-0016 §26).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Subject {
     /// The host a member's certificate names.
@@ -105,7 +105,7 @@ enum Key {
 }
 
 /// What a message through a Gateway is counted for besides an aggregate: the Agent it names, or —
-/// for an enrolment request — the bootstrap certificate the request proves (ADR-0016 clause 26).
+/// for an enrolment request — the bootstrap certificate the request proves (ADR-0016 §26).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Named {
     Agent([u8; 16]),
@@ -126,7 +126,7 @@ pub struct AgentRate {
 
 impl AgentRate {
     /// The limit as a Server keeps it: the subjects and aggregates as many as the certificate
-    /// register holds, the Agents behind Gateways as many as the fleet holds (ADR-0012 clause 28).
+    /// register holds, the Agents behind Gateways as many as the fleet holds (ADR-0012 §28).
     #[must_use]
     pub fn new(limits: Limits, max_agents: usize, clock: Arc<dyn Clock>) -> Self {
         AgentRate::with_capacities(limits, crate::revocation::MAX_ISSUED, max_agents, clock)
@@ -168,7 +168,7 @@ impl AgentRate {
     }
 
     /// [`admit`](Self::admit) for a message carrying an enrolment request. Through a Gateway it
-    /// takes no token of the Gateway's members (ADR-0016 clause 26). With `bootstrap` — the
+    /// takes no token of the Gateway's members (ADR-0016 §26). With `bootstrap` — the
     /// certificate its proof embeds, once checked to be one of a bootstrap CA — it takes one from
     /// that certificate's bucket, sized by `messages_per_sec` and `burst`, and one from the
     /// Gateway's enrolment aggregate, sized by `gateway_messages_per_sec` and `gateway_burst`, so

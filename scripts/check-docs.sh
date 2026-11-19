@@ -35,7 +35,8 @@
 #      Markdown. AGENTS.md is the only numbered document in this repository; extend the check if
 #      another one appears. The headings there must themselves run 1..N in order: a gap or a
 #      repeat is a botched renumbering, and it is the only half of the renumbering hazard a check
-#      can see (AGENTS.md, section 3).
+#      can see (AGENTS.md, section 3). A clause citation, an ADR's identifier, a space, and the
+#      section sign with a number or a list of them, cites that ADR and no section.
 #   5. ADR-reference integrity: every 'ADR-NNNN' reference (with actual digits) and every
 #      'ADR-draft-<slug>' reference (with an actual slug) names an ADR file that exists in
 #      docs/adr/ — anticipated follow-ups are described by topic, never by a number that does
@@ -129,12 +130,10 @@
 #      Superseded and rejected ADRs are not read.
 #  18. Clause citations: a citation of an ADR's clause names a numbered clause of that ADR's
 #      Decision, of an ADR in force: a normalization re-cites them by its clause table, and a
-#      citation that names no clause, or a clause of a dead ADR, is stale. The forms read are
-#      'ADR-NNNN clause N' and 'clauses N, M and K' or 'N to M' after it, the identifier perhaps a
-#      Markdown link, followed by a comma or an opening parenthesis, and 'clause N of ADR-NNNN',
-#      the word capitalized or not; a draft identifier counts as a number does. Numbers are joined
-#      by a comma, 'and', 'or', 'to' or an en dash, never by space alone, and a number the text
-#      goes on from, as a date does, is not one. A citation wrapped over two lines is joined, the
+#      citation that names no clause, or a clause of a dead ADR, is stale. The form read is the
+#      template's: 'ADR-NNNN §N', and a list of them after the identifier, '§N, §M', '§N and §M',
+#      '§N, §M, and §K' or a range '§N–§M', inside a Markdown link's text where it is one; a draft
+#      identifier counts as a number does. A citation wrapped over two lines is joined, the
 #      comment marker of the second line and a backslash ending the first dropped. Each number,
 #      both ends of a range included, lies between 1 and the count of the Decision's numbered
 #      items ('N. ' at the start of a line, outside fenced code, where a '## ' line ends no section
@@ -142,7 +141,8 @@
 #      the past they were written against, and outside CHANGELOG.md, which records what held when
 #      each entry was written. So does a citation of a place instead of a clause, which a
 #      normalization's clause table cannot follow: 'point', 'paragraph', 'line', 'rule', 'item',
-#      'bullet', 'step', 'section' or the section sign before a number, after an identifier. An
+#      'bullet', 'step', 'section', the older form 'clause', or the section sign after a link,
+#      before a number and after an identifier, and 'clause N of ADR-NNNN'. An
 #      identifier that names no ADR is check 5's. Superseded and rejected ADRs are not read, nor is
 #      the template.
 #
@@ -772,6 +772,14 @@ check_relative_links() {
 # Named gap (AGENTS.md, section 5): outside Markdown there are no links, so a '§N' in a workflow or
 # a script comment is still only checked for the number existing. Those references live in files a
 # maintainer edits next to AGENTS.md; the weaker guarantee is recorded here rather than hidden.
+# clauses_out <line> — sets LINE to the line without its clause citations, an ADR's identifier, a
+# space, and the section sign with a number, or a list of them ('§4, §5', '§4 and §5', '§2–§5').
+clauses_out() {
+  local re="($ADR_REF_RE) §[0-9]+((, |,? and |–)§[0-9]+)*"
+  LINE="$1"
+  while [[ "$LINE" =~ $re ]]; do LINE="${LINE/"${BASH_REMATCH[0]}"/}"; done
+}
+
 check_section_refs() {
   local agents="$ROOT/AGENTS.md"
   if [[ ! -f "$agents" ]]; then
@@ -842,6 +850,8 @@ check_section_refs() {
             rest="${rest#*\`}"
           done
           line+="$rest"
+          clauses_out "$line"
+          line="$LINE"
           [[ "$line" == *§* ]] || continue
           # Split the line into its links and what is left once every link is removed, which is a
           # reference nothing verifies. Each match is the leftmost one, so cutting the text up to
@@ -884,10 +894,15 @@ check_section_refs() {
         ;;
       *)
         while IFS=: read -r lineno line; do
-          n="${line#§}"
-          _contains "$n" "${valid_sections[@]}" \
-            || add_error "$rel:$lineno: reference '§$n' matches no numbered section in AGENTS.md"
-        done < <(grep -noE '§[0-9]+' "$f")
+          clauses_out "$line"
+          rest="$LINE"
+          while [[ "$rest" =~ §([0-9]+) ]]; do
+            n="${BASH_REMATCH[1]}"
+            rest="${rest#*"${BASH_REMATCH[0]}"}"
+            _contains "$n" "${valid_sections[@]}" \
+              || add_error "$rel:$lineno: reference '§$n' matches no numbered section in AGENTS.md"
+          done
+        done < <(grep -nE '§[0-9]+' "$f")
         ;;
     esac
   done
@@ -1436,7 +1451,7 @@ check_clause_citations() {
     [[ -n "$target" ]] || continue
     if [[ "$word" != clause ]]; then
       [[ "$rel" == CHANGELOG.md ]] \
-        || add_error "$rel:$lineno: ADR-$key is cited by $word, a place a normalization cannot follow — cite its clause"
+        || add_error "$rel:$lineno: ADR-$key is cited by $word, a place a normalization cannot follow — cite its clause as 'ADR-$key §N'"
       continue
     fi
     if is_inactive_adr "$target" && [[ "$file" != "$ADR_DIR"/* && "$rel" != CHANGELOG.md ]]; then
@@ -1465,14 +1480,20 @@ check_clause_citations() {
       sep = "(,[[:space:]]|,[[:space:]]and[[:space:]]|,[[:space:]]or[[:space:]]|[[:space:]]and[[:space:]]"
       sep = sep "|[[:space:]]or[[:space:]]|[[:space:]]to[[:space:]]|[[:space:]]?\342\200\223[[:space:]]?)"
       list = "[0-9]+(" sep "[0-9]+)*"
-      # The word a citation names a clause or a place by; the section sign is a place.
+      # The clause form: the identifier, a space, and the section sign before each number.
+      sign = "\302\247"
+      clause = key "[[:space:]]" sign "[0-9]+((,[[:space:]]|,[[:space:]]and[[:space:]]|[[:space:]]and[[:space:]]|\342\200\223)" sign "[0-9]+)*"
+      # The words a citation names a place by, the older word clause among them, and the section sign
+      # after a link, which leaves the link text of the identifier.
       word = "([Cc]lauses?|[Pp]oints?|[Pp]aragraphs?|[Ll]ines?|[Rr]ules?|[Ii]tems?|[Bb]ullets?"
-      word = word "|[Ss]teps?|[Ss]ections?|\302\247)"
+      word = word "|[Ss]teps?|[Ss]ections?)"
       after = key "(\\]\\([^)]+\\))?,?[[:space:]]+\\(?" word "[[:space:]]?" list
+      linked = key "\\]\\([^)]+\\),?[[:space:]]+\\(?" sign "[[:space:]]?" list
       before = "[Cc]lauses?[[:space:]]+" list "[[:space:]]+of[[:space:]]+\\[?" key
     }
     # numbers <text> — the numbers of a list, each range as N-M, joined by spaces.
     function numbers(text,   out) {
+      gsub(sign, "", text)
       gsub(/[[:space:]]*(to|\342\200\223)[[:space:]]*/, "-", text)
       gsub(/,|and|or/, " ", text)
       out = ""
@@ -1494,6 +1515,23 @@ check_clause_citations() {
     }
     function cites(line, joined,   rest, off, m, id, w, list) {
       rest = joined; off = 0
+      while (match(rest, clause)) {
+        if (off + RSTART > length(line)) break
+        m = substr(rest, RSTART, RLENGTH)
+        off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
+        match(m, key); id = substr(m, RSTART, RLENGTH)
+        list = substr(m, RSTART + RLENGTH)
+        emit(id, "clause", list)
+      }
+      rest = joined; off = 0
+      while (match(rest, linked)) {
+        if (off + RSTART > length(line)) break
+        m = substr(rest, RSTART, RLENGTH)
+        off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
+        match(m, key); id = substr(m, RSTART, RLENGTH)
+        emit(id, "the section sign after its link", "")
+      }
+      rest = joined; off = 0
       while (match(rest, after)) {
         if (off + RSTART > length(line)) break
         m = substr(rest, RSTART, RLENGTH)
@@ -1503,6 +1541,7 @@ check_clause_citations() {
         w = m; sub(/^ADR-[^[:space:]]*[[:space:]]+\(?/, "", w)
         list = w; sub(/^[^0-9]+/, "", list)
         sub(/[[:space:]0-9].*$/, "", w); w = tolower(w); sub(/s$/, "", w)
+        if (w == "clause") w = "the older word clause"
         emit(id, w, whole(list, rest))
       }
       rest = joined; off = 0
@@ -1511,8 +1550,7 @@ check_clause_citations() {
         m = substr(rest, RSTART, RLENGTH)
         off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
         match(m, key); id = substr(m, RSTART, RLENGTH)
-        list = m; sub(/^[Cc]lauses?[[:space:]]+/, "", list); sub(/[[:space:]]+of[[:space:]].*$/, "", list)
-        emit(id, "clause", list)
+        emit(id, "clause N of", "")
       }
     }
     # A line ending in a backslash, as a Rust string continues, joins as any other.

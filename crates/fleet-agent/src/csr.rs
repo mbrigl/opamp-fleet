@@ -32,7 +32,7 @@ const RENEW_AFTER: f64 = 2.0 / 3.0;
 /// right now.
 ///
 /// A request in flight is re-sent unchanged until it is answered: an enrolment waits for an
-/// operator, and the Server's queue knows a request by its public key (ADR-0027 clause 9).
+/// operator, and the Server's queue knows a request by its public key (ADR-0027 §9).
 /// Generating one **writes the private key** to the state directory before the request goes out,
 /// as a pending key beside the one in force, so an answer arriving after a restart is still usable
 /// and the certificate in force keeps its own key until the new one is proved.
@@ -78,7 +78,7 @@ pub fn accept(state_dir: &Path, cert_pem: &[u8]) -> Result<(), String> {
     // Whole or not at all, through a temporary name and a rename in the held directory, so a link
     // the service's account put at either name is replaced rather than written through (ADR-0022).
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0022 clause 21).
+    // may pass through (ADR-0022 §21).
     held(state_dir)?
         .write(PENDING_CERT_FILE, cert_pem, 0o600)
         .map_err(|e| format!("cannot store the issued certificate: {e}"))?;
@@ -157,8 +157,8 @@ fn certifies(dir: &HeldDir, cert_pem: &[u8], key_name: &str) -> bool {
 }
 
 /// The SHA-256 fingerprint of the key a request in flight asks to be certified — the one logged
-/// when the request was generated, and the `id` the Server's queue lists it under (ADR-0027
-/// clause 10). `None` when no request is in flight or its key cannot be read.
+/// when the request was generated, and the `id` the Server's queue lists it under (ADR-0027 §10).
+/// `None` when no request is in flight or its key cannot be read.
 #[must_use]
 pub fn pending_fingerprint(state_dir: &Path) -> Option<String> {
     use sha2::{Digest, Sha256};
@@ -233,13 +233,13 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     // Server to match on (ADR-0026): identity is `instance_uid`, and the Server may re-key it.
     let mut params = CertificateParams::new(vec![config.name.clone()])
         .map_err(|e| format!("cannot build a certificate request: {e}"))?;
-    // The subject an operator reads in the enrolment queue (ADR-0027 clause 10); rcgen's default
+    // The subject an operator reads in the enrolment queue (ADR-0027 §10); rcgen's default
     // names every host alike.
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, config.name.clone());
-    // A renewal says which certificate it renews, signed with that certificate's key (ADR-0016
-    // clause 18): the Server carries the host on from it even when a Gateway is in between.
+    // A renewal says which certificate it renews, signed with that certificate's key (ADR-0016 §18):
+    // the Server carries the host on from it even when a Gateway is in between.
     if let Some(proof) = renewal_proof(config, &key) {
         let uri = rcgen::string::Ia5String::try_from(proof)
             .map_err(|e| format!("cannot build a renewal proof: {e}"))?;
@@ -259,7 +259,7 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
 
     // Held without following a link at its name, and each file written whole over a link at its
     // own: an install enrols as root in a directory that belongs to the service's account
-    // (ADR-0022). Passed through by the process group where one is registered (ADR-0022 clause 21).
+    // (ADR-0022). Passed through by the process group where one is registered (ADR-0022 §21).
     crate::storage::create_shared_dir(
         &config.state_dir,
         &config.state_dir,
@@ -280,10 +280,10 @@ fn generate(config: &ClientConfig) -> Result<Vec<u8>, String> {
     )
     .map_err(|e| format!("cannot store the private key: {e}"))?;
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0022 clause 21).
+    // may pass through (ADR-0022 §21).
     dir.write(PENDING_CSR_FILE, csr.as_bytes(), 0o600)
         .map_err(|e| format!("cannot store the certificate request: {e}"))?;
-    // What the operator matches in the enrolment queue (ADR-0027 clause 10): the same SHA-256 the
+    // What the operator matches in the enrolment queue (ADR-0027 §10): the same SHA-256 the
     // Server lists as the request's key fingerprint.
     {
         use sha2::{Digest, Sha256};

@@ -1,7 +1,7 @@
-//! When a certificate counts as ending (ADR-0036 clause 21): one rule, plain date arithmetic on
+//! When a certificate counts as ending (ADR-0036 §21): one rule, plain date arithmetic on
 //! Unix seconds, so the operator tool's `pki status`, the Server's `pki status` and the running
 //! Server judge alike. [`read`] reads a certificate's end and puts it in the line `pki status`
-//! prints (ADR-0036 clause 6).
+//! prints (ADR-0036 §6).
 
 pub mod read;
 
@@ -35,7 +35,7 @@ pub fn standing(not_before: i64, not_after: i64, now: i64) -> Standing {
     }
 }
 
-/// The exit code of a `pki status` command (ADR-0036 clause 22): `0` when nothing is ending, `1`
+/// The exit code of a `pki status` command (ADR-0036 §22): `0` when nothing is ending, `1`
 /// when something is, `2` when something has ended.
 #[must_use]
 pub fn exit_code(standings: impl IntoIterator<Item = Standing>) -> i32 {

@@ -31,7 +31,7 @@ configurations and packages released to an Agent it speaks for
 (ADR-0033),
 on the Server and from
 a Gateway's package cache alike. The boundary is worth
-stating precisely because the host binding (ADR-0027 clause 11) runs close to it — *which Agent is
+stating precisely because the host binding (ADR-0027 §11) runs close to it — *which Agent is
 speaking*, and so *what its host may receive from the Server*, is authentication and belongs here;
 *what that Agent is allowed to do* beyond that is authorization and does not.
 
@@ -108,15 +108,15 @@ has:
 - **A CSR's claim to an `instance_uid` is checked** (ADR-0026): a CSR naming any
   `instance_uid` but its sender's is answered `BadRequest` before it is signed or queued — the
   Baseline's conditional MUST.
-- **A certificate names its host, and a host speaks only for its own Agents** (ADR-0027 clause 11,
-  ADR-0026 clause 12, and ADR-0016 clause 18): the Server puts a host of its own in every
+- **A certificate names its host, and a host speaks only for its own Agents** (ADR-0027 §11,
+  ADR-0026 §12, and ADR-0016 §18): the Server puts a host of its own in every
   certificate it signs; an
   `instance_uid` first reported with one host's certificate is not spoken for by another's — such a
   reporter is re-keyed — and a host holds at most three valid certificates. A renewal proves the
   certificate it renews with that certificate's key, so it keeps its host and chain through a
   Gateway too. An operator marks a Gateway, whose certificate then speaks for any Agent.
-- **Key material and configuration readable by their owner alone** (ADR-0026 clause 7, ADR-0021
-  clause 25): on Unix the private key, the stored connection settings and `supervisor.toml` are
+- **Key material and configuration readable by their owner alone** (ADR-0026 §7, ADR-0021 §25):
+  on Unix the private key, the stored connection settings and `supervisor.toml` are
   written `0600` in `0700` directories, a state directory `0710` that the process account's group
   only passes through where one is registered (ADR-0022). On Windows a system-scope install gives
   the default data
@@ -149,7 +149,7 @@ has:
   without a process account runs every Managed Process as the Client; all Managed Processes share
   the one account, so they read one another's `config/`.
 - **A Managed Process cannot take the second service's place by its socket or pipe, nor, on
-  Linux and Windows, reach into it once it has closed itself** (ADR-0022 clause 19):
+  Linux and Windows, reach into it once it has closed itself** (ADR-0022 §19):
   before the Client writes anything
   on a new connection it reads the process at the other end — `SO_PEERPIDFD` on Linux,
   `LOCAL_PEERPID` on macOS, `GetNamedPipeServerProcessId` on Windows — and accepts it only where
@@ -181,7 +181,7 @@ has:
   away; where the service manager cannot be asked — no system bus, a `launchctl print` that fails —
   no Managed Process starts until it answers again.
 - **An install acts only on directories an administrator named or its roots hold** (ADR-0021,
-  ADR-0022 clause 1): `supervisor.toml` belongs to the service's account, and `service install`
+  ADR-0022 §1): `supervisor.toml` belongs to the service's account, and `service install`
   and `service config` run as root or an Administrator. The state directory comes from
   `--state-dir`, else from the registration an earlier install wrote, and only then from the file,
   and from that only beneath the data root or the layout root. Beneath a root it is reached with no
@@ -190,7 +190,7 @@ has:
   hand-over and the cut act on a link or junction itself on every platform.
 - **A delivered Supervisor block reaches no further than the package signature** (ADR-0019): no
   environment or arguments beyond what the running block has or the operator allowed, and no file
-  outside its own `config/` directory. Under ADR-0019 clause 35's rule — no variable that steers
+  outside its own `config/` directory. Under ADR-0019 §35's rule — no variable that steers
   which code a program loads, no value pointing where the Server delivers unsigned files — the
   Client refuses the names and placeholders the clause lists, and further loader variables
   (`PATHEXT`, `COMSPEC`, `NODE_PATH`, `PYTHONHOME`, `PERLLIB`, `PERL5DB`, `RUBYLIB`) and new values
@@ -221,7 +221,7 @@ has:
   A test holds the modules these steps run in to no path-based read, write, removal, rename or mode
   change outside a justified list (`privileged_steps_follow_no_link.rs`).
 - **A privileged enrolment connects where its own run answered**
-  ([ADR-0022](adr/0022-the-accounts-the-service-runs-under.md) clause 28):
+  ([ADR-0022 §28](adr/0022-the-accounts-the-service-runs-under.md)):
   a run that answered the questionnaire or `--endpoint` enrols with the endpoint and the CA
   certificates it answered, held in memory, and does not read them back from `supervisor.toml`,
   which the service's account can rewrite meanwhile. An answer without a CA leaves the built-in
@@ -233,7 +233,7 @@ has:
   at its name, wherever it lies, as a default the questionnaire offers from the file is. A kept
   `ca_file` that is a link, such as an entry of `/etc/ssl/certs`, is refused there; the file
   names the path the link leads to instead.
-- **No credential in `server.toml` authenticates on its own** (ADR-0026 clause 21): an operator's
+- **No credential in `server.toml` authenticates on its own** (ADR-0026 §21): an operator's
   Basic password is kept as an Argon2id hash of at least the OWASP minimum, and a value in clear is
   refused at startup without being echoed. The Server offers no credential (ADR-0013).
 - **An audit record of every security decision** (ADR-0028): admissions and refusals, enrolment,
@@ -241,10 +241,10 @@ has:
   admission without its record, refusals aggregated per peer before they are queued and kept to
   half the queue so they cannot crowd out any other record, and no `Authorization` value in any
   line, not even as a hash.
-- **Certificates live 30 days by default** (ADR-0026 clause 8) and are renewed at two thirds of
+- **Certificates live 30 days by default** (ADR-0026 §8) and are renewed at two thirds of
   that; a test with lives of seconds watches three generations each replace the one before it
   expires (`certificate_renewal_e2e.rs`). A soak on real hosts before a rollout is the operator's.
-- **An offered move to another TLS endpoint needs the Client's own CA file** (ADR-0013 clause 5),
+- **An offered move to another TLS endpoint needs the Client's own CA file** (ADR-0013 §5),
   so a Server cannot move the fleet to a host only a public CA vouches for.
 - **The Supervisor Endpoint admits only the process its Supervisor started** (ADR-0016): a token
   made at every start, handed to the process in its environment, asked of every connection.
@@ -270,7 +270,7 @@ has:
   withhold a floor, so it takes effect on a host only once one that serves it has been reached.
 - `TLSConnectionSettings`, `ProxyConnectionSettings` and offered `headers` refused on merit, so a
   Server cannot command a Client to weaken its own verification or plant a header on every
-  connection of the fleet (ADR-0013 clause 8,
+  connection of the fleet (ADR-0013 §8,
   [`CONFORMANCE.md`](CONFORMANCE.md#mutual-tls-and-the-two-fields-still-refused)).
 
 ### Where each bound applies today
@@ -279,9 +279,9 @@ The list above is per mechanism; this is the same state per **surface**, since a
 one listener and not on its neighbour is the failure mode worth seeing at a glance. ✅ in force,
 ⚠️ partial, ❌ absent.
 
-- **Every listener below that serves OpAMP or the REST API** (`opamp::server::listen`, ADR-0012
-  clause 18): ✅ a body or WebSocket message that has begun delivers 64 KiB in every 60 s or is cut
-  off — `408`, or a `1008` close — while nothing has a deadline and an idle connection is left
+- **Every listener below that serves OpAMP or the REST API** (`opamp::server::listen`,
+  ADR-0012 §18): ✅ a body or WebSocket message that has begun delivers 64 KiB in every 60 s or is
+  cut off — `408`, or a `1008` close — while nothing has a deadline and an idle connection is left
   alone.
 - **Agent plane** — `127.0.0.1:4320` until an operator publishes it (ADR-0012).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1) · ✅ message size, in both directions ·

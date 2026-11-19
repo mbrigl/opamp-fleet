@@ -44,10 +44,10 @@ impl AppState {
     /// Forgets everything this Server knows about one Agent (ADR-0029): the record is dropped and
     /// the row leaves the fleet view. Nothing reaches the host — no process is stopped and no
     /// certificate revoked, since a certificate here proves fleet membership and its host, never
-    /// which Agent is speaking (ADR-0027 clause 11). A Client still running therefore reappears on its next
+    /// which Agent is speaking (ADR-0027 §11). A Client still running therefore reappears on its next
     /// report, which this Server answers with `ReportFullState` as it does for any unknown Agent.
     /// The `instance_uid` is released from the Host it was bound to, so that report binds it to
-    /// the host whose certificate carries it (ADR-0029 clause 10).
+    /// the host whose certificate carries it (ADR-0029 §10).
     ///
     /// Refused while the Agent is still reporting: the record holds the hashes that gate
     /// re-offering, so forgetting a live Agent has it offered its configuration again — and the
@@ -72,9 +72,9 @@ impl AppState {
         }
         // Forgetting that left a stored record behind would be the "remembering under another
         // name" ADR-0029 rejected: the record leaves the store with the row, its labels with it
-        // (ADR-0029 clause 21). On a shared store the instance that carries the Agent may be
+        // (ADR-0029 §21). On a shared store the instance that carries the Agent may be
         // another, so what decides is the presence stored, read and removed in one step
-        // (ADR-0029 clause 11).
+        // (ADR-0029 §11).
         // On a shared store the record's removal answers what its stored assignment named, read
         // under the row's lock in the same step, so the revisions only it pinned are collected
         // whatever another instance released meanwhile.
@@ -106,14 +106,14 @@ impl AppState {
         let removed = fleet.remove(uid);
         self.kept.forget(uid);
         // Its `instance_uid` leaves the Host it was bound to: whichever host reports it next binds
-        // it (ADR-0029 clause 10).
+        // it (ADR-0029 §10).
         if let Some(revocations) = &self.revocations {
             if let Err(e) = revocations.release(uid.as_bytes()) {
                 warn!(agent = %uid, error = %e, "cannot write the released host binding");
             }
         }
         if let Some(record) = removed {
-            // A session that still carries it ends (ADR-0029 clause 10).
+            // A session that still carries it ends (ADR-0029 §10).
             self.end_session(uid, &record);
             // A Client Agent forgotten takes its labels from the Agents that inherited them.
             self.unplace(
@@ -158,23 +158,22 @@ impl AppState {
     /// Writes one record when its durable content changed since it was last written, and says
     /// whether the write failed — for an operator's act that must not be answered unwritten — or
     /// found no record to write, as of an Agent forgotten through another instance. The record was
-    /// created or read before (ADR-0029 clause 14), so only what a report decides is written of
+    /// created or read before (ADR-0029 §14), so only what a report decides is written of
     /// it, and nothing creates it again.
     ///
     /// `persisted` is what the record held when the report let the fleet lock go, and it is
     /// written after: no other report waits for the write. Two writes of one record do not race,
     /// so an older state never lands after a newer one, since the Agent's own lock, which every
     /// report of it holds from its start to its answer, is held across the write; and a report is
-    /// answered only once its record is written (ADR-0029 clause 4). What a store's write may take
-    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0039 clause 24).
+    /// answered only once its record is written (ADR-0029 §4). What a store's write may take
+    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (ADR-0039 §24).
     ///
     /// On a shared store, an Agent this instance was answered no count of takes for, its take not
     /// written or its answer lost, has its record written at every report and no digest kept: a
     /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
     /// again, may have written over it, and the next report writes it again. Once a count is
     /// answered, a report that changes nothing durable writes nothing again
-    /// (ADR-0025
-    /// clause 8).
+    /// (ADR-0025 §8).
     fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
         let digest = persisted.durable_digest();
         let counted = !self.agent_store.is_shared()
@@ -229,7 +228,7 @@ impl AppState {
     /// `last_seen` is current and whose next compressed report is accepted without a gap. On a
     /// shared store only the records of the Agents this instance heard from are written: of the
     /// others it holds what it loaded, and another instance carries them
-    /// (ADR-0029 clause 2). Of those, only the ones no other
+    /// (ADR-0029 §2). Of those, only the ones no other
     /// instance holds the connection of: an Agent heard here that moved to another instance keeps
     /// what that instance wrote of it. Whether one moved is told by the count of takes this
     /// instance was last answered, never by comparing its clock with another's.
@@ -286,7 +285,7 @@ impl AppState {
 
     /// [`process`](Self::process) for a connection that presented a certificate: the host it was
     /// issued to binds the Agents it reports for, and a CSR without a renewal proof renews it
-    /// unless its host is a Gateway's (ADR-0027 clause 11, ADR-0016).
+    /// unless its host is a Gateway's (ADR-0027 §11, ADR-0016).
     pub fn process_presented(
         &self,
         msg: AgentToServer,
@@ -357,8 +356,8 @@ impl AppState {
         let mut reply_flags = 0u64;
         let mut identification = None;
 
-        // An instance_uid belongs to the host whose certificate first reported it (ADR-0027
-        // clause 11): a certificate of another host does not speak for it, nor re-keys it. Such a
+        // An instance_uid belongs to the host whose certificate first reported it (ADR-0027 §11):
+        // a certificate of another host does not speak for it, nor re-keys it. Such a
         // reporter is re-keyed — it gets an identity of its own, never the one it claimed. The
         // binding is made only once the report is admitted below.
         let mut binding = None;
@@ -427,7 +426,7 @@ impl AppState {
             });
         }
         if moves {
-            // The stored record follows the identity in one step (ADR-0029 clause 14), before what
+            // The stored record follows the identity in one step (ADR-0029 §14), before what
             // is held does; what this report changes is written by the dirty check at this
             // exchange's end. A move that fails leaves the Agent under the identity it has, and
             // the reply assigns none, so the Agent asks again with its next report. Until what is
@@ -494,8 +493,7 @@ impl AppState {
         // comes back on a new connection of the host whose certificate its old connection
         // presented is not a duplicate of itself: the newest connection takes it, and the older
         // one's reports no longer take it back
-        // (ADR-0025
-        // clause 8).
+        // (ADR-0025 §8).
         let arrived_over = self
             .revocations
             .as_ref()
@@ -677,7 +675,7 @@ impl AppState {
                     });
                 }
             }
-            // A re-key an Agent asks for keeps its host (ADR-0027 clause 11).
+            // A re-key an Agent asks for keeps its host (ADR-0027 §11).
             if let Some((old, new)) = rekeyed {
                 if let Err(e) = revocations.rebind(old.as_bytes(), new.as_bytes()) {
                     warn!(error = %e, "cannot move the host binding to the new instance_uid");
@@ -775,7 +773,7 @@ impl AppState {
             reply_flags |= ServerToAgentFlags::ReportFullState as u64;
         }
 
-        // The Host it arrived over (ADR-0029 clause 16) — none without a host register.
+        // The Host it arrived over (ADR-0029 §16) — none without a host register.
         let moved = record.host != arrived_over;
         record.host = arrived_over;
 
@@ -1132,7 +1130,7 @@ impl AppState {
             owner: conn,
             carried_ms: self.clock.now_ms(),
             heard: true,
-            // A new Agent waits (ADR-0032 clause 10): it is assigned nothing until an operator's
+            // A new Agent waits (ADR-0032 §10): it is assigned nothing until an operator's
             // rollout act says so, and the fleet view shows what it could get.
             assignment: None,
         }
@@ -1141,8 +1139,8 @@ impl AppState {
     /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
     /// at an Agent's first report here: another instance may have written it, and its labels, its
     /// assignment and its queued restart are what this report goes on from
-    /// (ADR-0025
-    /// clause 8). Read before the fleet lock is taken, so no other report waits for it. Answers
+    /// (ADR-0025 §8).
+    /// Read before the fleet lock is taken, so no other report waits for it. Answers
     /// whether it loaded one; one that cannot be read is logged, and the report goes on as an
     /// Agent's first.
     fn hold_from_store(&self, uid: &InstanceUid) -> bool {
@@ -1365,8 +1363,7 @@ pub(super) struct Ending {
     disconnected: bool,
     /// It came on an older connection of the host whose newer one carries the Agent, which its
     /// goodbye does not end and a queued restart is not sent on
-    /// (ADR-0025
-    /// clause 8).
+    /// (ADR-0025 §8).
     superseded: bool,
     identification: Option<AgentIdentification>,
     reply_flags: u64,
@@ -1424,12 +1421,12 @@ pub fn bad_request(message: &str) -> ServerToAgent {
     }
 }
 
-/// What a CSR with a bootstrap proof over a member's certificate is answered (ADR-0016 clause 25).
+/// What a CSR with a bootstrap proof over a member's certificate is answered (ADR-0016 §25).
 pub const MEMBER_DOES_NOT_ENROL: &str =
     "a certificate signing request with a bootstrap proof is an enrolment, and a member does not \
      enrol";
 
-/// What a CSR with neither proof over a Gateway's certificate is answered (ADR-0016 clause 18).
+/// What a CSR with neither proof over a Gateway's certificate is answered (ADR-0016 §18).
 pub const NEEDS_A_PROOF: &str =
     "a certificate requested through a Gateway needs a renewal proof or a bootstrap proof";
 
@@ -1439,7 +1436,7 @@ pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 /// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
 /// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
 /// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
-/// field a Client and a Gateway route a reply by (ADR-0012 clause 27).
+/// field a Client and a Gateway route a reply by (ADR-0012 §27).
 pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
     ServerToAgent {
         instance_uid: instance_uid.to_vec(),
@@ -1600,7 +1597,7 @@ mod tests {
 
     /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
     /// be written — tells the Agent when to ask again, so it retries instead of giving up or
-    /// hammering (ADR-0027 clause 9, ADR-0028 clause 5).
+    /// hammering (ADR-0027 §9, ADR-0028 §5).
     /// Verifies: ADR-0026, ADR-0028, ADR-0012
     #[test]
     fn unavailable_tells_the_agent_when_to_retry() {

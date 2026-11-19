@@ -58,7 +58,7 @@ pub struct UpdateMarker {
     /// How many times a process has started and found this marker.
     pub attempts: u32,
     /// The trace the install belongs to, and the span inside it that staged this version
-    /// (ADR-0018 clause 21) — hex, as OpenTelemetry writes them.
+    /// (ADR-0018 §21) — hex, as OpenTelemetry writes them.
     ///
     /// **Why a telemetry field is in an operational file.** The install necessarily completes in a
     /// different process than the one that started it, so the span that staged the version is gone
@@ -105,7 +105,7 @@ pub struct UpdateOutcome {
 }
 
 /// The span in which the process that came up after the restart finishes what a previous process
-/// started — a continuation of that install's trace when the marker carries one (ADR-0018 clause 21),
+/// started — a continuation of that install's trace when the marker carries one (ADR-0018 §21),
 /// and an ordinary root span when it does not.
 fn continued(marker: &UpdateMarker, span: tracing::Span) -> tracing::Span {
     if let Some(trace) = &marker.trace {
@@ -135,14 +135,14 @@ fn load_marker(state_dir: &Path) -> Option<UpdateMarker> {
 fn store_marker(state_dir: &Path, marker: &UpdateMarker) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(marker).expect("an UpdateMarker serializes");
     // Owner-only, as every file of the Client's in a state directory the process account's group
-    // may pass through (ADR-0022 clause 21).
+    // may pass through (ADR-0022 §21).
     crate::storage::write_private(&marker_path(state_dir), &json)
         .map_err(|e| format!("cannot write the update marker: {e}"))
 }
 
 /// The [`SelfUpdater`] on this host (ADR-0020): the state directory the marker lives in, the key
 /// that opens an encrypted archive, the marker this process commits if it is itself a freshly
-/// installed version, and the floors its own Agent type is held to (ADR-0034 clause 21).
+/// installed version, and the floors its own Agent type is held to (ADR-0034 §21).
 pub struct Installer {
     state_dir: PathBuf,
     archive_key: Option<zeroize::Zeroizing<String>>,
@@ -166,7 +166,7 @@ impl Installer {
     }
 
     /// Holds every offered version to the floor `floors` keeps for `agent_type`, this Client's own
-    /// Agent type (ADR-0034 clause 21).
+    /// Agent type (ADR-0034 §21).
     #[must_use]
     pub fn with_floors(
         mut self,
@@ -207,7 +207,7 @@ impl SelfUpdater for Installer {
 /// Installs a verified artifact as a new version of *this Client* and points `current` at it
 /// (ADR-0020).
 ///
-/// `floor` is what the floors say of this Client's own Agent type (ADR-0034 clause 21): its floor,
+/// `floor` is what the floors say of this Client's own Agent type (ADR-0034 §21): its floor,
 /// none, or why the floors cannot be read.
 ///
 /// # Errors
@@ -230,7 +230,7 @@ pub fn install(
     // sign the bytes, not the destination. The probe's own version check (ADR-0037) is too late; it
     // runs only after the artifact is already staged on disk.
     //
-    // A Package version is SemVer (ADR-0034 clause 2), which is held to the same identifier set.
+    // A Package version is SemVer (ADR-0034 §2), which is held to the same identifier set.
     if !fleet_core::version::is_semver(version) {
         return Err(format!(
             "the offered version {version:?} is not a valid version — a package version is a \
@@ -253,7 +253,7 @@ pub fn install(
         ));
     }
     // The higher of the running build and the floor the operator signed for this Client's own
-    // Agent type is its floor (ADR-0034 clause 21). The running build is held to above; an old
+    // Agent type is its floor (ADR-0034 §21). The running build is held to above; an old
     // build numbered above it is held to the signed floor here.
     if let Some(floor) = floor?.filter(|floor| {
         fleet_core::version::precedence(version, floor) == Some(std::cmp::Ordering::Less)
@@ -629,7 +629,7 @@ mod tests {
         );
     }
 
-    /// The trace the install belongs to rides in the marker (ADR-0018 clause 21) — and a marker
+    /// The trace the install belongs to rides in the marker (ADR-0018 §21) — and a marker
     /// written before that field existed still parses.
     ///
     /// The second half is the load-bearing one: an update in flight across a version bump is
@@ -994,7 +994,7 @@ mod tests {
     }
 
     /// A Server may offer a value that is not a version at all — including the `0.1.1 799e36a` a
-    /// query string makes of an unencoded `+` — and the probe refuses it (ADR-0034 clause 21).
+    /// query string makes of an unencoded `+` — and the probe refuses it (ADR-0034 §21).
     /// Verifies: ADR-0020, ADR-0034
     #[cfg(unix)]
     #[test]

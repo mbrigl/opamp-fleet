@@ -1,5 +1,5 @@
 //! What the Client and the operator tool share and the Server does not use
-//! (ADR-0008 clause 16): the unpackers of a package's artifact and
+//! (ADR-0008 §16): the unpackers of a package's artifact and
 //! the 7z Unix-mode convention (`archive`), the links a kind's tree package keeps (`tree`), the
 //! file operations that follow no link (`nofollow`), the reader of a password file (`password`), and
 //! a bootstrap identity opened from a PKCS#12 file (`identity`).

@@ -1,6 +1,6 @@
 //! A bootstrap identity opened from a bootstrap PKCS#12 file, the way the Client's install opens it
-//! (ADR-0027 clause 15). The operator tool's `pki p12-extract` opens a file with the same reader
-//! (ADR-0036 clause 24).
+//! (ADR-0027 §15). The operator tool's `pki p12-extract` opens a file with the same reader
+//! (ADR-0036 §24).
 
 use std::path::Path;
 
@@ -9,8 +9,8 @@ use zeroize::Zeroizing;
 use super::{pem_block, BootstrapIdentity};
 
 /// The identity in `bytes`, the PKCS#12 file at `path`, under `password`, as PEM in memory
-/// (ADR-0027 clause 15). The caller reads the file, through no link the service's account placed
-/// and at most [`fleet_core::pkcs12::MAX_FILE_BYTES`] of it (ADR-0022 clause 11).
+/// (ADR-0027 §15). The caller reads the file, through no link the service's account placed
+/// and at most [`fleet_core::pkcs12::MAX_FILE_BYTES`] of it (ADR-0022 §11).
 ///
 /// # Errors
 /// [`OpenError::WrongPassword`](fleet_core::pkcs12::file::OpenError) when the password does not
@@ -42,7 +42,7 @@ mod tests {
 
     /// A sealed bootstrap file opens to its certificate and key as PEM under its password; a
     /// wrong password is `WrongPassword`, and anything else is `Invalid`, naming the file
-    /// (ADR-0027 clause 15).
+    /// (ADR-0027 §15).
     /// Verifies: ADR-0027
     #[test]
     fn a_bootstrap_file_opens_under_its_password_alone() {

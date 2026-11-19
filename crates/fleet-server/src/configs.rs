@@ -31,7 +31,7 @@ pub struct Revision {
     /// Agent type, so nothing here guesses at one it does not know.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
-    /// The Agent type this Configuration is written for (ADR-0032 clauses 2 and 4), compared raw
+    /// The Agent type this Configuration is written for (ADR-0032 §2 and §4), compared raw
     /// for equality against the `service.name` the Agent reports. It fits the Configuration to the
     /// Agents of the Deployment that holds it; it never aims. Required: the store refuses a saved
     /// revision without one ([`check_type`]). It is read as empty when a stored file lacks it, so
@@ -130,7 +130,7 @@ impl DesiredConfig {
     }
 }
 
-/// Refuses a revision without an Agent type (ADR-0032 clause 2): a Configuration is written for
+/// Refuses a revision without an Agent type (ADR-0032 §2): a Configuration is written for
 /// one type, and content for several is one Configuration per type.
 ///
 /// # Errors
@@ -145,7 +145,7 @@ pub fn check_type(revision: &Revision) -> Result<(), String> {
     Ok(())
 }
 
-/// Does this revision fit this Agent (ADR-0032 clause 4)? Its `service_name` must equal the
+/// Does this revision fit this Agent (ADR-0032 §4)? Its `service_name` must equal the
 /// `service.name` the Agent reports — compared raw, no canonicalisation, because there is no
 /// canonical set of Agent types. An Agent that reports no `service.name` fits no revision, and a
 /// revision without a type fits no Agent. Whom a Configuration aims at is not asked here: the
@@ -170,7 +170,7 @@ pub fn fits(revision: &Revision, description: Option<&AgentDescription>) -> bool
     reported == Some(revision.service_name.as_str())
 }
 
-/// One revision a rollout pins (ADR-0032 clause 6): the Configuration it is of, the hash an
+/// One revision a rollout pins (ADR-0032 §6): the Configuration it is of, the hash an
 /// assignment pins it by, and the revision. A rollout adds it by its hash and touches no other
 /// revision of the Configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -180,7 +180,7 @@ pub struct Pinned {
     pub revision: Revision,
 }
 
-/// The Configuration store's port (ADR-0009, ADR-0039 clause 2): where Configurations persist so a
+/// The Configuration store's port (ADR-0009, ADR-0039 §2): where Configurations persist so a
 /// Server restart does not lose what the fleet should run. It speaks in parts: the saved revision
 /// is written on its own, a retained revision is added by its hash only by the rollout that pins
 /// it ([`AgentStore::release`](crate::agent_store::AgentStore::release)) and removed by its hash
@@ -196,7 +196,7 @@ pub trait ConfigBackend: Send + Sync {
     fn save(&self, name: &str, saved: &Revision) -> Result<(), String>;
 
     /// Removes every retained revision of `name` that `referenced` does not name and no stored
-    /// assignment pins, and answers the ones kept (ADR-0032, ADR-0039 clause 2). A database
+    /// assignment pins, and answers the ones kept (ADR-0032, ADR-0039 §2). A database
     /// adapter reckons it in one transaction from the revisions and the assignments it stores,
     /// holding the Configuration's row against every rollout that pins one of its revisions; the
     /// filesystem adapter, its only writer, from `referenced`, which the Agent store answered. A
@@ -208,7 +208,7 @@ pub trait ConfigBackend: Send + Sync {
     ) -> Result<BTreeMap<String, Revision>, String>;
 
     /// Deletes one Configuration, its retained revisions with it, unless a stored assignment pins
-    /// it (ADR-0032 clause 12). A database adapter counts the assignments in the transaction that
+    /// it (ADR-0032 §12). A database adapter counts the assignments in the transaction that
     /// deletes, holding the Configuration's row against every rollout that pins one of its
     /// revisions, so a pin written through another instance refuses it, and takes the
     /// Configuration out of every Deployment that holds it in the same transaction; the
@@ -254,8 +254,8 @@ impl ConfigStore {
 
     /// Reads every Configuration again from the backend, as another instance saved, pinned,
     /// collected or deleted one
-    /// (ADR-0025
-    /// clause 12): what is held is dropped and what is stored taken in its place. It reads under
+    /// (ADR-0025 §12):
+    /// what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap.
     ///
     /// # Errors
@@ -330,8 +330,8 @@ impl ConfigStore {
         })
     }
 
-    /// Pins the saved revision of each of `names` for a rollout (ADR-0032 clause 6, ADR-0039
-    /// clause 2): hands `write` each one's hash and every revision it pins, under the store's
+    /// Pins the saved revision of each of `names` for a rollout (ADR-0032 §6, ADR-0039 §2):
+    /// hands `write` each one's hash and every revision it pins, under the store's
     /// lock, and makes them the store's — `write` persists them together with the assignments
     /// that pin them. Each pinned revision is handed on, held already or not: another instance
     /// may have collected it from the store since this one read it. What `write` answers is
@@ -376,7 +376,7 @@ impl ConfigStore {
     /// Drops every retained revision of `name` that `referenced` does not name and no stored
     /// assignment pins — the collection half of ADR-0032's "the store retains every revision an
     /// assignment still references" — and holds what the store kept. The caller asks the Agent
-    /// store which revisions its assignments reference (ADR-0039 clause 2); a database store
+    /// store which revisions its assignments reference (ADR-0039 §2); a database store
     /// reckons the rest in its own transaction from the assignments it stores, so a revision
     /// another instance pinned is kept. A revision left behind by a failed write is harmless and
     /// collected on the next act, or when the Server next starts.
@@ -393,7 +393,7 @@ impl ConfigStore {
     }
 
     /// Deletes a Configuration — the saved revision and every retained one — unless a stored
-    /// assignment pins it (ADR-0032 clause 12), which the backend decides in the act that deletes:
+    /// assignment pins it (ADR-0032 §12), which the backend decides in the act that deletes:
     /// another instance may have pinned it since this one read it. The caller refuses it first
     /// while an assignment it holds pins it.
     ///
@@ -411,7 +411,7 @@ impl ConfigStore {
         Ok(removal)
     }
 
-    /// The candidates a Deployment holding `names` offers one Agent (ADR-0032 clause 9): each of
+    /// The candidates a Deployment holding `names` offers one Agent (ADR-0032 §9): each of
     /// those Configurations that exists and whose saved revision fits the Agent's type, as
     /// name → hash of the saved revision. What a rollout act would pin, and what the fleet view
     /// diffs against the Agent's assignment to show what is waiting. Never an offer.
@@ -433,7 +433,7 @@ impl ConfigStore {
     /// Configuration's pinned revision as one entry. `None` when the Agent is assigned nothing —
     /// no offer is made and it keeps running what it already runs (goal 9). An assignment whose
     /// Configuration or revision is gone composes nothing rather than failing: a pinned
-    /// Configuration cannot be deleted (ADR-0032 clause 12), so the case is a race, not a state.
+    /// Configuration cannot be deleted (ADR-0032 §12), so the case is a race, not a state.
     pub fn compose(&self, assignments: &BTreeMap<String, String>) -> Option<DesiredConfig> {
         let configs = self.configs.read().expect("configs lock");
         let entries: Vec<ConfigEntry> = assignments
@@ -612,7 +612,7 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// ADR-0032 clause 4: a revision fits only the Agents of its type. One without a type, which
+    /// ADR-0032 §4: a revision fits only the Agents of its type. One without a type, which
     /// the store never holds, fits no Agent at all.
     /// Verifies: ADR-0032
     #[test]
@@ -634,7 +634,7 @@ pub(crate) mod tests {
         assert!(!fits(&untyped, None));
     }
 
-    /// ADR-0032 clause 4: equality against a missing attribute fails, so an Agent that reports no
+    /// ADR-0032 §4: equality against a missing attribute fails, so an Agent that reports no
     /// `service.name` receives no Configuration.
     /// Verifies: ADR-0032
     #[test]
@@ -647,7 +647,7 @@ pub(crate) mod tests {
         assert!(!fits(&typed(revision("b"), ""), Some(&untyped_agent)));
     }
 
-    /// ADR-0032 clause 2: the store refuses a revision without an Agent type, naming
+    /// ADR-0032 §2: the store refuses a revision without an Agent type, naming
     /// `service_name`, and keeps nothing of it.
     /// Verifies: ADR-0032
     #[test]
@@ -699,7 +699,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// ADR-0032 clause 6: a rollout pins a snapshot. Editing the saved revision afterwards changes
+    /// ADR-0032 §6: a rollout pins a snapshot. Editing the saved revision afterwards changes
     /// nothing for an Agent assigned the pinned one, and the candidate hash moves so the fleet
     /// view can show a newer save waiting.
     // Verifies: ADR-0032
@@ -911,7 +911,7 @@ pub(crate) mod tests {
 
     /// The JSON contract of ADR-0031, on the stored revision: an unset role is absent on the way
     /// in and absent on the way out, so every stored file stays minimal; the type, which every
-    /// saved revision has (ADR-0032 clause 2), is always written.
+    /// saved revision has (ADR-0032 §2), is always written.
     #[test]
     fn an_unset_role_is_absent_from_the_stored_json() {
         let json = serde_json::to_string(&revision("b")).expect("serialize");
@@ -931,7 +931,7 @@ pub(crate) mod tests {
     }
 
     /// The candidates are the held Configurations that exist and fit the Agent's type, each at
-    /// its saved revision (ADR-0032 clauses 4 and 9). A name the store does not hold proposes
+    /// its saved revision (ADR-0032 §4 and §9). A name the store does not hold proposes
     /// nothing, and an Agent that reports no type is proposed nothing.
     /// Verifies: ADR-0032
     #[test]

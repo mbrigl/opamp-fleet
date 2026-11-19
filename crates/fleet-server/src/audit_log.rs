@@ -7,8 +7,8 @@
 //! A decision is recorded through [`AuditLog::record`], which never waits on the disk: the entry goes
 //! through a bounded channel to the writer task. When the channel is full, or the last write failed,
 //! the call answers [`Unavailable`], and the caller refuses what it was about to allow — a security
-//! decision is never taken without its record (ADR-0028 clause 5). Refusals are aggregated per
-//! event and peer past ten a second, never dropped (ADR-0028 clause 4), and counted before they
+//! decision is never taken without its record (ADR-0028 §5). Refusals are aggregated per
+//! event and peer past ten a second, never dropped (ADR-0028 §4), and counted before they
 //! reach the channel, where they may take no more than [`REFUSAL_SHARE`] of it: a flood of refusals
 //! from however many peers cannot leave an admission or an operator act without room for its
 //! record. The store behind the writer is a port; the filesystem adapter is
@@ -36,7 +36,7 @@ use crate::audit::{Audit, Entry, Field, Permit, Unavailable};
 use crate::fleet::Clock;
 
 /// The entries waiting for the writer at most, the places held for entries counted among them
-/// (ADR-0028 clause 5).
+/// (ADR-0028 §5).
 pub const CHANNEL_CAPACITY: usize = 10_000;
 
 /// The room the channel keeps beyond [`CHANNEL_CAPACITY`] for the writer's requests, a drain or
@@ -144,7 +144,7 @@ pub trait AuditStore: Send {
 
     /// The `checkpoint_seq` and hash of the last checkpoint the file `file`, which the last
     /// [`rotate`](Self::rotate) deleted, held or named as removed, if any
-    /// (ADR-0028 clause 10).
+    /// (ADR-0028 §10).
     fn removed_checkpoint(&mut self, file: &str) -> Option<(u64, String)> {
         let _ = file;
         None
@@ -154,7 +154,7 @@ pub trait AuditStore: Send {
     /// is `checkpoint_prev`, alone, as [`append`](Self::append) does. A store several processes
     /// write holds at most one checkpoint per `checkpoint_seq` and takes one only while
     /// `checkpoint_prev` names its newest
-    /// (ADR-0028 clause 11).
+    /// (ADR-0028 §11).
     ///
     /// # Errors
     /// Returns an error when the line cannot be written, or another checkpoint came first; then
@@ -201,8 +201,7 @@ enum Message {
 
 /// The lease a decision was taken under, as its entry names it where the store keeps one chain
 /// per lease
-/// (ADR-0028
-/// clause 7).
+/// (ADR-0028 §7).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Under {
     /// No lease to name: the store keeps one chain, or the writer adds the entry of its own.
@@ -370,8 +369,7 @@ impl AuditLog {
 
     /// [`start`](Self::start), or with `held` [`start_under`](Self::start_under), and every line
     /// the store accepts handed to `export` as well
-    /// (ADR-0028
-    /// clause 15).
+    /// (ADR-0028 §15).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read.
@@ -387,7 +385,7 @@ impl AuditLog {
 
     /// [`start_exporting`](Self::start_exporting), and, with `signing`, a checkpoint of the heads
     /// of every chain signed at every interval and at the shutdown's close
-    /// (ADR-0028 clause 11).
+    /// (ADR-0028 §11).
     ///
     /// # Errors
     /// Returns an error when the store cannot be read.
@@ -491,8 +489,8 @@ impl AuditLog {
 
     /// [`drain`](Self::drain) at an orderly shutdown, and then, where the store keeps one chain
     /// per lease, the chain closed with `audit.chain_closed` and `reason` `shutdown`
-    /// (ADR-0028
-    /// clause 7). A closing write whose answer was lost counts as written when the chain holds its
+    /// (ADR-0028 §7).
+    /// A closing write whose answer was lost counts as written when the chain holds its
     /// closing entry. Once the chain is closed every decision is refused and counted
     /// ([`unrecorded_count`](Self::unrecorded_count)).
     /// From its start no place is given ([`Audit::reserve`]), and it waits within `timeout` for
@@ -758,8 +756,7 @@ pub fn render(seq: u64, time_ms: u64, entry: &Entry, prev: &str) -> String {
     Value::Object(line).to_string()
 }
 
-/// Emits a line written to the record as the `tracing` event every entry is also (ADR-0028
-/// clause 6).
+/// Emits a line written to the record as the `tracing` event every entry is also (ADR-0028 §6).
 pub(crate) fn emit(seq: u64, event: &str, outcome: &str, text: &str) {
     info!(target: "audit", seq, event = %event, outcome = %outcome, "{}", text);
 }
@@ -1029,8 +1026,7 @@ impl Writer {
                         let mut entry = Entry::new("audit.rotated", "recorded")
                             .with("deleted_last_hash", line_hash(&last));
                         // The last checkpoint the file held, which a verifier goes on from
-                        // (ADR-0028
-                        // clause 10).
+                        // (ADR-0028 §10).
                         if let Some((seq, hash)) = self.store.removed_checkpoint(&file) {
                             entry = entry
                                 .with("checkpoint_seq", seq)
@@ -1210,7 +1206,7 @@ impl Writer {
 }
 
 /// The checkpoints' signing
-/// (ADR-0028 clause 11): the
+/// (ADR-0028 §11): the
 /// audit key, where the heads come from, and how often.
 pub struct Signing {
     pub signer: Arc<dyn crate::checkpoint::CheckpointSigner>,
@@ -1574,7 +1570,7 @@ impl Held {
 }
 
 /// Walks lines in order and names the first whose `prev` does not match the line before it
-/// (ADR-0028 clause 3); [`Held`] when the whole chain holds. Lines that are not entries hold when
+/// (ADR-0028 §3); [`Held`] when the whole chain holds. Lines that are not entries hold when
 /// the file store repaired them: the torn pieces crashes left, the repair's own among them,
 /// followed by one `audit.chain_broken` chained on the last of them and naming as `last_whole` the
 /// hash of the entry before the first. Torn lines nothing follows do not hold. A repair of one
@@ -1686,12 +1682,12 @@ pub struct Walked {
     pub closed: bool,
     /// The `seq` and the hash of the archive's last entry, where its `audit.chain_opened` names
     /// them as its predecessor
-    /// (ADR-0028 clause 9).
+    /// (ADR-0028 §9).
     pub predecessor: Option<(u64, String)>,
 }
 
 /// Walks one chain of a lease in `seq` order
-/// (ADR-0028 clauses 7 and 8):
+/// (ADR-0028 §7 and §8):
 /// it starts with `audit.chain_opened` and 64 zeros as `prev`, or, once pruned, after an entry an
 /// `audit.pruned` names as the last it removed; every entry names the chain, carries the `seq`
 /// after the one before and the hash of the one before as its `prev`, and nothing follows an

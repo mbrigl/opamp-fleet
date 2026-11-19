@@ -50,7 +50,7 @@ pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::ReportsOwnLogs as u64;
 
 /// What a Supervisor's Agent declares when the operator switched its remote configuration off
-/// (ADR-0019 clause 47): the base set without either remote-configuration bit.
+/// (ADR-0019 §47): the base set without either remote-configuration bit.
 pub const AGENT_CAPABILITIES_WITHOUT_REMOTE_CONFIG: u64 = AGENT_CAPABILITIES
     & !(AgentCapabilities::AcceptsRemoteConfig as u64
         | AgentCapabilities::ReportsRemoteConfig as u64);
@@ -78,8 +78,8 @@ pub struct Handled {
 ///
 /// It is also the shipped program's name and its configuration file's (ADR-0021) — see
 /// [`layout::COMPONENT`](crate::service::layout::COMPONENT), which holds the same string as a
-/// **separate** constant. It is *not* the service's name: ADR-0022 clause 17 gives the service the
-/// product's name, and ADR-0022 clause 6 keeps this one off
+/// **separate** constant. It is *not* the service's name: ADR-0022 §17 gives the service the
+/// product's name, and ADR-0022 §6 keeps this one off
 /// [`PRODUCT_NAME`](crate::product::PRODUCT_NAME) deliberately — the archive member a self-update
 /// extracts is the same in every variant build, which is what lets one published package Set
 /// serve them all. Derive this from the product and the fleet carries N products where it has one.
@@ -111,7 +111,7 @@ pub struct AgentState {
 }
 
 /// How many ignored remote configuration hashes a Supervisor with remote configuration switched
-/// off remembers before it starts over (ADR-0019 clause 48).
+/// off remembers before it starts over (ADR-0019 §48).
 const IGNORED_CONFIGS_CAP: usize = 1024;
 
 /// A Server-sent hash as a log field: hex, cut after its first 32 bytes, since its length is the
@@ -187,7 +187,7 @@ struct Local {
     /// installing or after a failure).
     server_offered: Option<(String, Vec<u8>)>,
     /// The last install failure for this Agent's package, reported alongside the status — or,
-    /// while it is `Installing`, why it waits for the second service (ADR-0022 clause 17).
+    /// while it is `Installing`, why it waits for the second service (ADR-0022 §17).
     package_error: String,
     /// A failure in processing the *offer itself* rather than one package — the Baseline's
     /// `PackageStatuses.error_message`, "set if the Agent encountered an error when processing the
@@ -202,15 +202,15 @@ struct Local {
     namespace: Option<String>,
     /// Handling an offer changed the package status; the protocol is told once it is done.
     package_status_owed: bool,
-    /// The high-water marks every Supervisor of this Client shares (ADR-0034 clause 8): an offer
+    /// The high-water marks every Supervisor of this Client shares (ADR-0034 §8): an offer
     /// below its Agent type's mark is refused, and an `Installed` raises it. `None` for the
-    /// Client's own Agent, which keeps no mark (ADR-0034 clause 21).
+    /// Client's own Agent, which keeps no mark (ADR-0034 §21).
     high_water: Option<std::sync::Arc<dyn HighWaterMarks>>,
-    /// The floor of each Agent type this Client keeps (ADR-0034 clause 17): a Supervisor refuses
+    /// The floor of each Agent type this Client keeps (ADR-0034 §17): a Supervisor refuses
     /// an offer below its type's floor, and its health says when what it runs lies below it.
-    /// The Client's own Agent is held to its floor by the self-update (ADR-0034 clause 21).
+    /// The Client's own Agent is held to its floor by the self-update (ADR-0034 §21).
     floors: Option<std::sync::Arc<dyn PackageFloors>>,
-    /// What the health last said about the floor (ADR-0034 clause 19): empty while the installed
+    /// What the health last said about the floor (ADR-0034 §19): empty while the installed
     /// version is at or above it.
     below_floor: String,
 }
@@ -387,7 +387,7 @@ impl AgentState {
         self.name_the_wait();
     }
 
-    /// What waits for the second service says so (ADR-0022 clause 17): while the Supervisor's
+    /// What waits for the second service says so (ADR-0022 §17): while the Supervisor's
     /// health says that the service is not reached, a configuration that is `APPLYING` and a
     /// package that is `Installing` name that as the reason, and nothing once it is reached.
     fn name_the_wait(&mut self) {
@@ -439,7 +439,7 @@ impl AgentState {
     }
 
     /// Says in the health whether what this Supervisor runs lies below its type's floor
-    /// (ADR-0034 clause 19) — asked before every report, since a fetch raises a floor without
+    /// (ADR-0034 §19) — asked before every report, since a fetch raises a floor without
     /// telling the Agent.
     fn note_floor(&mut self) {
         let note = self.local.floor_note();
@@ -449,7 +449,7 @@ impl AgentState {
         }
     }
 
-    /// A report carrying `csr` alone, as an enrolling host sends it (ADR-0016 clause 24).
+    /// A report carrying `csr` alone, as an enrolling host sends it (ADR-0016 §24).
     pub fn csr_report(&mut self, csr: Vec<u8>) -> AgentToServer {
         self.protocol.csr_report(csr)
     }
@@ -494,7 +494,7 @@ impl AgentState {
 
         if let Some(remote_config) = received.remote_config {
             if let Some(ignored) = &mut self.ignored_configs {
-                // Not declared, so not acted on and not reported (ADR-0019 clauses 3 and 48); said once per hash, so a Server resending its offer on every exchange
+                // Not declared, so not acted on and not reported (ADR-0019 §3 and §48); said once per hash, so a Server resending its offer on every exchange
                 // does not flood the log.
                 use sha2::Digest as _;
                 let seen: [u8; 32] = sha2::Sha256::digest(&remote_config.config_hash).into();
@@ -512,7 +512,7 @@ impl AgentState {
                              off for this supervisor in [supervisors] remote_config_disabled"
                         );
                     } else {
-                        // The Client's own Agent, offered a Supervisor set (ADR-0019 clause 40).
+                        // The Client's own Agent, offered a Supervisor set (ADR-0019 §40).
                         warn!(
                             hash = %logged_hash(&remote_config.config_hash),
                             "ignoring a supervisor set: this Client keeps its supervisor set \
@@ -521,8 +521,7 @@ impl AgentState {
                     }
                 }
             } else {
-                // A repeat of the hash applying or applied is only reported (clause 56 of
-                // ADR-0019).
+                // A repeat of the hash applying or applied is only reported (ADR-0019 §56).
                 if !self.report_a_repeated_offer(&remote_config.config_hash) {
                     self.apply(remote_config);
                 }
@@ -639,7 +638,7 @@ impl ReportContent for Local {
 }
 
 impl Local {
-    /// The process's health, with what the floor says about it (ADR-0034 clause 19) in its
+    /// The process's health, with what the floor says about it (ADR-0034 §19) in its
     /// `last_error`, which the fleet view shows.
     fn health(&self) -> ComponentHealth {
         let mut health = self.process_health();
@@ -684,7 +683,7 @@ mod tests {
     use opamp::proto::{ServerErrorResponseType, ServerToAgentFlags};
     use std::collections::HashMap;
 
-    /// ADR-0013 clause 4: an offer that names a telemetry destination is actionable, whether or not
+    /// ADR-0013 §4: an offer that names a telemetry destination is actionable, whether or not
     /// it carries OpAMP settings — and one that carries nothing this Client applies is not.
     /// Verifies: ADR-0013
     #[test]
@@ -1749,7 +1748,7 @@ mod tests {
         );
     }
 
-    /// ADR-0032 clause 18: for the package that carries this Client, *already installed* is what
+    /// ADR-0032 §18: for the package that carries this Client, *already installed* is what
     /// this process runs — never a hash in a record. The same bytes can be published under a new
     /// version, and a record about a binary that is gone must not swallow the offer that would
     /// replace it: the Server offers because the Agent reports running something older, and a
@@ -2130,7 +2129,7 @@ mod tests {
     }
 
     /// A Supervisor with no installed record and no mark refuses an offer at `1.19`: nothing is
-    /// downloaded, and the reason names the version (ADR-0034 clause 7).
+    /// downloaded, and the reason names the version (ADR-0034 §7).
     /// Verifies: ADR-0034
     #[test]
     fn a_supervisor_refuses_an_offer_whose_version_is_not_semver() {
@@ -2154,7 +2153,7 @@ mod tests {
 
     /// The mark rises on `Installed` and on nothing else: a failed apply, which rolled back to the
     /// predecessor, leaves it and the version reported where they were; an `Installed` raises it
-    /// and writes the file owner-only (ADR-0034 clause 8).
+    /// and writes the file owner-only (ADR-0034 §8).
     /// Verifies: ADR-0034
     #[test]
     fn the_mark_rises_only_when_a_package_is_installed() {
@@ -2194,7 +2193,7 @@ mod tests {
     /// A Supervisor reports the version of the Package it installed as its own attribute, on the
     /// next report after the install, and keeps it across a rollback, which leaves the predecessor
     /// running; it reports none before its first install. The Client Agent reports none, and a
-    /// Managed Process cannot state it (ADR-0032 clause 25).
+    /// Managed Process cannot state it (ADR-0032 §25).
     /// Verifies: ADR-0032
     #[test]
     fn a_supervisor_reports_the_version_of_the_package_it_installed() {
@@ -2254,7 +2253,7 @@ mod tests {
     }
 
     /// An installed record an older Client wrote under `1.19` is dropped at load: the Agent
-    /// reports no `agent_has_version`, and nothing enters the mark (ADR-0034 clause 10).
+    /// reports no `agent_has_version`, and nothing enters the mark (ADR-0034 §10).
     /// Verifies: ADR-0034
     #[test]
     fn an_installed_record_whose_version_is_not_semver_is_dropped_at_load() {
@@ -2295,7 +2294,7 @@ mod tests {
         }
     }
 
-    /// ADR-0013 clause 14: once the Server has declared its capabilities, package status stops
+    /// ADR-0013 §14: once the Server has declared its capabilities, package status stops
     /// going to one that cannot take it. The Baseline makes this a MUST in both directions.
     /// Verifies: ADR-0013
     #[test]
@@ -2331,7 +2330,7 @@ mod tests {
         assert!(agent.next_report().package_statuses.is_some());
     }
 
-    /// And the optimistic half (ADR-0013 clause 12): before the Server has said anything there is nothing to
+    /// And the optimistic half (ADR-0013 §12): before the Server has said anything there is nothing to
     /// obey, so the first report — which necessarily precedes any declaration — carries everything.
     /// Verifies: ADR-0013
     #[test]
@@ -2349,7 +2348,7 @@ mod tests {
         assert!(agent.next_report().package_statuses.is_some());
     }
 
-    /// ADR-0013 clause 13, and the reason the naive gate is wrong: a Server may send an offer
+    /// ADR-0013 §13, and the reason the naive gate is wrong: a Server may send an offer
     /// *without* declaring `OffersConnectionSettings` — this project's own does exactly that for a
     /// `[telemetry_offer]`-only or `[client_ca]`-only configuration. Withholding the acknowledgement
     /// would leave its hash gate open and have it re-offer for ever, so the offer arms the report.
@@ -2383,7 +2382,7 @@ mod tests {
         assert_eq!(status.last_connection_settings_hash, b"offer-1");
     }
 
-    /// The other side of ADR-0013 clause 12, and the only shape where the gate is actually observable: a
+    /// The other side of ADR-0013 §12, and the only shape where the gate is actually observable: a
     /// **restarted** Client holds a status from its persisted settings (ADR-0013) without any offer
     /// having arrived in this process. Sent to a Server that declares only the mandatory bit, that
     /// status exercises a capability the Server never claimed — so it is withheld until the Server
@@ -2414,7 +2413,7 @@ mod tests {
         assert!(agent.next_report().connection_settings_status.is_some());
     }
 
-    /// ADR-0013 clause 16, written as an assertion so the deliberate non-gate cannot be silently
+    /// ADR-0013 §16, written as an assertion so the deliberate non-gate cannot be silently
     /// reversed by someone applying the MUST field by field. `OffersRemoteConfig` says the Server
     /// *can offer* configuration; what licenses this inbound status is `AcceptsStatus`, and gating
     /// it would silence the hash the Server's re-offer decision depends on.
@@ -3180,7 +3179,7 @@ mod tests {
     }
 
     /// A listed Supervisor's Agent is built without either remote-configuration bit, and keeps
-    /// every other capability a Supervisor declares (ADR-0019 clause 47).
+    /// every other capability a Supervisor declares (ADR-0019 §47).
     /// Verifies: ADR-0019
     #[test]
     fn a_supervisor_with_remote_config_disabled_declares_neither_remote_config_capability() {
@@ -3205,7 +3204,7 @@ mod tests {
     }
 
     /// An offer that arrives anyway is ignored: nothing stored, no entry file, nothing pending for
-    /// the process adapter, and no status reported (ADR-0019 clause 48).
+    /// the process adapter, and no status reported (ADR-0019 §48).
     /// Verifies: ADR-0019
     #[test]
     fn a_remote_config_offered_anyway_is_neither_stored_nor_applied_nor_reported() {
@@ -3235,7 +3234,7 @@ mod tests {
         assert!(agent.next_report().remote_config_status.is_none());
     }
 
-    /// The warning about an ignored offer is said once per hash seen since start (ADR-0019 clause 30), so a Server resending the same offer does not flood the log.
+    /// The warning about an ignored offer is said once per hash seen since start (ADR-0019 §30), so a Server resending the same offer does not flood the log.
     /// Verifies: ADR-0019
     #[test]
     fn an_ignored_remote_config_is_logged_once_per_hash() {
@@ -3261,7 +3260,7 @@ mod tests {
 
     /// What an ignored offer leaves behind is bounded whatever the Server sends: at most
     /// `IGNORED_CONFIGS_CAP` remembered digests however many distinct hashes arrive, and a long
-    /// hash cut short in the log (ADR-0019 clause 48).
+    /// hash cut short in the log (ADR-0019 §48).
     /// Verifies: ADR-0019
     #[test]
     fn what_ignored_remote_configs_leave_behind_is_bounded() {
@@ -3299,7 +3298,7 @@ mod tests {
 
     /// The Client's own Agent on a host that keeps its set is built without either
     /// remote-configuration bit and keeps everything else it declares, self-update included
-    /// (ADR-0019 clause 39).
+    /// (ADR-0019 §39).
     /// Verifies: ADR-0019
     #[test]
     fn the_own_agent_of_a_host_that_keeps_its_set_declares_neither_remote_config_capability() {
@@ -3328,7 +3327,7 @@ mod tests {
     }
 
     /// A set offered anyway is not stored, not handed to the Supervisor-set apply, and not
-    /// answered (ADR-0019 clause 40).
+    /// answered (ADR-0019 §40).
     /// Verifies: ADR-0019
     #[test]
     fn a_set_offered_anyway_to_a_host_that_keeps_it_is_neither_stored_nor_applied_nor_reported() {
@@ -3361,7 +3360,7 @@ mod tests {
     }
 
     /// The warning about an ignored set is said once per hash and names the key that keeps the
-    /// set on the host (ADR-0019 clause 40).
+    /// set on the host (ADR-0019 §40).
     /// Verifies: ADR-0019
     #[test]
     fn a_set_ignored_by_a_host_that_keeps_it_is_logged_once_per_hash() {

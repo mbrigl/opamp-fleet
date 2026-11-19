@@ -38,7 +38,7 @@ fn read(dir: &Path, name: &str) -> Result<Option<Configuration>, String> {
 }
 
 /// Adds one retained revision to the Configuration's file in `dir`, in one step — the write this
-/// store and a rollout's revisions (ADR-0039 clause 2) share. The file is this Server's alone, so
+/// store and a rollout's revisions (ADR-0039 §2) share. The file is this Server's alone, so
 /// what it reads is what it wrote.
 pub(crate) fn retain(dir: &Path, pinned: &Pinned) -> Result<(), String> {
     let mut config = read(dir, &pinned.configuration)?
@@ -75,7 +75,7 @@ fn parse(stem: &str, path: &Path, text: &str) -> Result<Configuration, String> {
     if config.name != stem {
         return Err(super::misnamed(path, "name"));
     }
-    // A Configuration is written for one Agent type (ADR-0032 clause 2); one without it
+    // A Configuration is written for one Agent type (ADR-0032 §2); one without it
     // would reach no Agent, so the operator saves it again with a type.
     crate::configs::check_type(&config.saved).map_err(|e| {
         format!(
@@ -243,7 +243,7 @@ mod tests {
     }
 
     /// A stored Configuration without an Agent type fails the start, naming its file
-    /// (ADR-0032 clause 2).
+    /// (ADR-0032 §2).
     /// Verifies: ADR-0032
     #[test]
     fn a_stored_configuration_without_a_type_refuses_to_open_and_names_it() {

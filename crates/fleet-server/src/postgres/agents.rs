@@ -1,4 +1,4 @@
-//! Agent records in PostgreSQL (ADR-0039 clauses 4 and 21): the PostgreSQL adapter behind
+//! Agent records in PostgreSQL (ADR-0039 §4 and §21): the PostgreSQL adapter behind
 //! [`AgentStore`](crate::agent_store::AgentStore) — one row per Agent, its scalars as columns, the
 //! wire-typed fields as their protobuf bytes, its labels, and its assignment's Configurations in
 //! rows of their own. A rollout's revisions and assignments commit together or not at all. Each
@@ -122,7 +122,7 @@ impl PgAgentStore {
 
     /// The adapter on `database`, holding what the stored assignments pin, read alone: what a
     /// deletion and a collection ask of the pins is answered from them, and no record is loaded
-    /// (ADR-0039 clause 3).
+    /// (ADR-0039 §3).
     ///
     /// # Errors
     /// Returns an error when the assignments cannot be read, or one names a Package that does not
@@ -556,9 +556,9 @@ impl AgentStore for PgAgentStore {
     /// One statement that locks the row the triggers on `agents` keep the count in and inserts
     /// only while the count is below `max_records`, so creations on every instance count each
     /// other's rows one after another, the ceiling is decided without reading every row, and no
-    /// creation waits for a client round trip of another (ADR-0039 clause 22). Its transaction
+    /// creation waits for a client round trip of another (ADR-0039 §22). Its transaction
     /// commits without waiting for the flush, so neither does any for a flush of another
-    /// (ADR-0039 clause 21). A report's write of a record that exists waits for none of it.
+    /// (ADR-0039 §21). A report's write of a record that exists waits for none of it.
     fn create_within(
         &self,
         uid: &InstanceUid,
@@ -570,11 +570,11 @@ impl AgentStore for PgAgentStore {
         let max = i64::try_from(max_records).unwrap_or(i64::MAX);
         let creating = self.creating.enter();
         let creation = self.database.run(move |pool| async move {
-            // A creation waits for a connection up to its call's bound (ADR-0039 clause 24).
+            // A creation waits for a connection up to its call's bound (ADR-0039 §24).
             let mut client = creating_client(&pool).await?;
             let key = uid.to_string();
             // One transaction that commits without waiting for its flush, so the count's row is
-            // let go at once (ADR-0039 clause 21); the record's Configurations, where it names
+            // let go at once (ADR-0039 §21); the record's Configurations, where it names
             // any, are written in it.
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
@@ -963,7 +963,7 @@ impl AgentStore for PgAgentStore {
     }
 
     /// One transaction: the revisions and the assignments that pin them commit together or not at
-    /// all (ADR-0039 clause 21). Each record's assignment is written alone, in the order of the
+    /// all (ADR-0039 §21). Each record's assignment is written alone, in the order of the
     /// `instance_uid`, so two releases over the same Agents lock their rows in one order; a record
     /// forgotten meanwhile is written nothing. The row of each Package an assignment pins is held
     /// `FOR KEY SHARE` until the commit, as each pinned Configuration's is, so a write to the
@@ -1087,11 +1087,11 @@ async fn hold_released_through(client: &impl GenericClient, name: &str) -> Resul
 const PRESENCE_PIECE: usize = 1_000;
 
 /// What a creation's transaction runs first: its commit does not wait for the database to flush
-/// it, and no other transaction on the connection is affected (ADR-0039 clause 21).
+/// it, and no other transaction on the connection is affected (ADR-0039 §21).
 const ASYNCHRONOUS_COMMIT: &str = "SET LOCAL synchronous_commit = off";
 
 /// A count of the creations under way, bounded by half the pool, so the other half serves every
-/// other call while creations wait for the count's row (ADR-0039 clause 24).
+/// other call while creations wait for the count's row (ADR-0039 §24).
 struct Creating {
     at_most: usize,
     under_way: Mutex<usize>,
@@ -1153,7 +1153,7 @@ const CONFIGURATIONS: &str = "(SELECT json_object_agg(c.configuration, c.revisio
      FROM agent_assignment_configurations AS c WHERE c.instance_uid = agents.instance_uid)";
 
 /// A wire-typed field as its protobuf bytes, the encoding whose compatibility rules the Baseline
-/// already governs (ADR-0039 clause 4).
+/// already governs (ADR-0039 §4).
 fn encode<M: Message>(message: Option<&M>) -> Option<Vec<u8>> {
     message.map(Message::encode_to_vec)
 }
@@ -1170,7 +1170,7 @@ pub(super) fn decode<M: Message + Default>(
 }
 
 /// Every Agent record. A row that does not decode fails, naming its `instance_uid`
-/// (ADR-0039 clause 4).
+/// (ADR-0039 §4).
 pub(crate) async fn read_all(
     client: &impl GenericClient,
 ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
@@ -1312,7 +1312,7 @@ async fn read_assignments(
     Ok(assignments)
 }
 
-/// The columns a report decides (ADR-0029 clause 2): every
+/// The columns a report decides (ADR-0029 §2): every
 /// column but the key, the labels, `restart_pending` and the assignment's.
 const REPORTED: [&str; 12] = [
     "sequence_num",
@@ -1341,8 +1341,7 @@ struct Held<'a> {
 /// whose sequence number is not higher than the record's. Answers `None` where it wrote no record,
 /// and otherwise whether the write made the row a Client Agent that reports its machine behind a
 /// Gateway's Host, which the row it replaced was not: over another Host, not a Client Agent, or
-/// of another machine (ADR-0025
-/// clause 9).
+/// of another machine (ADR-0025 §9).
 async fn write_reported(
     client: &impl GenericClient,
     uid: &InstanceUid,
@@ -1466,8 +1465,7 @@ async fn write_reported(
 
 /// The values of the columns the list of Agents reads, derived from `record`, which every write
 /// of it writes in the same statement
-/// (ADR-0030
-/// clause 8).
+/// (ADR-0030 §8).
 fn derived_of(
     uid: &InstanceUid,
     record: &PersistedAgent,
@@ -1591,7 +1589,7 @@ const INSERTED_TYPES: [&str; 28] = [
 /// [`insert`], or with `within` the creation of a record only while the count of the records,
 /// kept by the triggers of migration 14, is below `within`: one statement that locks the count's
 /// row, so creations of every instance are counted one after another and none waits for a round
-/// trip of another (ADR-0039 clause 22).
+/// trip of another (ADR-0039 §22).
 async fn insert_as(
     client: &impl GenericClient,
     uid: &InstanceUid,
@@ -1794,8 +1792,7 @@ mod tests {
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(false)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
         // A restart taken for a send that failed is put back, and the next take finds it queued
-        // (ADR-0025
-        // clause 8).
+        // (ADR-0025 §8).
         assert_eq!(store.set_restart_pending(&three, false), Ok(Some(true)));
         assert_eq!(store.set_restart_pending(&three, true), Ok(Some(false)));
         assert_eq!(
@@ -2439,7 +2436,7 @@ mod tests {
     /// While every pooled connection is busy for longer than the five seconds any other call waits
     /// for one, a creation waits on and creates the record once a connection is free, and a read
     /// fails after its five seconds: a new Agent is not answered `Unavailable` while a connecting
-    /// fleet holds the pool for a few seconds (ADR-0039 clause 24).
+    /// fleet holds the pool for a few seconds (ADR-0039 §24).
     /// Verifies: ADR-0039
     #[test]
     fn a_creation_waits_for_a_pooled_connection_longer_than_any_other_call() {
@@ -3088,7 +3085,7 @@ mod tests {
     }
 
     /// A rollout whose last record cannot be written leaves none of its assignments behind, on
-    /// either store, and what the store answers about pins stays as it was (ADR-0039 clause 21):
+    /// either store, and what the store answers about pins stays as it was (ADR-0039 §21):
     /// the records already written are put back, or never committed. `refuse(uid)` makes the
     /// write of that Agent's record fail; `mend` takes that away. Answers the retained revisions
     /// the store holds afterwards, which the caller judges: none with PostgreSQL, at most one
@@ -4033,7 +4030,7 @@ mod tests {
 
     /// A row that does not decode fails the read that meets it, naming its `instance_uid`: the
     /// load, the query, the query of it and the read of it. Opening the adapter, which reads the
-    /// assignments alone, does not meet it (ADR-0039 clause 4).
+    /// assignments alone, does not meet it (ADR-0039 §4).
     /// Verifies: ADR-0039
     #[test]
     fn an_agent_row_that_does_not_decode_fails_the_read_that_meets_it_naming_it() {

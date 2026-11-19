@@ -32,7 +32,7 @@ struct Cli {
     tree: Tree,
 }
 
-/// The two command trees, and nothing else (ADR-0034 clause 22).
+/// The two command trees, and nothing else (ADR-0034 §22).
 #[derive(Subcommand)]
 enum Tree {
     /// Fetch, pack, hash and sign package artifacts, and make the package signing key.

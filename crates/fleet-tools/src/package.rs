@@ -45,7 +45,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-/// The commands of `opamp-fleetctl package` (ADR-0034 clause 22).
+/// The commands of `opamp-fleetctl package` (ADR-0034 §22).
 #[derive(Subcommand)]
 pub enum Command {
     /// Fetch a release of a known agent, verify it against upstream's checksum, and optionally
@@ -114,7 +114,7 @@ pub enum Command {
     /// the names already agree; `--program-name` is for when they do not.
     ///
     /// Two of the three containers the Client can open are produced. There is deliberately no
-    /// `zip`: the Client reads one (ADR-0033 clause 62) so that a build published as a zip travels as
+    /// `zip`: the Client reads one (ADR-0033 §62) so that a build published as a zip travels as
     /// published, which is the opposite of a reason to *write* one here — a zip carries no Unix
     /// modes, and packing an artifact into it would be choosing the one container that cannot say
     /// the program is executable.
@@ -222,7 +222,7 @@ pub fn run(command: Command) -> Result<(), String> {
                 return Err("sign needs --agent-type, --version and the artifact".to_string());
             };
             // Before the key is read: it never signs a version a Client would refuse
-            // (ADR-0034 clause 4).
+            // (ADR-0034 §4).
             require_semver(&version)?;
             let keypair = load_key(&key)?;
             let bytes = std::fs::read(&artifact)
@@ -437,7 +437,7 @@ pub(crate) fn signing_key() -> Result<(Zeroizing<Vec<u8>>, String), String> {
     ))
 }
 
-/// Refuses a Package version that is not SemVer (ADR-0034 clauses 2 and 4), naming it — the
+/// Refuses a Package version that is not SemVer (ADR-0034 §2 and §4), naming it — the
 /// predicate the Server and the Client ask too, so what is signed here is what they take.
 ///
 /// # Errors
@@ -455,8 +455,8 @@ pub(crate) fn require_semver(version: &str) -> Result<(), String> {
 }
 
 /// The signature, hex, over the floor statement of `agent_type` at `version`
-/// (`fleet_core::package::floor_statement`, ADR-0034 clause 14). A version that is not SemVer is
-/// refused before the key is read, as `sign` refuses it (ADR-0034 clause 4).
+/// (`fleet_core::package::floor_statement`, ADR-0034 §14). A version that is not SemVer is
+/// refused before the key is read, as `sign` refuses it (ADR-0034 §4).
 fn floor_signature(key: &PathBuf, agent_type: &str, version: &str) -> Result<String, String> {
     if !fleet_core::version::is_semver(version) {
         return Err(format!(
@@ -526,7 +526,7 @@ mod tests {
 
     /// `sign --version 1.19` and a signing file at `1.19` each fail naming the version, before
     /// the key is read: the key named here does not exist, so reading it would fail with another
-    /// message (ADR-0034 clause 4).
+    /// message (ADR-0034 §4).
     /// Verifies: ADR-0034
     #[test]
     fn sign_refuses_a_version_that_is_not_semver_before_reading_the_key() {

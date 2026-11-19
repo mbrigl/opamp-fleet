@@ -1,7 +1,7 @@
 //! What `opamp-fleetctl pki token-init` makes on a SoftHSM2 token is what the Server signs with: the
 //! Server, configured from `token.toml.fragment`, opens the token, loads both CAs by their labels
 //! and signs a host certificate that `client-ca.pem` verifies
-//! (ADR-0036 clause 8). The program is run as an operator runs
+//! (ADR-0036 §8). The program is run as an operator runs
 //! it; without `FLEET_TEST_PKCS11_MODULE` the test says so and skips.
 #![cfg(unix)]
 

@@ -11,10 +11,10 @@ pub const MAX_ORGANIZATION: usize = 64;
 /// [`MAX_COMMON_NAME`].
 pub const MAX_PRODUCT: usize = 40;
 
-/// The product a fleet's certificates are named for unless told otherwise (ADR-0036 clause 17).
+/// The product a fleet's certificates are named for unless told otherwise (ADR-0036 §17).
 pub const DEFAULT_PRODUCT: &str = "OpAMP Fleet";
 
-/// A leaf's common name from the common name of the CA that signs it (ADR-0036 clause 19): a
+/// A leaf's common name from the common name of the CA that signs it (ADR-0036 §19): a
 /// trailing ` CA` becomes ` Certificate`, and without one ` Certificate` is appended.
 #[must_use]
 pub fn leaf_common_name(ca_common_name: &str) -> String {
@@ -22,7 +22,7 @@ pub fn leaf_common_name(ca_common_name: &str) -> String {
     format!("{stem} Certificate")
 }
 
-/// A product name (ADR-0036 clause 17): letters, digits, space, `.` and `-`, 1 to
+/// A product name (ADR-0036 §17): letters, digits, space, `.` and `-`, 1 to
 /// [`MAX_PRODUCT`] characters, no leading or trailing space.
 ///
 /// # Errors
@@ -42,7 +42,7 @@ pub fn check_product(product: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// An organization or organizational unit (ADR-0036 clause 18): 1 to [`MAX_ORGANIZATION`]
+/// An organization or organizational unit (ADR-0036 §18): 1 to [`MAX_ORGANIZATION`]
 /// characters of UTF-8 without control characters.
 ///
 /// # Errors

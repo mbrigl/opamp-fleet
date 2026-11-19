@@ -1,13 +1,13 @@
 //! The audit record's export
-//! (ADR-0028
-//! clause 15): every entry the store has accepted, sent as an OTLP log record to the OTLP/HTTP
+//! (ADR-0028 §15):
+//! every entry the store has accepted, sent as an OTLP log record to the OTLP/HTTP
 //! endpoint `[audit.export]` names — a copy the Server cannot rewrite once it has left.
 //!
 //! The writer of the record hands each line it has written to a [`Sink`], which never waits: the
 //! line goes into a queue of [`QUEUE`] entries, and one that finds the queue full is counted as
 //! dropped. A thread of its own takes the lines out, encodes them with `opentelemetry-otlp`, the
 //! crate the Client's own telemetry uses (ADR-0018), and sends them through a `reqwest` client on
-//! the TLS 1.3 *ring* configuration (ADR-0012 clauses 5 and 21); a batch the receiver does not take
+//! the TLS 1.3 *ring* configuration (ADR-0012 §5 and §21); a batch the receiver does not take
 //! is tried again, until it does, while the queue fills behind it. The count of what was dropped is
 //! written into the record itself as `audit.export_dropped` ([`AuditExport::report_dropped`]),
 //! about every [`DROPPED_EVERY`] while it is not zero and once at shutdown.

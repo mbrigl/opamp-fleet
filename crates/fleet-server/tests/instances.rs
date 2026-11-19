@@ -1674,8 +1674,8 @@ impl Instance {
 }
 
 impl Pki {
-    /// A certificate and key naming `host` the way the Server's own signer does (ADR-0027 clause
-    /// 11), and no other name.
+    /// A certificate and key naming `host` the way the Server's own signer does (ADR-0027 §11),
+    /// and no other name.
     fn issue_to_host(&self, host: &str) -> (String, String) {
         let ca_key = KeyPair::from_pem(&self.ca_key_pem).expect("ca key");
         let issuer = Issuer::from_ca_cert_pem(&self.ca_pem, ca_key).expect("issuer");
@@ -3226,7 +3226,7 @@ async fn a_revocation_whose_notification_is_missed_is_caught_at_the_next_renewal
 
 /// A binding and its Host committed by another instance that ended before it sent the notice
 /// that follows the commit are taken up by the next lease renewal, which reads the ledger again
-/// (ADR-0025 clauses 9 and 10).
+/// (ADR-0025 §9 and §10).
 /// Verifies: ADR-0025
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next_renewal() {
@@ -3262,8 +3262,8 @@ async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next
 
 /// A renewal registered by another writer, whose notification never arrives while the listening
 /// connection stays up, is taken up by the next lease renewal: so a revocation of the certificate
-/// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0026 clause 28,
-/// ADR-0039 clause 10).
+/// it renewed, committed by this instance afterwards, refuses the renewal too (ADR-0026 §28,
+/// ADR-0039 §10).
 /// Verifies: ADR-0025, ADR-0039
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_renewal_whose_notification_is_missed_is_refused_once_its_predecessor_is_revoked() {
@@ -3324,8 +3324,7 @@ async fn a_renewal_whose_notification_is_missed_is_refused_once_its_predecessor_
 /// An instance killed without a shutdown leaves its lease and its audit chain behind; a running
 /// instance takes the lease over at one of its renewals once it lapsed, and the dead chain ends
 /// with `audit.chain_closed`, `reason` `lease_lapsed`, `closed_by` the running instance's chain
-/// (ADR-0025
-/// clause 18).
+/// (ADR-0025 §18).
 /// Verifies: ADR-0028, ADR-0025
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_running_instance_closes_the_chain_of_one_killed_at_its_renewal() {
@@ -6141,8 +6140,7 @@ fn two_releases_on() -> &'static [Migration] {
 /// as an instance of 0.8.0 takes one, writing no release, two instances of 0.8.1 that start at
 /// once apply migration 12 once beside it and both serve, and that lease reads 0.8.0. They apply
 /// the migrations up to 18, which name 0.8.0; migration 19 names 0.8.4
-/// (ADR-0025
-/// clause 16).
+/// (ADR-0025 §16).
 /// Verifies: ADR-0025
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
@@ -6209,8 +6207,7 @@ fn the_next_patch_release() -> &'static [Migration] {
 /// With an instance of N on its schema, two instances of N+1 that start at once apply N+1's
 /// migration once and both serve; the instances of N and N+1 both serve the Agents that report
 /// to either, each reading the other's; and each lease names the release of its instance
-/// (ADR-0025
-/// clause 16).
+/// (ADR-0025 §16).
 /// Verifies: ADR-0025
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_versions_serve_side_by_side_and_the_newer_migrates_once() {
@@ -6326,7 +6323,7 @@ impl Schema {
 /// the live lease of 0.8.4, each writes a Deployment and a Host, and each loads what the other
 /// wrote. A Server of 0.8.4 names the contract pair in its `INSERT`s and decodes each Host's array
 /// as a list; one of 0.8.5 names neither, and its rows hold the defaults
-/// (ADR-0039 clause 22).
+/// (ADR-0039 §22).
 /// Verifies: ADR-0039
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_of_0_8_4_and_one_of_0_8_5_each_load_what_the_other_wrote() {
@@ -6446,8 +6443,7 @@ async fn an_instance_of_0_8_4_and_one_of_0_8_5_each_load_what_the_other_wrote() 
 /// An instance whose lease lapsed while a Server two releases on migrated checks the schema as
 /// it takes its new lease, and stops: it takes none, keeps the refusal naming both versions, and
 /// ends what its lease sends, so its planes stay closed and the Server exits
-/// (ADR-0025
-/// clause 16).
+/// (ADR-0025 §16).
 /// Verifies: ADR-0025
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_its_new_lease() {

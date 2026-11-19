@@ -125,8 +125,8 @@ Five more forces bear on the repack, the reading of a certificate's end and the 
 - **The reading of a certificate's end has a natural home in `fleet-core`.** `fleet-core` carries
   `x509-parser` and `time` for `x509` and `csr`. The file stays each program's to read, through
   `opamp::tls`, the one reader of a certificate's PEM
-  ([ADR-0008](0008-six-crates-on-tokio-and-axum.md)
-  clause 17). The core `ending` stays plain
+  ([ADR-0008 §17](0008-six-crates-on-tokio-and-axum.md)).
+  The core `ending` stays plain
   date arithmetic without a dependency, as that clause describes it; the reading is its adapter
   `ending::read`.
 - **A CA key the Server reads from a file can be copied.** Whoever reads the client CA's key once,
@@ -182,14 +182,14 @@ upstream that signs with OpenPGP.
 
 5. **No dependency beyond the issuance crates, the PKCS#12 reader the Client shares, and `cryptoki`
    for a token.** The `pki` commands use `rcgen` with the features
-   [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-   clause 13 states for issuance, and `time`. `p12-extract` also reads through
+   [ADR-0027 §13](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+   states for issuance, and `time`. `p12-extract` also reads through
    `fleet_util::identity::pkcs12::open`, the reader the Client's install uses, and so through
    `fleet_core::pkcs12::file` and `p12-keystore` (ADR-0027). `pki token-init` and `pki bootstrap-ca
    --pkcs11-module` reach a PKCS#11 token through `cryptoki`, the wrapper the Server uses for the
    same token
-   ([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-   clause 35). Every key is ECDSA P-256. A key written to a file is PKCS#8 PEM, the form
+   ([ADR-0026 §35](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)).
+   Every key is ECDSA P-256. A key written to a file is PKCS#8 PEM, the form
    `[client_ca]` loads; a key made on a token stays on it. Every certificate is PEM. Every serial is
    16 random bytes, as the client CA's are.
 
@@ -366,8 +366,8 @@ upstream that signs with OpenPGP.
 24. **`p12-extract` reads what the Client's install reads.** `opamp-fleetctl pki p12-extract <file>
     --out <dir>` opens `<file>` with `fleet_util::identity::pkcs12::open`, the reader the
     Client's install uses. It therefore takes exactly the bootstrap PKCS#12 files
-    [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-    clauses 4 and 15 describe, by the file's form and by how the Client reads it, and refuses the
+    [ADR-0027 §4 and §15](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+    describe, by the file's form and by how the Client reads it, and refuses the
     rest, naming why. That covers a file over the reader's size bound, a wrong password, a scheme
     other than PBES2/AES with an HMAC-SHA-2 MAC, and anything other than one key with its one
     certificate.
@@ -406,8 +406,8 @@ upstream that signs with OpenPGP.
       at that path and not through a linked directory, whose target is byte for byte that one is
       kept. It is packed with mode `0o777`, read from the tree and never followed, so nothing of
       the operator's host is read through it, and the Client creates exactly those links
-      ([ADR-0033](0033-packages-signatures-and-delivery.md)
-      clause 57). A link at a named path with another target, and every link the kind does not
+      ([ADR-0033 §57](0033-packages-signatures-and-delivery.md)).
+      A link at a named path with another target, and every link the kind does not
       name, leads out and fails the repack as the bullet above states.
       The shared rule is `fleet_util::tree::is_kept`.
     - **A link that names nothing inside the tree is dropped.**
@@ -422,7 +422,7 @@ upstream that signs with OpenPGP.
 
 28. **A later repack of one upstream version is a pre-release of the next patch.** The first
     repack of a version is the Package that version names
-    ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 6). A later repack of
+    ([ADR-0034 §6](0034-package-versions-high-water-mark-and-floor.md)). A later repack of
     the same version, one that takes newer files from its sources or is packed by a changed rule,
     is named by `opamp-fleetctl package fetch --repack <n>`, `n` from 2, and uploaded as Package
     `<major>.<minor>.<patch+1>-0.r.<n>`: the second repack of `2.14.3` is `2.14.4-0.r.2`.
@@ -433,11 +433,11 @@ upstream that signs with OpenPGP.
       below any pre-release upstream names for the next patch.
     - **The program keeps the version it is.** Its program keeps reporting the upstream version,
       so the Server holds the Package against the version of the Package the host's Supervisor
-      installed ([ADR-0032](0032-deployments-and-rollouts.md) clauses
-      14 and 25): a host on an earlier repack is offered the later one, a host on the later one is
+      installed ([ADR-0032 §14 and §25](0032-deployments-and-rollouts.md)):
+      a host on an earlier repack is offered the later one, a host on the later one is
       offered it no more, and upstream's next release still replaces it. Build metadata
       (`2.14.3+r2`) is not the form: two versions that differ only in it compare equal
-      ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 2).
+      ([ADR-0034 §2](0034-package-versions-high-water-mark-and-floor.md)).
     - **Refused:** `--repack 0`; a later repack of a version that is not three numbers; and a later
       repack of an agent whose artifact the tool uploads as upstream publishes it, which has one
       artifact per version. `--repack 1`, the default, is the version itself. The operator counts
@@ -484,8 +484,8 @@ passphrase prompt; a token for the server CA's key or the package signing key, w
 with the operator; replacing the server CA, which every host's configuration follows; replacing the
 client CA, which every host's enrolment follows, but for the move of a fleet onto a token, whose new
 client CA `pki token-init` makes and which
-[ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-clause 40 rolls out; and holding two bootstrap CAs at once while one replaces the other; enforcing a
+[ADR-0026 §40](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+rolls out; and holding two bootstrap CAs at once while one replaces the other; enforcing a
 CA's end in the handshake, or limiting the running Server's signatures to its CA's end; certificate
 revocation lists or OCSP; ACME and certificates from a public CA, which the Server reads as they
 are; a `pki` command on the Client binary; the Server's `pki status` on Windows or macOS, where the
@@ -495,8 +495,8 @@ installer; provenance of the release's assets
 fleet through the Operator plane beyond the upload `package fetch` makes; writing the extracted key
 encrypted, extracting files other than the bootstrap form, and making a PKCS#12 file with the tool;
 how the Client applies a tar's modes, which
-[ADR-0022](0022-the-accounts-the-service-runs-under.md)
-clause 23 states; a kind's own removal, before packing, of links it knows upstream leaves behind (as
+[ADR-0022 §23](0022-the-accounts-the-service-runs-under.md)
+states; a kind's own removal, before packing, of links it knows upstream leaves behind (as
 an AppImage's repack removes `.DirIcon`), which each kind states where it is decided; hard links,
 which are files of the tree; the trust in the extracted tree's origin, which the hash of what was
 downloaded settles; following an upstream's key at run time, a new key reaching the tool in a new
@@ -560,7 +560,7 @@ which `gpgv` cannot know of.
 - **`p12-extract` opens the file with the Client's `fleet_agent::tls::pkcs12_identity`.** Clauses
   5 and 24 as they stood until 2026-11-15. Rejected: it reached the reader by depending on the
   Client, which linked the whole Client into the operator program
-  ([ADR-0008](0008-six-crates-on-tokio-and-axum.md) clause 22); the same reader now lives in
+  ([ADR-0008 §22](0008-six-crates-on-tokio-and-axum.md)); the same reader now lives in
   `fleet-util`, which both use.
 - **`pki status` in one program only.** The Server host does not hold the server CA's certificate
   and the operator's machine does not hold `server.toml`, so either program alone sees only part of

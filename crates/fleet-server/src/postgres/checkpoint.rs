@@ -1,5 +1,5 @@
 //! The checkpoints of the audit record on PostgreSQL
-//! (ADR-0028 clause 11): which
+//! (ADR-0028 §11): which
 //! instance signs, and what its checkpoint names.
 //!
 //! The instance that holds a session-level advisory lock signs. It holds the lock on one
