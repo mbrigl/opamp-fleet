@@ -50,8 +50,17 @@ expect pass "a repository without a manual" "$d"
 d="$(manual plain $'# Manual\n\nStart the Server, then the Client.')"
 expect pass "a manual that cites no ADR" "$d"
 
-d="$(manual cites-number $'# Manual\n\nThe Client verifies every package (ADR-0001).')"
+# The identifiers are assembled, so that the documentation check does not read them as citations.
+d="$(manual cites-id "$(printf '# Manual\n\nThe Client verifies every package (%s-every-package).' SEC)")"
 expect fail "a manual that names an ADR" "$d" "docs/manual/README.md:3: cites an ADR"
+
+d="$(manual cites-own "$(printf '# Manual\n\nThe Client verifies every package (%s-every-package).' PRJ)")"
+mkdir -p "$d/docs/adr" && printf '# ADRs\n\n### Categories\n\n- **PRJ** — its own.\n' > "$d/docs/adr/README.md"
+expect fail "a manual that names an ADR of a category the index lists" "$d" \
+  "docs/manual/README.md:3: cites an ADR"
+
+d="$(manual names-word "$(printf '# Manual\n\nA SEC-like key, and API-first, are no ADR.')")"
+expect pass "a word that only looks like a category key" "$d"
 
 d="$(manual links-record $'# Manual\n\nSee [why](../adr/0001-decision.md).')"
 expect fail "a manual that links into the decision record" "$d" "docs/manual/README.md:3: cites an ADR"

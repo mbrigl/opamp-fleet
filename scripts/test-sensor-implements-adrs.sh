@@ -7,10 +7,10 @@
 # Each case builds a throwaway git repository under a temporary directory with ADRs under
 # docs/adr/, adds commits on a branch whose messages say what they implement, runs the sensor
 # against the branch, and asserts the exit code and a line a reader would meet. The cases form a
-# table: an accepted ADR, a proposed one, a superseded one, a rejected one, a number the head does
-# not have, a draft that exists, a draft numbered by its map to an accepted ADR, a draft with
-# neither file nor number, a commit that implements nothing, an ADR named outside an Implements
-# line, nothing to compare, and a base that does not resolve.
+# table: an accepted ADR, a proposed one, a superseded one, a rejected one, an identifier the head
+# does not have, one of a category the project's index lists, a number from before the migration
+# to identifiers, a commit that implements nothing, an ADR named outside an Implements line,
+# nothing to compare, and a base that does not resolve.
 #
 # Inputs: scripts/sensor-implements-adrs.sh scripts/lib/
 #
@@ -23,16 +23,14 @@ set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib/selftest.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/selftest.sh"
 SENSOR="$ROOT/scripts/sensor-implements-adrs.sh"
-# The draft identifiers of the fixtures are built here, so that the documentation check, which
-# holds every draft identifier against docs/adr/, does not read them as references.
-D="draft"
-# The numbers too, so that a normalization, which moves every literal ADR identifier and file
-# name of the tree (scripts/test-normalize-remap.sh), leaves the fixtures as they are.
-# id <n> — the identifier ADR-NNNN of n; file <n> <slug> — the file name NNNN-<slug>.md.
-id() { printf 'ADR-%04d' "$1"; }
-file() { printf '%04d-%s.md' "$1" "$2"; }
-A1="$(id 1)" A2="$(id 2)" A3="$(id 3)" A4="$(id 4)" A5="$(id 5)" A9="$(id 9)"
-NEW="ADR-$D-a-new-rule" OLD="ADR-$D-the-old-rule" LOST="ADR-$D-nobody-wrote-it"
+# The identifiers of the fixtures are built here, so that the documentation check, which holds
+# every identifier against docs/adr/, does not read them as references, and a map script leaves
+# them as they are (scripts/test-normalize-remap.sh).
+# id <n> — the identifier SEC-decision-<n>; file <n> — its file name.
+id() { printf '%s-decision-%s' SEC "$1"; }
+file() { printf '%s.md' "$(id "$1")"; }
+A1="$(id 1)" A2="$(id 2)" A3="$(id 3)" A4="$(id 4)" A9="$(id 9)"
+OWN="$(printf '%s-own-rule' PRJ)" NUMBER="$(printf 'ADR-%04d' 1)"
 
 # git_in <dir> <args...> — git in the fixture, with an author.
 git_in() {
@@ -54,10 +52,17 @@ repo() {
   local dir="$work/$1"
   mkdir -p "$dir"
   git -C "${dir:?}" init -q -b main
-  adr "$dir" "$(file 1 one)" "🟢 accepted"
-  adr "$dir" "$(file 2 two)" "⚪ superseded by [$A1]($(file 1 one))"
-  adr "$dir" "$(file 3 three)" "🔴 rejected"
-  adr "$dir" "$(file 4 four)" "🟡 proposed"
+  adr "$dir" "$(file 1)" "🟢 accepted"
+  adr "$dir" "$(file 2)" "⚪ superseded by [$A1]($(file 1))"
+  adr "$dir" "$(file 3)" "🔴 rejected"
+  adr "$dir" "$(file 4)" "🟡 proposed"
+  printf '# ADRs
+
+### Categories
+
+- **PRJ** — the project'"'"'s own.
+' > "$dir/docs/adr/README.md"
+  adr "$dir" "$OWN.md" "🟢 accepted"
   git_in "$dir" add docs
   git_in "$dir" commit -q -m "the ADRs"
   git_in "$dir" switch -q -c feat/x
@@ -101,36 +106,18 @@ commit "$r" "fix: the rejected way"$'\n\n'"Implements $A3"
 expect 0 "a rejected ADR: listed" "$r" "— $A3: rejected"
 
 r="$(repo missing)"
-commit "$r" "fix: a number from elsewhere"$'\n\n'"Implements $A9"
-expect 0 "a number the head does not have: listed" "$r" "— $A9: no ADR of that number"
+commit "$r" "fix: an identifier from elsewhere"$'\n\n'"Implements $A9"
+expect 0 "an identifier the head does not have: listed" "$r" "— $A9: no ADR of that identifier"
 
-r="$(repo draft)"
-adr "$r" "$D-a-new-rule.md" "🟡 proposed"
-git_in "$r" add docs
-commit "$r" "feat: the new rule"$'\n\nImplements '"$NEW"
-expect 0 "a draft that exists: in force" "$r" "0 name one not in force."
+r="$(repo own-category)"
+commit "$r" "feat: the project's rule"$'\n\n'"Implements $OWN"
+expect 0 "an ADR of a category the index lists: counted, in force" "$r" \
+  "1 commit(s) name an ADR they implement; 0 name one not in force."
 
-r="$(repo numbered)"
-adr "$r" "$D-a-new-rule.md" "🟡 proposed"
-git_in "$r" add docs
-commit "$r" "feat: the new rule"$'\n\nImplements '"$NEW"
-git_in "$r" mv "docs/adr/$D-a-new-rule.md" "docs/adr/$(file 5 a-new-rule)"
-adr "$r" "$(file 5 a-new-rule)" "🟢 accepted"
-git_in "$r" add docs
-commit "$r" "docs(adr): number the drafts"$'\n\n'"$NEW → $A5"
-expect 0 "a draft numbered to an accepted ADR: in force through the map" "$r" \
-  "0 name one not in force."
-
-r="$(repo numbered-superseded)"
-commit "$r" "feat: an old draft"$'\n\nImplements '"$OLD"
-commit "$r" "docs(adr): number the drafts"$'\n\n'"$OLD → $A2"
-expect 0 "a draft numbered to a superseded ADR: listed through the map" "$r" \
-  "$OLD: superseded by $A1 (numbered $A2)"
-
-r="$(repo no-draft)"
-commit "$r" "feat: a lost draft"$'\n\nImplements '"$LOST"
-expect 0 "a draft with neither file nor number: listed" "$r" \
-  "$LOST: no draft of that name and no number for it"
+r="$(repo number)"
+commit "$r" "feat: before the migration"$'\n\n'"Implements $NUMBER"
+expect 0 "a number from before the migration: no ADR, nothing counted" "$r" \
+  "0 commit(s) name an ADR they implement"
 
 r="$(repo nothing)"
 commit "$r" $'chore: tidy\n\nImplements: none'
