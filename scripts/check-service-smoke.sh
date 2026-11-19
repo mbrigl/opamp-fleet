@@ -23,9 +23,11 @@ set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=lib/root.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+# A macOS runner runs this under its bash 3.2, where an empty "${ARGS[@]}" under 'set -u' is an
+# unbound variable: ${ARGS[@]+"${ARGS[@]}"} expands to nothing instead.
 usage="scripts/check-service-smoke.sh [--root <dir>]"
 enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
-rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 ${ARGS[@]+"${ARGS[@]}"}
 
 if [[ "${CI:-}" != "true" && "${FLEET_SMOKE_THROWAWAY:-}" != "1" ]]; then
   echo "Skipped: it registers services and accounts; set FLEET_SMOKE_THROWAWAY=1 on a throwaway machine."

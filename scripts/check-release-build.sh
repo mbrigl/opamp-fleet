@@ -16,10 +16,12 @@ set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=lib/root.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+# A macOS runner runs this under its bash 3.2, where an empty "${ARGS[@]}" under 'set -u' is an
+# unbound variable: ${ARGS[@]+"${ARGS[@]}"} expands to nothing instead.
 usage="scripts/check-release-build.sh [--root <dir>] fleet-agent|fleet-server"
 enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
-set -- "${ARGS[@]}"
-rest_args "${BASH_SOURCE[0]}" "$usage" 1 "${ARGS[@]}"
+set -- ${ARGS[@]+"${ARGS[@]}"}
+rest_args "${BASH_SOURCE[0]}" "$usage" 1 ${ARGS[@]+"${ARGS[@]}"}
 
 case "${1:-}" in
   fleet-agent | fleet-server) ;;

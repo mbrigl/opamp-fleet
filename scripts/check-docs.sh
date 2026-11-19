@@ -197,21 +197,21 @@
 #      Decision, of an ADR in force: a normalization re-cites them by its clause table, and a
 #      citation that names no clause, or a clause of a dead ADR, is stale. The form read is
 #      NUC-adrs-are-named-by-category §3's: an identifier, a space, and the section sign with the
-#      number, and a list of them after the identifier, '§N, §M', '§N and §M', '§N, §M, and §K' or
-#      a range '§N–§M', inside a Markdown link's text where it is one. A citation wrapped over two
+#      number, and a list of them after the identifier, '§N, §M', '§N and §M', '§N, §M, and §K' or a
+#      range '§N–§M', inside a Markdown link's text where it is one. A citation wrapped over two
 #      lines is joined, the comment marker of the second line and a backslash ending the first
 #      dropped. Each number, both ends of a range included, lies between 1 and the count of the
 #      Decision's numbered items ('N. ' at the start of a line, outside fenced code, where a '## '
 #      line ends no section either); a Decision that numbers none is not held. A citation of a
 #      superseded or rejected ADR fails outside docs/adr/, whose ADRs keep the past they were
 #      written against, and outside CHANGELOG.md, which records what held when each entry was
-#      written. So does a citation of a project ADR by
-#      a place instead of a clause, which a normalization's clause table cannot follow: 'point',
-#      'paragraph', 'line', 'rule', 'item', 'bullet', 'step', 'section', the older word 'clause',
-#      or the section sign after a link, before a number and after an identifier, and
-#      'clause N of' an identifier. The base's own text is the template's, and only its clause
-#      numbers are read. An identifier that names no ADR is the rule docs/adr-refs'. Superseded and rejected
-#      ADRs are not read, nor is the template. A check of this project's own.
+#      written. So does a citation of a project ADR by a place instead of a clause, which a
+#      normalization's clause table cannot follow: 'point', 'paragraph', 'line', 'rule', 'item',
+#      'bullet', 'step', 'section', the older word 'clause', or the section sign after a link,
+#      before a number and after an identifier, and 'clause N of' an identifier. The base's own text
+#      is the template's, and only its clause numbers are read. An identifier that names no ADR is
+#      the rule docs/adr-refs'. Superseded and rejected ADRs are not read, nor is the template. A
+#      check of this project's own.
 #
 # The rules docs/adr-refs and docs/adr-link-targets read every text file of the repository,
 # not a list of documentation extensions: docs/adr/README.md states that code may reference an
@@ -1531,11 +1531,11 @@ heading_texts() {
   ' "$1"
 }
 
-# The rule docs/named-sections (see the header). One awk pass over every text file that mentions either document
-# prints each reference as file, line, the '../' before the name, the name, and the heading. A
-# line is read joined to the next, whose comment marker is dropped, and a match counts on the line
-# it starts on: a reference wrapped over two lines is read once, and whole. HEADING_TEXTS holds
-# the headings of each document, newline-framed, read once.
+# The rule docs/named-sections (see the header). One awk pass over every text file that mentions
+# either document prints each reference as file, line, the '../' before the name, the name, and the
+# heading. A line is read joined to the next, whose comment marker is dropped, and a match counts on
+# the line it starts on: a reference wrapped over two lines is read once, and whole. HEADING_TEXTS
+# holds the headings of each document, newline-framed, read once.
 declare -A HEADING_TEXTS=()
 check_named_sections() {  # docs/named-sections
   local files=() f
@@ -1597,11 +1597,11 @@ check_named_sections() {  # docs/named-sections
   ' "${files[@]}")
 }
 
-# The rule docs/clause-citations (see the header). DECISION_CLAUSES holds, for each ADR's identifier, the numbers of its
-# Decision's numbered items, space-framed, outside fenced code (ADR_FENCE_AWK), read once. One awk pass over
-# every file that names an ADR prints each citation as file, line, the key, the word cited by
-# ('clause' or a place), and its numbers, a range as 'N-M'; a line is read joined to the next, as
-# in docs/named-sections.
+# The rule docs/clause-citations (see the header). DECISION_CLAUSES holds, for each ADR's
+# identifier, the numbers of its Decision's numbered items, space-framed, outside fenced code
+# (ADR_FENCE_AWK), read once. One awk pass over every file that names an ADR prints each citation as
+# file, line, the key, the word cited by ('clause' or a place), and its numbers, a range as 'N-M'; a
+# line is read joined to the next, as in docs/named-sections.
 declare -A DECISION_CLAUSES=()
 check_clause_citations() {  # docs/clause-citations
   local files=() f

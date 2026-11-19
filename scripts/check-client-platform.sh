@@ -23,9 +23,11 @@ set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=lib/root.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/root.sh"
+# A macOS runner runs this under its bash 3.2, where an empty "${ARGS[@]}" under 'set -u' is an
+# unbound variable: ${ARGS[@]+"${ARGS[@]}"} expands to nothing instead.
 usage="scripts/check-client-platform.sh [--root <dir>]"
 enter_root "${BASH_SOURCE[0]}" "$usage" "$@"
-rest_args "${BASH_SOURCE[0]}" "$usage" 0 "${ARGS[@]}"
+rest_args "${BASH_SOURCE[0]}" "$usage" 0 ${ARGS[@]+"${ARGS[@]}"}
 
 command -v cargo >/dev/null || { echo "cargo is required (rust-toolchain.toml names the toolchain)" >&2; exit 1; }
 
