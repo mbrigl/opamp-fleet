@@ -782,33 +782,27 @@ pub(crate) async fn read_all(client: &impl GenericClient) -> Result<Ledger, Stri
     let mut hosts = BTreeMap::new();
     for row in client
         .query(
-            "SELECT host, gateway, instance_uids, subject, approved_ms, valid_until_ms FROM hosts",
+            "SELECT host, gateway, subject, approved_ms, valid_until_ms FROM hosts",
             &[],
         )
         .await
         .map_err(sql)?
     {
         let host: String = row.get(0);
-        let subject = serde_json::from_value(row.get(3))
+        let subject = serde_json::from_value(row.get(2))
             .map_err(|e| format!("host {host:?} in the database: subject: {e}"))?;
+        // A Host speaks for the `instance_uid`s bound to it in their own table: its row's array
+        // is not read.
         hosts.insert(
             host,
             Host {
                 gateway: row.get(1),
-                instance_uids: row
-                    .get::<_, Vec<String>>(2)
-                    .into_iter()
-                    .collect::<BTreeSet<_>>(),
+                instance_uids: BTreeSet::new(),
                 subject,
-                approved_ms: row.get::<_, Option<i64>>(4).map(unsigned),
-                valid_until_ms: row.get::<_, Option<i64>>(5).map(unsigned),
+                approved_ms: row.get::<_, Option<i64>>(3).map(unsigned),
+                valid_until_ms: row.get::<_, Option<i64>>(4).map(unsigned),
             },
         );
-    }
-    // A Host speaks for the `instance_uid`s bound to it in their own table, whatever its row's
-    // array says.
-    for entry in hosts.values_mut() {
-        entry.instance_uids.clear();
     }
     for row in client
         .query("SELECT instance_uid, host FROM host_bindings", &[])
@@ -2710,6 +2704,31 @@ mod tests {
         store.bind("02", "a").expect("bind");
         store.save_hosts(&after).expect("save");
         assert_eq!(store.load().expect("load").hosts, after);
+    }
+
+    /// The load reads no Host's `instance_uids` array, so a release that lets the column be
+    /// `NULL` or drops it leaves the load of this one standing (the backlog entry
+    /// `the-server-stops-naming-the-contract-pair.md`).
+    /// Verifies: ADR-0023
+    #[test]
+    fn the_load_reads_no_hosts_array() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.open();
+        let store = PgLedgerStore::new(database.clone());
+        store
+            .save_hosts(&BTreeMap::from([("a".to_string(), host(&[], false))]))
+            .expect("save");
+        test.sql(
+            "INSERT INTO host_bindings VALUES ('01', 'a'); \
+             ALTER TABLE hosts ALTER COLUMN instance_uids DROP NOT NULL; \
+             UPDATE hosts SET instance_uids = NULL WHERE host = 'a'",
+        );
+        assert_eq!(
+            store.load().expect("load").hosts,
+            BTreeMap::from([("a".to_string(), host(&["01"], false))])
+        );
     }
 
     /// This release adds nothing to the Hosts' `instance_uids` arrays and no longer reads them. It

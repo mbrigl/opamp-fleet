@@ -20,11 +20,11 @@ mirror columns any more (the test `the_mirror_columns_are_written_no_more` in
   `postgres/deployments.rs` (lines 61 and 436). The columns are `NOT NULL` without a default
   (`postgres/schema.rs`, near lines 333 to 338).
 - `hosts.instance_uids` is `NOT NULL` without a default (`postgres/schema.rs`, line 384). The
-  `INSERT`s into `hosts` name it (`postgres/ledger.rs`, lines 512, 655 and 1057), and the upsert
-  filters it by the bindings (near line 1060). An `UPDATE` takes a released Agent out with
+  `INSERT`s into `hosts` name it (`postgres/ledger.rs`, lines 512, 655 and 1051), and the upsert
+  filters it by the bindings (near line 1054). An `UPDATE` takes a released Agent out with
   `array_remove` (near line 636), and the mark of a Gateway resets it with
-  `UPDATE hosts SET instance_uids = '{}'` (line 532). The load `SELECT`s `instance_uids` and
-  discards it (near line 785).
+  `UPDATE hosts SET instance_uids = '{}'` (line 532). The load no longer reads it (the test
+  `the_load_reads_no_hosts_array`).
 
 Test SQL names them too: `postgres/deployments.rs` line 741, `postgres/mod.rs` lines 1515 and
 2545, `postgres/agents.rs` line 3620, `postgres/ledger.rs` line 1543 and near lines 2729 to 2784,
@@ -56,7 +56,8 @@ The human decides these questions first:
   removes the mirror columns. The ticket defers the removal to X+1. ADR-0025 clause 16 allows that,
   since what N+1 stops using is removed by N+2 "at the earliest".
 
-The first cheap step needs no decision: the load stops selecting `instance_uids`.
+The first cheap step, which needed no decision, landed on 2026-11-19: the load no longer selects
+`instance_uids`.
 
 The release after X drops the columns; the backlog entry
 `docs/backlog/the-contract-pair-is-dropped.md` holds it.
