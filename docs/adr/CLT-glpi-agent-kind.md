@@ -1,4 +1,4 @@
-# ADR-draft-glpi-agent: The GLPI Agent gets a kind of its own, and its packages are upstream's portable zip as published and its AppImage repacked as a tree
+# CLT-glpi-agent-kind: The GLPI Agent gets a kind of its own, and its packages are upstream's portable zip as published and its AppImage repacked as a tree
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-10
@@ -11,7 +11,7 @@ The fleet manages the [GLPI Agent](https://glpi-agent.readthedocs.io/) — the i
 GLPI asset-management suite — beyond the Collector. It should be an ordinary Managed Process: a
 package the Client installs into its own Supervisor directory, updates with a health gate and rolls
 back, a Configuration rolled out from the Server, a restart issued from it. A kind knows its own
-agent ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)): what
+agent ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)): what
 follows from the artifact and the platform is compiled in, and a block holds only what an operator
 decides.
 
@@ -41,7 +41,7 @@ own glibc is not newer); it holds 219 symlinks, 38 of them dangling. On a newer 
 starts the agent through `runtime/default` instead, the host's own C library, reached through
 one absolute link to the host's program loader, a link out of the tree. Dereferenced, with that
 one link kept, it runs (about 7 100 files, 248 MB — inside the tree limits of
-[ADR-0033](0033-packages-signatures-and-delivery.md) clause 57).
+[PKG-signed-packages-and-delivery §57](PKG-signed-packages-and-delivery.md)).
 Five links are directories, and one is load-bearing: `usr/share/perl/5.26` → `5.26.1` is the name
 the bundled `PERL5LIB` uses.
 
@@ -93,52 +93,51 @@ the Linux AppImage repacked deterministically into a tree whose one link is the 
    - File logging exists because a daemon with no console has nowhere else to write. The log lies
      in `agent-log/`, a directory of its own beside `program/` that the kind names among the
      directories made before every spawn, so that a process account running the agent may write
-     it ([ADR-0021](0021-the-accounts-the-service-runs-under.md) clause 21).
-   - `agent-state/` and `agent-log/` are this kind's data directories in the sense of ADR-0021
-     clause 21, and only they are: the kind names both in `ensure_dirs`, and under a process
-     account each gets the owner, the group, the mode `2770` and the Windows ACL that clause gives
-     a kind's data directories.
+     it ([CLT-accounts-service-runs-under §21](CLT-accounts-service-runs-under.md)).
+   - `agent-state/` and `agent-log/` are this kind's data directories in the sense of
+     CLT-accounts-service-runs-under §21, and only they are: the kind names both in `ensure_dirs`,
+     and under a process account each gets the owning account, the group, the mode `2770` and the
+     Windows ACL that clause gives a kind's data directories.
 
 4. **GLPI's identity, configuration and version.** `service_name = "glpi-agent"` is the Agent type
    every GLPI Configuration and Package is for. A Configuration named `glpi-agent-conf` lands where
    `--conf-file` reads it and applies by restart — there is no reload signal. The version probe and
    the preflight are `--version`, asked of the agent started exactly as the daemon is: after the
    first arguments of clause 2 and in its working directory, as
-   [ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 57
+   [CLT-supervisor-mode-and-kinds §57](CLT-supervisor-mode-and-kinds.md)
    decides for the probe and the preflight. The program alone is not the agent — the bundled Perl
    answers a bare `--version` with its own banner, and `AppRun` without `--script` is the
    AppImage's installer. The kind reads the version only from a first line that is exactly
    `GLPI Agent (…)`, and only a number of a release tag's shape (clause 7), followed at most by
    one package revision `-<digits>`, which it drops. It writes the release as SemVer by the rule
-   the Package is named by ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md)
-   clause 6): `GLPI Agent (1.19-1)` and `GLPI Agent (1.19)` report the `service.version`
-   `1.19.0`, the upstream version, which is the Package version of the first repack (clause 7).
-   Kept, the revision would be a SemVer pre-release and rank the build below its release. After
-   a later repack the agent still reports the upstream version, and the Server decides by the
-   `supervisor.package.version` the Supervisor reports
-   ([ADR-0032](0032-deployments-and-rollouts.md) clauses 14 and 25).
-   Any other banner reports none rather than a guess — `1.22-dev`, `1.19-1-gabcdef` and
-   `1.19-1.2` included, suffixes upstream does not document — and the
-   `supervisor.package.version` alone tracks the install. That
-   `service.version` is the one attribute the kind reads from its agent, a
+   the Package is named by
+   ([PKG-versions-high-water-mark-floor §6](PKG-versions-high-water-mark-floor.md)):
+   `GLPI Agent (1.19-1)` and `GLPI Agent (1.19)` report the `service.version` `1.19.0`, the upstream
+   version, which is the Package version of the first repack (clause 7). Kept, the revision would be
+   a SemVer pre-release and rank the build below its release. After a later repack the agent still
+   reports the upstream version, and the Server decides by the `supervisor.package.version` the
+   Supervisor reports
+   ([SRV-deployments-and-pinned-rollouts §14 and §25](SRV-deployments-and-pinned-rollouts.md)). Any
+   other banner reports none rather than a guess — `1.22-dev`, `1.19-1-gabcdef` and `1.19-1.2`
+   included, suffixes upstream does not document — and the `supervisor.package.version` alone tracks
+   the install. That `service.version` is the one attribute the kind reads from its agent, a
    `service.*` key the fold admits
-   ([ADR-0017](0017-what-an-agent-reports-about-itself.md) clause 8). Until
+   ([CLT-what-an-agent-reports §8](CLT-what-an-agent-reports.md)). Until
    the first Configuration arrives the agent refuses to start and the Supervisor holds after its
    crash budget; the first apply ends the hold.
 
 5. **The Windows package is upstream's portable zip, byte for byte**, opened as
-   [ADR-0033](0033-packages-signatures-and-delivery.md) clause 62
+   [PKG-signed-packages-and-delivery §62](PKG-signed-packages-and-delivery.md)
    decides. Taken as published, the hash an Agent verifies is upstream's own. It is uploaded to the
    Server like every artifact
-   ([ADR-0033](0033-packages-signatures-and-delivery.md)
-   clause 3).
+   ([PKG-signed-packages-and-delivery §3](PKG-signed-packages-and-delivery.md)).
 
 6. **The Linux package is the AppImage, repacked by `opamp-fleetctl package fetch`.** The tool
    verifies the AppImage against the release's `glpi-agent-<tag>.sha256` (looked up by name),
    extracts its file system without running it, refuses if `AppRun` is missing, drops `.DirIcon`,
    and packs the result by the repack of
-   [ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
-   clause 27 under the wrapper directory `glpi-agent-<version>`, as
+   [OPS-operator-program-fleetctl §27](OPS-operator-program-fleetctl.md)
+   under the wrapper directory `glpi-agent-<version>`, as
    `glpi-agent_<version>_linux_amd64.tar.gz`, `<version>` being the Package version (clause 7)
    and `<tag>` upstream's own. **The AppImage is never run**: its squashfs file system starts
    where its ELF program ends, which the ELF header says, and `unsquashfs` (squashfs-tools) reads
@@ -159,10 +158,9 @@ the Linux AppImage repacked deterministically into a tree whose one link is the 
      the host's C library through one absolute link,
      `runtime/default/lib64/ld-linux-x86-64.so.2` → `/lib64/ld-linux-x86-64.so.2`. The `glpi`
      kind names exactly that link, by that path and that target, as the one its tree keeps
-     ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
-     clause 27,
-     [ADR-0033](0033-packages-signatures-and-delivery.md)
-     clause 57): the repack packs it as that link and the Client creates it; every other link
+     ([OPS-operator-program-fleetctl §27](OPS-operator-program-fleetctl.md),
+     [PKG-signed-packages-and-delivery §57](PKG-signed-packages-and-delivery.md)):
+     the repack packs it as that link and the Client creates it; every other link
      leading out still fails the repack. `AppRun.env` and every file of either runtime travel as
      upstream built them. Upstream's compat runtime holds a link that names nothing:
      `runtime/compat/lib/x86_64-linux-gnu/libcrypt.so.1` names a `libcrypt-2.27.so` that
@@ -176,13 +174,13 @@ the Linux AppImage repacked deterministically into a tree whose one link is the 
 7. **GLPI ships for `windows/amd64` and `linux/amd64` only.** The release's zip is matched
    case-insensitively (its spelling changed case at 1.9); tags carry no `v` and have two or three
    numeric parts. Both artifacts are entries of one Package of Agent type `glpi-agent` at the
-   upstream version written as SemVer (ADR-0034 clause 6): the release tagged `1.19` is fetched
-   under that tag and uploaded as Package `1.19.0`. Hosts on other platforms get no GLPI package.
-   The Linux artifact is a repack, so a later repack of one version, such as one packed by a
-   changed rule, is numbered as clause 28 of
-   [ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
-   numbers it: `package fetch --repack 2` of `1.19` uploads Package `1.19.1-0.r.2`, its Windows
-   entry upstream's zip again.
+   upstream version written as SemVer (PKG-versions-high-water-mark-floor §6): the release tagged
+   `1.19` is fetched under that tag and uploaded as Package `1.19.0`. Hosts on other platforms get
+   no GLPI package. The Linux artifact is a repack, so a later repack of one version, such as one
+   packed by a changed rule, is numbered as
+   [OPS-operator-program-fleetctl §28](OPS-operator-program-fleetctl.md) numbers it:
+   `package fetch --repack 2` of `1.19` uploads Package `1.19.1-0.r.2`, its Windows entry upstream's
+   zip again.
 
 8. **One GLPI Agent per host, and it is the fleet's.** Where a native installation exists, its
    autostart is switched off first — `systemctl disable --now glpi-agent` on Linux, `EXECMODE=3`
@@ -204,9 +202,9 @@ the Linux AppImage repacked deterministically into a tree whose one link is the 
     red when upstream moves something — one test on the packing side, one on the client side,
     `cfg`-gated per platform where the facts differ.
 
-12. **The kind declares that the GLPI Agent gets no Supervisor Endpoint token,** as clause 28 of
-    [ADR-0016](0016-client-modes-and-the-gateway.md) lets a kind
-    whose program never connects to its Supervisor Endpoint (clause 9). The agent's Deploy task
+12. **The kind declares that the GLPI Agent gets no Supervisor Endpoint token,** as
+    [CLT-modes-and-gateway §28](CLT-modes-and-gateway.md) lets a kind
+    whose program never connects to its Supervisor Endpoint (clause 9). The agent's *Deploy* task
     runs what the GLPI server sends it, so the token would serve no connection and would reach
     whatever that task starts.
 
@@ -316,18 +314,18 @@ distribution plus a relocatable Perl is the only visible route).
   is an operator duty the fleet cannot verify.
 - Negative: the agent runs as the account that starts it: the Client's, or the process account
   where one is registered, through the second service
-  ([ADR-0021](0021-the-accounts-the-service-runs-under.md) clauses 16 and 18). Its inventory reads
-  the DMI tables and the hardware, and its Deploy task installs packages, which need root on Linux
-  and an administrator on Windows. On Linux, where the packages run the Client under its own
+  ([CLT-accounts-service-runs-under §16 and §18](CLT-accounts-service-runs-under.md)). Its inventory
+  reads the DMI tables and the hardware, and its Deploy task installs packages, which need root on
+  Linux and an administrator on Windows. On Linux, where the packages run the Client under its own
   account, a host that needs the whole agent registers with `service install --run-as root` and
-  no process account (ADR-0021 clause 1). On Windows a first registration runs the Client as the
-  virtual account `NT SERVICE\opamp-fleet`, which the install grants no group and no privilege
-  (ADR-0021 clauses 1 and 2): the agent inventories less and deploys nothing that needs an
-  administrator, and a host that needs the whole agent registers with
+  no process account (CLT-accounts-service-runs-under §1). On Windows a first registration runs the
+  Client as the virtual account `NT SERVICE\opamp-fleet`, which the install grants no group and no
+  privilege (CLT-accounts-service-runs-under §1 and §2): the agent inventories less and deploys
+  nothing that needs an administrator, and a host that needs the whole agent registers with
   `service install --run-as LocalSystem` and no process account. A re-registration keeps the
   account the SCM holds, so a host moves only when the operator names the account. A process
-  account is never root or `LocalSystem` (ADR-0021 clause 16), so an agent under one inventories
-  less and deploys nothing that needs either.
+  account is never root or `LocalSystem` (CLT-accounts-service-runs-under §16), so an agent under
+  one inventories less and deploys nothing that needs either.
 - Negative: the Linux repack needs `unsquashfs` 4.5.1 or later on the packing host. A
   distribution that backports the fixes into an older version is refused all the same, since the
   tool reads the version and not the patches.
@@ -364,7 +362,7 @@ distribution plus a relocatable Perl is the only visible route).
   `the_defaults_are_the_artifacts` in `glpi.rs` (the kept link on the packing and the client
   side),
   `unsquashfs_older_than_4_5_1_is_refused` and `the_unsquashfs_version_is_read_from_its_banner`
-  (clause 6's minimum version),
+  (clause 6's oldest version of `unsquashfs`),
   `the_glpi_configuration_is_the_file_the_kind_points_its_agent_at` (the packing side of
   clause 10),
   `a_tag_is_a_version_only_when_it_is_this_agents_release` (clause 7's tags),
