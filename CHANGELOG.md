@@ -17,6 +17,19 @@ carries a date once its tag exists.
 
 ## [0.8.6]
 
+### Fixed
+
+- **A Configuration fits an Agent by the type the list shows**
+  ([CLT-what-an-agent-reports §1](docs/adr/CLT-what-an-agent-reports.md),
+  [SRV-deployments-and-pinned-rollouts §4](docs/adr/SRV-deployments-and-pinned-rollouts.md)).
+  A Configuration fitted an Agent whose `service.name` was reported only among its
+  non-identifying attributes, while the list showed that Agent with no type, the `service_name`
+  filter missed it, and no Package reached it. A Configuration now reads the type where the other
+  paths do, in the identifying attributes alone. An Agent that reports `service.name` twice is
+  now listed by its first value, as a Package is offered by it, not its last. **What to do:** a
+  foreign Agent that reports `service.name` only as non-identifying receives no Configuration
+  after the upgrade; report it as identifying, as the OpAMP specification asks.
+
 ## [0.8.5] - 2026-11-19
 
 ### Fixed

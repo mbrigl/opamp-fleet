@@ -11,7 +11,7 @@
 //! that quietly matches nothing, or a package that reaches nobody. As constants it is a name the
 //! compiler knows. That is the whole reason they live here rather than in each end.
 
-use crate::proto::{any_value, AnyValue, ArrayValue, KeyValue};
+use crate::proto::{any_value, AgentDescription, AnyValue, ArrayValue, KeyValue};
 
 /// The Agent *type* — a Collector distribution, this Client — never an operator's name for one
 /// (CLT-what-an-agent-reports). A package is matched against it (PKG-signed-packages-and-delivery).
@@ -66,6 +66,31 @@ pub fn string_value<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a str
             any_value::Value::StringValue(s) if !s.is_empty() => Some(s.as_str()),
             _ => None,
         })
+}
+
+/// The string value of `key` in either attribute set of `description`: the identifying set first,
+/// then the non-identifying one. The Server reads a Selector's keys, an Agent's machine and the
+/// values the fleet reports so (SRV-deployments-and-pinned-rollouts §3), and reads them here alone,
+/// so the paths cannot drift.
+#[must_use]
+pub fn reported<'a>(description: &'a AgentDescription, key: &str) -> Option<&'a str> {
+    string_value(&description.identifying_attributes, key)
+        .or_else(|| string_value(&description.non_identifying_attributes, key))
+}
+
+/// The Agent type an Agent reports: its `service.name`, read from the identifying attributes
+/// alone (CLT-what-an-agent-reports §1). A `service.name` among the non-identifying attributes
+/// is no type: the list, the filter, the Configurations and the Packages all read this one.
+#[must_use]
+pub fn agent_type(description: &AgentDescription) -> Option<&str> {
+    string_value(&description.identifying_attributes, SERVICE_NAME)
+}
+
+/// The version an Agent reports for itself: its `service.version`, read from the identifying
+/// attributes alone, where the Agent type is (CLT-what-an-agent-reports §4).
+#[must_use]
+pub fn agent_version(description: &AgentDescription) -> Option<&str> {
+    string_value(&description.identifying_attributes, SERVICE_VERSION)
 }
 
 /// One attribute as the protocol carries it: a key and a string value.
@@ -193,5 +218,58 @@ mod tests {
     fn the_kind_prefix_lies_in_the_supervisors_namespace() {
         assert_eq!(SUPERVISOR_KIND_PREFIX, "supervisor.kind.");
         assert!(SUPERVISOR_KIND_PREFIX.starts_with(SUPERVISOR_PREFIX));
+    }
+
+    fn described(identifying: Vec<KeyValue>, non_identifying: Vec<KeyValue>) -> AgentDescription {
+        AgentDescription {
+            identifying_attributes: identifying,
+            non_identifying_attributes: non_identifying,
+        }
+    }
+
+    #[test]
+    fn a_reported_key_is_read_from_the_identifying_set_first() {
+        let both = described(
+            vec![string_attr("channel", "stable")],
+            vec![string_attr("channel", "beta"), string_attr("site", "fra")],
+        );
+        assert_eq!(reported(&both, "channel"), Some("stable"));
+        assert_eq!(reported(&both, "site"), Some("fra"));
+        assert_eq!(reported(&both, "absent"), None);
+        let empty_first = described(
+            vec![string_attr("channel", "")],
+            vec![string_attr("channel", "beta")],
+        );
+        assert_eq!(reported(&empty_first, "channel"), Some("beta"));
+    }
+
+    #[test]
+    fn the_agent_type_and_version_are_read_from_the_identifying_set_alone() {
+        let identifying = described(
+            vec![
+                string_attr(SERVICE_NAME, "otelcol"),
+                string_attr(SERVICE_VERSION, "0.1.0"),
+            ],
+            vec![],
+        );
+        assert_eq!(agent_type(&identifying), Some("otelcol"));
+        assert_eq!(agent_version(&identifying), Some("0.1.0"));
+        let elsewhere = described(
+            vec![],
+            vec![
+                string_attr(SERVICE_NAME, "otelcol"),
+                string_attr(SERVICE_VERSION, "0.1.0"),
+            ],
+        );
+        assert_eq!(agent_type(&elsewhere), None);
+        assert_eq!(agent_version(&elsewhere), None);
+        let twice = described(
+            vec![
+                string_attr(SERVICE_NAME, "first"),
+                string_attr(SERVICE_NAME, "second"),
+            ],
+            vec![],
+        );
+        assert_eq!(agent_type(&twice), Some("first"));
     }
 }

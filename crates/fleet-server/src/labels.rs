@@ -246,13 +246,7 @@ pub fn is_client_agent(description: Option<&AgentDescription>) -> bool {
 /// `host.name` that happens to be spelled alike. `None` when it reports neither.
 pub fn machine(description: Option<&AgentDescription>) -> Option<String> {
     let description = description?;
-    let reported = |key: &str| {
-        opamp::attributes::string_value(&description.identifying_attributes, key)
-            .or_else(|| {
-                opamp::attributes::string_value(&description.non_identifying_attributes, key)
-            })
-            .filter(|value| !value.is_empty())
-    };
+    let reported = |key: &str| opamp::attributes::reported(description, key);
     reported("host.id")
         .map(|id| format!("host.id={id}"))
         .or_else(|| reported("host.name").map(|name| format!("host.name={name}")))

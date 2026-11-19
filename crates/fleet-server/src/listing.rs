@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 
 use opamp::attributes;
 use opamp::proto::{
-    AgentDescription, ComponentHealth, PackageStatuses, RemoteConfigStatus, RemoteConfigStatuses,
+    any_value, AgentDescription, ComponentHealth, KeyValue, PackageStatuses, RemoteConfigStatus,
+    RemoteConfigStatuses,
 };
 use opamp::uid::InstanceUid;
 use serde::{Deserialize, Serialize};
@@ -260,20 +261,24 @@ pub struct DisplayValues {
     pub config: &'static str,
 }
 
-/// An Agent's service name and instance name, each read only from the attribute set CLT-what-an-agent-reports §1 and §2
-/// give it: `service.name` from the identifying attributes,
+/// An Agent's service name and instance name, each read only from the attribute set
+/// CLT-what-an-agent-reports §1 and §2 give it: `service.name` from the identifying attributes,
 /// `service.instance.name` from the non-identifying ones. Empty where it is not reported there.
 #[must_use]
-pub fn names(
-    identifying: &BTreeMap<String, String>,
-    non_identifying: &BTreeMap<String, String>,
-) -> (String, String) {
-    let lookup = |map: &BTreeMap<String, String>, key: &str| -> String {
-        map.get(key).cloned().unwrap_or_default()
+pub fn names(description: Option<&AgentDescription>) -> (String, String) {
+    let Some(description) = description else {
+        return (String::new(), String::new());
     };
     (
-        lookup(identifying, attributes::SERVICE_NAME),
-        lookup(non_identifying, attributes::SERVICE_INSTANCE_NAME),
+        attributes::agent_type(description)
+            .unwrap_or_default()
+            .to_string(),
+        attributes::string_value(
+            &description.non_identifying_attributes,
+            attributes::SERVICE_INSTANCE_NAME,
+        )
+        .unwrap_or_default()
+        .to_string(),
     )
 }
 
@@ -285,24 +290,27 @@ pub fn display_values(
 ) -> DisplayValues {
     let (identifying, non_identifying) = match description {
         Some(d) => (
-            crate::fleet::attr_map(&d.identifying_attributes),
-            crate::fleet::attr_map(&d.non_identifying_attributes),
+            attr_map(&d.identifying_attributes),
+            attr_map(&d.non_identifying_attributes),
         ),
         None => (BTreeMap::new(), BTreeMap::new()),
     };
     let lookup = |map: &BTreeMap<String, String>, key: &str| -> String {
         map.get(key).cloned().unwrap_or_default()
     };
-    let build = lookup(&identifying, attributes::SERVICE_VERSION);
+    let build = description
+        .and_then(attributes::agent_version)
+        .unwrap_or_default()
+        .to_string();
     let os = match lookup(&non_identifying, attributes::OS_DESCRIPTION) {
         description if !description.is_empty() => description,
         _ => lookup(&non_identifying, attributes::OS_TYPE),
     };
-    let (service_name, instance_name) = names(&identifying, &non_identifying);
+    let (service_name, instance_name) = names(description);
     DisplayValues {
         service_name,
         instance_name,
-        version: crate::fleet::display_version(&build),
+        version: display_version(&build),
         build,
         os,
         platform: crate::packages::Platform::reported(description)
@@ -316,6 +324,103 @@ pub fn display_values(
         },
         identifying,
         non_identifying,
+    }
+}
+
+/// The version a reader of the fleet table wants: the release, without the commit the build came
+/// from (OPS-cargo-decides-product-version).
+///
+/// A value that is not a version is returned as it stands. `service.version` is whatever an Agent
+/// puts there, and a Foreign Agent numbers itself however its own project does — trimming a string
+/// this Server does not understand would be inventing a version rather than showing one.
+pub(crate) fn display_version(reported: &str) -> String {
+    fleet_core::version::identity(reported)
+        .unwrap_or(reported)
+        .to_string()
+}
+
+/// A declared capability bitmask as the names from the Baseline's `AgentCapabilities`. Undefined
+/// bits are surfaced verbatim rather than dropped — a peer declaring them is worth seeing.
+pub(crate) fn capability_names(mask: u64) -> Vec<String> {
+    use opamp::proto::AgentCapabilities as C;
+    const KNOWN: [(C, &str); 16] = [
+        (C::ReportsStatus, "ReportsStatus"),
+        (C::AcceptsRemoteConfig, "AcceptsRemoteConfig"),
+        (C::ReportsEffectiveConfig, "ReportsEffectiveConfig"),
+        (C::AcceptsPackages, "AcceptsPackages"),
+        (C::ReportsPackageStatuses, "ReportsPackageStatuses"),
+        (C::ReportsOwnTraces, "ReportsOwnTraces"),
+        (C::ReportsOwnMetrics, "ReportsOwnMetrics"),
+        (C::ReportsOwnLogs, "ReportsOwnLogs"),
+        (
+            C::AcceptsOpAmpConnectionSettings,
+            "AcceptsOpAMPConnectionSettings",
+        ),
+        (
+            C::AcceptsOtherConnectionSettings,
+            "AcceptsOtherConnectionSettings",
+        ),
+        (C::AcceptsRestartCommand, "AcceptsRestartCommand"),
+        (C::ReportsHealth, "ReportsHealth"),
+        (C::ReportsRemoteConfig, "ReportsRemoteConfig"),
+        (C::ReportsHeartbeat, "ReportsHeartbeat"),
+        (C::ReportsAvailableComponents, "ReportsAvailableComponents"),
+        (
+            C::ReportsConnectionSettingsStatus,
+            "ReportsConnectionSettingsStatus",
+        ),
+    ];
+    let mut names = Vec::new();
+    let mut undefined = mask;
+    for (bit, name) in KNOWN {
+        if mask & bit as u64 != 0 {
+            names.push(name.to_string());
+            undefined &= !(bit as u64);
+        }
+    }
+    if undefined != 0 {
+        names.push(format!("unknown bits 0x{undefined:x}"));
+    }
+    names
+}
+
+/// Reported attributes as the API shows them: string values as-is, string arrays (the shape the
+/// conventions give `host.ip` and `host.mac`, CLT-what-an-agent-reports) joined with a comma, other value kinds in
+/// their debug form — the view is for reading, the wire keeps the typed original.
+pub(crate) fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
+    fn text(value: &any_value::Value) -> String {
+        match value {
+            any_value::Value::StringValue(s) => s.clone(),
+            any_value::Value::ArrayValue(list) => list
+                .values
+                .iter()
+                .filter_map(|v| v.value.as_ref())
+                .map(text)
+                .collect::<Vec<_>>()
+                .join(", "),
+            other => format!("{other:?}"),
+        }
+    }
+    attributes
+        .iter()
+        .filter_map(|kv| {
+            let value = kv.value.as_ref()?.value.as_ref()?;
+            Some((kv.key.clone(), text(value)))
+        })
+        .collect()
+}
+
+/// The name of a package's installation state, as the list searches it and the view shows it:
+/// `Unknown` for a state the Baseline does not name.
+pub(crate) fn package_status_name(status: i32) -> &'static str {
+    use opamp::proto::PackageStatusEnum as S;
+    match status {
+        s if s == S::Installed as i32 => "Installed",
+        s if s == S::Installing as i32 => "Installing",
+        s if s == S::InstallPending as i32 => "InstallPending",
+        s if s == S::InstallFailed as i32 => "InstallFailed",
+        s if s == S::Downloading as i32 => "Downloading",
+        _ => "Unknown",
     }
 }
 
@@ -367,11 +472,7 @@ pub fn derive(source: &Source<'_>) -> Derived {
             {
                 continue;
             }
-            let value = attributes::string_value(&description.identifying_attributes, &kv.key)
-                .or_else(|| {
-                    attributes::string_value(&description.non_identifying_attributes, &kv.key)
-                })
-                .map(sanitize);
+            let value = attributes::reported(description, &kv.key).map(sanitize);
             reported.insert(sanitize(&kv.key), value);
         }
     }
@@ -391,16 +492,16 @@ pub fn derive(source: &Source<'_>) -> Derived {
     ];
     fields.extend(non_identifying.iter().map(|(k, v)| format!("{k}={v}")));
     fields.extend(identifying.iter().map(|(k, v)| format!("{k}={v}")));
-    fields.extend(crate::fleet::capability_names(source.capabilities));
+    fields.extend(capability_names(source.capabilities));
     if let Some(statuses) = source.package_statuses {
-        let mut packages: Vec<crate::fleet::PackageStatusView> = statuses
-            .packages
-            .values()
-            .map(crate::fleet::PackageStatusView::from_status)
-            .collect();
+        let mut packages: Vec<&opamp::proto::PackageStatus> = statuses.packages.values().collect();
         packages.sort_by(|a, b| a.name.cmp(&b.name));
         for package in packages {
-            fields.extend([package.name, package.version, package.status]);
+            fields.extend([
+                package.name.clone(),
+                package.agent_has_version.clone(),
+                package_status_name(package.status).to_string(),
+            ]);
         }
     }
     Derived {
@@ -553,6 +654,49 @@ pub fn parse_selector(text: &str) -> Option<BTreeMap<String, String>> {
 mod tests {
     use super::*;
 
+    /// The view of an array-valued attribute — the shape `host.ip` and `host.mac` arrive in
+    /// (CLT-what-an-agent-reports): joined for reading, not dumped in debug form.
+    #[test]
+    fn the_view_joins_a_string_array_attribute() {
+        let attrs = vec![
+            opamp::attributes::string_attr("host.name", "edge-01"),
+            opamp::attributes::string_array_attr(
+                "host.ip",
+                &["10.0.0.7".into(), "192.168.1.140".into()],
+            ),
+        ];
+        let map = attr_map(&attrs);
+        assert_eq!(map["host.name"], "edge-01");
+        assert_eq!(map["host.ip"], "10.0.0.7, 192.168.1.140");
+    }
+
+    /// OPS-cargo-decides-product-version: the fleet table shows the release, and the build stays reachable beside it. A
+    /// Foreign Agent that numbers itself in its own way is shown as it reported.
+    #[test]
+    fn the_displayed_version_drops_the_commit_and_keeps_the_pre_release() {
+        assert_eq!(display_version("0.1.1+799e36a"), "0.1.1");
+        assert_eq!(display_version("0.1.1-dev+799e36a"), "0.1.1-dev");
+        assert_eq!(display_version("0.1.1"), "0.1.1");
+        // Not a version this Server understands — shown rather than trimmed into something else.
+        assert_eq!(display_version("v2.9-nightly"), "v2.9-nightly");
+        assert_eq!(display_version(""), "");
+    }
+
+    #[test]
+    fn capability_names_decode_known_bits_and_surface_undefined_ones() {
+        use opamp::proto::AgentCapabilities as C;
+        assert!(capability_names(0).is_empty());
+        assert_eq!(
+            capability_names(C::ReportsStatus as u64 | C::ReportsHealth as u64),
+            ["ReportsStatus", "ReportsHealth"]
+        );
+        let with_undefined = capability_names(C::ReportsStatus as u64 | 1 << 60);
+        assert_eq!(
+            with_undefined,
+            ["ReportsStatus", "unknown bits 0x1000000000000000"]
+        );
+    }
+
     fn at(key: i64, tiebreak: &str) -> Position {
         Position {
             key: Key::Int(key),
@@ -663,5 +807,68 @@ mod tests {
         assert_eq!(parse_selector("tier"), None);
         assert_eq!(parse_selector("tier="), None);
         assert_eq!(parse_selector(""), None);
+    }
+
+    /// The type of one Agent as each path reads it: the list and its `service_name` filter, the
+    /// fit of a Configuration, and the offer of a Package (CLT-what-an-agent-reports §1).
+    fn types_read(identifying: &[(&str, &str)], non_identifying: &[(&str, &str)]) -> [String; 3] {
+        let attrs = |pairs: &[(&str, &str)]| -> Vec<opamp::proto::KeyValue> {
+            pairs
+                .iter()
+                .map(|(k, v)| attributes::string_attr(k, v))
+                .collect()
+        };
+        let description = AgentDescription {
+            identifying_attributes: attrs(identifying),
+            non_identifying_attributes: attrs(non_identifying),
+        };
+        let listed = derive(&Source {
+            uid: &InstanceUid::default(),
+            description: Some(&description),
+            health: None,
+            remote_config_status: None,
+            package_statuses: None,
+            capabilities: 0,
+            transport: Transport::WebSocket,
+        })
+        .service_name;
+        let fitted = ["otelcol", "first", "second"]
+            .into_iter()
+            .find(|name| {
+                let revision = crate::configs::Revision {
+                    body: String::new(),
+                    role: String::new(),
+                    service_name: (*name).to_string(),
+                };
+                crate::configs::fits(&revision, Some(&description))
+            })
+            .unwrap_or_default()
+            .to_string();
+        let offered = crate::packages::reported_agent_type(Some(&description))
+            .unwrap_or_default()
+            .to_string();
+        [listed, fitted, offered]
+    }
+
+    #[test]
+    fn every_path_reads_the_agent_type_from_the_identifying_attributes_alone() {
+        let elsewhere = types_read(&[], &[("service.name", "otelcol")]);
+        assert_eq!(elsewhere, ["", "", ""].map(String::from));
+        let identifying = types_read(&[("service.name", "otelcol")], &[]);
+        assert_eq!(
+            identifying,
+            ["otelcol", "otelcol", "otelcol"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn a_type_reported_twice_or_empty_is_read_alike_by_the_list_and_the_offer() {
+        let twice = types_read(
+            &[("service.name", "first"), ("service.name", "second")],
+            &[],
+        );
+        assert_eq!(twice, ["first", "first", "first"].map(String::from));
+        let empty = types_read(&[("service.name", "")], &[]);
+        assert_eq!(empty, ["", "", ""].map(String::from));
     }
 }

@@ -42,7 +42,6 @@ pub use placement::{Group, Placement};
 pub use session::{
     bad_request, unavailable, Processed, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER,
 };
-pub(crate) use views::{attr_map, capability_names, display_version};
 pub use views::{
     AgentListing, AgentQuery, AgentView, DeploymentReach, HostAgentView, HostAgents,
     PackageStatusView, PendingConfigurationView, PendingPackageView,

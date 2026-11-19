@@ -43,9 +43,7 @@ pub fn matches(
         return false;
     };
     selector.iter().all(|(key, value)| {
-        attributes::string_value(&description.identifying_attributes, key)
-            .or_else(|| attributes::string_value(&description.non_identifying_attributes, key))
-            .is_some_and(|reported| reported == *value)
+        attributes::reported(description, key).is_some_and(|reported| reported == *value)
     })
 }
 

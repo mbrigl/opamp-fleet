@@ -6,12 +6,12 @@
 use std::collections::{BTreeMap, HashMap};
 
 use opamp::attributes;
-use opamp::proto::{any_value, KeyValue};
 use opamp::uid::InstanceUid;
 use serde::Serialize;
 
 use crate::configs::DesiredConfig;
 use crate::deployments::{deployment_for, Deployment, DeploymentStore};
+use crate::listing::capability_names;
 use crate::packages::PackageId;
 
 use super::placement::{Group, Placement};
@@ -38,23 +38,14 @@ impl AppState {
                 record
                     .description
                     .as_ref()
-                    .and_then(|d| {
-                        attributes::string_value(&d.identifying_attributes, key).or_else(|| {
-                            attributes::string_value(&d.non_identifying_attributes, key)
-                        })
-                    })
+                    .and_then(|d| attributes::reported(d, key))
                     .unwrap_or_default()
                     .to_string()
             };
             // The names as the list derives them (CLT-what-an-agent-reports §1 and §2), so the two cannot
             // differ.
-            let (service_name, service_instance_name) = match &record.description {
-                Some(d) => crate::listing::names(
-                    &attr_map(&d.identifying_attributes),
-                    &attr_map(&d.non_identifying_attributes),
-                ),
-                None => (String::new(), String::new()),
-            };
+            let (service_name, service_instance_name) =
+                crate::listing::names(record.description.as_ref());
             let entry = hosts.entry(host.clone()).or_default();
             let is_client_agent = record.placement.client_agent == Some(*uid);
             if is_client_agent && record.placement.group == Some(Group::Host(host.clone())) {
@@ -337,18 +328,6 @@ impl AppState {
     }
 }
 
-/// The version a reader of the fleet table wants: the release, without the commit the build came
-/// from (OPS-cargo-decides-product-version).
-///
-/// A value that is not a version is returned as it stands. `service.version` is whatever an Agent
-/// puts there, and a Foreign Agent numbers itself however its own project does — trimming a string
-/// this Server does not understand would be inventing a version rather than showing one.
-pub(crate) fn display_version(reported: &str) -> String {
-    fleet_core::version::identity(reported)
-        .unwrap_or(reported)
-        .to_string()
-}
-
 /// What the list of Agents is asked
 /// (API-lists-paged-by-cursor §3–§6).
 #[derive(Clone, Debug, Default)]
@@ -629,15 +608,7 @@ pub struct PackageStatusView {
 
 impl PackageStatusView {
     pub(crate) fn from_status(status: &opamp::proto::PackageStatus) -> Self {
-        use opamp::proto::PackageStatusEnum as S;
-        let name = match status.status {
-            s if s == S::Installed as i32 => "Installed",
-            s if s == S::Installing as i32 => "Installing",
-            s if s == S::InstallPending as i32 => "InstallPending",
-            s if s == S::InstallFailed as i32 => "InstallFailed",
-            s if s == S::Downloading as i32 => "Downloading",
-            _ => "Unknown",
-        };
+        let name = crate::listing::package_status_name(status.status);
         // The Baseline carries these only with `Downloading`, and a percentage of zero means the
         // source never said how big the artifact is — not that nothing has arrived.
         let details = status.download_details.filter(|_| name == "Downloading");
@@ -652,77 +623,6 @@ impl PackageStatusView {
             download_bytes_per_second: details.map(|d| d.download_bytes_per_second),
         }
     }
-}
-
-/// A declared capability bitmask as the names from the Baseline's `AgentCapabilities`. Undefined
-/// bits are surfaced verbatim rather than dropped — a peer declaring them is worth seeing.
-pub(crate) fn capability_names(mask: u64) -> Vec<String> {
-    use opamp::proto::AgentCapabilities as C;
-    const KNOWN: [(C, &str); 16] = [
-        (C::ReportsStatus, "ReportsStatus"),
-        (C::AcceptsRemoteConfig, "AcceptsRemoteConfig"),
-        (C::ReportsEffectiveConfig, "ReportsEffectiveConfig"),
-        (C::AcceptsPackages, "AcceptsPackages"),
-        (C::ReportsPackageStatuses, "ReportsPackageStatuses"),
-        (C::ReportsOwnTraces, "ReportsOwnTraces"),
-        (C::ReportsOwnMetrics, "ReportsOwnMetrics"),
-        (C::ReportsOwnLogs, "ReportsOwnLogs"),
-        (
-            C::AcceptsOpAmpConnectionSettings,
-            "AcceptsOpAMPConnectionSettings",
-        ),
-        (
-            C::AcceptsOtherConnectionSettings,
-            "AcceptsOtherConnectionSettings",
-        ),
-        (C::AcceptsRestartCommand, "AcceptsRestartCommand"),
-        (C::ReportsHealth, "ReportsHealth"),
-        (C::ReportsRemoteConfig, "ReportsRemoteConfig"),
-        (C::ReportsHeartbeat, "ReportsHeartbeat"),
-        (C::ReportsAvailableComponents, "ReportsAvailableComponents"),
-        (
-            C::ReportsConnectionSettingsStatus,
-            "ReportsConnectionSettingsStatus",
-        ),
-    ];
-    let mut names = Vec::new();
-    let mut undefined = mask;
-    for (bit, name) in KNOWN {
-        if mask & bit as u64 != 0 {
-            names.push(name.to_string());
-            undefined &= !(bit as u64);
-        }
-    }
-    if undefined != 0 {
-        names.push(format!("unknown bits 0x{undefined:x}"));
-    }
-    names
-}
-
-/// Reported attributes as the API shows them: string values as-is, string arrays (the shape the
-/// conventions give `host.ip` and `host.mac`, CLT-what-an-agent-reports) joined with a comma, other value kinds in
-/// their debug form — the view is for reading, the wire keeps the typed original.
-pub(crate) fn attr_map(attributes: &[KeyValue]) -> BTreeMap<String, String> {
-    fn text(value: &any_value::Value) -> String {
-        match value {
-            any_value::Value::StringValue(s) => s.clone(),
-            any_value::Value::ArrayValue(list) => list
-                .values
-                .iter()
-                .filter_map(|v| v.value.as_ref())
-                .map(text)
-                .collect::<Vec<_>>()
-                .join(", "),
-            other => format!("{other:?}"),
-        }
-    }
-    attributes
-        .iter()
-        .filter_map(|kv| {
-            let value = kv.value.as_ref()?.value.as_ref()?;
-            Some((kv.key.clone(), text(value)))
-        })
-        .collect()
 }
 
 impl AgentView {
@@ -858,53 +758,10 @@ mod tests {
     use super::*;
     use crate::fleet::fixtures::*;
     use crate::revocation::Revocations;
-    use opamp::proto::{AgentDescription, RemoteConfigStatus};
+    use opamp::proto::{AgentDescription, KeyValue, RemoteConfigStatus};
     use prost::Message as _;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
-
-    /// The view of an array-valued attribute — the shape `host.ip` and `host.mac` arrive in
-    /// (CLT-what-an-agent-reports): joined for reading, not dumped in debug form.
-    #[test]
-    fn the_view_joins_a_string_array_attribute() {
-        let attrs = vec![
-            opamp::attributes::string_attr("host.name", "edge-01"),
-            opamp::attributes::string_array_attr(
-                "host.ip",
-                &["10.0.0.7".into(), "192.168.1.140".into()],
-            ),
-        ];
-        let map = super::attr_map(&attrs);
-        assert_eq!(map["host.name"], "edge-01");
-        assert_eq!(map["host.ip"], "10.0.0.7, 192.168.1.140");
-    }
-
-    /// OPS-cargo-decides-product-version: the fleet table shows the release, and the build stays reachable beside it. A
-    /// Foreign Agent that numbers itself in its own way is shown as it reported.
-    #[test]
-    fn the_displayed_version_drops_the_commit_and_keeps_the_pre_release() {
-        assert_eq!(super::display_version("0.1.1+799e36a"), "0.1.1");
-        assert_eq!(super::display_version("0.1.1-dev+799e36a"), "0.1.1-dev");
-        assert_eq!(super::display_version("0.1.1"), "0.1.1");
-        // Not a version this Server understands — shown rather than trimmed into something else.
-        assert_eq!(super::display_version("v2.9-nightly"), "v2.9-nightly");
-        assert_eq!(super::display_version(""), "");
-    }
-
-    #[test]
-    fn capability_names_decode_known_bits_and_surface_undefined_ones() {
-        use opamp::proto::AgentCapabilities as C;
-        assert!(capability_names(0).is_empty());
-        assert_eq!(
-            capability_names(C::ReportsStatus as u64 | C::ReportsHealth as u64),
-            ["ReportsStatus", "ReportsHealth"]
-        );
-        let with_undefined = capability_names(C::ReportsStatus as u64 | 1 << 60);
-        assert_eq!(
-            with_undefined,
-            ["ReportsStatus", "unknown bits 0x1000000000000000"]
-        );
-    }
 
     /// What an operator sees while a package is on the wire. A status the view does not know
     /// reads as "Unknown", which is worse than useless during a rollout — so `Downloading` and
