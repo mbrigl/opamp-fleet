@@ -16,6 +16,17 @@ once its tag exists.
 
 ## [0.8.5]
 
+### Fixed
+
+- **The Hosts view shows an Agent's names as the list does**
+  ([ADR-0018](docs/adr/0018-what-an-agent-reports-about-itself.md)
+  clauses 1 and 2). The Hosts view looked up an Agent's `service.name` and
+  `service.instance.name` in both attribute sets, the list only in the one each belongs to: the
+  service name in the identifying attributes, the instance name in the non-identifying ones. An
+  Agent that reported either in the other set showed a name in the Hosts view and none in the
+  list. Both now show the list's. **What to do:** nothing; a foreign Agent that reports
+  `service.instance.name` as identifying shows no instance name in the Hosts view either.
+
 ### Changed
 
 - **A delete counts what pins it by index**
