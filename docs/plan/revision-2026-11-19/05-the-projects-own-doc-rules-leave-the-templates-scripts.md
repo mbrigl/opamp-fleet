@@ -14,9 +14,12 @@ Each take-up of NUC v0.9.1, v0.10.0, v0.11.0 and v0.11.1 merged those files by h
 The project's own sensors (`sensor-changelog.sh`, `sensor-implements-adrs.sh`) show the other
 shape: a script of the project's own, called from `check-all.sh`.
 
-The project's rules move into scripts of the project's own, each with its self-test, so the
-template's files are the template's again. What cannot move without an extension point in the
-template stays, and is named in the template finding drafted by this revision.
+The project's rules in `check-docs.sh` and `sensor-tests-kept.sh` move into scripts of the
+project's own, each with its self-test, called from `check-all.sh`, so the template's files are
+the template's again. A moved script reads the documents again for itself, since the template's
+scripts offer no point where a project's rule runs on what they have parsed. A rule that cannot
+move at that cost stays, and the hand-off names it. The smaller additions to `check-shell.sh` and
+`check-traceability.sh` stay, and the hand-off names them.
 
 ## Acceptance criteria
 
@@ -31,7 +34,6 @@ template stays, and is named in the template finding drafted by this revision.
 - Touches: `scripts/check-docs.sh`, `scripts/test-check-docs.sh`, `scripts/sensor-tests-kept.sh`,
   `scripts/test-sensor-tests-kept.sh`, `scripts/check-all.sh`
 - NUC-checks-are-bash; NUC-template-learns-from-projects.
-- `.scratch/template-findings/` (not in git): the finding on an extension point.
 
 ## Blocked by
 

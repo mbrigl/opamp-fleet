@@ -16,15 +16,15 @@ and their steps' `uses` as values.
   when the test runs, then it passes, decided by a self-test on such a fixture.
 - [ ] Given an image job that is granted `attestations: write`, or that has a step using the
   attesting action, when the test runs, then it fails and names the job.
-- [ ] Given the change, when the tests of `fleet-tools` run, then every assertion they made
-  before is still made, unchanged in number and name.
+- [ ] Given the change, when the tests of `fleet-tools` run, then every test they ran
+  before still runs, unchanged in number and name, and asserts what it asserted.
 
 ## Read first
 
 - Touches: `crates/fleet-tools/tests/release_workflow.rs`, `crates/fleet-tools/Cargo.toml`
 - OPS-releases-attestations-server-image §11; OPS-actions-pinned-by-sha.
-- A YAML parser as a dev-dependency is a new crate in the supply chain (`deny.toml`); find out
-  first whether one is in `Cargo.lock` already.
+- A YAML parser as a dev-dependency is a new crate in the supply chain (`deny.toml`): `Cargo.lock`
+  has none today.
 
 ## Blocked by
 

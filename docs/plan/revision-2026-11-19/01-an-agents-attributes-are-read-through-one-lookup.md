@@ -32,9 +32,13 @@ them, and a test refuses a read of those keys anywhere else in the Server.
   Package, then all four answer alike, as the human decided for `configs::fits` (see Mode).
 - [ ] Given an Agent that reports `service.name` twice or empty, when it is listed and when a
   Package is offered to it, then both read the same value.
-- [ ] Given the Server's production code, when a test reads it, then the keys `SERVICE_NAME` and
-  `SERVICE_VERSION`, and a lookup over both attribute sets, are read only through the shared
-  functions of `opamp::attributes`. `Platform::reported` is the named exception, with its reason.
+- [ ] Given the Server's production code, when a test reads it, then an Agent's reported
+  `SERVICE_NAME` and `SERVICE_VERSION` are read from an `AgentDescription` only through the shared
+  functions of `opamp::attributes`, and so is a lookup of one key in the identifying set and then
+  the non-identifying one. Not reads: a write of the key, such as the OpenTelemetry resource of
+  `audit_export.rs`, and a walk over both sets that looks up no key (`listing.rs` near line 361,
+  `labels.rs` near lines 109 and 141). `Platform::reported` is the named exception, with its
+  reason.
 - [ ] Given the change, when the fleet's unit tests and the Server's suites run, then they pass,
   and a changed answer of `configs::fits` has its `CHANGELOG.md` entry.
 

@@ -28,13 +28,12 @@ skimmed. The design revision drops what prevented nothing
   must be timed, such as the waiter's own poll, carries its reason as `// timed: <why>`, on its
   line or on a comment line right above it, which `scripts/sensor-tests-kept.sh` reads in place
   of listing it.
-- **A structural test reads the syntax, and runs with the crate it decides** — a test that
-  decides a rule over source or configuration parses it, a Rust file as a `syn` tree and a
-  workflow as YAML, and asserts on items and keys, never on words or exact text. A word moves into
-  a comment and a rename reformats a line: the release-workflow test failed on a comment
-  (a0dc7cd17), and two hand lexers missed test code the syntax tree cut (d54447ce8). It lives in
-  the crate whose code it decides, so that crate's own `cargo test` runs it; the at-calls test sat
-  in `fleet-util` and the Client's tests never ran it (17e0754ef).
+- **A structural test reads the syntax, never words** — a test that decides a rule over source or
+  configuration parses it and asserts on items and keys. A word moves into a comment: the
+  release-workflow test failed on one (a0dc7cd17), and a hand lexer missed test code that a syntax
+  tree cuts (d54447ce8).
+- **A test runs with the crate it decides** — so that crate's own `cargo test` runs it. The
+  at-calls test sat in `fleet-util`, and the Client's tests never ran it (17e0754ef).
 - **A rule two paths apply is one function** — two paths that admit the same input, or derive
   the same value from it, call one function. Two routes, a Gateway and the Server, or a list and
   a view of the same Agent are such paths. A second copy drifts: the path it misses admits what

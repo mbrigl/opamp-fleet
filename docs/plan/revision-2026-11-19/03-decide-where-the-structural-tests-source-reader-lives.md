@@ -14,7 +14,8 @@ A decision, not code. Four structural tests each read Rust source and cut out it
   looking for the item at a `;` or a `,`, so a test-only function with two parameters counts as
   served code.
 
-The two lexers carry the defects that d54447ce8 took out of the capability matrix the day before.
+The two lexers carry one or both of the defects that d54447ce8 took out of the capability matrix
+the day before.
 The syn reader needed 4fff44bd8 (a cut that missed attributes on expression statements),
 3e7142d36 (a path with `\` on Windows) and 52033af18 (the two copies disagreed on what is
 shipped).

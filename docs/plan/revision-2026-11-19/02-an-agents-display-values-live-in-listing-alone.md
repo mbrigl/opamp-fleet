@@ -16,10 +16,11 @@ in `fleet`. `views` keeps the view types and calls `listing`. `names` takes the 
 ## Acceptance criteria
 
 - [ ] Given the change, when `crates/fleet-server/src/listing.rs` is read, then it names nothing
-  under `crate::fleet`, and `fleet.rs` has no re-export for it.
+  under `crate::fleet` but `Transport` (`fleet.rs` near line 85, which 13 files use and which
+  stays where it is), and `fleet.rs` has no re-export for it.
 - [ ] Given an Agent's record, when it is listed and when its view and its Host's view are read,
-  then the values are equal, decided by the test that holds them so today (`fleet/views.rs`
-  near lines 1487 to 1556).
+  then the values are equal, decided by the tests that hold them so today, among them
+  `the_hosts_view_shows_an_agents_names_as_its_listed_record` in `fleet/views.rs`.
 - [ ] Given the change, when the fleet's unit tests and the Server's suites run, then they pass
   unchanged in number and name.
 

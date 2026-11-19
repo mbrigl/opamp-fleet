@@ -18,8 +18,10 @@ columns to show 0.8.5 survives the drop
 tests of the schema it leaves. The check that no served statement names a column of the pair
 (`no_statement_names_a_column_of_the_contract_pair` in `crates/fleet-server/src/postgres/schema.rs`)
 goes too, with its reader of served code (`served_literals`, `raw_string_at`,
-`names_the_contract_pair`), and the ADR's Enforcement stops citing it.
+`names_the_contract_pair`), and the ADR's Enforcement stops citing it. The
+same Enforcement still introduces its tests as carrying `Verifies:` "once it has one" of a
+number; that wording goes with it.
 
 **From.** The triage of the plan by the human (2026-11-15); replaces ticket 02 of
 `the-contract-pair-is-removed`. Restated when release 0.8.5 took release X (2026-11-19). The
-design revision of 2026-11-19 added the check and its reader.
+design revision of 2026-11-19 named the check and its reader.

@@ -11,8 +11,8 @@ release 0.8.5 named them in `crates/fleet-server/src/postgres/enrolment.rs` (rej
 registration of a renewal).
 
 **Idea.** Each path that exists only for a Server of 0.8.0 beside this one goes, with its comment,
-and a path that also serves 0.8.4 keeps only that reason. Some of them are clauses of the ADR
-that supersedes SRV-state-stores-contract-pair, or of SRV-instances-share-one-postgresql,
+and a path that also serves 0.8.4 keeps only that reason. Some of them are clauses of
+SRV-state-stores-contract-pair, or of SRV-instances-share-one-postgresql,
 SEC-bootstrap-certificates-and-enrolment and SEC-append-only-audit-record; those stay until a
 supersession or the next normalization restates them.
 
