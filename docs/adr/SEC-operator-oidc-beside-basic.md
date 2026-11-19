@@ -1,45 +1,48 @@
-# ADR-draft-the-operator-plane-also-signs-in-with-oidc-beside-basic: Both transports over TLS 1.3, two planes split by audience, bounded input, and admission by client certificate and revocation, with the Operator plane also signing in with OIDC beside Basic
+# SEC-operator-oidc-beside-basic: Both transports over TLS 1.3, two planes split by audience, bounded input, and admission by client certificate and revocation, with the Operator plane also signing in with OIDC beside Basic
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
-- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, the reconnect delays in `crates/opamp/src/client/backoff.rs` and `crates/opamp/src/client/ws.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the `rustls` features in `Cargo.toml`, the `listen`, `max_connections`, `max_new_connections_per_sec`, `[rest]`, `[tls]` and `[rest.tls]` keys of `server.toml` and their parsing and startup checks in `crates/fleet-server/src/config.rs`, the certificates `server pki status` lists and the running Server watches in `crates/fleet-server/src/pki.rs`, `config/server.toml`, the message limit in `crates/fleet-server/src/agent_rate.rs`, `on_message` and `on_unreadable` of the Server's handler, the enrolment refusals in `Fleet::enrol` and the download guard `admit_download` in `crates/fleet-server/src/transport.rs`, every `Unavailable` reply in `crates/fleet-server/src/fleet.rs`, the `[agent_rate_limit]` section of `server.toml` and its startup warning, the `agent_rate.throttled` audit event, every outbound connection the Server opens, and every document that tells an operator which certificate the Operator plane serves or how a browser or `opamp-fleetctl` trusts it; admission on `/v1/opamp`, the package download route and `/v1/gateway/revocations` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential and guard in `crates/fleet-server/src/credentials.rs` and `api.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the WebSocket session loop and the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the `/api/v1/revocations` route, the reading of a CSR in `crates/fleet-server/src/ca.rs` and its handling in `crates/fleet-server/src/fleet.rs`, the Client's identity, CSR and renewal in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity it presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, the Server's `hash-credential` and `pki status` commands in `crates/fleet-server/src/main.rs`, the `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` and every PKCS#11 adapter beside the local CA in `crates/fleet-server/src/pkcs11.rs` and `crates/fleet-core/src/pkcs11.rs`, the signing of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the `[pkcs11]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, the `pki init`, `pki token-init` and `pki bootstrap-ca` commands in `crates/fleet-tools/src/pki.rs`, the `cryptoki` dependency of the Server and of `crates/fleet-tools` in `Cargo.toml` and `deny.toml`, SoftHSM2 with its `softhsm2.conf` and token directory in the Dev Container and on the CI runner, `docs/ARCHITECTURE.md`, and every document that tells an operator where the CA keys live; the Operator plane's guard and its `401` in `crates/fleet-server/src/api.rs`, the token validation and the issuer's key cache beside it, the actor of every Operator-plane audit entry, the sign-in of the bundled UI under `crates/fleet-server/static/`, the Operator plane's Content Security Policy, the `[rest.auth.oidc]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, the `jsonwebtoken` dependency in `Cargo.toml` and `deny.toml`, the outbound connection to the issuer, and every document that tells an operator how to sign in
-- **Supersedes:** [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md), [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, the reconnect delays in `crates/opamp/src/client/backoff.rs` and `crates/opamp/src/client/ws.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the `rustls` features in `Cargo.toml`, the `listen`, `max_connections`, `max_new_connections_per_sec`, `[rest]`, `[tls]` and `[rest.tls]` keys of `server.toml` and their parsing and startup checks in `crates/fleet-server/src/config.rs`, the certificates `server pki status` lists and the running Server watches in `crates/fleet-server/src/pki.rs`, `config/server.toml`, the message limit in `crates/fleet-server/src/agent_rate.rs`, `on_message` and `on_unreadable` of the Server's handler, the enrolment refusals in `Fleet::enrol` and the download guard `admit_download` in `crates/fleet-server/src/transport.rs`, every `Unavailable` reply in `crates/fleet-server/src/fleet/session.rs` and `crates/fleet-server/src/fleet/approval.rs`, the `[agent_rate_limit]` section of `server.toml` and its startup warning, the `agent_rate.throttled` audit event, every outbound connection the Server opens, and every document that tells an operator which certificate the Operator plane serves or how a browser or `opamp-fleetctl` trusts it; admission on `/v1/opamp`, the package download route and `/v1/gateway/revocations` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential and guard in `crates/fleet-server/src/credentials.rs` and `api.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the WebSocket session loop and the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the `/api/v1/revocations` route, the reading of a CSR in `crates/fleet-server/src/ca.rs` and its handling in `crates/fleet-server/src/fleet/approval.rs`, the Client's identity, CSR and renewal in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity it presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, the Server's `hash-credential` and `pki status` commands in `crates/fleet-server/src/main.rs`, the `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` and every PKCS#11 adapter beside the local CA in `crates/fleet-server/src/pkcs11.rs` and `crates/fleet-core/src/pkcs11.rs`, the signing of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the `[pkcs11]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, the `pki init`, `pki token-init` and `pki bootstrap-ca` commands in `crates/fleet-tools/src/pki.rs`, the `cryptoki` dependency of the Server and of `crates/fleet-tools` in `Cargo.toml` and `deny.toml`, SoftHSM2 with its `softhsm2.conf` and token directory in the Dev Container and on the CI runner, `docs/ARCHITECTURE.md`, and every document that tells an operator where the CA keys live; the Operator plane's guard and its `401` in `crates/fleet-server/src/api.rs`, the token validation and the issuer's key cache beside it, the actor of every Operator-plane audit entry, the sign-in of the bundled UI under `crates/fleet-server/static/`, the Operator plane's Content Security Policy, the `[rest.auth.oidc]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, the `jsonwebtoken` dependency in `Cargo.toml` and `deny.toml`, the outbound connection to the issuer, and every document that tells an operator how to sign in
+- **Supersedes:** [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md), [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)
 
 ## Context
 
 This ADR carries every clause of
-[ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) and
-[ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+[SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) and
+[SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)
 and changes three of them, so that the Operator plane also signs in with OpenID Connect beside
-Basic: the guard of the Operator plane and the rule that its credential carries no rights (ADR-0026
-clauses 13 and 16), and the purposes the Server dials out for (ADR-0012 clause 21). It adds five
-clauses: the bearer token, the issuer's keys, the library, the bundled UI's sign-in, and the audit
-of who acted. The two fold into one ADR because the guard of the Operator plane, which ADR-0026
-decides, and the outbound connection to the issuer, which ADR-0012 bounds, change together.
+Basic: the guard of the Operator plane and the rule that its credential carries no rights
+(SEC-admission-by-client-certificate §13 and §16), and the purposes the Server dials out for
+(SEC-tls13-two-planes-bounded-input §21). It adds five clauses: the bearer token, the issuer's keys,
+the library, the bundled UI's sign-in, and the audit of who acted. The two fold into one ADR because
+the guard of the Operator plane, which SEC-admission-by-client-certificate decides, and the outbound
+connection to the issuer, which SEC-tls13-two-planes-bounded-input bounds, change together.
 
-**Clause map.** ADR-0012's clauses keep their numbers, and ADR-0026's follow them, each its old
-number plus 29. On acceptance, a citation of ADR-0012 clause *n* moves to clause *n* of this ADR,
-and one of ADR-0026 clause *n* to clause *n* + 29.
+**Clause map.** SEC-tls13-two-planes-bounded-input's clauses keep their numbers, and
+SEC-admission-by-client-certificate's follow them, each its old number plus 29. On acceptance, a
+citation of SEC-tls13-two-planes-bounded-input §*n* moves to §*n* of this ADR, and one of
+SEC-admission-by-client-certificate §*n* to §*n* + 29.
 
 | Old clauses | Clauses here | Change |
 |---|---|---|
-| ADR-0012 clauses 1–20 and 22–29 | 1–20 and 22–29 | none |
-| ADR-0012 clause 21 | 21 | the issuer is a third purpose of the Server's outbound connections |
-| ADR-0026 clauses 1–12 | 30–41 | none |
-| ADR-0026 clause 13 | 42 | the Operator plane is guarded by Basic, OIDC or both |
-| ADR-0026 clauses 14 and 15 | 43 and 44 | none |
-| ADR-0026 clause 16 | 45 | the operators' credentials, a Basic credential and a token, carry no rights |
-| ADR-0026 clauses 17–41 | 46–70 | none |
+| SEC-tls13-two-planes-bounded-input §1–§20 and §22–§29 | 1–20 and 22–29 | none |
+| SEC-tls13-two-planes-bounded-input §21 | 21 | the issuer is a third purpose of the Server's outbound connections |
+| SEC-admission-by-client-certificate §1–§12 | 30–41 | none |
+| SEC-admission-by-client-certificate §13 | 42 | the Operator plane is guarded by Basic, OIDC or both |
+| SEC-admission-by-client-certificate §14 and §15 | 43 and 44 | none |
+| SEC-admission-by-client-certificate §16 | 45 | the operators' credentials, a Basic credential and a token, carry no rights |
+| SEC-admission-by-client-certificate §17–§41 | 46–70 | none |
 | none | 71–75 | new: the bearer token, the issuer's keys, the library, the bundled UI, the audit |
 
 The Operator plane is guarded as a whole by `[rest.auth]`, Basic only
-([ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-clause 13). Every route, the UI at `/` included, answers `401` with
+([SEC-admission-by-client-certificate §13](SEC-admission-by-client-certificate.md)).
+Every route, the UI at `/` included, answers `401` with
 `WWW-Authenticate: Basic realm="opamp"`, and the browser's native prompt is the login. The
-operators' credential is the only one and carries no roles (ADR-0026 clause 16). ADR-0026 rejected
-pluggable authenticators for its own change and named the plane's guard as the seam where one
-could be added later.
+operators' credential is the only one and carries no roles
+(SEC-admission-by-client-certificate §16). SEC-admission-by-client-certificate rejected pluggable
+authenticators for its own change and named the plane's guard as the seam where one could be added
+later.
 
 Companies that run a fleet sign their people in through an identity provider. Basic credentials
 in `server.toml` are then a second list of people, kept apart from the one that decides who works
@@ -54,8 +57,8 @@ token's issuer and subject, never a name or an e-mail address.
 
 The build constrains the token library: TLS and signatures run on *ring*, and `deny.toml` bans
 `aws-lc-rs` and OpenSSL
-([ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)
-clause 5). `reqwest` is already a dependency and speaks TLS 1.3 alone.
+([SEC-tls13-two-planes-bounded-input §5](SEC-tls13-two-planes-bounded-input.md)).
+`reqwest` is already a dependency and speaks TLS 1.3 alone.
 
 A reader without this conversation would expect the UI's token in a cookie or browser storage, a
 client secret in `server.toml`, and rights read from the token's roles. This ADR decides against
@@ -75,7 +78,7 @@ third-party clients, and a Client speaking one cannot exercise both faces of its
   wait for the next poll.
 - **WebSocket:** one persistent connection, either side sends at will, each message a varint
   header plus the protobuf body. It gives the control loop its "within seconds" property, and
-  Gateway multiplexing is stated for it ([ADR-0016](0016-client-modes-and-the-gateway.md)).
+  Gateway multiplexing is stated for it ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)).
 - **Detection:** one path (`/v1/opamp`, default port 4320). The Baseline describes the
   `Content-Type` header as how the Server tells the two apart.
 
@@ -83,8 +86,9 @@ TLS is part of the transport. G-17 requires every connection a Client opens to t
 TLS 1.3, with a client certificate in its handshake. The Strategy *Security before convenience*
 widens that to every connection that leaves the host, and accepts plaintext on the loopback alone.
 Q-1 adds that a configuration breaking this is refused at startup, naming the setting, and never
-warned about. The Dev Container ([ADR-0004](0004-dev-container-runtime.md)) has neither OpenSSL
-headers nor cmake, which `aws-lc-rs`-backed rustls needs.
+warned about. The Dev Container
+([NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md)) has neither OpenSSL headers
+nor cmake, which `aws-lc-rs`-backed rustls needs.
 
 In this ADR, **LOOPBACK** means the IP literals `127.0.0.1` and `::1`. A host name is never
 LOOPBACK, `localhost` included: what it resolves to is a resolver's answer, not the
@@ -102,12 +106,12 @@ route code, since a browser presents none.
 One route crosses that line: the package download. Its path is under `/api/v1`, but its audience
 is Agents, and the offered `download_url` is a path the Client resolves against its own OpAMP
 endpoint. Where the route is served, and what protects the artifact, is
-[ADR-0033](0033-packages-signatures-and-delivery.md)'s.
+[PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)'s.
 
 The Agent plane's certificate is made by `opamp-fleetctl pki` from the fleet's own server CA
-([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)). The Clients trust that CA because
-their `[tls] ca_file` names it. A browser does not, unless the operator imports the server CA
-into every browser that opens the UI. In an organization with its own PKI, the UI is expected to
+([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)). The Clients trust that CA
+because their `[tls] ca_file` names it. A browser does not, unless the operator imports the server
+CA into every browser that opens the UI. In an organization with its own PKI, the UI is expected to
 present a certificate from that PKI, which every managed browser already trusts. The Agent plane
 cannot take that certificate instead, because every Client trusts the fleet's server CA and
 nothing else. One certificate for both planes also puts the key every Client's trust rests on
@@ -123,11 +127,11 @@ connection, send `GET /v1/opamp HTTP/1.1\r\n` and fall silent, costing the Serve
 hyper's read buffer per connection, before any route or credential check runs. hyper 1.x defaults
 `header_read_timeout` to 30 s, but the default is inert unless a `Timer` is installed (its
 `Time::check` warns and resolves to `None`), and configuring the timeout without a timer panics.
-Neither `axum::serve` (0.8) nor `axum_server` (0.7) installs one; `axum::serve` exposes no builder
-at all, while `axum_server::Server::http_builder()` does. A per-request timeout is the wrong
-instrument: the three routes that matter (the WebSocket, the download, and the package upload
-with its body limit off) are meant to take long, and middleware runs only after the headers are
-parsed.
+`axum::serve` (0.8) installs none and exposes no builder at all; `axum_server` (0.9) installs one
+but turns the timeout off, and exposes the builder as `axum_server::Server::http_builder()`. A
+per-request timeout is the wrong instrument: the three routes that matter (the WebSocket, the
+download, and the package upload with its body limit off) are meant to take long, and middleware
+runs only after the headers are parsed.
 
 Two more bounds are needed. Nothing else limits how many connections a peer may hold open at
 once, and `max_agents` bounds the fleet, not the sockets. The TLS listeners offer `h2` by ALPN,
@@ -157,11 +161,11 @@ bounds how many messages an admitted peer sends:
 
 None of them bounds how often. One WebSocket session can send a full report as fast as the Server
 decodes it. Each report takes the fleet lock, may write the Agent's record to disk
-([ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)), may compose an offer, and may ask for a
-certificate to be signed. A plain-HTTP poller can do the same with one request per message. The
-package download route is the Agent plane's other member route, and it costs more: each request
-scans the fleet under its lock to find an Agent the artifact is offered to
-([ADR-0033](0033-packages-signatures-and-delivery.md)).
+([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)), may compose an offer, and may
+ask for a certificate to be signed. A plain-HTTP poller can do the same with one request per
+message. The package download route is the Agent plane's other member route, and it costs more: each
+request scans the fleet under its lock to find an Agent the artifact is offered to
+([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)).
 
 The specification holds that no vulnerability can be ruled out (Strategy *Security before
 convenience*). A host taken over, or a Client with a bug that loops, is still a member, and
@@ -172,14 +176,14 @@ Forces that shape the rate limit:
 
 - **The host is the unit admission knows.** A certificate names the host it was issued to as
   `urn:opamp-fleet:host:<id>`
-  ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-  clause 11). `instance_uid` is
+  ([SEC-bootstrap-certificates-and-enrolment §11](SEC-bootstrap-certificates-and-enrolment.md)).
+  `instance_uid` is
   self-asserted (clause 41), so a limit keyed on it alone binds nothing: a peer chooses a new uid
   for each message. A certificate an operator provisioned outside the CSR flow names no host until
   it is first renewed. It is still one certificate, told apart by its issuer and serial (`CertId` in
   [`revocation.rs`](../../crates/fleet-server/src/revocation.rs)).
 - **A Gateway carries other hosts' Agents.** Behind a marked Gateway every Agent arrives under the
-  Gateway's certificate (clause 40, [ADR-0016](0016-client-modes-and-the-gateway.md)). A per-host
+  Gateway's certificate (clause 40, [CLT-modes-and-gateway](CLT-modes-and-gateway.md)). A per-host
   limit there would put a whole site under one host's budget. A per-uid limit alone bounds nothing,
   because a downstream peer can cycle uids. The Gateway's `max_carried_agents` does not stop that
   either: it bounds one downstream connection, and a plain-HTTP downstream exchange is a connection
@@ -195,13 +199,13 @@ Forces that shape the rate limit:
     that *"SHOULD be used only for the client's attempts to reconnect"*.
   - *"The minimum recommended retry interval is 30 seconds."*
   - This Server answers `Unavailable` with `retry_info` of 30 s (`RETRY_AFTER` in
-    [`fleet.rs`](../../crates/fleet-server/src/fleet.rs)) in four places besides the rate limit:
-    at the Agent-record ceiling (clause 19 and
-    [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)
-    clause 2), when the enrolment queue is full or no enrolment window is open
-    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-    clause 9), and when the audit record holds back a CSR
-    ([ADR-0028](0028-the-audit-record.md)).
+    [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs)) in four places besides the
+    rate limit: at the Agent-record ceiling (clause 19 and
+    [SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md)),
+    when the enrolment queue is full or no enrolment window is open
+    ([SEC-bootstrap-certificates-and-enrolment §9](SEC-bootstrap-certificates-and-enrolment.md)),
+    and when the audit record holds back a CSR
+    ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)).
 - **The Client honours `Unavailable` on both transports.**
   [`opamp::client::protocol`](../../crates/opamp/src/client/protocol.rs) turns it into a wait,
   `retry_info` or 30 s without one.
@@ -210,22 +214,21 @@ Forces that shape the rate limit:
   - On plain HTTP it waits and resumes its routine reports
     ([`http.rs`](../../crates/opamp/src/client/http.rs)).
 - **A refused message loses nothing.** The Server detects a gap in `sequence_num` and answers the
-  next message it processes with `ReportFullState` (`fleet.rs`). The Baseline's *Retrying
+  next message it processes with `ReportFullState` (`fleet/session.rs`). The Baseline's *Retrying
   Messages* section lets a Client keep one up-to-date message of each kind rather than a queue.
 - **A reply reaches an Agent only when it carries that Agent's `instance_uid`.** This project's
   own Client routes every reply by that field and drops one without it, on every connection
   (`Engine::handle` in [`engine.rs`](../../crates/fleet-agent/src/engine.rs)). A Gateway drops one
-  too ([ADR-0016](0016-client-modes-and-the-gateway.md),
+  too ([CLT-modes-and-gateway](CLT-modes-and-gateway.md),
   [`pool.rs`](../../crates/fleet-agent/src/gateway/pool.rs)). An `Unavailable` reply built
   without an `instance_uid` reaches no Agent, and the Client never waits as told.
 - **A host speaks for at most 256 Agents**
-  ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-  clause 11),
+  ([SEC-bootstrap-certificates-and-enrolment §11](SEC-bootstrap-certificates-and-enrolment.md)),
   and after a reconnect the Client sends one
   full report for each of them. At the Baseline's 30 s heartbeat or poll, 256 Agents send about 8.5
   messages a second.
 - **Refusals already have a bounded record.**
-  [ADR-0028](0028-the-audit-record.md)
+  [SEC-append-only-audit-record](SEC-append-only-audit-record.md)
   writes at most ten refusals of one event per peer address and second, and counts the rest. It
   counts every decision whose entry could not be queued in the next entry's `unrecorded_before`.
 
@@ -274,15 +277,15 @@ Forces that shape the answer:
   with `AgentIdentification`. A certificate whose validity depended on matching it would die on a
   re-key the Server itself initiated.
 - **A Gateway terminates.** A Client in Gateway Mode reads OpAMP to fold many Agents onto few
-  connections ([ADR-0016](0016-client-modes-and-the-gateway.md)), so the certificate the Server
+  connections ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)), so the certificate the Server
   sees belongs to the Gateway. The Gateway's own handshake is what proves a downstream peer.
 - **A Client updates itself.** A Client may start with a `supervisor.toml` written for an
   earlier version, by the self-update of
-  [ADR-0019](0019-the-client-updates-itself-from-a-signed-package.md), with nobody at the host.
+  [CLT-self-update-signed-package](CLT-self-update-signed-package.md), with nobody at the host.
 - **The Agent plane serves the package download besides `/v1/opamp`**
-  ([ADR-0033](0033-packages-signatures-and-delivery.md)). A handshake that requires a certificate
-  requires it there too, so the Client's downloader must present one — to the Server, never to a
-  mirror.
+  ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). A handshake that
+  requires a certificate requires it there too, so the Client's downloader must present one — to the
+  Server, never to a mirror.
 - **An approval means something only when the enrolling peer can be told apart.** A bootstrap
   certificate that chains to the same CA as an issued one is indistinguishable from it; a CA of its
   own makes an enrolment connection recognisable from its handshake.
@@ -299,7 +302,7 @@ field in AgentToServer message matches the instance_uid in the CSR fields"*, so 
 for a certificate in another Agent's name. It prescribes no field: the `instance_uid` may sit in
 *"one of the CSR fields (or part of the field)"*. The subject of an issued certificate is
 descriptive
-([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)):
+([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)):
 the Server does not require it to match `instance_uid` and drops requested SANs. That alone would
 leave the conditional MUST unmet: a CSR that *does* carry an `instance_uid` would be signed whatever
 it carries. [`CONFORMANCE.md`](../CONFORMANCE.md#mutual-tls-and-the-two-fields-still-refused)
@@ -308,7 +311,7 @@ records how it is met.
 This project's own Client puts its `service.instance.name` in the common name and no
 `instance_uid` anywhere, so it never triggers that check. A peer implementation may, and
 interoperability with one is a stated target
-([ADR-0011](0011-the-protocol-is-pinned-and-checked-against-opamp-go.md)). The difficulty is
+([API-protocol-pinned-interop-checked](API-protocol-pinned-interop-checked.md)). The difficulty is
 recognising a claim without reading an ordinary descriptive subject as one. The Baseline's
 `instance_uid` is 16 bytes and SHOULD be a UUID v7; its textual form is the canonical 8-4-4-4-12
 hexadecimal form of RFC 9562, which a host name or a product name does not take by accident.
@@ -340,25 +343,25 @@ Three facts shape the revocation list:
   key (clause 39). A host that renewed shortly before its old certificate was revoked would carry
   on with the new one.
 - **A Gateway hides its downstream certificates.** The Server sees the Gateway's certificate on a
-  pooled upstream connection ([ADR-0016](0016-client-modes-and-the-gateway.md)); the downstream
+  pooled upstream connection ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)); the downstream
   certificate stays on the downstream hop, and nothing of the downstream Agent's proof reaches the
   Server.
 
 The certificate is worth only what the key that signs it is worth. The Server signs two kinds of
 certificate: as the local client CA it signs every host certificate (clause 37), and as the
 bootstrap CA it issues bootstrap certificates on request
-([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
 A key kept as a file is a PKCS#8 PEM file that `opamp-fleetctl pki init` writes into the Server's
 directory and the Server reads unattended, unencrypted
-([ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 7 and 16). Whoever reads
+([OPS-operator-program-fleetctl §7 and §16](OPS-operator-program-fleetctl.md)). Whoever reads
 `client-ca-key.pem` once, from the host, from a backup or from a snapshot of its disk, can sign a
 member certificate for any host until the CA is replaced, and nothing in the fleet would tell that
 certificate from a real one. Several Server instances on one PostgreSQL database
-([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md))
+([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md))
 each need the CA keys, and copying a key file to every instance multiplies the places it can be
 read from; an instance whose CA key is a file therefore runs alone (that ADR's clause 2). A key
 on a token is made there by `opamp-fleetctl pki token-init` on the Server host and never leaves it
-([ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 7, 8, 12 and 16).
+([OPS-operator-program-fleetctl §7, §8, §12 and §16](OPS-operator-program-fleetctl.md)).
 
 The `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` separates the signing of a host
 certificate from the code that decides to sign it, and the bootstrap certificates are signed in
@@ -408,14 +411,14 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    that delivers Server-initiated changes without polling latency. `poll_interval_secs` (default
    30) governs polling. `heartbeat_interval_secs` (default 30; `0` disables heartbeats and
    undeclares `ReportsHeartbeat`) governs WebSocket. A heartbeat the Server offers replaces both
-   ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)).
+   ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)).
 
 3. **Gzip and a message size limit on both transports.** The Server accepts gzip request bodies
    (a Baseline MUST) and enforces `max_message_size_bytes` (default 64 MiB, `0` refused at
    startup) in both directions and on both transports, applied after decompression: `413` on plain
    HTTP, a `1009` close on WebSocket, and an oversized reply is discarded rather than sent. The
    shared helpers that implement this live in `crates/opamp`
-   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+   ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
 
 4. **Reconnection belongs to the Client's transport layer, and a fleet comes back spread out.**
    - The first reconnect after an established connection is lost — cut, or closed by a Server
@@ -440,7 +443,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
      `503` waits the `Retry-After` it carries, or the next backoff step when it carries none,
      whichever is longer.
    - After a reconnect the Client sends a full status report. The Server keys no state on the
-     connection ([ADR-0016](0016-client-modes-and-the-gateway.md)).
+     connection ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)).
 
 5. **TLS is TLS 1.3 alone, on rustls with the `ring` provider, everywhere; no OpenSSL, no system
    TLS library.** `reqwest` requires the `tls12` feature of `rustls`, so the floor is held where
@@ -448,7 +451,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    provider with the three TLS 1.3 suites and nothing else: `TLS13_AES_256_GCM_SHA384`,
    `TLS13_AES_128_GCM_SHA256` and `TLS13_CHACHA20_POLY1305_SHA256`. Every rustls configuration of
    both ends is built from it with the protocol versions pinned to TLS 1.3
-   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+   ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
    Each binary installs it process-wide at
    startup, and every `reqwest` client is built with a minimum of TLS 1.3. This covers every
    connection: OpAMP, the REST API, downloads, mirrors, own telemetry and the Server's connections
@@ -480,7 +483,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    clauses 42 and 71 to 75,
    and its connection cap)
    live inside it; unknown keys are refused as everywhere
-   ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+   ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
    The router is split accordingly:
    `fleet_server::agent_app(state, admission)` and `fleet_server::operator_app(state, auth)`.
 
@@ -515,23 +518,29 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 
 13. **`[rest.tls] cert_file` is a certificate the Server depends on.** `server pki status` lists
     it, and the running Server warns before it ends, at startup and daily, under the expiry rule
-    of [ADR-0036](0036-the-operator-program-opamp-fleetctl.md). A file named in both `[tls]` and
-    `[rest.tls]` is listed once.
+    of [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md). A file named in both
+    `[tls]` and `[rest.tls]` is listed once.
 
 14. **Two listeners always; addresses that cannot both be bound fail at startup.** There is no
     single-port mode. The same port on the same address, or on an address that covers every
     interface (`0.0.0.0:4320` and `127.0.0.1:4320`), is refused at load with a message naming both
     keys. Both listeners are bound before either serves, and a bind failure names the plane.
 
-15. **Every plane's server is built in one place, with an HTTP/1 header-read timeout of 30
-    seconds.** `listen::plane` serves both planes on `opamp::server::listen`
-    ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)),
-    which serves plain and TLS through
-    `axum_server`, installs `hyper_util::rt::TokioTimer` on the HTTP/1 builder, and sets
-    `header_read_timeout` to `HEADER_READ_TIMEOUT` (30 s, hyper's own default and what axum
-    applies once it installs the timer itself). The timeout is a parameter of the serving function
-    so a test can drive it short. `hyper-util` is a dependency of `opamp`'s `server` feature for
-    this.
+15. **Every plane's server is built in one place, and 30 seconds bound the time to a
+    connection's first request and to each HTTP/1 header read.** `listen::plane` serves both planes
+    on `opamp::server::listen` ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)), which
+    serves plain and TLS through `axum_server`. Its `bounded` sets `HEADER_READ_TIMEOUT`, 30 seconds
+    and hyper's own default, in two places on every listener:
+    - as the HTTP/1 `header_read_timeout`, with `hyper_util::rt::TokioTimer` installed on the
+      HTTP/1 builder;
+    - as `axum_server`'s `first_request_timeout`, which bounds the time to a connection's first
+      request. That time counts from the connection, or from the end of the TLS handshake on a
+      TLS listener.
+
+    `axum_server` 0.9 installs a timer itself but turns the header-read timeout off. So the
+    listener sets the timer and both timeouts, and rests on no default of the library. The
+    timeout is a setting of the listener, `with_header_read_timeout`, so a test can drive it short.
+    `hyper-util` is a dependency of `opamp`'s `server` feature for this.
 
 16. **The TLS handshake deadline is stated, not inherited.** `TLS_HANDSHAKE_TIMEOUT` is 10 seconds
     on both planes' acceptors: `axum_server`'s default value, named in this code so it reads as a
@@ -540,9 +549,9 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 17. **Shutdown is one bounded drain for both planes.** One `Handle` is shared by both listeners. A
     stop closes both listeners at once and tells each WebSocket session to close at an instant
     drawn uniformly over `drain_secs`
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-    clause 3); whatever has not ended 2 seconds after that window is cut, and the Agent-record flush
-    of [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md) runs afterwards.
+    ([SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md));
+    whatever has not ended 2 seconds after that window is cut, and the Agent-record flush
+    of [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md) runs afterwards.
 
 18. **No request timeout, but a floor on the pace of every body and every message; no
     `tower-http`, no `server.toml` key for these bounds.** The long routes stay long: nothing has
@@ -565,7 +574,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     accept, before the TLS handshake, while the connections already established keep working. A
     fleet larger than the default raises the key together with the process's file-descriptor
     limit. Where several instances serve one fleet
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)),
+    ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)),
     each connection cap counts the connections of one instance, and `max_agents` counts the Agent
     records stored, for the whole fleet. A fleet with more connections than one instance's cap is
     spread over enough instances, or the cap is raised.
@@ -581,13 +590,13 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     over TLS 1.3.** Each outbound connection runs over the provider of clause 5, and plaintext
     only to a loopback endpoint the configuration names. The ADRs in force give it three such
     purposes, the S3 store and the PostgreSQL store
-    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md),
-    clauses 17 and 24), and the issuer `[rest.auth.oidc] issuer` names, for its discovery document
+    ([SRV-state-stores-contract-pair §17 and §24](SRV-state-stores-contract-pair.md)),
+    and the issuer `[rest.auth.oidc] issuer` names, for its discovery document
     and the JSON Web Key Set that document names (clause 72). The Server sends no request for a
     package anywhere
-    ([ADR-0033](0033-packages-signatures-and-delivery.md), clause 4). This clause and clause 5
-    bind the Server's own code. A library the operator has the Server load opens what its own
-    configuration names, over its own stack, and the ADR that has the Server load it decides
+    ([PKG-signed-packages-and-delivery §4](PKG-signed-packages-and-delivery.md)). This clause and
+    clause 5 bind the Server's own code. A library the operator has the Server load opens what its
+    own configuration names, over its own stack, and the ADR that has the Server load it decides
     whether it may.
 
 22. **`[agent_rate_limit]` in `server.toml`.** The rate limit covers an admitted peer's
@@ -598,9 +607,9 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     | Key | Default | Rule |
     |---|---|---|
     | `messages_per_sec` | `10` | Tokens added to a host's or an Agent's bucket per second, continuously. `0` is refused at startup with a message naming the key. |
-    | `burst` | `300` | That bucket's capacity, enough for one full report from each of the 256 Agents a host may speak for (ADR-0027 clause 11) after a reconnect. A new bucket starts full. `0` is refused at startup with a message naming the key. |
+    | `burst` | `300` | That bucket's capacity, enough for one full report from each of the 256 Agents a host may speak for (SEC-bootstrap-certificates-and-enrolment §11) after a reconnect. A new bucket starts full. `0` is refused at startup with a message naming the key. |
     | `gateway_messages_per_sec` | `500` | Tokens added per second to the aggregate bucket of a host marked as a Gateway. `0` is refused at startup with a message naming the key. |
-    | `gateway_burst` | `10000` | The aggregate bucket's capacity: one full report from each Agent at the default `max_carried_agents` (ADR-0016). `0` is refused at startup with a message naming the key. |
+    | `gateway_burst` | `10000` | The aggregate bucket's capacity: one full report from each Agent at the default `max_carried_agents` (CLT-modes-and-gateway). `0` is refused at startup with a message naming the key. |
 
 23. **The Server warns when the limit is below what the fleet's heartbeat needs.**
     `messages_per_sec` times the offered `[connection_offer] heartbeat_interval_secs` is the number
@@ -620,7 +629,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     On `/v1/opamp` the check runs first in `on_message`: before enrolment, before a CSR is read,
     and before `process_presented` takes the fleet lock. On the download route it runs in
     `admit_download` once the certificate is admitted, before the route's handler. Which bucket a
-    message or a download is counted in is [ADR-0016](0016-client-modes-and-the-gateway.md)'s.
+    message or a download is counted in is [CLT-modes-and-gateway](CLT-modes-and-gateway.md)'s.
 
     Not counted: a WebSocket upgrade that sends nothing, which the connection cap bounds, and the
     Gateways' revocation list.
@@ -663,14 +672,12 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     and a Gateway route replies by that field alone and drop a reply without it. The throttled
     reply of clause 25 therefore names the Agent that sent the message, and only that Agent. The
     other `Unavailable` replies carry it too. Those replies are:
-    - the Agent-record ceiling in `fleet.rs` (clause 19 and
-      [ADR-0029](0029-the-fleet-record-of-agents-and-hosts.md)
-      clause 2);
+    - the Agent-record ceiling in `fleet/session.rs` (clause 19 and
+      [SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md));
     - a CSR held back for its audit record
-      ([ADR-0028](0028-the-audit-record.md));
+      ([SEC-append-only-audit-record](SEC-append-only-audit-record.md));
     - the full enrolment queue and the closed enrolment window in `Fleet::enrol`
-      ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
-      clause 9).
+      ([SEC-bootstrap-certificates-and-enrolment §9](SEC-bootstrap-certificates-and-enrolment.md)).
 
     An undecodable message has no `instance_uid`, so its throttled reply carries none, and no Agent
     receives it.
@@ -690,7 +697,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 
 29. **The audit records every throttled message and download as a refusal.** Each one is passed
     to the audit record
-    ([ADR-0028](0028-the-audit-record.md))
+    ([SEC-append-only-audit-record](SEC-append-only-audit-record.md))
     as event `agent_rate.throttled` with outcome `throttled`. The entry carries:
     - the peer address;
     - `host`, or `serial` and the CA role where the certificate names no host;
@@ -698,11 +705,12 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     - `bucket`: `agent`, `host` or `gateway`, naming the bucket that was empty;
     - `route`: `opamp` with the `transport`, or `download`.
 
-    The entries are aggregated under ADR-0028's bound on refusals, by event and peer address. A
-    host that floods costs at most ten entries and one `agent_rate.throttled.aggregated` count per
-    address and second. The refusal never waits for its entry. A refusal that finds the audit
-    channel full is counted in the next entry's `unrecorded_before` (ADR-0028). A message or
-    download the limit lets through is recorded by nothing new.
+    The entries are aggregated under SEC-append-only-audit-record's bound on refusals, by event and
+    peer address. A host that floods costs at most ten entries and one
+    `agent_rate.throttled.aggregated` count per address and second. The refusal never waits for its
+    entry. A refusal that finds the audit channel full is counted in the next entry's
+    `unrecorded_before` (SEC-append-only-audit-record). A message or download the limit lets through
+    is recorded by nothing new.
 
 ### Admission and revocation
 
@@ -727,14 +735,14 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     present is ignored, with one notice at startup naming the section, and nothing from it is sent;
     a Client updated by the Server must keep connecting. An `Authorization` header persisted with
     connection settings is dropped when they are loaded
-    ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)). A `401` is logged as an
-    admission failure and retried with the transport's backoff. The communication layer refuses
-    `ws://` and `http://` to a host that is not LOOPBACK
-    ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+    ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)). A `401`
+    is logged as an admission failure and retried with the transport's backoff. The communication
+    layer refuses `ws://` and `http://` to a host that is not LOOPBACK
+    ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
 33. **What the Server offers reaches only admitted members.** A connection-settings offer and a
     `[telemetry_offer]` carrying headers are sent only on a connection whose certificate was issued
     by the client CA. An enrolment connection
-    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md))
+    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md))
     receives no offer but the certificate it asked for.
 34. **Client certificates on both transports, required in the TLS handshake.** `[tls]
     client_ca_file` in `server.toml` is required; a configuration without it is refused at startup
@@ -756,7 +764,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     `client-key.pem`. The stored pair outranks the file, the same precedence persisted connection
     settings have; deleting it reverts to what the operator wrote. The private key is written
     `0600` on Unix and inherits the state directory's ACL on Windows
-    ([ADR-0020](0020-the-installed-service-and-its-state.md)).
+    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)).
 37. **The Server signs CSRs as a local CA while `[client_ca]` is configured.** `[client_ca]` names
     `cert_file`, `validity_days` (default 30, `0` refused; a month bounds what a certificate stolen
     unnoticed is good for, and a host offline for a fortnight still renews on its own) and the CA's
@@ -767,43 +775,43 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     holds no Server-issued certificate, or holds one in its renewal window, generates a keypair and
     a PEM CSR locally and sends it as `ConnectionSettingsRequest.opamp.certificate_request`, only
     once the Server has declared the capability (the pessimistic gate on sending in
-    [ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)). A CSR on a connection
-    whose certificate chains to the client CA is signed at once; a CSR on an enrolment connection
-    waits for an operator
-    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+    [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)). A CSR on
+    a connection whose certificate chains to the client CA is signed at once; a CSR on an enrolment
+    connection waits for an operator
+    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
     A CSR that does not parse, or that arrives while no `[client_ca]` is configured, is answered
     with a `ServerErrorResponse` of type `BadRequest`. The issued certificate travels back as an
     ordinary connection-settings offer with no private key in it.
 38. **A bootstrap certificate carries a host to its first CSR, and an operator approves it.** It is
     issued by the bootstrap CA, never by the client CA, and the Server tells it apart from an issued
     one by that issuer. The Server issues it
-    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
     Any number may be valid at once, one per customer, site or batch as the operator chooses,
     because none opens anything on its own: it needs an open enrolment window
-    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md))
+    ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md))
     and an operator's approval
-    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
     A short validity limits its reach. Handing it to a host is the operator's job.
 39. **Renewal starts at two thirds of the validity, and the old certificate stays until the new
     one is proved.** The Client asks again once its certificate is two thirds through its life and
     keeps presenting the old one until the candidate has been verified by connecting with it (the
     verification by connecting in
-    [ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)); on failure the previous
-    certificate stays in force and the offer is reported `FAILED`.
+    [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)); on
+    failure the previous certificate stays in force and the offer is reported `FAILED`.
 40. **Mutual TLS is per hop, and a Gateway's handshake admits the peers behind it.** Between an
     Agent and the Server through a Gateway there are two mutual-TLS connections, each proving the
     peer at that hop. The Gateway holds its own client identity for the upstream leg, obtained
     through the same CSR flow, and admits a downstream peer by its handshake against the fleet's
     client CA and the Server's revocation list, or, where it holds the bootstrap CA's certificate, a
     peer presenting a bootstrap certificate as an enrolling peer
-    ([ADR-0016](0016-client-modes-and-the-gateway.md), which also owns the Gateway's downstream TLS
+    ([CLT-modes-and-gateway](CLT-modes-and-gateway.md), which also owns the Gateway's downstream TLS
     keys). The Server admits the Gateway, and the Gateway's mark
-    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md))
+    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md))
     lets its certificate speak for the Agents it carries.
 41. **Admission is a fleet-wide trust boundary, and within it the host is the only bound between
     Agents.** A report's `instance_uid` is self-asserted; an admitted peer may report under any
     `instance_uid` its host speaks for
-    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
     and through a Gateway under any at all. Per-Agent authorization is not added: binding a
     certificate to one `instance_uid` breaks Server-initiated re-keying, certificate renewal and
     Gateway Mode. Operators who need isolation between mutually distrusting Agents put them behind
@@ -813,7 +821,8 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     loopback.**
     - `[rest.auth] basic_users` is a map of `user = "$argon2id$…"` (clause 50); several
       users allow rotation and the withdrawal of one operator's credential. `basic_users_file` names
-      a file holding that map instead ([ADR-0024](0024-the-servers-configuration.md) clause 5). An
+      a file holding that map instead
+      ([SRV-configuration-toml-and-environment §5](SRV-configuration-toml-and-environment.md)). An
       entry with an empty name or password fails startup.
     - `[rest.auth.oidc]` names `issuer`, `client_id`, `required_claim` (a claim name and the value
       it must hold) and an optional `ca_file`. It names no client secret. Without `required_claim`
@@ -867,11 +876,11 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     handshake, and a host gets its first certificate from an operator.
 47. **The package download is reached with a client certificate.** Its route on the Agent plane
     sits behind the same handshake as `/v1/opamp`
-    ([ADR-0033](0033-packages-signatures-and-delivery.md)). The route requires a certificate from
-    the client CA; a bootstrap certificate is answered `401`. The Client presents its certificate
-    only to the Server's own origin — the scheme, host and port of its OpAMP endpoint — and
-    presents none to any other host or on a redirect hop that leaves that origin
-    ([ADR-0033](0033-packages-signatures-and-delivery.md)).
+    ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The route requires a
+    certificate from the client CA; a bootstrap certificate is answered `401`. The Client presents
+    its certificate only to the Server's own origin — the scheme, host and port of its OpAMP
+    endpoint — and presents none to any other host or on a redirect hop that leaves that origin
+    ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)).
 48. **Repeated admission failures from one peer address are throttled.** `[admission_throttle]` in
     `server.toml` sets `max_failures` (default 10), `window_secs` (default 60) and `backoff_secs`
     (default 300). Every `401` on `/v1/opamp` and on the download route counts as a failure of the
@@ -886,13 +895,14 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     or a bootstrap certificate on the download route — so the throttle does not stop guessing; it
     bounds what a refused host that keeps retrying costs in handshakes, revocation lookups and
     audit entries
-    ([ADR-0028](0028-the-audit-record.md)).
+    ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)).
 49. **Enrolment reaches the Server directly or through a Gateway, and the Server decides it.** A
     host enrols by connecting to the Server, or through a Gateway that holds the bootstrap CA's
     certificate: the Gateway admits it as an enrolling peer and relays its one CSR, which carries a
-    bootstrap proof, and nothing else it sends ([ADR-0016](0016-client-modes-and-the-gateway.md),
-    clause 24). The Server decides a relayed enrolment as any other
-    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+    bootstrap proof, and nothing else it sends
+    ([CLT-modes-and-gateway §24](CLT-modes-and-gateway.md)). The Server decides a relayed enrolment
+    as any other
+    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
     A CSR a Gateway forwards from a peer that holds a client certificate is signed as a renewal. A
     host can also be provisioned a client certificate by an operator.
 50. **No credential in `server.toml` authenticates on its own.** An entry of `[rest.auth]
@@ -909,7 +919,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     encodes it, and each requested SAN of a type that carries text — DNS name, URI, e-mail address
     — is searched for claims. A SAN is read for this check only; the Server still drops it from
     the certificate
-    ([ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
 53. **The sender is the message's `instance_uid`.** The `instance_uid` of the `AgentToServer` that
     carries the CSR, as the message states it and before any re-key the same message causes, is
     compared byte for byte with each claim. On an enrolment connection it is the same field.
@@ -917,7 +927,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     from the sender's is answered `BadRequest`, naming the mismatch without echoing the CSR, and
     never reaches the signer or the enrolment queue. A CSR whose claims all match is signed as any
     other. A CSR with no claim is signed as clause 37 and the renewal proof
-    ([ADR-0016](0016-client-modes-and-the-gateway.md)) decide; that is this project's own Client.
+    ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)) decide; that is this project's own Client.
 55. **The Server gives every certificate it signs a random serial.** 16 bytes from the system's
     secure random source, the top bit cleared so the encoding stays positive. Two certificates from
     one key have two serials.
@@ -929,7 +939,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     revocation.
 57. **A revocation follows renewal.** A certificate is revoked when it, or any predecessor in its
     chain in the certificate register
-    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+    ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
     is on the list. A connection that presents a revoked one is refused before its CSR is read, and
     an open session re-checks its certificate before a CSR it carries is signed.
 58. **There is no credential to revoke.** `POST /api/v1/revocations` with `{"credential": …}` is
@@ -949,8 +959,8 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     the filesystem store the one Server holds every session, and a revocation reaches them in
     process as it is committed, through the revocation list's subscription. On PostgreSQL a
     revocation committed on any instance reaches every instance by its notification
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-    clause 9), or after a missed one by the re-read of that ADR's clause 10. Either way it is
+    ([SRV-instances-share-one-postgresql §9](SRV-instances-share-one-postgresql.md)),
+    or after a missed one by the re-read of that ADR's clause 10. Either way it is
     checked against every open session there at once; a session checks itself once
     more as it starts, so a revocation landing during its admission is not missed. A session it
     concerns is closed with WebSocket close code `1008` (policy violation) and the reason `revoked`.
@@ -964,21 +974,21 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     the Agent plane is admitted as `/v1/opamp` is — the handshake's client certificate from the
     client CA, checked against the list — and is answered only to a certificate whose host an
     operator marked as a Gateway (`PUT /api/v1/hosts/{host}/gateway`,
-    [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md));
+    [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md));
     any other is answered `403`. The body is JSON: every certificate of the client CA that is
     revoked by clause 57, its own entry or a predecessor's, each by the SHA-256 of its issuer's name
     and its serial, so the Gateway resolves no chain; and a version that changes with every change
     to the list, carried as an `ETag`, so a fetch with `If-None-Match` is answered `304`. With
     PostgreSQL it is the list's one version in the database
-    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-    clause 10), the same on every instance, so an `ETag` one instance gave is answered `304` by
+    ([SRV-state-stores-contract-pair §10](SRV-state-stores-contract-pair.md)),
+    the same on every instance, so an `ETag` one instance gave is answered `304` by
     another. Bootstrap certificates are not on it: a Gateway admits no bootstrap certificate. The
     route is outside the OpenAPI document, as the package download is.
 64. **One PKCS#11 token, named in `server.toml`.** `[pkcs11]` names `module`, the path of the
     PKCS#11 library; `token_label`; and `pin_file`, a file that holds the user PIN. The PIN file may
     be read by its owner and its group and written by its owner alone, as `password_file` may
-    ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-    clause 24). One that others may read, or its group may write, fails startup naming it. The PIN
+    ([SRV-state-stores-contract-pair §24](SRV-state-stores-contract-pair.md)).
+    One that others may read, or its group may write, fails startup naming it. The PIN
     is never written into `server.toml` (clause 50). The Server loads the module at startup through
     `cryptoki` and keeps a pool of four sessions on the token, opened as they are needed; no setting
     changes the number. PKCS#11 initialises a module once per process, so instances that share a
@@ -997,14 +1007,15 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 67. **The Server signs only what a use case justifies, and audits every signature.** A host
     certificate is signed for a valid renewal proof, an approved enrolment request or a member's
     CSR on its own connection. A bootstrap certificate is signed for an operator's request, and a
-    checkpoint on the schedule of [ADR-0028](0028-the-audit-record.md) clause 11. Every certificate
-    signed with a token key writes the audit entry `pkcs11.signed`. It names the key's label as
+    checkpoint on the schedule of
+    [SEC-append-only-audit-record §11](SEC-append-only-audit-record.md). Every certificate signed
+    with a token key writes the audit entry `pkcs11.signed`. It names the key's label as
     `key_label`, the certificate's `issuer` and `serial`, and as `use_case` the one that asked for
     it: `renewal`, `enrolment_approval`, `member_csr` or `bootstrap_issue`. A checkpoint is its own
-    signature's entry: it names the key and carries the signature, and no `pkcs11.signed` is
-    written beside it. The entry's place in the record is held before the token is asked to sign,
-    so without a record nothing is signed. It stands beside the entry the use case writes for its
-    decision. A signature made with a key file writes none.
+    signature's entry: it names the key and carries the signature, and no `pkcs11.signed` is written
+    beside it. The entry's place in the record is held before the token is asked to sign, so without
+    a record nothing is signed. It stands beside the entry the use case writes for its decision. A
+    signature made with a key file writes none.
 68. **SoftHSM2 is the planned token, and says so.** The Server is built and tested against
     SoftHSM2; a hardware or cloud HSM is a change of `[pkcs11] module`, nothing else. SoftHSM2 keeps
     its token in files on one host, so it serves the Server instances of that host alone
@@ -1017,7 +1028,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     Server starts, logs a warning that the keys have no hardware protection, and writes the audit
     entry `pkcs11.software_token` at every startup. The Dev Container and the CI runner install
     SoftHSM2 for the tests, beside the packages they already install, within
-    [ADR-0004](0004-dev-container-runtime.md).
+    [NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md).
     - SoftHSM2 reads a configuration of its own, `softhsm2.conf`, from the path in `SOFTHSM2_CONF`
       or from `/etc/softhsm2.conf`. Its `directories.tokendir` names the directory that holds the
       tokens, encrypted under their PINs. The Server neither writes nor reads either; it loads the
@@ -1032,10 +1043,11 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     - With a hardware or cloud HSM neither file exists; the vendor's client configures how the
       module reaches the device.
     - The Server's image carries no PKCS#11 module
-      ([ADR-0038](0038-releases-attestations-and-the-server-image.md)). An operator who runs the
-      image with a token mounts the module into the container, with what it loads, and names its
-      path in `[pkcs11] module`; with SoftHSM2 also its configuration, named by `SOFTHSM2_CONF`, and
-      its token directory. A module that does not load in the container fails startup (clause 64).
+      ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)). An
+      operator who runs the image with a token mounts the module into the container, with what it
+      loads, and names its path in `[pkcs11] module`; with SoftHSM2 also its configuration, named by
+      `SOFTHSM2_CONF`, and its token directory. A module that does not load in the container fails
+      startup (clause 64).
 69. **An existing fleet moves to new CA keys at its ordinary renewal.** A key file cannot be
     imported into a token without leaving a copy outside it. So the move makes a new client CA on
     the token, with `opamp-fleetctl pki token-init` on the Server host. For a transition,
@@ -1044,11 +1056,11 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     was issued by any CA in `client_ca_file`, so a host whose certificate the old CA signed renews
     to one the new key signs. Once the last certificate the old CA signed has ended, the operator
     removes it from `client_ca_file`. A new bootstrap CA takes the old one's place as
-    [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clause 12 makes it.
+    [OPS-operator-program-fleetctl §12](OPS-operator-program-fleetctl.md) makes it.
 70. **Instances that share the keys reach the same ones.** A key on the token is no file, so an
     instance whose CA keys are named by their labels need not be alone
-    ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-    clause 2). Instances that sign with shared keys name the same labels on a token every one of
+    ([SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)).
+    Instances that sign with shared keys name the same labels on a token every one of
     them reaches: a network HSM all of them reach, or a token that the HSM's own replication keeps
     identical on each host.
     - SoftHSM2 keeps its token in files on one host, and the instances on that host may share it:
@@ -1057,7 +1069,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
       Server cannot tell which host a token's files are on, so keeping a SoftHSM2 token's
       instances on its host is the operator's. The Server does not copy keys between tokens.
     - The audit key's label, which every instance on one database names alike, is decided by
-      [ADR-0028](0028-the-audit-record.md) clause 16.
+      [SEC-append-only-audit-record §16](SEC-append-only-audit-record.md).
 
 ### Signing in with OpenID Connect
 
@@ -1069,7 +1081,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
       seconds; a `typ` header, when present, is `JWT` or `at+jwt`. The claim `required_claim` names
       must hold the configured value.
     - The audience a token must name depends on the route. On `/mcp`, where
-      [ADR-draft-an-mcp-endpoint-on-the-operator-plane-reads-and-prepares-and-never-distributes](draft-an-mcp-endpoint-on-the-operator-plane-reads-and-prepares-and-never-distributes.md)
+      [API-mcp-reads-never-distributes](API-mcp-reads-never-distributes.md)
       serves it, `aud` names that endpoint's canonical URI (its clause 3). On every other route
       `aud` names `client_id`, and a token whose `aud` names the canonical URI of `/mcp` is refused
       there, even when it names `client_id` too. `azp` stands in for `aud` on no route.
@@ -1117,14 +1129,14 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 **Out of scope:**
 
 - Where the package download route is served and which hosts a Client downloads from
-  ([ADR-0033](0033-packages-signatures-and-delivery.md)); the certificate it requires is clause
-  47's.
+  ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)); the certificate it
+  requires is clause 47's.
 - Connection settings and the heartbeat offer
-  ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)).
+  ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)).
 - Which bucket a message or a download is counted in
-  ([ADR-0016](0016-client-modes-and-the-gateway.md)).
+  ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)).
 - The rate of successful admission attempts; repeated failures are throttled by clause 48.
-- Where the Client's own telemetry goes ([ADR-0017](0017-what-an-agent-reports-about-itself.md)).
+- Where the Client's own telemetry goes ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)).
 - Response compression on plain HTTP.
 - A connection cap on the Client's own listeners, the Gateway endpoint and the Supervisor
   Endpoint, which carry the bounds of `opamp`'s listener and no cap.
@@ -1147,18 +1159,19 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
   certificate subject to `instance_uid` where Gateway Mode and re-keying are off; proxying a CSR to
   an external CA (it would sit behind `[client_ca]`); how an installer obtains and writes the
   bootstrap certificate, which
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)
   decides, as it decides the view of the pending requests in the bundled UI; counting failed TLS
   handshakes, and the `Unavailable` answer of an overloaded Server, which belong to the connection
   caps; enrolment by a per-host token, which a fleet that outgrows approval one host at a time may
   need; binding the issued certificate to the `instance_uid` (the certificate proves membership and
   its host, not an Agent's identity); the Client putting its `instance_uid` into its own CSR; claims
   in CSR extensions other than the SAN; CRL and OCSP for third parties; what a Gateway does with the
-  list ([ADR-0016](0016-client-modes-and-the-gateway.md)); shortening certificate validity; a
+  list ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)); shortening certificate validity; a
   revocation view in the bundled UI; the audit record of revocations and of the sessions they end,
-  and the audit key with its checkpoints and the export, which [ADR-0028](0028-the-audit-record.md)
-  decides; the server CA's key and the package signing key, which stay offline with the operator;
-  the TLS listener's own key; a separate signing service behind the signer port; keys on the Client.
+  and the audit key with its checkpoints and the export, which
+  [SEC-append-only-audit-record](SEC-append-only-audit-record.md) decides; the server CA's key and
+  the package signing key, which stay offline with the operator; the TLS listener's own key; a
+  separate signing service behind the signer port; keys on the Client.
 - Of signing in: a bearer token from any issuer but the one `[rest.auth.oidc]` names; rights and
   levels of any kind, and the specification change they need; service accounts and the client
   credentials flow; a session cookie or a server-side confidential client; OIDC on the Agent plane;
@@ -1172,10 +1185,10 @@ here: `server revoke <serial>`, which revokes a certificate and ends its session
 `server pki status`. They act on the database with the Server's own configuration and credentials,
 so their authentication is shell access on a Server host; the set stays that small because an
 incident needs a peer cut off, not a rollout. How each run is audited, since it holds no lease
-([ADR-0028](0028-the-audit-record.md)),
+([SEC-append-only-audit-record](SEC-append-only-audit-record.md)),
 and that a run which writes to the database sends the notification of
-[ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
-clause 9, so that every instance ends the sessions a revocation concerns, are decided with them.
+[SRV-instances-share-one-postgresql §9](SRV-instances-share-one-postgresql.md),
+so that every instance ends the sessions a revocation concerns, are decided with them.
 
 End-to-end tests against a real Keycloak are not decided here either. Component tests keep the
 in-process test issuer with its own JWKS; Keycloak would run beside PostgreSQL and the object
@@ -1288,7 +1301,7 @@ forwarded into the Dev Container, and as a workflow service in CI.
   default is a knob nobody turns.
 - **The bound as a shared layer in `crates/opamp`.** It is one framework's builder knob in one
   binary; the Client's outbound transports have no counterpart
-  ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+  ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
 - **The weaker posture: TLS 1.2 and 1.3, optional TLS, plaintext on any address, an Agent plane on
   `0.0.0.0:4320` and `ws://` as the Client's default.** A Server that starts with no configuration
   and a fleet that connects without certificates are convenient. Rejected: security comes before
@@ -1348,8 +1361,8 @@ forwarded into the Dev Container, and as a workflow service in CI.
   rely on (Q-1). A fleet that needs more raises the numbers.
 - **Probe a package source over `https://`, with `http://` on the loopback alone.** It sets rules
   for an outbound request the Server does not make: the Server sends no request for a package
-  anywhere ([ADR-0033](0033-packages-signatures-and-delivery.md), clause 4), and its outbound
-  connections are those clause 21 names.
+  anywhere ([PKG-signed-packages-and-delivery §4](PKG-signed-packages-and-delivery.md)), and its
+  outbound connections are those clause 21 names.
 - **The first reconnect after a lost connection on the backoff's first step, one second with equal
   jitter, and no bound on the Server's new connections.** After a restart every Agent of a fleet
   would come back within the same half second, the floor of that jitter, and the Server would have
@@ -1390,9 +1403,10 @@ forwarded into the Dev Container, and as a workflow service in CI.
   requires it.** Rejected: the Agent plane reads no credential, and the Server is upgraded first,
   so a question kept for older Servers would teach a setting nothing reads.
 - **Remove a leftover `[auth]` section at install, or refuse the file there.** Rejected: `install`
-  never rewrites a file that exists ([ADR-0020](0020-the-installed-service-and-its-state.md)), and
-  refusing the section would stop a self-updated Client, whose file still has it, from connecting
-  on a host nobody watches.
+  never rewrites a file that exists
+  ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), and refusing the section
+  would stop a self-updated Client, whose file still has it, from connecting on a host nobody
+  watches.
 - **Refuse a leftover `[auth]` on the Client at startup**, as the Server does. Rejected: a Client
   updated by the Server starts with the old file and nobody at the host, so the whole fleet would
   stop at once. A section that is ignored weakens nothing.
@@ -1410,8 +1424,8 @@ forwarded into the Dev Container, and as a workflow service in CI.
   invitation; a window that closes by itself bounds both the queue and an operator's attention.
 - **An enrolment queue whose requests outlive their window** — a request would stay pending after
   the window it was made in closed. The queue is persisted with the window's end
-  ([ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
-  clause 8), and a closing window expires every request in it.
+  ([SRV-state-stores-contract-pair §8](SRV-state-stores-contract-pair.md)),
+  and a closing window expires every request in it.
 - **A download listener of its own instead of a certificate on the download** — a third listener
   serving artifacts to anyone who reaches it, where the Agent plane's handshake already proves the
   peer.
@@ -1495,12 +1509,12 @@ forwarded into the Dev Container, and as a workflow service in CI.
   Server.** A host that only a Gateway reaches could then join only with a client certificate an
   operator provisions, while G-15 asks that it enrol through the Gateway. A Gateway that holds the
   bootstrap CA's certificate admits an enrolling peer and relays its one CSR, and the Server decides
-  that enrolment as any other ([ADR-0016](0016-client-modes-and-the-gateway.md), clause 24; clauses
+  that enrolment as any other ([CLT-modes-and-gateway §24](CLT-modes-and-gateway.md); clauses
   40 and 49).
 - **A revocation that reaches the sessions of one Server's process alone, and a revocation list
   whose `ETag` is that Server's own.** It holds while one Server holds every session. Where several
   instances serve one fleet
-  ([ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)),
+  ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)),
   a session another instance holds would outlive the revocation, and a Gateway that fetches the
   list from another instance would download it again for an unchanged list. Rejected; clauses 61
   and 63 reach every instance and give the list one version in the database.
@@ -1515,8 +1529,8 @@ forwarded into the Dev Container, and as a workflow service in CI.
   Rejected; it stays an option.
 - **PKCS#11 required with the PostgreSQL store.** One Server on PostgreSQL keeps its key on one
   host as a Server on files does; the database does not make a key file more exposed. What needs
-  shared keys is several instances, and clause 2 of
-  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  shared keys is several instances, and
+  [SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)
   makes an instance with a CA key file the only one. Rejected.
 - **Encrypted key files with a passphrase from a file.** It protects a backup, but the passphrase
   sits on the same host as the file, and every instance holds both. Rejected.
@@ -1619,8 +1633,9 @@ forwarded into the Dev Container, and as a workflow service in CI.
   about 2.5 kB for an idle one.
 - The HTTP/1 header bound:
   [`hyper::server::conn::http1::Builder::header_read_timeout`](https://docs.rs/hyper/1.11.0/hyper/server/conn/http1/struct.Builder.html#method.header_read_timeout):
-  requires a `Timer`, panics if configured without one; `axum-server` 0.7 `http_builder` and its
-  10-second rustls handshake default, read from the vendored sources.
+  requires a `Timer`, panics if configured without one; `axum-server` 0.9 `http_builder`, its
+  timer with the timeout off, and its 10-second rustls handshake default, read from the vendored
+  0.9.2 sources.
 - Header timeouts elsewhere:
   [Diving into Go's HTTP server timeouts](https://adam-p.ca/blog/2022/01/golang-http-server-timeouts/)
   and nginx's `client_header_timeout` (60 s): the range 30 s sits in.
@@ -1653,8 +1668,8 @@ forwarded into the Dev Container, and as a workflow service in CI.
     `Proofs` and `Fleet::enrol`;
   - [`throttle.rs`](../../crates/fleet-server/src/throttle.rs): the per-address throttle and its
     bounded table;
-  - [`fleet.rs`](../../crates/fleet-server/src/fleet.rs): `unavailable`, `RETRY_AFTER` and the
-    `sequence_num` gap;
+  - [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs): `unavailable`,
+    `RETRY_AFTER` and the `sequence_num` gap;
   - [`audit_log.rs`](../../crates/fleet-server/src/audit_log.rs): the `unrecorded_before` count;
   - [`server.rs`](../../crates/opamp/src/server.rs): the `Handler` dispatch;
   - the Client's handling of `Unavailable` in
@@ -1847,7 +1862,7 @@ forwarded into the Dev Container, and as a workflow service in CI.
   near 256 Agents needs a higher `messages_per_sec`, and the startup warning says so.
 - Negative / trade-offs: a downstream peer behind a Gateway that names a neighbour's
   `instance_uid` drains that Agent's bucket, and the neighbour is throttled. This is no worse than
-  what [ADR-0016](0016-client-modes-and-the-gateway.md) accepts behind a Gateway, where such a peer
+  what [CLT-modes-and-gateway](CLT-modes-and-gateway.md) accepts behind a Gateway, where such a peer
   takes over the neighbour's route. A peer that cycles uids is bounded by the Gateway's aggregate,
   which every Agent behind that Gateway shares.
 - Negative / trade-offs: an over-limit download fails that download attempt on the Client, which
@@ -1859,8 +1874,8 @@ forwarded into the Dev Container, and as a workflow service in CI.
   answers one host or Gateway over its rate while the Server has time to spare. The Agent sees no
   difference, and the protocol has no other retryable answer.
 - Negative / trade-offs: an aggregate audit entry names the peer address, not the host, because
-  ADR-0028 aggregates by address. Behind a NAT or a Gateway only the first ten entries of each
-  second name the host or the Agent.
+  SEC-append-only-audit-record aggregates by address. Behind a NAT or a Gateway only the first ten
+  entries of each second name the host or the Agent.
 - Follow-ups:
   - a connection cap on the Client's Gateway endpoint;
   - measuring the HTTP/2 bounds against a real fleet;
@@ -1869,8 +1884,8 @@ forwarded into the Dev Container, and as a workflow service in CI.
   - the Client's downloader honouring `Retry-After`;
   - the running Server's daily expiry check reads the file, not the certificate it serves, so a
     file replaced without a restart silences the warning while the old certificate is still
-    served; this holds for `[tls]` and `[rest.tls]` alike, and is a fix within ADR-0036's expiry
-    rule;
+    served; this holds for `[tls]` and `[rest.tls]` alike, and is a fix within
+    OPS-operator-program-fleetctl's expiry rule;
   - whether to reload certificates without a restart;
   - whether operators should present client certificates on the Operator plane.
 
@@ -1891,10 +1906,10 @@ forwarded into the Dev Container, and as a workflow service in CI.
   never leaves it.
 - Positive: no machinery for a fleet credential exists — no Agent plane `[auth]`, no
   `hash-credential --bearer`, no credential in connection-settings offers
-  ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)), no revocation by hash
-  (clause 58), no audit events for one
-  ([ADR-0028](0028-the-audit-record.md)),
-  and no Gateway pool partitioned by credential ([ADR-0016](0016-client-modes-and-the-gateway.md)).
+  ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)), no
+  revocation by hash (clause 58), no audit events for one
+  ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)),
+  and no Gateway pool partitioned by credential ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)).
 - Positive: a compromised host reports only for its own Agents and holds at most three valid
   certificates; it cannot take over another host's Agent record or its renewals.
 - Positive: the Baseline's conditional MUST on `instance_uid` in the CSR is met; a peer cannot ask
@@ -1911,8 +1926,8 @@ forwarded into the Dev Container, and as a workflow service in CI.
   unauthenticated exposure.
 - Negative / trade-offs: the Server is upgraded before its Clients. A Server refuses to start
   while `server.toml` keeps `[auth]` or a credential key in `[connection_offer]`
-  ([ADR-0013](0013-connection-settings-that-never-lead-to-plaintext.md)), and the manual says to
-  delete them.
+  ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)), and the
+  manual says to delete them.
 - Negative / trade-offs: an operator marks each Gateway by hand; until then the first Agents it
   carries bind to the Gateway's host, and the mark is the remedy.
 - Negative / trade-offs: the Server is a CA, and its signing key can mint fleet members.
@@ -1957,8 +1972,8 @@ forwarded into the Dev Container, and as a workflow service in CI.
 - Negative / trade-offs: every signature waits for the token; a slow or unreachable HSM delays or
   refuses renewals and enrolments, and the Server reports it as it reports any signing error.
 - Negative / trade-offs: a compromised Server can still have the token sign while it runs; the
-  audit entries of clause 67 and the export of [ADR-0028](0028-the-audit-record.md) clause 15 are
-  what show it afterwards.
+  audit entries of clause 67 and the export of
+  [SEC-append-only-audit-record §15](SEC-append-only-audit-record.md) are what show it afterwards.
 - Follow-ups: enrolment by a per-host token; a strict per-Agent identity mode; an external-CA
   backend; running the `instance_uid` claim check against opamp-go in the interoperability suite.
 - Follow-ups: revocation by Agent as a convenience in the bundled UI; shortening certificate
@@ -2048,6 +2063,10 @@ policy limits what a mistake could reach.
   [`crates/fleet-server/tests/connection_setup.rs`](../../crates/fleet-server/tests/connection_setup.rs):
   `a_connection_that_never_finishes_its_headers_is_hung_up_on`,
   `an_established_session_outlives_the_header_bound` (clauses 15, 18).
+- Clause 15's first-request bound, with the bound driven short:
+  [`crates/opamp/tests/server_listen.rs`](../../crates/opamp/tests/server_listen.rs):
+  `a_peer_silent_before_its_first_request_is_hung_up_on`,
+  `a_peer_silent_after_the_tls_handshake_is_hung_up_on`.
 - Clause 18's floor, over real connections to `opamp`'s listener with the floor driven short, in
   real time, since a paused clock fires a socket's timeouts at once:
   [`crates/opamp/tests/server_listen.rs`](../../crates/opamp/tests/server_listen.rs):
@@ -2082,8 +2101,7 @@ These tests carry `Verifies:` for this ADR:
   (clauses 7, 9), `the_operator_plane_requires_authentication_off_the_loopback` (clause 8),
   `max_connections_defaults_per_plane_and_zero_is_refused` (clause 19).
 - The store connections of clause 21 are verified under
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md),
-  clauses 17 and 24.
+  [SRV-state-stores-contract-pair §17 and §24](SRV-state-stores-contract-pair.md).
 
 The Operator plane's own certificate (clauses 9 to 13), each test marked as verifying this ADR:
 
@@ -2143,12 +2161,12 @@ Tests of the rate limit, each marked `Verifies:` for this ADR:
   `a_throttled_agent_behind_a_gateway_hears_unavailable_and_its_neighbour_does_not`. Two Agents
   ride one folded connection to a marked Gateway, and one floods. It alone receives the
   `Unavailable`, routed by its `instance_uid`, and the other's reports keep being processed
-  (clauses 25, 27, and the bucket rule of ADR-0016).
+  (clauses 25, 27, and the bucket rule of CLT-modes-and-gateway).
 
 These tests verify the bucket a message is counted in, which
-[ADR-0016](0016-client-modes-and-the-gateway.md) decides, and so carry `Verifies: ADR-0016`; they
-pin what clause 24 counts as well: in `crates/fleet-server/src/agent_rate.rs`,
-`a_host_is_one_bucket_whatever_its_agents_report`,
+[CLT-modes-and-gateway](CLT-modes-and-gateway.md) decides, and so carry
+`Verifies: CLT-modes-and-gateway`; they pin what clause 24 counts as well: in
+`crates/fleet-server/src/agent_rate.rs`, `a_host_is_one_bucket_whatever_its_agents_report`,
 `a_member_certificate_without_a_host_is_counted_by_issuer_and_serial`,
 `an_enrolment_connection_is_counted_by_its_peer_address`,
 `marking_a_gateway_takes_effect_at_the_next_message`,
@@ -2188,22 +2206,22 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
   `a_bootstrap_ca_sharing_its_subject_with_the_client_ca_is_refused` (clause 46),
   `a_bootstrap_certificate_is_refused_outside_an_enrolment_window` (clauses 38, 48; the enrolment
   connection,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `an_enrolment_request_waits_for_an_operator_and_is_issued_on_approval` (clauses 33, 47; the
   window,
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md);
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md);
   the enrolment connection and the pending list,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `a_rejected_request_is_refused_and_closing_the_window_shuts_enrolment` (the window,
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md);
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md);
   the enrolment connection,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `an_unknown_request_is_not_approved_and_is_rejected_before_it_arrives` (the pending list,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `repeated_failures_from_one_address_are_throttled`,
   `the_operator_plane_counts_its_failures_in_a_table_of_its_own` (clause 48),
   `an_operator_sees_each_host_and_can_mark_a_gateway` (the host and its mark,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
 - [`crates/fleet-server/src/credentials.rs`](../../crates/fleet-server/src/credentials.rs) —
   `a_basic_password_is_verified_against_its_argon2id_hash`,
   `an_unknown_user_costs_the_same_verification`, `a_basic_verification_is_remembered_and_bounded`,
@@ -2221,36 +2239,36 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
   `admission_needs_a_client_identity_and_nothing_else` (clause 34).
 - [`crates/fleet-server/src/tls.rs`](../../crates/fleet-server/src/tls.rs) —
   `a_certificate_not_issued_by_the_client_ca_only_enrols` (clauses 35, 46; the enrolment connection,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
 - [`crates/fleet-server/src/enrolment.rs`](../../crates/fleet-server/src/enrolment.rs) —
   `the_window_is_closed_by_default_and_bounded`, `closing_the_window_expires_every_request` (the
   window,
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
   `a_request_waits_for_an_operator_and_is_answered_once_decided`, `the_queue_is_bounded` (the
   enrolment connection and the pending list,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
 - [`crates/fleet-server/src/ca.rs`](../../crates/fleet-server/src/ca.rs) —
   `signs_a_request_into_a_certificate`, `the_request_cannot_dictate_the_certificates_powers`,
   `refuses_a_request_that_does_not_parse` (clause 37; the issued certificate's subject,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `a_renewal_proof_names_the_certificate_and_its_host` (the host,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md);
-  the renewal proof, [ADR-0016](0016-client-modes-and-the-gateway.md)).
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md);
+  the renewal proof, [CLT-modes-and-gateway](CLT-modes-and-gateway.md)).
 - [`crates/fleet-server/src/revocation.rs`](../../crates/fleet-server/src/revocation.rs) —
   `a_host_is_bounded_and_speaks_only_for_its_own_agents` (the host,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
-- [`crates/fleet-server/src/fleet.rs`](../../crates/fleet-server/src/fleet.rs) —
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
+- [`crates/fleet-server/src/fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs) —
   `a_host_cannot_report_for_another_hosts_agent` (clause 41; the host,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `unavailable_tells_the_agent_when_to_retry` (the enrolment queue,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
 -
   [`crates/fleet-agent/tests/certificate_renewal_e2e.rs`](../../crates/fleet-agent/tests/certificate_renewal_e2e.rs)
   — `a_client_renews_each_certificate_before_it_expires` (clauses 37, 39; the renewal proof,
-  [ADR-0016](0016-client-modes-and-the-gateway.md)).
+  [CLT-modes-and-gateway](CLT-modes-and-gateway.md)).
 - [`crates/fleet-agent/src/csr.rs`](../../crates/fleet-agent/src/csr.rs) —
   `a_client_without_a_certificate_asks_and_keeps_its_key` (clause 37; the enrolment connection,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)),
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `the_private_key_is_written_owner_only`, `an_issued_certificate_becomes_the_identity`,
   `a_certificate_without_a_pending_key_is_refused` (clause 36),
   `a_certificate_in_its_renewal_window_is_requested_again` (clause 39).
@@ -2276,15 +2294,15 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
 - [`crates/fleet-server/src/revocation.rs`](../../crates/fleet-server/src/revocation.rs) tests:
   `a_revocation_follows_every_renewal` (clause 57), `the_list_survives_a_restart_and_can_be_lifted`
   (clause 59; the persisted list,
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
   `a_renewal_stays_revoked_after_its_revoked_ancestor_expires` (clause 57; the persisted list,
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
   `the_list_and_the_register_are_bounded`,
   `an_expired_register_entry_is_dropped_with_its_revocation` (the register and the persisted list,
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)).
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)).
 - [`crates/fleet-server/src/fs/revocation.rs`](../../crates/fleet-server/src/fs/revocation.rs)
   tests: `the_ledger_survives_a_reopen` (the register and the persisted list,
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md));
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md));
   `a_persisted_credential_entry_is_dropped_on_load` (clause 58): a list holding a credential entry
   beside a certificate entry loads with the certificate entry alone, is written back without the
   credential entry, and the drop is logged.
@@ -2296,11 +2314,11 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
   `a_revocation_closes_the_session_it_concerns_and_no_other` (clause 61),
   `a_session_is_closed_when_its_certificate_expires` (clause 62),
   `a_revocation_reaches_a_certificate_renewed_before_it` (clauses 55, 57; the register,
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)),
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
   `a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called` (clause 56),
   `a_csr_for_another_agent_still_descends_from_the_presented_certificate` (the register,
-  [ADR-0023](0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md);
-  revocation behind a Gateway, [ADR-0016](0016-client-modes-and-the-gateway.md)),
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md);
+  revocation behind a Gateway, [CLT-modes-and-gateway](CLT-modes-and-gateway.md)),
   `a_marked_gateway_is_handed_the_revoked_certificates_with_their_renewals` (clause 63, an unmarked
   member answered `403` and an unchanged list `304`),
   `a_bootstrap_certificate_is_not_handed_the_list` (clause 63);
@@ -2309,16 +2327,16 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
 -
   [`crates/fleet-agent/tests/gateway_revocation_e2e.rs`](../../crates/fleet-agent/tests/gateway_revocation_e2e.rs)
   test: `a_certificate_the_server_revokes_is_refused_behind_the_gateway` (clause 63; revocation
-  behind a Gateway, [ADR-0016](0016-client-modes-and-the-gateway.md)).
+  behind a Gateway, [CLT-modes-and-gateway](CLT-modes-and-gateway.md)).
 - The Server refuses to start on a bootstrap CA key that does not match `bootstrap_ca_file` or that
   is the client CA's key; without `bootstrap_ca_key_file` it starts, admits a bootstrap certificate
   made elsewhere, and answers `POST /api/v1/bootstrap-certificates` with `409` (clause 46).
 - A request carrying a bootstrap certificate the Server issued is listed with the `bootstrap_serial`
   that `GET /api/v1/bootstrap-certificates` lists for it, and `PendingEnrolment` in the OpenAPI
   document carries the field (the pending list,
-  [ADR-0027](0027-bootstrap-certificates-and-enrolment-and-a-rejected-key-stays-refused-beyond-its-window.md)).
+  [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
 - Clauses 32 and 34 across instances are verified by the tests
-  [ADR-0025](0025-several-server-instances-share-one-postgresql-database-and-a-group-is-placed-again-at-once.md)
+  [SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)
   names.
 
 Tests that carry `Verifies:` for this ADR verify the CA keys on a token (clauses 37, 46 and 64 to
@@ -2339,7 +2357,7 @@ Tests that carry `Verifies:` for this ADR verify the CA keys on a token (clauses
   the token, none of them extractable, signs both CA certificates through the token, writes no key
   file, and refuses a label the token already holds; `pki init --ca-keys-on-token` writes neither
   the client CA nor the bootstrap CA (the commands,
-  [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clauses 7, 8 and 16).
+  [OPS-operator-program-fleetctl §7, §8 and §16](OPS-operator-program-fleetctl.md)).
 - `client_ca_file` with two CA certificates admits a member of either, a renewal proof whose
   certificate the old CA signed is accepted, and the renewal is signed by the token's key
   (clause 69).
@@ -2348,7 +2366,7 @@ Tests that carry `Verifies:` for this ADR verify the CA keys on a token (clauses
 - On PostgreSQL, two instances whose CA keys are named by their labels on one SoftHSM2 token,
   sharing one `cryptoki` context in one test process, both start and both sign renewals
   (clauses 64, 70). The check of the audit key's label across instances is
-  [ADR-0028](0028-the-audit-record.md)'s.
+  [SEC-append-only-audit-record](SEC-append-only-audit-record.md)'s.
 
 **Not mechanically decidable:** clause 41 decides what is *not* built beyond the host — no test
 can show the absence of a per-Agent authorization the design rejects; and clause 49 rests on the

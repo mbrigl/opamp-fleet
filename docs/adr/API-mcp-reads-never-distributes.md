@@ -1,4 +1,4 @@
-# ADR-draft-an-mcp-endpoint-on-the-operator-plane-reads-and-prepares-and-never-distributes: An MCP endpoint on the Operator plane reads and prepares, and never distributes
+# API-mcp-reads-never-distributes: An MCP endpoint on the Operator plane reads and prepares, and never distributes
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-22
@@ -8,8 +8,8 @@
 ## Context
 
 The Server's Operator plane serves the REST API and the bundled UI
-([ADR-0031](0031-configurations-and-the-rest-api.md),
-[ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md) clause 7).
+([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md),
+[SEC-tls13-two-planes-bounded-input §7](SEC-tls13-two-planes-bounded-input.md)).
 The specification's goal G-5 makes that API the contract through which any client drives the
 fleet. An assistant that speaks the Model Context Protocol (MCP) can use the REST API only through
 code written for it; an MCP endpoint lets such a client discover what it may do as typed tools and
@@ -19,20 +19,21 @@ An assistant also acts on what it reads, and what it reads can be written by som
 Configuration body, an Agent's reported attributes, a label. A tool that reaches the fleet would let
 such text steer a rollout, a restart or a revocation. The project already separates preparing from
 distributing: saving only saves, and a `PUT` changes what *could* be rolled out, never what *is*
-([ADR-0032](0032-deployments-and-rollouts.md) clause 1). Nothing an assignment pins can be deleted
-([ADR-0032](0032-deployments-and-rollouts.md) clause 12). Every act that reaches an Agent or changes
-who is admitted is its own route: a rollout, a restart, a revocation, an enrolment approval, a
-bootstrap certificate, the enrolment window, the Gateway mark.
+([SRV-deployments-and-pinned-rollouts §1](SRV-deployments-and-pinned-rollouts.md)). Nothing an
+assignment pins can be deleted
+([SRV-deployments-and-pinned-rollouts §12](SRV-deployments-and-pinned-rollouts.md)). Every act that
+reaches an Agent or changes who is admitted is its own route: a rollout, a restart, a revocation, an
+enrolment approval, a bootstrap certificate, the enrolment window, the Gateway mark.
 
 The Server has no rights model. The specification lists authorization as a Non-Goal, and every
 operator who passes the Operator plane's guard may do everything
-([ADR-draft-the-operator-plane-also-signs-in-with-oidc-beside-basic](draft-the-operator-plane-also-signs-in-with-oidc-beside-basic.md)
+([SEC-operator-oidc-beside-basic](SEC-operator-oidc-beside-basic.md)
 clause 45). A ceiling at a level such as `editor` would need levels in the identity provider (see
 *Alternatives considered*). Without levels the ceiling can only be the set of tools the endpoint
 offers.
 
 Since
-[ADR-draft-two-use-case-layers-stand-between-the-servers-planes-and-its-core](draft-two-use-case-layers-stand-between-the-servers-planes-and-its-core.md)
+[SRV-two-use-case-layers](SRV-two-use-case-layers.md)
 every Operator-plane endpoint reaches state through `operator_cases` alone, so an MCP tool can be
 one call of the same method the REST route calls.
 
@@ -51,25 +52,25 @@ secret.
 
 1. **One endpoint, off by default.** With `[mcp]` in `server.toml` the Operator plane serves `/mcp`
    over MCP's Streamable HTTP transport, revision 2026-07-28, through `rmcp`'s server mounted as an
-   axum route ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)
-   clause 13). Without `[mcp]` the route does not exist. The Server keeps no state between
+   axum route ([DEV-six-crates-tokio-axum §13](DEV-six-crates-tokio-axum.md)).
+   Without `[mcp]` the route does not exist. The Server keeps no state between
    requests: no session, no standalone stream; a `GET` or `DELETE` on `/mcp` is answered `405`. It
    offers tools only — no resources, prompts, sampling or elicitation.
 
 2. **The plane's guard and limits apply.** `/mcp` is a route of the Operator plane: TLS 1.3, the
    body and connection bounds of
-   [ADR-0012](0012-tls-1-3-two-planes-and-bounded-input.md)
-   clauses 15, 18 and 19, the throttle of
-   [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
-   clause 19, and the guard of
-   [ADR-draft-the-operator-plane-also-signs-in-with-oidc-beside-basic](draft-the-operator-plane-also-signs-in-with-oidc-beside-basic.md)
+   [SEC-tls13-two-planes-bounded-input §15, §18 and §19](SEC-tls13-two-planes-bounded-input.md),
+   the throttle of
+   [SEC-admission-by-client-certificate §19](SEC-admission-by-client-certificate.md),
+   and the guard of
+   [SEC-operator-oidc-beside-basic](SEC-operator-oidc-beside-basic.md)
    clause 42 — Basic credentials in the `Authorization` header, a bearer token validated as that
    ADR's clause 71 says, or both, as configured. A request whose `Origin` header is present and is
    not the Operator plane's own origin is answered `403`. A request whose `Host` names neither a DNS
    name nor an address of the Operator plane's certificate is answered `403`. The MCP client's
-   self-reported `clientInfo` is a label, never an identity. That draft supersedes ADR-0012 and
-   ADR-0026; if it is accepted, the bounds become its clauses 15, 18 and 19 and the throttle its
-   clause 48.
+   self-reported `clientInfo` is a label, never an identity. That draft supersedes
+   SEC-tls13-two-planes-bounded-input and SEC-admission-by-client-certificate; if it is accepted,
+   the bounds become its clauses 15, 18 and 19 and the throttle its clause 48.
 
 3. **With OIDC, `/mcp` is its own protected resource.** When OIDC is configured:
    - The Server serves `/.well-known/oauth-protected-resource/mcp` without credentials. It names
@@ -79,7 +80,7 @@ secret.
    - A `401` on `/mcp` carries `WWW-Authenticate: Bearer resource_metadata="…"` and no Basic
      challenge.
    - A bearer token is accepted on `/mcp` only with the audience that
-     [ADR-draft-the-operator-plane-also-signs-in-with-oidc-beside-basic](draft-the-operator-plane-also-signs-in-with-oidc-beside-basic.md)
+     [SEC-operator-oidc-beside-basic](SEC-operator-oidc-beside-basic.md)
      clause 71 sets for it: `aud` names that canonical URI, and `azp` does not stand in. The same
      clause refuses such a token on `/api/v1`, and an ID token on every route. A token whose
      audience is the UI's client, or any other, is answered `401` on `/mcp`, and the Server passes
@@ -94,15 +95,15 @@ secret.
    Configurations, the Packages, the Deployments, the certificates the client CA signed, the
    revocation list, the enrolment window and the waiting enrolment requests, and the bootstrap
    certificates' list. A list tool takes the limit, cursor and filters of
-   [ADR-0030](0030-the-lists-that-grow-with-the-fleet-are-paged-by-cursor-and-filtered-on-the-server.md)
+   [API-lists-paged-by-cursor](API-lists-paged-by-cursor.md)
    (paging) and returns one page. No tool returns a bootstrap PKCS#12 file, a password, a key, or a
    credential of `[rest.auth]`.
 
 5. **The tools prepare.** One tool per act that changes only what *could* be rolled out
-   (ADR-0032 clause 1): saving a Configuration; setting an Agent's labels; creating or saving a
-   Deployment, setting its Selector, and adding or removing a Configuration or a Package in it. A
-   Package, its entries and its signatures are read and never written: artifact bytes do not pass
-   through an assistant's context, and a signature is the operator's release gate.
+   (SRV-deployments-and-pinned-rollouts §1): saving a Configuration; setting an Agent's labels;
+   creating or saving a Deployment, setting its Selector, and adding or removing a Configuration or
+   a Package in it. A Package, its entries and its signatures are read and never written: artifact
+   bytes do not pass through an assistant's context, and a signature is the operator's release gate.
 
 6. **Nothing else is a tool.** No tool rolls out, restarts, forgets or deletes anything, revokes or
    withdraws a revocation, approves or rejects an enrolment, opens or closes the enrolment window,
@@ -136,8 +137,9 @@ rights model allows; MCP resources, prompts and subscriptions; the protocol revi
   which an assistant has no business holding, and attaching a signature is the step that makes a
   Package releasable with the operator's offline key. Rejected.
 - **Deleting a Configuration or a Deployment as a tool.** Nothing an assignment pins can be deleted
-  (ADR-0032 clause 12), so a delete does not reach an Agent; but it destroys an operator's work
-  without a way back, on text an assistant read. Rejected; deleting stays with the UI and the API.
+  (SRV-deployments-and-pinned-rollouts §12), so a delete does not reach an Agent; but it destroys an
+  operator's work without a way back, on text an assistant read. Rejected; deleting stays with the
+  UI and the API.
 - **A separate MCP server process in front of the REST API.** It keeps MCP out of the Server, but
   is a second component to run and harden, holds a credential to the whole API, and puts the
   person behind a proxy the audit cannot see through. Rejected.
@@ -165,7 +167,7 @@ rights model allows; MCP resources, prompts and subscriptions; the protocol revi
   TLS stack, no `reqwest`, no `aws-lc-rs` and no OpenSSL; its `auth` feature, which would pull
   `oauth2` and `reqwest`, stays off.
 - The REST routes in `crates/fleet-server/src/api.rs`, and the rule that saving only saves in
-  ADR-0032 clauses 1 and 24.
+  SRV-deployments-and-pinned-rollouts §1 and §24.
 
 ## Consequences
 
@@ -187,7 +189,7 @@ rights model allows; MCP resources, prompts and subscriptions; the protocol revi
 ## Enforcement
 
 Tests that will carry `Verifies:
-ADR-draft-an-mcp-endpoint-on-the-operator-plane-reads-and-prepares-and-never-distributes`:
+API-mcp-reads-never-distributes`:
 
 - Without `[mcp]`, `/mcp` is answered `404`; with it, `tools/list` names exactly the read and
   preparing tools of clauses 4 and 5, and each tool's `operator_cases` method is on an allow list
