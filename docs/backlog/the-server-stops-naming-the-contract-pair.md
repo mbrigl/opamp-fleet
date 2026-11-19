@@ -27,7 +27,7 @@ mirror columns any more (the test `the_mirror_columns_are_written_no_more` in
   `the_load_reads_no_hosts_array`).
 
 Test SQL names them too: `postgres/deployments.rs` line 741, `postgres/mod.rs` lines 1515 and
-2545, `postgres/agents.rs` line 3620, `postgres/ledger.rs` line 1543 and near lines 2729 to 2784,
+2545, `postgres/agents.rs` line 3620, `postgres/ledger.rs` line 1537 and near lines 2725 to 2803,
 `fleet.rs` near line 9694, and `tests/instances.rs` line 1384.
 
 A Server of 0.8.1 or 0.8.2 decodes `instance_uids` with `row.get::<_, Vec<String>>(2)`

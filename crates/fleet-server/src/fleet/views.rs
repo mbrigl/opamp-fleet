@@ -48,7 +48,13 @@ impl AppState {
             };
             // The names as the list derives them (ADR-0018 clauses 1 and 2), so the two cannot
             // differ.
-            let shown = crate::listing::display_values(record.description.as_ref(), None);
+            let (service_name, service_instance_name) = match &record.description {
+                Some(d) => crate::listing::names(
+                    &attr_map(&d.identifying_attributes),
+                    &attr_map(&d.non_identifying_attributes),
+                ),
+                None => (String::new(), String::new()),
+            };
             let entry = hosts.entry(host.clone()).or_default();
             let is_client_agent = record.placement.client_agent == Some(*uid);
             if is_client_agent && record.placement.group == Some(Group::Host(host.clone())) {
@@ -56,8 +62,8 @@ impl AppState {
             }
             entry.agents.push(HostAgentView {
                 instance_uid: uid.to_string(),
-                service_name: shown.service_name,
-                service_instance_name: shown.instance_name,
+                service_name,
+                service_instance_name,
                 host_name: reported("host.name"),
                 client: crate::labels::is_client_agent(record.description.as_ref()),
                 client_agent: record

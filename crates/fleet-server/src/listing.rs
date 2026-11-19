@@ -260,6 +260,23 @@ pub struct DisplayValues {
     pub config: &'static str,
 }
 
+/// An Agent's service name and instance name, each read only from the attribute set ADR-0018
+/// clauses 1 and 2 give it: `service.name` from the identifying attributes,
+/// `service.instance.name` from the non-identifying ones. Empty where it is not reported there.
+#[must_use]
+pub fn names(
+    identifying: &BTreeMap<String, String>,
+    non_identifying: &BTreeMap<String, String>,
+) -> (String, String) {
+    let lookup = |map: &BTreeMap<String, String>, key: &str| -> String {
+        map.get(key).cloned().unwrap_or_default()
+    };
+    (
+        lookup(identifying, attributes::SERVICE_NAME),
+        lookup(non_identifying, attributes::SERVICE_INSTANCE_NAME),
+    )
+}
+
 /// The display values of an Agent that reported `description` and `status`.
 #[must_use]
 pub fn display_values(
@@ -281,9 +298,10 @@ pub fn display_values(
         description if !description.is_empty() => description,
         _ => lookup(&non_identifying, attributes::OS_TYPE),
     };
+    let (service_name, instance_name) = names(&identifying, &non_identifying);
     DisplayValues {
-        service_name: lookup(&identifying, attributes::SERVICE_NAME),
-        instance_name: lookup(&non_identifying, attributes::SERVICE_INSTANCE_NAME),
+        service_name,
+        instance_name,
         version: crate::fleet::display_version(&build),
         build,
         os,
