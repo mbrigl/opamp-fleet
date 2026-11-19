@@ -87,6 +87,10 @@ jobs:
         run: bash scripts/test-check-protocol-baseline.sh
       - name: Check documentation consistency
         run: bash scripts/check-docs.sh
+      - name: Self-test the project's own documentation checks
+        run: bash scripts/test-check-project-docs.sh
+      - name: Check the project's own documentation rules
+        run: bash scripts/check-project-docs.sh
       # A newer upstream release is a warning, never a failure (API-protocol-pinned-interop-checked).
       - name: Check the Protocol Baseline
         run: bash scripts/check-protocol-baseline.sh
@@ -163,6 +167,12 @@ jobs:
       # forced push leaves that tip out of the history the checkout fetches, so it passes none.
       - name: Report test files deleted and skip markers added since the base
         run: bash scripts/sensor-tests-kept.sh "$BASE"
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
+      - name: Self-test the timed waits sensor
+        run: bash scripts/test-sensor-timed-waits.sh
+      - name: Report the timed waits added to the Rust tests without a reason since the base
+        run: bash scripts/sensor-timed-waits.sh "$BASE"
         env:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the binding ADRs sensor

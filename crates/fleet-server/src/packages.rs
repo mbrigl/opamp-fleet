@@ -1727,11 +1727,7 @@ fn claimed_version<'a>(set: &Package, installed: &'a InstalledVersions) -> Optio
 /// is held against when the Agent reports no version for the package itself (SRV-deployments-and-pinned-rollouts). It is also
 /// read beside a reported one, as what the Agent actually runs.
 fn reported_service_version(description: Option<&AgentDescription>) -> Option<&str> {
-    opamp::attributes::string_value(
-        &description?.identifying_attributes,
-        opamp::attributes::SERVICE_VERSION,
-    )
-    .filter(|version| !version.is_empty())
+    opamp::attributes::agent_version(description?)
 }
 
 /// What one Agent's Deployment would release to it, if an operator rolled out now.
@@ -1768,10 +1764,7 @@ fn resolve<'a>(
 /// `None` for an Agent that has not described itself or reports no type, which fits no Package
 /// (PKG-signed-packages-and-delivery). An empty value is `None` too: it is not a type.
 pub fn reported_agent_type(description: Option<&AgentDescription>) -> Option<&str> {
-    opamp::attributes::string_value(
-        &description?.identifying_attributes,
-        opamp::attributes::SERVICE_NAME,
-    )
+    opamp::attributes::agent_type(description?)
 }
 
 /// The aggregate over what one Agent is offered — its name and its content. One Package per

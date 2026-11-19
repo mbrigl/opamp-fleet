@@ -146,9 +146,10 @@ pub fn check_type(revision: &Revision) -> Result<(), String> {
 }
 
 /// Does this revision fit this Agent (SRV-deployments-and-pinned-rollouts §4)? Its `service_name` must equal the
-/// `service.name` the Agent reports — compared raw, no canonicalisation, because there is no
-/// canonical set of Agent types. An Agent that reports no `service.name` fits no revision, and a
-/// revision without a type fits no Agent. Whom a Configuration aims at is not asked here: the
+/// `service.name` the Agent reports among its identifying attributes, as every other path reads it
+/// (CLT-what-an-agent-reports §1) — compared raw, no canonicalisation, because there is no
+/// canonical set of Agent types. An Agent that reports no `service.name` there fits no revision,
+/// and a revision without a type fits no Agent. Whom a Configuration aims at is not asked here: the
 /// Deployment holding it decides.
 pub fn fits(revision: &Revision, description: Option<&AgentDescription>) -> bool {
     if revision.service_name.is_empty() {
@@ -157,17 +158,7 @@ pub fn fits(revision: &Revision, description: Option<&AgentDescription>) -> bool
     let Some(description) = description else {
         return false;
     };
-    let reported = attributes::string_value(
-        &description.identifying_attributes,
-        attributes::SERVICE_NAME,
-    )
-    .or_else(|| {
-        attributes::string_value(
-            &description.non_identifying_attributes,
-            attributes::SERVICE_NAME,
-        )
-    });
-    reported == Some(revision.service_name.as_str())
+    attributes::agent_type(description) == Some(revision.service_name.as_str())
 }
 
 /// One revision a rollout pins (SRV-deployments-and-pinned-rollouts §6): the Configuration it is of, the hash an

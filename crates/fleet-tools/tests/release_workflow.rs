@@ -8,7 +8,90 @@ use std::path::Path;
 
 fn workflow() -> String {
     let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
-    std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()))
+    let text = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+    without_comments(&text)
+}
+
+/// `text` without its YAML comments, so that a word a comment holds, such as an ADR's identifier
+/// or the version beside a pinned action, is never read as a key or a value. A comment is a line
+/// that starts with `#`, or the rest of a line from a ` #` outside quotes. A line of a block scalar
+/// is the scalar's text, not a comment, and stays whole: a block runs from a line whose value is
+/// `|` or `>`, with a chomping sign or an indentation digit, as a mapping's value (`run: |`) or a
+/// sequence's item (`- |`), to the next line that is no further indented than that line.
+fn without_comments(text: &str) -> String {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut block: Option<usize> = None;
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(opened_at) = block {
+            if trimmed.is_empty() || indent(line) > opened_at {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            block = None;
+        }
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let kept = without_trailing_comment(line);
+        let value = kept.trim();
+        let indicator = value
+            .rsplit_once(": ")
+            .map(|(_, after)| after)
+            .or_else(|| value.strip_prefix("- "))
+            .unwrap_or(value);
+        if opens_a_block(indicator) {
+            block = Some(indent(line));
+        }
+        out.push_str(kept);
+        out.push('\n');
+    }
+    out
+}
+
+/// `line` up to a ` #` that stands outside single and double quotes, without trailing blanks.
+fn without_trailing_comment(line: &str) -> &str {
+    let (mut single, mut double) = (false, false);
+    let mut previous = ' ';
+    for (at, c) in line.char_indices() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '#' if !single && !double && previous.is_whitespace() && at > 0 => {
+                return line[..at].trim_end();
+            }
+            _ => {}
+        }
+        previous = c;
+    }
+    line
+}
+
+/// Whether `value` is a block scalar's indicator: `|` or `>`, then a chomping sign and an
+/// indentation digit in either order.
+fn opens_a_block(value: &str) -> bool {
+    let mut chars = value.chars();
+    if !matches!(chars.next(), Some('|' | '>')) {
+        return false;
+    }
+    let rest: Vec<char> = chars.collect();
+    rest.len() <= 2
+        && rest.iter().filter(|c| matches!(c, '-' | '+')).count() <= 1
+        && rest.iter().filter(|c| c.is_ascii_digit()).count() <= 1
+        && rest
+            .iter()
+            .all(|c| matches!(c, '-' | '+') || c.is_ascii_digit())
+}
+
+#[test]
+fn a_comment_is_dropped_and_a_block_scalars_lines_are_kept() {
+    let text = "jobs:\n  # attestations: write\n  image:\n    run: |\n      # a shell comment\n      echo hi # kept\n    # a comment again\n    needs: [build]  # attestations: write\n    steps:\n      - uses: x/y@abc # v2\n      - name: '#1 a quoted hash'\n      - >-2\n        # a folded line\n    env: \"a # b\"\n";
+    assert_eq!(
+        without_comments(text),
+        "jobs:\n  image:\n    run: |\n      # a shell comment\n      echo hi # kept\n    needs: [build]\n    steps:\n      - uses: x/y@abc\n      - name: '#1 a quoted hash'\n      - >-2\n        # a folded line\n    env: \"a # b\"\n"
+    );
 }
 
 /// The rows of the build matrix: each `- { key: value, … }` line, as a map.
@@ -768,8 +851,8 @@ fn the_image_job_builds_checks_and_pushes_by_digest_alone() {
         ["contents: read", "packages: write"]
     );
     assert!(!image.contains("id-token"), "{image}");
-    // The permission key and the attesting action; a comment may cite the ADR, whose identifier
-    // holds the word.
+    // The permission key and the attesting action; `workflow` has dropped the comments, which may
+    // cite the ADR whose identifier holds the word.
     assert!(!image.contains("attestations:"), "{image}");
     assert!(!image.contains("actions/attest"), "{image}");
     let uses: Vec<&str> = image

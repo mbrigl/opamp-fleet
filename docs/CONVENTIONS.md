@@ -26,8 +26,14 @@ skimmed. The design revision drops what prevented nothing
   deadline only a defect reaches. A sleep or a timed budget that holds on an idle host fails on a
   loaded one, and a race the test meant to provoke goes unprovoked on a fast one. A wait that
   must be timed, such as the waiter's own poll, carries its reason as `// timed: <why>`, on its
-  line or on a comment line right above it, which `scripts/sensor-tests-kept.sh` reads in place
+  line or on a comment line right above it, which `scripts/sensor-timed-waits.sh` reads in place
   of listing it.
+- **A structural test reads the syntax, never words** — a test that decides a rule over source or
+  configuration parses it and asserts on items and keys. A word moves into a comment: the
+  release-workflow test failed on one (a0dc7cd17), and a hand lexer missed test code that a syntax
+  tree cuts (d54447ce8).
+- **A test runs with the crate it decides** — so that crate's own `cargo test` runs it. The
+  at-calls test sat in `fleet-util`, and the Client's tests never ran it (17e0754ef).
 - **A rule two paths apply is one function** — two paths that admit the same input, or derive
   the same value from it, call one function. Two routes, a Gateway and the Server, or a list and
   a view of the same Agent are such paths. A second copy drifts: the path it misses admits what
