@@ -986,7 +986,8 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     route is outside the OpenAPI document, as the package download is.
 64. **One PKCS#11 token, named in `server.toml`.** `[pkcs11]` names `module`, the path of the
     PKCS#11 library; `token_label`; and `pin_file`, a file that holds the user PIN. The PIN file may
-    be read by its owner and its group and written by its owner alone, as `password_file` may
+    be read by the account that owns it and its group and written by that account alone, as
+    `password_file` may
     ([SRV-state-stores-contract-pair §24](SRV-state-stores-contract-pair.md)).
     One that others may read, or its group may write, fails startup naming it. The PIN
     is never written into `server.toml` (clause 50). The Server loads the module at startup through
@@ -2016,7 +2017,7 @@ and JWKS endpoint:
 
 **Not mechanically decidable:** that the UI never writes a token to browser storage. A review of
 `crates/fleet-server/static/` checks it, and the test above that refuses foreign origins in the
-policy limits what a mistake could reach.
+policy limits what a mistake reaches.
 
 ### Transport and the two planes
 

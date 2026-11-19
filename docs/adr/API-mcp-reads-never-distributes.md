@@ -27,10 +27,9 @@ enrolment approval, a bootstrap certificate, the enrolment window, the Gateway m
 
 The Server has no rights model. The specification lists authorization as a Non-Goal, and every
 operator who passes the Operator plane's guard may do everything
-([SEC-operator-oidc-beside-basic](SEC-operator-oidc-beside-basic.md)
-clause 45). A ceiling at a level such as `editor` would need levels in the identity provider (see
-*Alternatives considered*). Without levels the ceiling can only be the set of tools the endpoint
-offers.
+([SEC-operator-oidc-beside-basic §45](SEC-operator-oidc-beside-basic.md)). A ceiling at a level
+such as `editor` would need levels in the identity provider (see *Alternatives considered*).
+Without levels the ceiling can only be the set of tools the endpoint offers.
 
 Since
 [SRV-two-use-case-layers](SRV-two-use-case-layers.md)
@@ -63,14 +62,16 @@ secret.
    the throttle of
    [SEC-admission-by-client-certificate §19](SEC-admission-by-client-certificate.md),
    and the guard of
-   [SEC-operator-oidc-beside-basic](SEC-operator-oidc-beside-basic.md)
-   clause 42 — Basic credentials in the `Authorization` header, a bearer token validated as that
-   ADR's clause 71 says, or both, as configured. A request whose `Origin` header is present and is
-   not the Operator plane's own origin is answered `403`. A request whose `Host` names neither a DNS
-   name nor an address of the Operator plane's certificate is answered `403`. The MCP client's
-   self-reported `clientInfo` is a label, never an identity. That draft supersedes
-   SEC-tls13-two-planes-bounded-input and SEC-admission-by-client-certificate; if it is accepted,
-   the bounds become its clauses 15, 18 and 19 and the throttle its clause 48.
+   [SEC-operator-oidc-beside-basic §42](SEC-operator-oidc-beside-basic.md)
+   — Basic credentials in the `Authorization` header, a bearer token validated as
+   SEC-operator-oidc-beside-basic §71 says, or both, as configured. A request whose `Origin`
+   header is present and is not the Operator plane's own origin is answered `403`. A request whose
+   `Host` names neither a DNS name nor an address of the Operator plane's certificate is answered
+   `403`. The MCP client's self-reported `clientInfo` is a label, never an identity.
+   SEC-operator-oidc-beside-basic supersedes SEC-tls13-two-planes-bounded-input and
+   SEC-admission-by-client-certificate; if it is accepted, the bounds become
+   SEC-operator-oidc-beside-basic §15, §18 and §19, and the throttle
+   SEC-operator-oidc-beside-basic §48.
 
 3. **With OIDC, `/mcp` is its own protected resource.** When OIDC is configured:
    - The Server serves `/.well-known/oauth-protected-resource/mcp` without credentials. It names
@@ -80,8 +81,8 @@ secret.
    - A `401` on `/mcp` carries `WWW-Authenticate: Bearer resource_metadata="…"` and no Basic
      challenge.
    - A bearer token is accepted on `/mcp` only with the audience that
-     [SEC-operator-oidc-beside-basic](SEC-operator-oidc-beside-basic.md)
-     clause 71 sets for it: `aud` names that canonical URI, and `azp` does not stand in. The same
+     [SEC-operator-oidc-beside-basic §71](SEC-operator-oidc-beside-basic.md)
+     sets for it: `aud` names that canonical URI, and `azp` does not stand in. The same
      clause refuses such a token on `/api/v1`, and an ID token on every route. A token whose
      audience is the UI's client, or any other, is answered `401` on `/mcp`, and the Server passes
      no token on.
