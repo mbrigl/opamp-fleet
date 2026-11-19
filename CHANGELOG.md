@@ -46,6 +46,19 @@ once its tag exists.
   kept while nothing arrived. They now hold 4 KiB, enough for an Agent's routine messages; a larger
   message still arrives whole, read 4 KiB at a time. The message size limit is unchanged. What
   this saves an instance's memory was not measured. **What to do:** nothing.
+- **The contract pair has defaults, and the Server names it no more**
+  ([ADR-draft-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it](docs/adr/draft-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
+  clause 22). On PostgreSQL, migration 19 gives the Deployments' `packages` and `configurations`
+  columns and the Hosts' `instance_uids` arrays a default, which changes no stored row, and no
+  statement 0.8.5 runs while serving names them: a Host's array no longer loses an Agent that is
+  released, nor is it emptied on a Gateway's mark. The migration names 0.8.4 as the oldest Server,
+  so an instance of 0.8.5 refuses to start beside a live lease of 0.8.3 or older, naming both
+  releases. The release after 0.8.5 drops the three columns. **What to do:** update from 0.8.4 by
+  a rolling update; from an older release, scale its instances to zero first. Start the first
+  instance of 0.8.5 at a quiet moment: its `ALTER TABLE`s take an `ACCESS EXCLUSIVE` lock on
+  `deployments` and `hosts` for the moment they change the catalogue, and every read and write of
+  a Deployment or a Host waits for it. They wait for the lock at most 5 seconds, as migration 18
+  does; a start that a longer transaction of 0.8.4 fails succeeds once started again.
 
 ## [0.8.4] - 2026-11-18
 

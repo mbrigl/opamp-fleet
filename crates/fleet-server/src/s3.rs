@@ -1069,13 +1069,15 @@ pub(crate) mod tests {
             "7c1d6a52-3f0e-4b8e-9a51-0d2c6e4f8a10",
             "3e8a4b61-2c7d-4f9e-8b15-9d0c7e6f5a21",
         ];
-        // The first open applies the schema, whose table the leases below are rows of.
+        // The first open applies the schema, whose table the leases below are rows of. Each
+        // names this release, so the opens below take them for leases of instances beside them.
         drop(test.shared());
+        let release = crate::postgres::schema::server_version();
         for lease in leases {
             test.sql(&format!(
                 "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
-                 expires_at) VALUES ('{lease}', 'here', false, now(), now(), \
-                 now() + interval '1 hour')"
+                 expires_at, release) VALUES ('{lease}', 'here', false, now(), now(), \
+                 now() + interval '1 hour', '{release}')"
             ));
         }
         let bucket = S3BlobStore::open(&again(&config)).expect("open");

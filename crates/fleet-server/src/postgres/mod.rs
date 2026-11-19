@@ -2787,8 +2787,21 @@ mod tests {
         );
     }
 
+    /// A live lease as a Server of `release` takes one, the release written.
+    fn lease_of(test: &TestDatabase, release: &str) -> String {
+        let id = lease::new_instance_id().expect("an id");
+        test.sql(&format!(
+            "INSERT INTO leases \
+             (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at, release) \
+             VALUES ('{id}', 'host-{release}', false, now(), now(), now() + interval '1 hour', \
+             '{release}')"
+        ));
+        id
+    }
+
     /// An instance whose migrations name the oldest Server a live lease's release is, or older,
-    /// serves beside it: a newer patch release of 0.8 beside a lease of 0.8.0.
+    /// serves beside it: a newer patch release of 0.8 beside a lease of 0.8.4, which the newest
+    /// migration names.
     /// Verifies: ADR-0025
     #[test]
     fn a_patch_release_serves_beside_a_lease_of_the_release_its_migrations_name() {
@@ -2796,12 +2809,12 @@ mod tests {
             return;
         };
         drop(test.shared());
-        lease_as_0_8_0_takes_it(&test, false);
+        lease_of(&test, "0.8.4");
         let patch = Database::open(
             &test.config(),
             Opening {
                 schema: Some(&test.schema),
-                release: "0.8.1",
+                release: "0.8.5",
                 migrations: Some(schema::MIGRATIONS),
                 ..Opening::default()
             },
@@ -2815,8 +2828,59 @@ mod tests {
         releases.dedup();
         assert_eq!(
             releases,
-            [[Some("0.8.0".to_string())], [Some("0.8.1".to_string())]]
+            [[Some("0.8.4".to_string())], [Some("0.8.5".to_string())]]
         );
+    }
+
+    /// An instance of 0.8.5 refuses to start beside a live lease of a release older than 0.8.4,
+    /// which its migration of the contract pair's defaults names: the refusal names the lease's
+    /// release, 0.8.4 and its own, and the schema 0.8.4 left is left as it was. Beside a lease
+    /// of 0.8.4 it migrates and serves
+    /// (ADR-0023 clause 22,
+    /// ADR-0025
+    /// clause 16).
+    /// Verifies: ADR-0023
+    #[test]
+    fn an_instance_of_0_8_5_refuses_to_start_beside_a_live_lease_older_than_0_8_4() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let open_as = |release: &'static str, migrations: &'static [schema::Migration]| {
+            Database::open(
+                &test.config(),
+                Opening {
+                    schema: Some(&test.schema),
+                    release,
+                    migrations: Some(migrations),
+                    ..Opening::default()
+                },
+            )
+        };
+        // The schema of 0.8.4, and a live lease of 0.8.3 on it.
+        let older = open_as("0.8.3", &schema::MIGRATIONS[..17]).expect("0.8.3 migrates");
+        let held = older
+            // timed: a lease term, not a wait
+            .take_lease("host-0.8.3", Duration::from_secs(3600), &Terms::default())
+            .expect("a lease of 0.8.3");
+        let schema_rows =
+            || test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
+        let before = schema_rows();
+        let err = open_as("0.8.5", schema::MIGRATIONS)
+            .map(|_| ())
+            .expect_err("a live lease of 0.8.3");
+        for named in ["0.8.3", "0.8.4", "0.8.5", held.instance_id.as_str()] {
+            assert!(err.contains(named), "{named}: {err}");
+        }
+        assert_eq!(schema_rows(), before, "nothing migrated");
+
+        older.release_lease(&held.instance_id).expect("released");
+        lease_of(&test, "0.8.4");
+        let newer = open_as("0.8.5", schema::MIGRATIONS).expect("beside 0.8.4");
+        newer
+            // timed: a lease term, not a wait
+            .take_lease("host-0.8.5", Duration::from_secs(3600), &Terms::default())
+            .expect("serves");
+        assert_eq!(schema_rows().len(), schema::MIGRATIONS.len(), "migrated");
     }
 
     /// Of a lease taken while a Server two releases on migrates, the later sees the earlier: the
@@ -2841,12 +2905,12 @@ mod tests {
             &test.config(),
             Opening {
                 schema: Some(&test.schema),
-                release: "0.8.0",
+                release: "0.8.4",
                 migrations: Some(schema::MIGRATIONS),
                 ..Opening::default()
             },
         )
-        .expect("0.8.0 migrates");
+        .expect("0.8.4 migrates");
         let waits_for_the_migrations = |waiting: usize| {
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             while test
@@ -2900,7 +2964,7 @@ mod tests {
                 .expect("taking")
                 .map(|_| ())
                 .expect_err("refused");
-            for named in ["needs Server 0.9.0", "this Server is 0.8.0"] {
+            for named in ["needs Server 0.9.0", "this Server is 0.8.4"] {
                 assert!(err.contains(named), "{named}: {err}");
             }
             assert_eq!(older.outdated(), Some(err), "the refusal is kept");

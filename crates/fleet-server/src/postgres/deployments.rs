@@ -53,14 +53,13 @@ impl DeploymentBackend for PgDeploymentBackend {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
             // `packages` and `configurations` mirrored the member rows; no release reads them,
-            // so a new row's are empty and nothing writes them after
+            // so a new row takes their defaults and nothing names them after
             // (ADR-0023
             // clause 22).
             transaction
                 .execute(
-                    "INSERT INTO deployments (name, selector, packages, configurations) \
-                     VALUES ($1, $2, '[]', '{}') ON CONFLICT (name) DO UPDATE SET \
-                     selector = EXCLUDED.selector",
+                    "INSERT INTO deployments (name, selector) VALUES ($1, $2) \
+                     ON CONFLICT (name) DO UPDATE SET selector = EXCLUDED.selector",
                     &[&name, &selector],
                 )
                 .await
@@ -433,9 +432,8 @@ pub(crate) async fn write(
     let selector = serde_json::to_value(&deployment.selector).expect("a Selector serializes");
     client
         .execute(
-            "INSERT INTO deployments (name, selector, packages, configurations) \
-             VALUES ($1, $2, '[]', '{}') ON CONFLICT (name) DO UPDATE SET \
-             selector = EXCLUDED.selector",
+            "INSERT INTO deployments (name, selector) VALUES ($1, $2) \
+             ON CONFLICT (name) DO UPDATE SET selector = EXCLUDED.selector",
             &[&deployment.name, &selector],
         )
         .await
@@ -835,9 +833,10 @@ mod tests {
     }
 
     /// No release reads the Deployments' `packages` and `configurations` columns, which mirror
-    /// the member rows, so this release writes them no more: a new Deployment's are empty, and
-    /// what a Server of 0.8.0 wrote into them stays as it was through every change of the
-    /// members, until the release after this one removes them
+    /// the member rows, and this release names them in no statement: a new Deployment's take
+    /// their defaults, what a release before wrote into them stays as it was through every change
+    /// of the members, and with the columns dropped, as the release after this one drops them,
+    /// every change and the load still succeed
     /// (ADR-0023
     /// clause 22).
     /// Verifies: ADR-0023
@@ -858,7 +857,7 @@ mod tests {
             [[Some("[]".to_string()), Some("{}".to_string())]],
             "a new Deployment's are empty"
         );
-        // As a Server of 0.8.0 beside this one leaves them.
+        // As a Server of 0.8.0 left them.
         test.sql(
             "UPDATE deployments SET packages = \
              '[{\"agent_type\":\"otelcol\",\"version\":\"1.2.3\"}]', \
@@ -877,6 +876,21 @@ mod tests {
             store.load().expect("load"),
             [deployment("canary", Some("1.2.4"), &["extra", "other"])],
             "the members are the rows'"
+        );
+
+        test.sql("ALTER TABLE deployments DROP COLUMN packages, DROP COLUMN configurations");
+        put(&store, &deployment("stable", Some("1.2.3"), &["base"]));
+        store
+            .drop_member(&Member::Configuration("extra".to_string()))
+            .expect("drop");
+        store
+            .amend("canary", &Change::RemovePackage(id("1.2.4")))
+            .expect("remove");
+        store.remove("canary").expect("remove the Deployment");
+        assert_eq!(
+            store.load().expect("load"),
+            [deployment("stable", Some("1.2.3"), &["base"])],
+            "with the columns dropped"
         );
     }
 

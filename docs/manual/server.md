@@ -1268,19 +1268,27 @@ start.
   restarted meanwhile: an instance of 0.8.0 checks the schema only at its own start and could take
   its lease just after the newer release checked the leases. Releases after 0.8.0 close that gap
   themselves.
+- **From 0.8.4 to 0.8.5** is a rolling update. The first instance of 0.8.5 gives the Deployments'
+  `packages` and `configurations` columns and the Hosts' `instance_uids` arrays a default, which
+  changes no stored row. Each `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock on `deployments` and
+  `hosts` for the moment it changes the catalogue, so every read and write of a Deployment or a
+  Host waits for that moment; start it at a quiet moment. Its migration names 0.8.4 as the oldest
+  Server, so an instance of 0.8.5 does not start beside a live lease of 0.8.3 or older: from such
+  a release, scale its instances to zero first, as for a skip. The release after 0.8.5 drops the
+  three columns.
 - **From 0.7.1** every Server stops first. An instance that shares the database starts, and
   migrates, only once nothing holds the database alone, as a Server of 0.7.1 does while it runs,
   and as `server migrate-to-postgres` and `server blobs-to-s3` do until they finish.
-- **Beside 0.8.0** four things differ from a fleet of one release. `max_agents` may be passed by
-  the records the two releases create at the same moment, since 0.8.0 counts under a lock the newer
-  release does not take. When both create the record of the same new Agent at the same moment, the
-  database ends one of the two as a deadlock after its `deadlock_timeout` (one second by default);
-  that report is answered `Unavailable`, and the Agent reports again. And a Gateway's mark through
-  an instance of 0.8.0 may be refused for a Host it has not heard of yet, or written for a host the
-  database has forgotten; make marks through an instance of this release. And an instance of 0.8.0
-  reads no rejected key: through it a rejected key waits again, is listed and may be approved, so
-  approve through an instance of this release, which refuses it. All four end
-  with the last instance of 0.8.0.
+- **Beside 0.8.0**, for releases 0.8.1 to 0.8.4, four things differ from a fleet of one release.
+  `max_agents` may be passed by the records the two releases create at the same moment, since
+  0.8.0 counts under a lock the newer release does not take. When both create the record of the
+  same new Agent at the same moment, the database ends one of the two as a deadlock after its
+  `deadlock_timeout` (one second by default); that report is answered `Unavailable`, and the Agent
+  reports again. And a Gateway's mark through an instance of 0.8.0 may be refused for a Host it has
+  not heard of yet, or written for a host the database has forgotten; make marks through an
+  instance of the newer release. And an instance of 0.8.0 reads no rejected key: through it a
+  rejected key waits again, is listed and may be approved, so approve through an instance of the
+  newer release, which refuses it. All four end with the last instance of 0.8.0.
 
 The first start of this release on a database migrates it to the schema of the paged lists: it
 adds columns to the Agents' table and builds three indexes over it, one of them over a digest of
