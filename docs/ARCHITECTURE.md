@@ -9,7 +9,7 @@
 > **Kept current by:** Markus Brigl. A document everyone may edit and nobody owns is
 > the one that goes stale.
 >
-> **Last design revision:** 2026-11-18, due after 20 changes. The revision that took the count
+> **Last design revision:** 2026-11-19, due after 20 changes. The revision that took the count
 > moves the date; the number is this project's to set; a sensor counts the changes outside
 > `docs/` since the commit that set the date and says when the next is due
 > ([NUC-design-is-revised §4](adr/NUC-design-is-revised.md)).

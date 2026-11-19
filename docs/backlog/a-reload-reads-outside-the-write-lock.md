@@ -31,8 +31,8 @@ SRV-instances-share-one-postgresql §12 ("Caches are read again, not updated"), 
 superseding ADR through `propose-adr` first.
 
 **Not now.** The human deferred it on 2026-11-19: no criterion asks for it, and the G-20 load test
-meets its target without it. It comes back when the timing of each kind of act
-(`docs/backlog/each-operator-act-is-timed-in-the-g20-test.md`) or another measurement shows it.
+meets its target without it. It comes back when the slowest operator act of each kind, which the
+G-20 load test prints since 06892c068, or another measurement shows it.
 
 **From.** Ticket 01 of `fleet-at-scale-costs`, the part the human did not keep in the ticket
 (2026-11-15).
