@@ -235,7 +235,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
    Any number may be valid at once, one per customer, site or batch as the operator chooses, because
    none opens anything on its own: it needs an open enrolment window
-   ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md))
+   ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md))
    and an operator's approval
    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
    A short validity limits its reach. Handing it to a host is the operator's job.
@@ -367,7 +367,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     revocation.
 28. **A revocation follows renewal.** A certificate is revoked when it, or any predecessor in its
     chain in the certificate register
-    ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)),
+    ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
     is on the list. A connection that presents a revoked one is refused before its CSR is read, and
     an open session re-checks its certificate before a CSR it carries is signed.
 29. **There is no credential to revoke.** `POST /api/v1/revocations` with `{"credential": …}` is
@@ -408,14 +408,14 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     and its serial, so the Gateway resolves no chain; and a version that changes with every change
     to the list, carried as an `ETag`, so a fetch with `If-None-Match` is answered `304`. With
     PostgreSQL it is the list's one version in the database
-    ([SRV-state-stores-approval-certificate §10](SRV-state-stores-approval-certificate.md)),
+    ([SRV-state-stores-contract-pair §10](SRV-state-stores-contract-pair.md)),
     the same on every instance, so an `ETag` one instance gave is answered `304` by
     another. Bootstrap certificates are not on it: a Gateway admits no bootstrap certificate. The
     route is outside the OpenAPI document, as the package download is.
 35. **One PKCS#11 token, named in `server.toml`.** `[pkcs11]` names `module`, the path of the
     PKCS#11 library; `token_label`; and `pin_file`, a file that holds the user PIN. The PIN file may
     be read by its owner and its group and written by its owner alone, as `password_file` may
-    ([SRV-state-stores-approval-certificate §24](SRV-state-stores-approval-certificate.md)).
+    ([SRV-state-stores-contract-pair §24](SRV-state-stores-contract-pair.md)).
     One that others may read, or its group may write, fails startup naming it. The PIN
     is never written into `server.toml` (clause 21). The Server loads the module at startup through
     `cryptoki` and keeps a pool of four sessions on the token, opened as they are needed; no setting
@@ -566,7 +566,7 @@ signing service behind the signer port; keys on the Client.
   invitation; a window that closes by itself bounds both the queue and an operator's attention.
 - **An enrolment queue whose requests outlive their window** — a request would stay pending after
   the window it was made in closed. The queue is persisted with the window's end
-  ([SRV-state-stores-approval-certificate §8](SRV-state-stores-approval-certificate.md)),
+  ([SRV-state-stores-contract-pair §8](SRV-state-stores-contract-pair.md)),
   and a closing window expires every request in it.
 - **A download listener of its own instead of a certificate on the download** — a third listener
   serving artifacts to anyone who reaches it, where the Agent plane's handshake already proves the
@@ -897,11 +897,11 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
   connection,
   [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `an_enrolment_request_waits_for_an_operator_and_is_issued_on_approval` (clauses 4, 18; the window,
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md);
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md);
   the enrolment connection and the pending list,
   [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `a_rejected_request_is_refused_and_closing_the_window_shuts_enrolment` (the window,
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md);
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md);
   the enrolment connection,
   [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
   `an_unknown_request_is_not_approved_and_is_rejected_before_it_arrives` (the pending list,
@@ -931,7 +931,7 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
 - [`crates/fleet-server/src/enrolment.rs`](../../crates/fleet-server/src/enrolment.rs) —
   `the_window_is_closed_by_default_and_bounded`, `closing_the_window_expires_every_request` (the
   window,
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)),
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
   `a_request_waits_for_an_operator_and_is_answered_once_decided`, `the_queue_is_bounded` (the
   enrolment connection and the pending list,
   [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
@@ -982,15 +982,15 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
 - [`crates/fleet-server/src/revocation.rs`](../../crates/fleet-server/src/revocation.rs) tests:
   `a_revocation_follows_every_renewal` (clause 28), `the_list_survives_a_restart_and_can_be_lifted`
   (clause 30; the persisted list,
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)),
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
   `a_renewal_stays_revoked_after_its_revoked_ancestor_expires` (clause 28; the persisted list,
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)),
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
   `the_list_and_the_register_are_bounded`,
   `an_expired_register_entry_is_dropped_with_its_revocation` (the register and the persisted list,
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)).
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)).
 - [`crates/fleet-server/src/fs/revocation.rs`](../../crates/fleet-server/src/fs/revocation.rs)
   tests: `the_ledger_survives_a_reopen` (the register and the persisted list,
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md));
   `a_persisted_credential_entry_is_dropped_on_load` (clause 29): a list holding a credential entry
   beside a certificate entry loads with the certificate entry alone, is written back without the
   credential entry, and the drop is logged.
@@ -1002,10 +1002,10 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
   `a_revocation_closes_the_session_it_concerns_and_no_other` (clause 32),
   `a_session_is_closed_when_its_certificate_expires` (clause 33),
   `a_revocation_reaches_a_certificate_renewed_before_it` (clauses 26, 28; the register,
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)),
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
   `a_revocation_names_its_issuer_by_role_whatever_the_issuer_is_called` (clause 27),
   `a_csr_for_another_agent_still_descends_from_the_presented_certificate` (the register,
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md);
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md);
   revocation behind a Gateway, [CLT-modes-and-gateway](CLT-modes-and-gateway.md)),
   `a_marked_gateway_is_handed_the_revoked_certificates_with_their_renewals` (clause 34, an unmarked
   member answered `403` and an unchanged list `304`),

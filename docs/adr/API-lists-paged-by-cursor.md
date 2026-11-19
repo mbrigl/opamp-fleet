@@ -116,14 +116,14 @@ answered with the whole array up to a bound.
    Where the Server holds the fleet in memory, on the filesystem store, the core answers them from
    memory; on PostgreSQL the store answers them through the port's `query_page` (clause 9). Which
    of the two a Server does is the rule of
-   [SRV-state-stores-approval-certificate §3](SRV-state-stores-approval-certificate.md).
+   [SRV-state-stores-contract-pair §3](SRV-state-stores-contract-pair.md).
    The OpenAPI document names every parameter and both headers for the four routes.
    - On PostgreSQL the wire-typed fields of a record are protobuf bytes, which SQL cannot search
      or sort. The core therefore writes, with every write of a record, the columns the queries
      read: the display name and the other sort keys of clause 5, the reported `key=value` pairs,
      the `service_name`, the `host.id` or `host.name` that groups an Agent behind a Gateway, and
      one search text over the fields `q` matches. They are scalars kept as columns, as
-     [SRV-state-stores-approval-certificate §21](SRV-state-stores-approval-certificate.md)
+     [SRV-state-stores-contract-pair §21](SRV-state-stores-contract-pair.md)
      keeps every scalar, written with the record they derive from.
    - Each row also keeps a SHA-256 digest over the columns its derived ones come from. A row
      whose digest does not match them was written without its derived columns: before they
@@ -155,7 +155,7 @@ answered with the whole array up to a bound.
      and the check of a Gateway's package download reads the Agents that arrived over
      the Gateway's Host rather than the whole fleet.
    - On PostgreSQL it is a read beside `get` and `query`, the reads
-     [SRV-state-stores-approval-certificate §3](SRV-state-stores-approval-certificate.md)
+     [SRV-state-stores-contract-pair §3](SRV-state-stores-contract-pair.md)
      names for a Server that does not hold the fleet in memory. The filesystem adapter
      answers it from the records it loaded, as the core answers the lists there (clause 8).
    - `reported_values(limit)` answers what `GET /api/v1/agents/attributes` lists (clause 7): the

@@ -187,7 +187,7 @@ carries a date once its tag exists.
 
 - **A Server with `[blobs] store = "s3"` refuses to start with `max_package_size_bytes` above
   5 GiB**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   An upload is placed in the bucket with one copy, and S3 copies at most 5 GiB (5368709120 bytes)
   at once, so a larger bound named an artifact the Server could not place. The refusal names the
   key and the bound.
@@ -581,7 +581,7 @@ carries a date once its tag exists.
   instance of this release: 0.8.0 still decides from its copy.
 
 - **A new Agent is not sent away while a connecting fleet holds the database's pool**
-  ([SRV-state-stores-approval-certificate §24](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair §24](docs/adr/SRV-state-stores-contract-pair.md)).
   On PostgreSQL, a new Agent's first report gave up after 5 s without a pooled
   connection and was answered `Unavailable`, which kept an Agent away 30 to 60 s; while a large
   fleet connected, the pool was held that long at times. Creating an Agent's record now waits up to
@@ -647,7 +647,7 @@ carries a date once its tag exists.
 - **An instance on PostgreSQL takes up its Agents without waiting one database round trip at a
   time**
   ([SRV-instances-share-one-postgresql §8](docs/adr/SRV-instances-share-one-postgresql.md),
-  [SRV-state-stores-approval-certificate §22](docs/adr/SRV-state-stores-approval-certificate.md)).
+  [SRV-state-stores-contract-pair §22](docs/adr/SRV-state-stores-contract-pair.md)).
   Each Agent's report held one lock of the whole instance across its calls to the
   database, on a worker of the runtime, so an instance served one round trip at a time: TLS
   handshakes and the heartbeats of connected Agents waited behind it, and an instance took up about
@@ -701,7 +701,7 @@ carries a date once its tag exists.
   behind that Gateway may reconnect to it as well.
 
 - **An approval records its certificate only with its decision**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   This removes the 0.8.0 bound *An approval whose commit fails leaves its certificate recorded*.
   On PostgreSQL the register entry and the Host an approval mints are written in the transaction
   that decides the request. When that commit fails, nothing is registered, the request still
@@ -755,7 +755,7 @@ carries a date once its tag exists.
   by `DELETE /api/v1/deployments/{name}/configurations/{configuration}` or
   `DELETE /api/v1/deployments/{name}/packages/{agent_type}/{version}`.
 - **A sweep stops once its lock is lost**
-  ([SRV-state-stores-approval-certificate §14](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair §14](docs/adr/SRV-state-stores-contract-pair.md)).
   On PostgreSQL a sweep whose database session ended after it had read which artifacts
   the entries name could still delete one that an upload through another instance had just
   stored, and the new entry named a missing artifact. A sweep now marks, on the session that holds
@@ -773,7 +773,7 @@ carries a date once its tag exists.
   replica the marks had not reached can leave one.
 - **A suspended instance serves nothing on a lease that lapsed meanwhile**
   ([SRV-instances-share-one-postgresql §3](docs/adr/SRV-instances-share-one-postgresql.md),
-  [SRV-state-stores-approval-certificate §14](docs/adr/SRV-state-stores-approval-certificate.md)).
+  [SRV-state-stores-contract-pair §14](docs/adr/SRV-state-stores-contract-pair.md)).
   On PostgreSQL an instance measured its lease on a clock that does not count the time
   its host was suspended. After a suspend it served on until its next renewal, up to
   `lease_renew_secs`, while its lease had lapsed for every other instance: it could admit an Agent
@@ -847,7 +847,7 @@ carries a date once its tag exists.
   **What to do:** nothing. A tool that reads `taken_under` as a chain identifier treats `none` as
   no lease, and one that reads `reason` knows `holder_gone`.
 - **A renewal stays revoked with its predecessor on every instance**
-  ([SRV-state-stores-approval-certificate §10](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair §10](docs/adr/SRV-state-stores-contract-pair.md)).
   On PostgreSQL an instance that missed the notification of a renewal another
   instance registered, and then revoked the certificate it renewed, admitted the renewal, and so
   did its Gateways' list, until another instance changed the list. Every change to the register
@@ -922,7 +922,7 @@ carries a date once its tag exists.
   instances.
 
 - **`server blobs-to-s3` moves the artifacts of a Server already on PostgreSQL into a bucket**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   `server blobs-to-s3 --data-dir <data_dir> --config <server.toml>` takes the `server.toml` the
   Server will start with: the bucket, and no `data_dir`. It then:
   - refuses while any instance holds a live lease;
@@ -937,7 +937,7 @@ carries a date once its tag exists.
   [the manual](docs/manual/server.md#blobs) shows.
 
 - **On PostgreSQL the audit record is kept for `[audit] retain_days`**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   The key's default is 365 days, from 1 to 36 500.
   - At its start and once a day, each instance prunes what the database stored longer ago than
     that. It prunes its own chain, and, one instance at a time, the closed chains.
@@ -952,7 +952,7 @@ carries a date once its tag exists.
 ### Changed
 
 - **A Server of 0.7.1 refuses a database this release has started on**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   The migrations this release applies at its first start on PostgreSQL, 3 to 10, name 0.8.0 as the
   oldest Server that understands the schema. A Server of 0.7.1 started on that database stops,
   naming both versions, and changes nothing: it holds no lease, keeps its audit record in files
@@ -963,7 +963,7 @@ carries a date once its tag exists.
   first instance of this release starts; a rolling update that starts the new one first is
   refused. A rollback to 0.7.1 after the upgrade needs the database restored from that backup.
 - **With PostgreSQL and S3, a `data_dir` fails startup, and the image names no data directory**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md),
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md),
   [OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)).
   - A Server on PostgreSQL and S3 keeps nothing on its disk. A `data_dir` named in `server.toml` or
     as `FLEET_SERVER__DATA_DIR` stops the start, naming the key.
@@ -980,7 +980,7 @@ carries a date once its tag exists.
   add a lifecycle rule that aborts incomplete multipart uploads under `<prefix>staging/`, as
   [the manual](docs/manual/server.md#blobs) shows.
 - **Each `[audit]` key applies to its own store**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   `max_file_bytes` and `keep_files` apply to the filesystem store alone, and `retain_days` to
   PostgreSQL alone. A key set for the other store stops the start, naming `[audit] <key>`.
   **What to do:** on PostgreSQL, remove `[audit] max_file_bytes` and `keep_files` from
@@ -1013,7 +1013,7 @@ carries a date once its tag exists.
   links the archive.
 
 - **With PostgreSQL, the revocation list has one version, and it is the Gateways' `ETag`**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   Every revocation and every lift moves a counter in the database, in its own transaction, and
   `GET /v1/gateway/revocations` answers `ETag: "list-<version>-<SHA-256 of the body>"`. Every
   Server instance on one database therefore answers the same `ETag` for the same list, and each
@@ -1089,7 +1089,7 @@ carries a date once its tag exists.
   **What to do:** nothing.
 - **With PostgreSQL, what an assignment pins is decided in the transaction, under the blob store's
   lock**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   These acts count the assignments stored, under the row's lock:
   - deleting a Configuration, a Package or a Deployment;
   - every write to a Package.
@@ -1405,7 +1405,7 @@ carries a date once its tag exists.
 
 - **The audit record syncs what is queued together once**
   ([SEC-append-only-audit-record](docs/adr/SEC-append-only-audit-record.md),
-  [SRV-state-stores-approval-certificate §12](docs/adr/SRV-state-stores-approval-certificate.md)).
+  [SRV-state-stores-contract-pair §12](docs/adr/SRV-state-stores-contract-pair.md)).
   The Server synced
   the disk after every audit entry, so it recorded no more decisions a second than the disk
   synced, and a burst of them, such as refusals from many addresses, could fill the 10 000-entry
@@ -1482,7 +1482,7 @@ carries a date once its tag exists.
   needs nothing. A script that downloads a release's `*.cdx.json` now also gets the Server's two.
 
 - **The Server's records may live in PostgreSQL**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   `[database] store = "postgres"` with a `[database.postgres]` section (`host`, `port`, `dbname`,
   `user`, `password_file`, optional `ca_file` and `tls`) keeps the Configurations, Deployments,
   Package records, Agents, Hosts, the certificate register, the revocation list, the bootstrap
@@ -1513,7 +1513,7 @@ carries a date once its tag exists.
   set the variables; keep secrets in files and set their `*_file` keys to the paths.
 
 - **Artifacts may live in an S3-compatible object store**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   `[blobs] store = "s3"` with a `[blobs.s3]` section (`endpoint`, `bucket`, `region`, optional
   `prefix` and `ca_file`) keeps one object per artifact in that bucket instead of a file under
   `data_dir/blobs/`, streamed through the Server both ways over TLS 1.3. The endpoint is `https://`,
@@ -1859,7 +1859,7 @@ carries a date once its tag exists.
 
 - **All of the Server's state lives under one data directory, and `server migrate` moves an
   installation there**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   `server.toml` names `data_dir` (default `fleet-data`) instead of `config_dir` and `packages_dir`;
   a file still naming either fails the start, naming `server migrate`. Under it each domain has a
   directory of its own — `configurations/`, `deployments/`, `packages/`, `blobs/`, `agents/`,
@@ -1884,7 +1884,7 @@ carries a date once its tag exists.
   ([Upgrading to one data directory](docs/manual/server.md#upgrading-to-one-data-directory)).
 
 - **The enrolment window and its queue survive a restart**
-  ([SRV-state-stores-approval-certificate](docs/adr/SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md)).
   They are written to `enrolment.json` before the act that changes them is answered, so an open
   window stays open until its end and a host whose approval it had not collected yet is handed its
   certificate after the restart; a window whose end passed while the Server was down is closed

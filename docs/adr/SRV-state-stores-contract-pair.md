@@ -4,14 +4,12 @@
 - **Date:** 2026-11-19
 - **Deciders:** Markus Brigl
 - **Applies to:** every storage port in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `blobs.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`, `audit.rs`) and every adapter under `crates/fleet-server/src/fs/`, `crates/fleet-server/src/postgres/` and `crates/fleet-server/src/s3.rs`, the embedded schema and its migrations, the wiring in `crates/fleet-server/src/lib.rs` and `crates/fleet-server/src/main.rs`, `data_dir`, the `[blobs]` and `[database]` sections and the `[audit]` keys `max_file_bytes`, `keep_files` and `retain_days` of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `server migrate`, `server migrate-to-postgres` and `server blobs-to-s3` commands, the `object_store`, `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls` dependencies in `Cargo.toml` and `deny.toml`, the S3 and PostgreSQL adapters' tests and the CI jobs that run them, the rustfs and postgres services in `observability/compose.yaml` and their forward into the Dev Container, the approval of an enrolment request in `crates/fleet-server/src/fleet/approval.rs` and `crates/fleet-server/src/api.rs` and the audit entries it writes, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its state
-- **Supersedes:** [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
 
 ## Context
 
-This ADR carries every clause of
-[SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
-word for word and changes one: clause 22, the Server's schema. Every clause keeps its number.
-Clause 22 changes in three places:
+Clause 22, the Server's schema, was restated on 2026-11-19. Until then an earlier ADR carried
+every clause of this one under the same number. That ADR was superseded by this one and deleted
+by the normalization of 2026-11-19. Clause 22 changes in three places:
 
 - A default given to a column that has none counts as a migration that only adds. Such a
   default changes no stored row; PostgreSQL applies it only to later inserts and updates.
@@ -20,7 +18,7 @@ Clause 22 changes in three places:
 - The schedule of the contract pair: release 0.8.5 gives the pair defaults and stops naming it,
   and the release after 0.8.5 drops it.
 
-SRV-state-stores-approval-certificate's schedule did not hold. It had the release after 0.8.0 write
+The earlier schedule did not hold. It had the release after 0.8.0 write
 the Deployments' mirror columns no more and the release after that remove them. Release 0.8.1
 stopped writing values into them and adding to the Hosts' arrays, yet it and every release up to
 0.8.4 still name the columns in their `INSERT`s. The columns are `NOT NULL` without a default, so
@@ -34,9 +32,9 @@ deviation from it.
 
 The human decided the questions on 2026-11-19: a default counts as an addition, the release that
 stops naming the pair names 0.8.4 as the oldest Server, and clause 22 keeps the concrete steps.
-SRV-state-stores-approval-certificate's own Context follows.
+The Context of the Server's state follows.
 
-### SRV-state-stores-approval-certificate's Context
+### The Server's state and its stores
 
 The Server's state is its records — Configurations with their revisions, Deployments, Package
 records, Agents with their labels and assignments, Hosts, the certificate register, the
@@ -927,10 +925,9 @@ monitors a production store or database.
 - **Only the rule, the schedule in the backlog.** Clause 22 would keep the rule and leave the
   steps to backlog entries. Then no further delay would need a supersession. But the record would
   name no plan for the columns, and the tests that hold the steps would cite no clause.
-- **Clause 22 split into an ADR of its own.** Two drafts would supersede
-  SRV-state-stores-approval-certificate: one with every other clause, one with the schema. The cut
-  is cleaner, but it moves every reference to SRV-state-stores-approval-certificate now, for a
-  change to one clause.
+- **Clause 22 split into an ADR of its own.** Two drafts would supersede the
+  earlier ADR: one with every other clause, one with the schema. The cut is cleaner, but it moves
+  every reference to the earlier ADR at once, for a change to one clause.
 
 ## Sources / Prior art
 
@@ -1044,7 +1041,7 @@ Of the restatement of clause 22:
 
 ## Enforcement
 
-Tests that carry `Verifies: SRV-state-stores-approval-certificate`:
+Tests that carry `Verifies: SRV-state-stores-contract-pair`:
 
 - Layout, ports and migration of the old layout:
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
@@ -1139,7 +1136,7 @@ Tests that carry `Verifies: SRV-state-stores-approval-certificate`:
 - The S3 and PostgreSQL tests run in CI jobs with a rustfs and a PostgreSQL service, and are
   reported skipped where no store is named. `cargo tree` of the Server contains neither
   `aws-lc-rs` nor `openssl`; `cargo-deny` fails on a licence or source outside the allow list.
-- Tests that carry `Verifies: SRV-state-stores-approval-certificate`, for clauses 2, 10, 21 and 22:
+- Tests that carry `Verifies: SRV-state-stores-contract-pair`, for clauses 2, 10, 21 and 22:
   [`postgres/ledger.rs`](../../crates/fleet-server/src/postgres/ledger.rs)
   `the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held`,
   `a_register_change_moves_the_list_version`,
@@ -1190,7 +1187,7 @@ Tests that carry `Verifies: SRV-state-stores-approval-certificate`:
   `a_gateway_mark_finds_a_host_another_instance_wrote`;
   [`postgres/enrolment.rs`](../../crates/fleet-server/src/postgres/enrolment.rs)
   `two_takers_at_the_queues_bound_take_one_request_between_them`.
-- Tests that carry `Verifies: SRV-state-stores-approval-certificate`, for clause 23:
+- Tests that carry `Verifies: SRV-state-stores-contract-pair`, for clause 23:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_second_instance_that_must_be_alone_fails_startup_naming_it`,
   `a_server_that_loses_its_lock_logs_it_and_writes_nothing_more`;
@@ -1204,7 +1201,7 @@ Tests that carry `Verifies: SRV-state-stores-approval-certificate`:
   [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
   `an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_one`, which opens the
   listeners again only once the instance holds a new lease.
-- Tests that carry `Verifies: SRV-state-stores-approval-certificate`, for clause 22:
+- Tests that carry `Verifies: SRV-state-stores-contract-pair`, for clause 22:
   [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs)
   `a_server_of_0_7_1_refuses_the_schema_once_a_migration_of_0_8_0_is_applied`: the schema of
   migrations 1 and 2 is taken by 0.7.1, and after each of migrations 3 to 10 it is refused, naming
@@ -1213,7 +1210,7 @@ Tests that carry `Verifies: SRV-state-stores-approval-certificate`:
   lock held on the schema of migrations 1 and 2, as a running Server of 0.7.1 holds it, an
   instance that shares the database fails startup and the schema is left as it was, and once the
   lock is free the instance migrates and starts.
-- Tests that carry `Verifies: SRV-state-stores-approval-certificate`, for clauses 1, 16 and 27:
+- Tests that carry `Verifies: SRV-state-stores-contract-pair`, for clauses 1, 16 and 27:
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs)
   `a_data_dir_beside_the_database_holds_the_blobs_alone`, that the Server makes `blobs/` in a
   `data_dir` beside the database with the filesystem blob store and keeps `audit/` there only as the
@@ -1225,7 +1222,7 @@ Tests that carry `Verifies: SRV-state-stores-approval-certificate`:
   `a_store_opened_before_its_lease_takes_no_upload_until_the_lease_is_named`;
   [`tests/stateless_instance.rs`](../../crates/fleet-server/tests/stateless_instance.rs)
   `a_bucket_that_fails_startup_leaves_no_lease_behind`.
-- Tests that carry `Verifies: SRV-state-stores-approval-certificate`, for clauses 2, 9 and 21:
+- Tests that carry `Verifies: SRV-state-stores-contract-pair`, for clauses 2, 9 and 21:
   [`postgres/enrolment.rs`](../../crates/fleet-server/src/postgres/enrolment.rs)
   `an_approval_whose_commit_fails_records_nothing_and_a_second_records_one_certificate`,
   `two_instances_approving_one_request_whose_first_commit_fails_sign_it_once_more`,

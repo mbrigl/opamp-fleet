@@ -16,7 +16,7 @@ The Server runs in a container. A container is configured by its orchestrator, a
 orchestrator's natural channel is the environment: a variable per setting, changed per deployment
 without rebuilding the image or mounting a file. Every setting of `server.toml` must be reachable
 that way, the PostgreSQL connection and the object store of
-[SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
+[SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)
 among them. The Client runs as an operating-system service on the host it manages, not in a
 container.
 
@@ -103,9 +103,9 @@ environment carry paths to secrets but never a secret itself.
    the Server logs, at info level, the name of every key its environment set, and never a value.
 
 8. **No other variable configures the Server.** The `AWS_*` variables are read as
-   [SRV-state-stores-approval-certificate §17 and §18](SRV-state-stores-approval-certificate.md)
+   [SRV-state-stores-contract-pair §17 and §18](SRV-state-stores-contract-pair.md)
    say: for credentials only, never for an endpoint or an option. `FLEET_TEST_*`
-   variables are read by tests alone. Where SRV-state-stores-approval-certificate says the S3
+   variables are read by tests alone. Where SRV-state-stores-contract-pair says the S3
    connection is configured in `server.toml` alone, the environment of this ADR counts as
    `server.toml`: `FLEET_SERVER__BLOBS__S3__ENDPOINT` sets the endpoint, and `AWS_ENDPOINT` still
    does not.

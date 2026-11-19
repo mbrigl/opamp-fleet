@@ -122,7 +122,7 @@ Configuration, Package or Deployment that an assignment pins.
      `PUT|DELETE …/configurations/{configuration}` holds or drops a Configuration; one the Server
      does not hold is `404`.
    - A Deployment is persisted through the store
-     [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
+     [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)
      names: owner-only, one JSON file per Deployment in the filesystem adapter, one row in the
      PostgreSQL adapter. A stored Deployment that does not parse, or whose name disagrees with its
      content, fails startup naming it. Saving distributes nothing.
@@ -330,7 +330,7 @@ Configuration, Package or Deployment that an assignment pins.
 **Out of scope:** a fleet-wide base Configuration, and any "everyone" Deployment; releasing only a
 Deployment's Configurations or only its Packages; parameters and blocks in a Configuration (G-18, a
 decision of its own); where Deployments, Configurations and assignments are stored
-([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
+([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md));
 what a Package and its entries are
 ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)); an opt-in convergence
 policy for Agents that appear later; a batched or paused progressive walk; an audit trail of who
@@ -423,7 +423,7 @@ re-install a version the test holds back; a Server-driven downgrade.
   mode on the resource where the rule was asked for; an override is unavailable to the bulk act
   and the count. A downgrade, if wanted, is its own act.
 - **Persist a Deployment as JSON files of its own, outside the port
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)
   puts every record behind.** A PostgreSQL deployment would then keep its Deployments on the host
   while every other record lives in the database. A Deployment is persisted through that store's
   port (clause 5).

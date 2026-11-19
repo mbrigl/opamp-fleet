@@ -368,7 +368,7 @@ Agent plane with token buckets.
     over TLS 1.3.** Each outbound connection runs over the provider of clause 5, and plaintext
     only to a loopback endpoint the configuration names. The ADRs in force give it two such
     purposes, the S3 store and the PostgreSQL store
-    ([SRV-state-stores-approval-certificate §17 and §24](SRV-state-stores-approval-certificate.md)).
+    ([SRV-state-stores-contract-pair §17 and §24](SRV-state-stores-contract-pair.md)).
     The Server sends no request for a package anywhere
     ([PKG-signed-packages-and-delivery §4](PKG-signed-packages-and-delivery.md)). This clause and
     clause 5 bind the Server's own code. A library the operator has the Server load opens what its
@@ -942,7 +942,7 @@ These tests carry `Verifies: SEC-tls13-two-planes-bounded-input`:
   (clauses 7, 9), `the_operator_plane_requires_authentication_off_the_loopback` (clause 8),
   `max_connections_defaults_per_plane_and_zero_is_refused` (clause 19).
 - The store connections of clause 21 are verified under
-  [SRV-state-stores-approval-certificate §17 and §24](SRV-state-stores-approval-certificate.md).
+  [SRV-state-stores-contract-pair §17 and §24](SRV-state-stores-contract-pair.md).
 
 The Operator plane's own certificate (clauses 9 to 13), each test marked as verifying this ADR:
 

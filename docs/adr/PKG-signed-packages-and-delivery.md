@@ -178,7 +178,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
    GiB, `413` beyond). The whole store may be at most `max_total_package_bytes` (default 16 GiB,
    `507` when the upload would pass it, checked before streaming and again after). `0` for either is
    refused at load. Where the bytes are kept is
-   [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)'s.
+   [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)'s.
    There is no referenced entry: no `url`, no `sha256` given instead of bytes, and no request
    headers.
 
@@ -421,7 +421,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 32. **An absent assignment means nothing was rolled out.** An Agent record carrying no assignment
     fields loads as assigned nothing; the Server never invents a rollout at startup. Records are
     written in the envelope
-    [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
+    [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)
     holds, and an envelope of another version stops the Server with a message saying that
     `server migrate` moves a data directory an older Server wrote.
 
@@ -812,12 +812,12 @@ rollout ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollou
 Package version is written and the floors below which nothing is taken
 ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)); where and how the
 Server keeps the bytes
-([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
+([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md));
 what a certificate speaks for ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md));
 what a host behind a Gateway receives from it ([CLT-modes-and-gateway](CLT-modes-and-gateway.md));
 verifying upstream sigstore/cosign signatures; a retention policy for superseded Packages;
-inequality in Selectors; refusing an overlapping Selector at write time; whether
-`[self_update] package` should be renamed, since its value is an Agent type; addons, and installing
+inequality in Selectors; refusing an overlapping Selector at write time; a new name
+for `[self_update] package`, whose value is an Agent type; addons, and installing
 them, until a Client can install one; a bound finer than the host; roles, permissions and tenancy on
 the Operator plane; keeping the Gateway's cache and the offers it serves across a restart of the
 Gateway, and the Gateway's own Supervisors fetching through the cache; resuming an interrupted
@@ -1110,13 +1110,13 @@ documented; a reproducible tree mode for `opamp-fleetctl package pack`.
   restores the installed program, not the download; tying retention to the staged file would
   delete what a fallback needs.
 - **A directory per Package.** It is not the layout the store keeps: the filesystem adapter of
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)
   holds one stored file per Package and the PostgreSQL adapter one row, so startup checks a stored
   Package, not a directory (clause 8).
 - **An envelope of its own for an Agent record, with a cleared agents directory as the way past a
   version change.** Clearing the directory drops the fleet record an operator relies on. The
   record's envelope is
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)'s,
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)'s,
   and `server migrate` moves a data directory an older Server wrote (clause 32).
 
 ## Sources / Prior art

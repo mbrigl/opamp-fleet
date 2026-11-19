@@ -366,7 +366,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
     certificate was issued by the client CA, is valid now, is not revoked, and its key verifies
     the signature. The new certificate is then issued to that certificate's host, with it as the
     predecessor in the Server's register of what it signed
-    ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)).
+    ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)).
     This holds through a Gateway, which presents its own certificate. A proof that does not hold
     is answered `BadRequest`. A CSR without a renewal proof — a third-party client's — renews the
     certificate its connection presented, and its host, unless that host is marked as a Gateway.
@@ -473,7 +473,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
       ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)),
       so its issuer and
       serial would put every enrolling host in one bucket. The enrolment window
-      ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)),
+      ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
       the bound on the queue and the operator's approval
       ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md))
       already bound what enrolment costs.

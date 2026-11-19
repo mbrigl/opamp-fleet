@@ -17,7 +17,7 @@ that is not reporting at that moment — a laptop that is off, a host under inve
 because it went quiet — vanishes, and every other Agent is demanded `ReportFullState` at once. The
 Server's state survives a restart with only each Agent's status determined dynamically, and the
 storage is **replaceable**
-([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)).
+([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)).
 The record's access pattern is narrow — loaded whole at startup where one Server holds the fleet in
 memory, read from the store, one Agent or the list the Operator plane shows, where it does not, and
 written and deleted one Agent at a time — and its report-derived fields are prost-generated protobuf
@@ -126,7 +126,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      stored presence lets it go, read and removed in one step (clause 11);
    - `set_labels(uid, labels)` and `set_restart_pending(uid, pending)` — the acts that decide them,
      each writing what it names alone; the assignments are written by the rollout operation of
-     [SRV-state-stores-approval-certificate §2](SRV-state-stores-approval-certificate.md).
+     [SRV-state-stores-contract-pair §2](SRV-state-stores-contract-pair.md).
      The instance that delivers a restart clears `restart_pending` only while no later
      request set it again;
    - `remove(uid)` — forget one record; removing what is absent is not an error;
@@ -140,7 +140,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
    `AppState` takes a `Box<dyn AgentStore>`; the binary wires the adapter, and
    another backend is a new adapter plus one wiring line. Which reads a Server makes follows its
    store, by the one rule of
-   [SRV-state-stores-approval-certificate §3](SRV-state-stores-approval-certificate.md):
+   [SRV-state-stores-contract-pair §3](SRV-state-stores-contract-pair.md):
    on the filesystem store `load()` and the memory it fills, on PostgreSQL `get` and
    `query`.
 
@@ -363,7 +363,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 
 **Out of scope:** a configuration surface for choosing a storage backend and where Agent records and
 Hosts are stored
-([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
+([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md));
 a retention policy for Agents nobody claims; acting on staleness (alerts, webhooks, filters); bulk
 labelling; the exact topology behind a Gateway; a Host for a machine the Server sees no certificate
 of; labels or editable fields on a Host itself; which subject values a certificate carries
@@ -625,7 +625,7 @@ which approvals and provisioned certificates already limit.
     stores by [`postgres/agents.rs`](../../crates/fleet-server/src/postgres/agents.rs)
     `the_agent_port_contract_holds_on_the_filesystem` and
     `the_agent_port_contract_holds_on_postgres`, which carry the marker of
-    [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md).
+    [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md).
   - That a restart requested while another is delivered stays pending is decided on the filesystem
     store by [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs)
     `a_restart_requested_while_a_delivery_clears_one_stays_queued`, which carries the marker of

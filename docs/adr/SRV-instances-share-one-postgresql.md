@@ -29,7 +29,7 @@ several Server instances stops without warning: its Agents connected to another 
 bound, and a revocation ending its sessions on every instance within another. The Strategy has
 several instances serve one fleet on the shared stores, any of them taking over the Agents of one
 that is lost: active-active, sharing state only through PostgreSQL and the object store.
-[SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
+[SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)
 (the PostgreSQL store) puts every store behind the ports into one database, in whose schema
 every Server is an instance with a lease (clause 23);
 [SEC-append-only-audit-record](SEC-append-only-audit-record.md)
@@ -54,7 +54,7 @@ every change that concerns a live session by one `NOTIFY`.
 
 1. **Every Server on PostgreSQL is an instance, and there is no switch for "several".** With
    `[database] store = "postgres"`
-   ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md))
+   ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md))
    a Server takes an instance id at startup — a random UUID that is not persisted — and a lease in
    the database before it opens either listener, and keeps its listeners open only while it holds a
    lease it can prove (clause 3). Every line the instance logs carries its instance id, and the
@@ -83,7 +83,7 @@ every change that concerns a live session by one `NOTIFY`.
    every instance uses the same bucket and prefix, and every sweep of unreferenced blobs and every
    staging cleanup run under an advisory lock, so one instance does them at a time, and an upload
    takes it shared in the transaction that writes its entry;
-   [SRV-state-stores-approval-certificate §14](SRV-state-stores-approval-certificate.md)
+   [SRV-state-stores-contract-pair §14](SRV-state-stores-contract-pair.md)
    decides it for the blob store. An instance on PostgreSQL and S3 keeps nothing on its
    own disk (that ADR's clause 1): it reads its configuration, its TLS files and its secret files,
    all of them read-only, and with no CA key on the Server, any instance can take its place. The
@@ -107,9 +107,9 @@ every change that concerns a live session by one `NOTIFY`.
    `lease_renew_secs` later, finds its lease lapsed. An instance that cannot renew before its own
    lease lapses ends every session it carries and closes both listeners. Once the database answers
    again it takes a new lease, under a new instance id, and opens them again. It never serves on a
-   lease it cannot prove, because it could not learn of a revocation. A closed listener is what a
-   load balancer's or an orchestrator's probe sees: the image's probe is a TCP connection to `4320`
-   for liveness and readiness
+   lease it cannot prove, because on such a lease it learns of no revocation. A closed listener is
+   what a load balancer's or an orchestrator's probe sees: the image's probe is a TCP connection
+   to `4320` for liveness and readiness
    ([OPS-releases-attestations-server-image §17](OPS-releases-attestations-server-image.md)), and an
    instance without a lease is then neither, so no Agent is sent to it.
 
@@ -144,7 +144,7 @@ every change that concerns a live session by one `NOTIFY`.
 
 8. **On PostgreSQL an instance holds only the Agents it carries, and the newest connection takes an
    Agent.** On the filesystem store the one Server keeps the whole fleet in memory
-   ([SRV-state-stores-approval-certificate §3](SRV-state-stores-approval-certificate.md)).
+   ([SRV-state-stores-contract-pair §3](SRV-state-stores-contract-pair.md)).
    Each instance keeps in memory the records of the Agents whose connection it holds,
    loaded from the database when their first report arrives, and nothing of the rest. When an
    instance begins to carry an Agent, it takes the Agent at once, outside the batch, by one update
@@ -287,7 +287,7 @@ every change that concerns a live session by one `NOTIFY`.
     kind the instance does not know, as a newer version sends while two versions run side by side
     (clause 16), counts as a missed one. It does the same when a lease renewal finds that the
     revocation list's version in the database
-    ([SRV-state-stores-approval-certificate §10](SRV-state-stores-approval-certificate.md))
+    ([SRV-state-stores-contract-pair §10](SRV-state-stores-contract-pair.md))
     is newer than the one it holds. At every lease renewal it reads the ledger again
     besides, the Hosts and their bindings among it, so a notice sent after its commit that never
     arrived, as when its instance ended between the two (clause 9), is taken up within one renewal.
@@ -323,7 +323,7 @@ every change that concerns a live session by one `NOTIFY`.
 12. **Caches are read again, not updated.** Each instance may hold Configurations, Deployments,
     Packages, the package floors, the revocation list, the certificate register and the Hosts in
     memory, as the ports allow
-    ([SRV-state-stores-approval-certificate §2](SRV-state-stores-approval-certificate.md)).
+    ([SRV-state-stores-contract-pair §2](SRV-state-stores-contract-pair.md)).
     A notification of their kind has the instance read again at once what it
     concerns, the whole ledger for the revocation list, the register and the Hosts; nothing held
     is updated from the notification itself.
@@ -362,7 +362,7 @@ every change that concerns a live session by one `NOTIFY`.
     - Each schema change is expand-then-contract over two releases. The migrations of N+1 name N
       as the oldest Server version that understands the schema they leave, so the instances of N
       that still run serve on it, and what N+1 stops using is removed by N+2 at the earliest
-      ([SRV-state-stores-approval-certificate §22](SRV-state-stores-approval-certificate.md)).
+      ([SRV-state-stores-contract-pair §22](SRV-state-stores-contract-pair.md)).
     - An instance fails its start, naming both versions and changing nothing, on a schema that
       names a version newer than its own as the oldest that understands it.
     - Each lease records the release of its instance. Every lease taken before the migration that
@@ -376,7 +376,7 @@ every change that concerns a live session by one `NOTIFY`.
       the instance applies every migration it lacks, so a Server on PostgreSQL may skip releases
       while nothing older runs on its database.
     - An instance checks the schema and the live leases under the migrations' advisory lock
-      ([SRV-state-stores-approval-certificate §22](SRV-state-stores-approval-certificate.md))
+      ([SRV-state-stores-contract-pair §22](SRV-state-stores-contract-pair.md))
       before it migrates. The transaction that takes its lease takes that lock too and
       checks the schema again, at its start and whenever it takes a new lease after its own
       lapsed (clause 3). So of two instances that start at once, the later sees the lease or the
@@ -422,10 +422,10 @@ every change that concerns a live session by one `NOTIFY`.
       and opening or closing the window each change the rows they name and no other, in one
       transaction that carries the notification of clause 9, or that it follows for a binding a
       report makes and a Host row made or moved forward by a report, an issuance or a prune
-      ([SRV-state-stores-approval-certificate §8–§10 and §21](SRV-state-stores-approval-certificate.md)).
+      ([SRV-state-stores-contract-pair §8–§10 and §21](SRV-state-stores-contract-pair.md)).
       An approval registers its certificate, writes the Host it mints
       and decides its request in one such transaction
-      ([SRV-state-stores-approval-certificate §9](SRV-state-stores-approval-certificate.md)).
+      ([SRV-state-stores-contract-pair §9](SRV-state-stores-contract-pair.md)).
       An instance of 0.8.0 reads no rejected key
       ([SEC-bootstrap-certificates-and-enrolment §16](SEC-bootstrap-certificates-and-enrolment.md)),
       so through it a rejected key waits again and may be approved, until the last
@@ -437,7 +437,7 @@ every change that concerns a live session by one `NOTIFY`.
       not for one instance.
     - The ceiling on the Agents' records, `max_agents`, is counted from one row in the statement
       that creates a record
-      ([SRV-state-stores-approval-certificate §22](SRV-state-stores-approval-certificate.md)),
+      ([SRV-state-stores-contract-pair §22](SRV-state-stores-contract-pair.md)),
       so it holds for the fleet too. An instance of 0.8.0 counts under a lock of its
       own, so while one runs beside the instances of this release the ceiling may be passed by the
       records created at the same moment.
@@ -452,7 +452,7 @@ every change that concerns a live session by one `NOTIFY`.
       Package's entries and a Deployment's members are rows of their own: an act adds or removes
       the ones it names, and the revisions a Configuration keeps are reckoned in the transaction
       from the rows and from the assignments that pin them
-      ([SRV-state-stores-approval-certificate §2 and §21](SRV-state-stores-approval-certificate.md)).
+      ([SRV-state-stores-contract-pair §2 and §21](SRV-state-stores-contract-pair.md)).
     - A Gateway's mark, set or taken away, is written only for a host the database knows, by its
       Host row or a register entry naming it, decided in the transaction that writes it, and is
       refused otherwise, whatever the instance holds in memory
@@ -514,7 +514,7 @@ every change that concerns a live session by one `NOTIFY`.
       ([CLT-modes-and-gateway §14](CLT-modes-and-gateway.md)), and its floors, fetched hourly
       ([PKG-versions-high-water-mark-floor §16](PKG-versions-high-water-mark-floor.md)). The list's
       version is the same on every instance
-      ([SRV-state-stores-approval-certificate §10](SRV-state-stores-approval-certificate.md)),
+      ([SRV-state-stores-contract-pair §10](SRV-state-stores-contract-pair.md)),
       so a fetch that reaches another instance is answered `304` and the list stays
       young enough to trust.
     - A Gateway is not refused for sending all its pool connections from one address. The admission
@@ -529,7 +529,7 @@ every change that concerns a live session by one `NOTIFY`.
       that bound waits its `Retry-After` as any Client does.
 
 **Out of scope:** the PostgreSQL schema and adapters themselves
-([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
+([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md));
 the audit chains, but for closing the chain of a process that died (clause 18)
 ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)),
 and their checkpoints, a decision of their own; paging and filtering
@@ -644,7 +644,7 @@ database cluster, which the operator runs.
 
 Tests that carry `Verifies: SRV-instances-share-one-postgresql` run against the PostgreSQL that the
 `FLEET_TEST_POSTGRES_*` variables name
-([SRV-state-stores-approval-certificate §25](SRV-state-stores-approval-certificate.md)),
+([SRV-state-stores-contract-pair §25](SRV-state-stores-contract-pair.md)),
 with two instances in one test process, or three where a bullet says so. They decide:
 
 - A rollout on instance A reaches an Agent connected to instance B, and a revocation on A closes

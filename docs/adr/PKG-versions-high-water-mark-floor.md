@@ -200,7 +200,7 @@ highest floor the operator signed for that type.
     it checks each floor when it is written and reports it valid or invalid, as it does for a
     package signature: feedback only, since the Client's check decides. The floors are stored as the
     Server stores its other records, in its data directory or in PostgreSQL
-    ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)),
+    ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
     in the data directory as the file clause 23 adds to its layout. Every action is audited. On the
     Agent plane `GET /v1/package-floors` answers every admitted member with all floors as a JSON
     object that maps an Agent type to its version and signature, behind the admission of
@@ -275,20 +275,20 @@ highest floor the operator signed for that type.
     | `configurations/<name>.json` | Configuration, with its retained revisions | Configurations ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)) |
     | `deployments/<name>.json` | Deployment | Deployments |
     | `packages/<agent_type>@<version>.json` | Package: identity and entries, no bytes | Packages ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)) |
-    | `blobs/<sha256>` | artifact, with the filesystem blob store | Blobs ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)) |
+    | `blobs/<sha256>` | artifact, with the filesystem blob store | Blobs ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)) |
     | `agents/<instance_uid>.json` | Agent: report, assignment, labels | Fleet ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) |
     | `hosts/<host>.json` | Host | Hosts |
     | `certificates/<issuer>-<serial>.json` | certificate the Server signed | Certificate register |
     | `revocations.json` | the revocation list | Revocations |
     | `bootstrap/<issuer>-<serial>.json`, `.p12` | bootstrap certificate the Server issued | Bootstrap |
-    | `enrolment.json` | the window and its pending requests | Enrolment ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md), the enrolment window) |
+    | `enrolment.json` | the window and its pending requests | Enrolment ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md), the enrolment window) |
     | `package-floors.json` | the floor of every Agent type | Package floors (clause 15) |
     | `audit/audit-<first seq>.jsonl` | audit file | Audit |
 
     With `store = "postgres"`, `data_dir` holds `audit/` and, with the filesystem blob store,
     `blobs/`, and nothing else. Beside a bucket, a `blobs/` an earlier filesystem blob store left
     is accepted too, as the place the switch from the filesystem to S3 copies from
-    ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
+    ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md));
     the Server does not create it there.
 
     `<issuer>` is the first 16 hex characters of the SHA-256 of the issuer's DER name, and

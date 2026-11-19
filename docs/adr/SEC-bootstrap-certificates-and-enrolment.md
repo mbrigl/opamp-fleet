@@ -110,7 +110,7 @@ find the bootstrap identity beside its program and enrol with it.
    and no subject alternative
    name. The Server makes the PKCS#12 file of clause 4, records and keeps it as the record of issued
    bootstrap certificates states
-   ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)),
+   ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
    and answers `201` with `serial`, `subject`, `not_before`, `not_after` and `certificate_pem`, and
    no `private_key_pem`. The key exists in plaintext only in the Server's memory while it issues; it
    leaves the Server only inside that file. A host that needs the pair as PEM takes it out of the
@@ -159,7 +159,7 @@ find the bootstrap identity beside its program and enrol with it.
      PKCS#12 file.
    - The row of each certificate whose entry says `p12` offers **Save bootstrap.p12**, in any page
      and at any time, through the download route of the record of issued bootstrap certificates
-     ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)).
+     ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)).
      A certificate issued elsewhere offers nothing to save.
    - The tab lists the certificates of `GET /api/v1/bootstrap-certificates`, each with its subject
      values. A valid one has a press that revokes it by its serial with the authority `bootstrap`.
@@ -419,7 +419,7 @@ find the bootstrap identity beside its program and enrol with it.
 - Deleting host certificates or their register entries; deleting a valid, unrevoked bootstrap
   certificate; removing revocation-list entries automatically once the certificate has ended,
   which the revocation list's own rules govern
-  ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)).
 - Subject attributes beyond the six; per-host values (an asset number, a hostname), which a
   bootstrap certificate shared by many hosts cannot carry; changing a Host's values without a new
   enrolment; authorization by subject values; the ETSI EN 319 412-1 semantics of
@@ -537,7 +537,7 @@ find the bootstrap identity beside its program and enrol with it.
 - **The CSR's subject in the host certificate, or the client CA's O and OU in every host
   certificate.** The first shows the Agent's name in the register, but that name is self-asserted,
   and the register already lists the host and the `instance_uid` of each certificate
-  ([SRV-state-stores-approval-certificate §9](SRV-state-stores-approval-certificate.md));
+  ([SRV-state-stores-contract-pair §9](SRV-state-stores-contract-pair.md));
   the second repeats the issuer in the subject and takes the place the bootstrap
   certificate's subject is carried into.
 - **An enrolment request matched to its bootstrap certificate by the certificate's
@@ -560,7 +560,7 @@ find the bootstrap identity beside its program and enrol with it.
   [CLT-installed-service-and-state](CLT-installed-service-and-state.md) and
   [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md) (the installed service and
   the Linux packages),
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)
   (the record of issued bootstrap certificates),
   [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md) (certificate names,
   `pki p12-extract`), [SEC-append-only-audit-record](SEC-append-only-audit-record.md)
@@ -657,7 +657,7 @@ Tests that carry `Verifies: SEC-bootstrap-certificates-and-enrolment`:
   character with its `400` text. The Server's issuing route answers `400` for a password of 7
   characters and issues one of 8 (clause 5).
 - Issuance and download write their audit entries
-  ([SRV-state-stores-approval-certificate §11](SRV-state-stores-approval-certificate.md)),
+  ([SRV-state-stores-contract-pair §11](SRV-state-stores-contract-pair.md)),
   and neither entry nor any log line holds the password (clause 5).
 - Issuing with all six attributes yields a bootstrap certificate whose subject holds them in the
   order of clause 1, with `country` as a `PrintableString`. A lower-case or three-letter country,
@@ -680,7 +680,7 @@ Tests that carry `Verifies: SEC-bootstrap-certificates-and-enrolment`:
   `enrolment.bootstrap_deleted`, and leaves the revocation on the list: the certificate is still
   refused at the handshake. Deleting a valid entry answers `409` and an unknown serial `404`
   (clause 7); a refused audit answers `503` with the entry kept
-  ([SRV-state-stores-approval-certificate §11](SRV-state-stores-approval-certificate.md)).
+  ([SRV-state-stores-contract-pair §11](SRV-state-stores-contract-pair.md)).
 - `bootstrap.p12` is found beside the program; lying beside a file of the pair, neither is taken.
   With `--fleet-files <dir>` the files are found in `<dir>` and not beside the program, and
   `--endpoint` copies `server-ca.pem` from it; a `<dir>` that is no readable directory fails the

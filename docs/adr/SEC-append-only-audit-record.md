@@ -41,11 +41,11 @@ password; neither may reach the record.
 
 Where the record is kept, in files or in PostgreSQL, its permissions, how it is written and how
 long it goes back are part of the Server's state and its stores
-([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)).
+([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)).
 On the filesystem store the files live under `data_dir/audit/` and rotate by size: a file reaching
 `max_file_bytes` is closed, `keep_files` are kept, and the deleted file's last hash is recorded
 first
-([SRV-state-stores-approval-certificate §12](SRV-state-stores-approval-certificate.md)).
+([SRV-state-stores-contract-pair §12](SRV-state-stores-contract-pair.md)).
 Size is the wrong bound for a database. A table has no file to close, and an operator
 asked how long the record goes back answers in time, not in megabytes.
 
@@ -141,7 +141,7 @@ token.
 3. **The chains.**
    - Each Server process writes the entries of its decisions through one writer thread of its
      own, which takes them from the channel of clause 5 in the order the decisions were taken.
-     [SRV-state-stores-approval-certificate §12](SRV-state-stores-approval-certificate.md)
+     [SRV-state-stores-contract-pair §12](SRV-state-stores-contract-pair.md)
      says where the entries are kept.
    - On the PostgreSQL store two entries are written in the transaction of a lease instead: a
      chain's `audit.chain_opened` in the one that takes its lease, and the `audit.chain_closed` of
@@ -290,7 +290,7 @@ token.
    that a Server wrote on the filesystem store stay where they are as a closed archive. The Server
    neither moves them nor writes to them again, `server audit-verify <dir>` verifies them as
    before, and deleting them is the operator's. `server migrate-to-postgres`
-   ([SRV-state-stores-approval-certificate §27](SRV-state-stores-approval-certificate.md))
+   ([SRV-state-stores-contract-pair §27](SRV-state-stores-contract-pair.md))
    records the `seq` and the hash of the archive's last entry in the database, and the
    first chain the database store opens names them in its `audit.chain_opened` as its
    `predecessor`. `server audit-verify --config <server.toml> --archive <dir>` checks that the
@@ -387,7 +387,7 @@ token.
     - every head any checkpoint names, not only the newest one's, is in the store: its chain
       reaches at least the `seq` it names and has at that `seq` the hash it names, unless a signed
       removal recorded the removal of that part
-      ([SRV-state-stores-approval-certificate §12](SRV-state-stores-approval-certificate.md)).
+      ([SRV-state-stores-contract-pair §12](SRV-state-stores-contract-pair.md)).
       A chain whose first entries are gone begins right after the last entry a signed
       removal names;
     - an entry written more than three intervals after the newest checkpoint, with no
@@ -462,7 +462,7 @@ does with the entries. The token itself, its `[pkcs11]` section and SoftHSM2 are
 [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)'s
 (clauses 35 to 41). Where the record is kept, its permissions, its writing and how long it goes
 back are
-[SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)'s.
+[SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)'s.
 Reading the record on the Operator plane is not decided here: without a rights model every operator
 who passes the guard would read it, where a rights model could keep it from those who only read or
 prepare. A chain for each run of a local command that changes state, such as
@@ -646,7 +646,7 @@ where a token is needed:
   `an_act_withdrawing_trust_whose_store_answered_an_error_is_recorded_all_the_same` (clause 5).
 - `crates/fleet-server/src/fs/audit.rs` test:
   `the_record_is_owner_only_and_continues_where_it_ended` (clause 3; the file's permissions are
-  [SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)'s).
+  [SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)'s).
 - The repair's link (clause 3): `crates/fleet-server/src/audit_log.rs` tests
   `a_truncated_file_is_recorded_as_a_broken_chain`,
   `a_torn_line_holds_only_when_the_next_entry_records_it_as_broken` and

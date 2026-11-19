@@ -91,7 +91,7 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
 **Out of scope:** what a Configuration holds, how it is aimed and released, its routes, and what
 deleting one does ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md));
 where Configurations are stored
-([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md)); the meaning of
+([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)); the meaning of
 a kind's own role values (each kind's own ADR); configuration history and audit.
 
 ## Alternatives considered

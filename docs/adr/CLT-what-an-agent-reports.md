@@ -202,8 +202,8 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
    `host.ip`, and `host.mac`. A Supervisor-backed Agent also reports `supervisor.package.version`,
    the version of the Package its Supervisor installed, when and from what record
    [SRV-deployments-and-pinned-rollouts §25](SRV-deployments-and-pinned-rollouts.md) states. What
-   the platform cannot answer is left out: a placeholder would be something false a Selector could
-   match. Nothing is taken from the connection.
+   the platform cannot answer is left out: a Selector would match a placeholder, and the
+   placeholder is false. Nothing is taken from the connection.
 
 6. **`host.ip` and `host.mac` follow the conventions.**
    - Enumerated with `sysinfo`'s `network` feature, the crate the Client already carries for its

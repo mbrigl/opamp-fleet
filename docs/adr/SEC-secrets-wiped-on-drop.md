@@ -21,7 +21,7 @@ out. Both ends hold secrets in memory:
   Operator plane Basic login before it is verified, and the PostgreSQL password and the S3 secret
   access key `read_secret_file` reads from `[database.postgres] password_file` and
   `[blobs.s3] secret_access_key_file`
-  ([SRV-state-stores-approval-certificate](SRV-state-stores-approval-certificate.md));
+  ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md));
 - the Supervisor Endpoint token ([CLT-modes-and-gateway](CLT-modes-and-gateway.md));
 - the passwords and keys `opamp-fleetctl` reads and writes.
 
