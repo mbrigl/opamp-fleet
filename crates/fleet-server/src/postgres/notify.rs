@@ -840,27 +840,4 @@ mod tests {
             "nothing awaited"
         );
     }
-
-    /// A notification that names the call that sent it is read by a Server of 0.8.0 as one without:
-    /// its payload, as 0.8.0 declares it, reads past a field it does not know (clause 16).
-    /// Verifies: SRV-instances-share-one-postgresql
-    #[test]
-    fn a_notification_that_names_its_call_is_read_by_the_release_before() {
-        /// The payload as version/0.8.0 declares it in `postgres/notify.rs`.
-        #[derive(Deserialize)]
-        struct Payload080 {
-            kind: String,
-            #[serde(default)]
-            id: String,
-            #[serde(default)]
-            from: Option<String>,
-        }
-        let read: Payload080 =
-            serde_json::from_str(r#"{"kind":"labels","id":"x","from":"a","call":"7"}"#)
-                .expect("read by 0.8.0");
-        assert_eq!(
-            (read.kind.as_str(), read.id.as_str(), read.from.as_deref()),
-            ("labels", "x", Some("a"))
-        );
-    }
 }

@@ -206,17 +206,36 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.4",
         sql: CONTRACT_PAIR_DEFAULTS,
     },
+    // The contract pair dropped. Release 0.8.5 names none of its columns in the statements it
+    // runs while serving, so it serves on what this leaves; a Server of 0.8.4 still names them and
+    // does not serve beside this one
+    // (SRV-state-stores-contract-pair §22,
+    // SRV-instances-share-one-postgresql §16).
+    Migration {
+        version: 20,
+        oldest_server: "0.8.5",
+        sql: CONTRACT_PAIR_DROPPED,
+    },
 ];
 
 /// The defaults of the contract pair — the Deployments' mirror columns `packages` and
 /// `configurations` and the Hosts' `instance_uids` arrays — so that a row inserted without naming
 /// them holds the empty value a Server of 0.8.4 writes there itself. Each statement takes an
-/// `ACCESS EXCLUSIVE` lock on its table for the moment it changes the catalogue. The release
-/// after the one that adds them drops the columns (SRV-state-stores-contract-pair §22).
+/// `ACCESS EXCLUSIVE` lock on its table for the moment it changes the catalogue. Migration 20
+/// drops the columns (SRV-state-stores-contract-pair §22).
 const CONTRACT_PAIR_DEFAULTS: &str = "
 ALTER TABLE deployments ALTER COLUMN packages SET DEFAULT '[]';
 ALTER TABLE deployments ALTER COLUMN configurations SET DEFAULT '{}';
 ALTER TABLE hosts ALTER COLUMN instance_uids SET DEFAULT '{}';
+";
+
+/// The contract pair dropped: the columns no release since 0.8.5 names. Migration 4 moved the
+/// arrays into the Hosts' bindings, and migration 5 the mirrors into the Deployments' members. Each
+/// statement takes an `ACCESS EXCLUSIVE` lock on its table for the moment it changes the
+/// catalogue, and rewrites no row (SRV-state-stores-contract-pair §22).
+const CONTRACT_PAIR_DROPPED: &str = "
+ALTER TABLE deployments DROP COLUMN packages, DROP COLUMN configurations;
+ALTER TABLE hosts DROP COLUMN instance_uids;
 ";
 
 /// What serves the counts of the Agents that pin a Package, a Deployment or a Configuration,
@@ -923,7 +942,8 @@ mod tests {
 
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
     /// one — a build that refused its own schema would never start. Migrations 11 to 18 name
-    /// 0.8.0, and migration 19, the contract pair's defaults, names 0.8.4.
+    /// 0.8.0, migration 19, the contract pair's defaults, names 0.8.4, and migration 20, which
+    /// drops the pair, names 0.8.5.
     /// Verifies: SRV-state-stores-contract-pair
     /// Verifies: SRV-instances-share-one-postgresql
     #[test]
@@ -959,12 +979,15 @@ mod tests {
         // The contract pair's defaults name 0.8.4, the release before the one that adds them
         // (SRV-state-stores-contract-pair §22).
         assert_eq!(MIGRATIONS[18].oldest_server, "0.8.4", "migration 19");
+        // The drop names 0.8.5, the first release that names no column of the pair.
+        assert_eq!(MIGRATIONS[19].oldest_server, "0.8.5", "migration 20");
         assert_eq!(
             MIGRATIONS.len(),
-            19,
+            20,
             "migrations 11 to 18 name 0.8.0, the audit key's label of SEC-append-only-audit-record, the \
-             checkpoints of the audit record and the indexes of the pin counts among them, and \
-             migration 19, the contract pair's defaults, names 0.8.4"
+             checkpoints of the audit record and the indexes of the pin counts among them, \
+             migration 19, the contract pair's defaults, names 0.8.4, and migration 20, its drop, \
+             names 0.8.5"
         );
         assert!(
             LEASE_RELEASE.contains(&format!("DEFAULT '{RELEASE_BEFORE_THE_RECORD}'")),
@@ -976,11 +999,34 @@ mod tests {
 
     /// A migration only adds (SRV-state-stores-contract-pair §22): nothing in the embedded schema drops, renames or
     /// alters a column away, an `ALTER COLUMN` only gives a column a default (`SET DEFAULT`), and
-    /// every table it creates is one [`TABLES`] knows.
+    /// every table it creates is one [`TABLES`] knows. The one removal is migration 20, which
+    /// drops the three columns of the contract pair and nothing else, a release after 0.8.5
+    /// stopped naming them.
     /// Verifies: SRV-state-stores-contract-pair
     #[test]
     fn a_migration_only_adds() {
-        for migration in MIGRATIONS {
+        assert_eq!(
+            CONTRACT_PAIR_DROPPED.split_whitespace().collect::<Vec<_>>(),
+            [
+                "ALTER",
+                "TABLE",
+                "deployments",
+                "DROP",
+                "COLUMN",
+                "packages,",
+                "DROP",
+                "COLUMN",
+                "configurations;",
+                "ALTER",
+                "TABLE",
+                "hosts",
+                "DROP",
+                "COLUMN",
+                "instance_uids;",
+            ],
+            "migration 20 drops the contract pair and nothing else"
+        );
+        for migration in MIGRATIONS.iter().filter(|m| m.sql != CONTRACT_PAIR_DROPPED) {
             let sql = migration.sql.to_ascii_uppercase();
             for removing in ["DROP ", "RENAME ", "TRUNCATE ", "DELETE FROM"] {
                 assert!(
@@ -1051,11 +1097,11 @@ mod tests {
     }
 
     /// Migration 19 gives each column of the contract pair its default, and names 0.8.4 as the
-    /// oldest Server: on a migrated database the catalogue holds the three defaults, and
-    /// `fleet_schema` records 0.8.4 for it.
+    /// oldest Server; migration 20 drops the columns, and names 0.8.5. On a migrated database the
+    /// catalogue holds none of the three columns, and `fleet_schema` records both releases.
     /// Verifies: SRV-state-stores-contract-pair
     #[test]
-    fn the_contract_pair_has_its_defaults_and_names_0_8_4() {
+    fn the_contract_pair_is_dropped_and_names_0_8_5() {
         assert_eq!(
             altered_columns(&CONTRACT_PAIR_DEFAULTS.to_ascii_uppercase()),
             (3, 0)
@@ -1064,197 +1110,21 @@ mod tests {
             return;
         };
         let _database = test.open();
-        assert_eq!(
-            test.rows(
-                "SELECT table_name::text, column_name::text, column_default::text \
-                 FROM information_schema.columns \
-                 WHERE table_schema = current_schema() AND ( \
-                 (table_name = 'deployments' AND column_name IN ('packages', 'configurations')) \
-                 OR (table_name = 'hosts' AND column_name = 'instance_uids')) \
-                 ORDER BY table_name, column_name"
-            ),
-            [
-                ["deployments", "configurations", "'{}'::text[]"],
-                ["deployments", "packages", "'[]'::json"],
-                ["hosts", "instance_uids", "'{}'::text[]"],
-            ]
-            .map(|row| row.map(|value| Some(value.to_string())))
+        let left = test.rows(
+            "SELECT table_name::text, column_name::text \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND ( \
+             (table_name = 'deployments' AND column_name IN ('packages', 'configurations')) \
+             OR (table_name = 'hosts' AND column_name = 'instance_uids'))",
         );
+        assert!(left.is_empty(), "no column of the pair is left: {left:?}");
         assert_eq!(
             test.rows(&format!(
-                "SELECT oldest_server FROM {SCHEMA_TABLE} WHERE version = 19"
+                "SELECT oldest_server FROM {SCHEMA_TABLE} WHERE version IN (19, 20) \
+                 ORDER BY version"
             )),
-            [[Some("0.8.4".to_string())]]
+            [[Some("0.8.4".to_string())], [Some("0.8.5".to_string())]]
         );
-    }
-
-    /// The string literals of the Rust source `code`, in order, without those of a module or an
-    /// item that `#[cfg(test)]` compiles only into the tests. Comments are passed over, and so is
-    /// a character literal; a raw string is read to its closing hashes.
-    fn served_literals(code: &str) -> Vec<String> {
-        let chars: Vec<char> = code.chars().collect();
-        let starts = |at: usize, text: &str| {
-            text.chars()
-                .enumerate()
-                .all(|(i, c)| chars.get(at + i) == Some(&c))
-        };
-        let (mut literals, mut at, mut depth) = (Vec::new(), 0, 0usize);
-        // The depth at which the item a `#[cfg(test)]` names opens, once it has opened.
-        let (mut pending, mut skipping): (bool, Option<usize>) = (false, None);
-        while at < chars.len() {
-            if starts(at, "//") {
-                while at < chars.len() && chars[at] != '\n' {
-                    at += 1;
-                }
-            } else if starts(at, "/*") {
-                at += 2;
-                while at < chars.len() && !starts(at, "*/") {
-                    at += 1;
-                }
-                at += 2;
-            } else if starts(at, "#[cfg(test)]") {
-                pending = skipping.is_none();
-                at += "#[cfg(test)]".len();
-            } else if chars[at] == '\'' {
-                // A character literal, `'x'` or `'\x'`, or a lifetime.
-                if chars.get(at + 1) == Some(&'\\') {
-                    at += 3;
-                    while at < chars.len() && chars[at] != '\'' {
-                        at += 1;
-                    }
-                    at += 1;
-                } else if chars.get(at + 2) == Some(&'\'') {
-                    at += 3;
-                } else {
-                    at += 1;
-                }
-            } else if chars[at] == '"' || raw_string_at(&chars, at) {
-                let mut hashes = 0;
-                let raw = chars[at] == 'r';
-                if raw {
-                    at += 1;
-                    while chars.get(at) == Some(&'#') {
-                        hashes += 1;
-                        at += 1;
-                    }
-                }
-                at += 1;
-                let mut literal = String::new();
-                while let Some(&c) = chars.get(at) {
-                    if !raw && c == '\\' {
-                        literal.push(c);
-                        literal.extend(chars.get(at + 1));
-                        at += 2;
-                        continue;
-                    }
-                    if c == '"' && (0..hashes).all(|i| chars.get(at + 1 + i) == Some(&'#')) {
-                        at += 1 + hashes;
-                        break;
-                    }
-                    literal.push(c);
-                    at += 1;
-                }
-                if skipping.is_none() {
-                    literals.push(literal);
-                }
-            } else {
-                match chars[at] {
-                    '{' => {
-                        if pending {
-                            skipping = Some(depth);
-                            pending = false;
-                        }
-                        depth += 1;
-                    }
-                    '}' => {
-                        depth -= 1;
-                        if skipping == Some(depth) {
-                            skipping = None;
-                        }
-                    }
-                    ';' | ',' if skipping.is_none() => pending = false,
-                    _ => {}
-                }
-                at += 1;
-            }
-        }
-        literals
-    }
-
-    /// Whether a raw string opens at `at` of `chars`: an `r` that ends no identifier, then any
-    /// hashes and a quote, which `r#type`, a raw identifier, lacks.
-    fn raw_string_at(chars: &[char], at: usize) -> bool {
-        let ends_a_word = at
-            .checked_sub(1)
-            .and_then(|before| chars.get(before))
-            .is_some_and(|c| c.is_alphanumeric() || *c == '_');
-        let quote = chars[at + 1..].iter().find(|c| **c != '#');
-        chars[at] == 'r' && !ends_a_word && quote == Some(&'"')
-    }
-
-    /// Whether `literal` is a statement, by the upper-case keyword that opens or holds one, and
-    /// names a column of the contract pair: the Hosts' `instance_uids`, or the Deployments'
-    /// `packages` or `configurations` in a statement on `deployments`.
-    fn names_the_contract_pair(literal: &str) -> bool {
-        let words: Vec<&str> = literal
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .collect();
-        let has = |word: &str| words.contains(&word);
-        ["SELECT", "INSERT", "UPDATE", "DELETE"]
-            .into_iter()
-            .any(has)
-            && (has("instance_uids")
-                || (has("deployments") && (has("packages") || has("configurations"))))
-    }
-
-    /// No statement the Server runs while serving names a column of the contract pair: no string
-    /// literal of its source outside the migrations of this file and outside what is compiled only
-    /// into the tests, so the release after this one can drop the columns beside it
-    /// (SRV-state-stores-contract-pair §22).
-    /// Verifies: SRV-state-stores-contract-pair
-    #[test]
-    fn no_statement_names_a_column_of_the_contract_pair() {
-        let mut found = Vec::new();
-        let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
-        while let Some(dir) = dirs.pop() {
-            for entry in std::fs::read_dir(&dir).expect("src") {
-                let path = entry.expect("entry").path();
-                if path.is_dir() {
-                    dirs.push(path);
-                } else if path.extension().is_some_and(|ext| ext == "rs")
-                    && !path.ends_with("postgres/schema.rs")
-                {
-                    let code = std::fs::read_to_string(&path).expect("read");
-                    for literal in served_literals(&code) {
-                        if names_the_contract_pair(&literal) {
-                            found.push(format!("{}: {literal}", path.display()));
-                        }
-                    }
-                }
-            }
-        }
-        assert!(found.is_empty(), "{found:#?}");
-        // The search finds what it is meant to: the statements of 0.8.4, as its source wrote them.
-        let as_0_8_4 = concat!(
-            "fn save() {\n    client.execute(\n        \"INSERT INTO deployments (name, selector, ",
-            "packages, configurations) VALUES ($1, $2, '[]', '{}')\",\n    );\n",
-            "    client.execute(\"UPDATE hosts SET instance_uids = '{}' WHERE host = $1\");\n}\n",
-            "#[cfg(test)]\nmod tests {\n",
-            "    const SKIPPED: &str = \"SELECT instance_uids FROM hosts\";\n}\n",
-            "fn quoted() -> char {\n    '\\''\n}\n",
-            "const LATER: &str = \"DELETE FROM hosts WHERE instance_uids = '{}'\";\n",
-        );
-        let literals = served_literals(as_0_8_4);
-        assert_eq!(literals.len(), 3, "{literals:?}");
-        assert!(
-            literals
-                .iter()
-                .all(|literal| names_the_contract_pair(literal)),
-            "{literals:?}"
-        );
-        assert!(!names_the_contract_pair(
-            "SELECT deployment, configuration FROM deployment_configurations"
-        ));
     }
 
     /// Each count of the Agents that pin a Package, a Deployment or a Configuration is served by

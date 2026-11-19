@@ -1272,8 +1272,15 @@ start.
   `hosts` for the moment it changes the catalogue, so every read and write of a Deployment or a
   Host waits for that moment; start it at a quiet moment. Its migration names 0.8.4 as the oldest
   Server, so an instance of 0.8.5 does not start beside a live lease of 0.8.3 or older: from such
-  a release, scale its instances to zero first, as for a skip. The release after 0.8.5 drops the
-  three columns.
+  a release, scale its instances to zero first, as for a skip. Release 0.8.6 drops the three
+  columns.
+- **From 0.8.5 to 0.8.6** is a rolling update. The first instance of 0.8.6 drops the Deployments'
+  `packages` and `configurations` columns and the Hosts' `instance_uids` arrays, which no
+  statement of 0.8.5 names. Each `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock on `deployments`
+  and `hosts` for the moment it changes the catalogue and rewrites no row; start it at a quiet
+  moment. Its migration names 0.8.5 as the oldest Server, so an instance of 0.8.6 does not start
+  beside a live lease of 0.8.4 or older: from such a release, scale its instances to zero first,
+  as for a skip.
 - **From 0.7.1** every Server stops first. An instance that shares the database starts, and
   migrates, only once nothing holds the database alone, as a Server of 0.7.1 does while it runs,
   and as `server migrate-to-postgres` and `server blobs-to-s3` do until they finish.

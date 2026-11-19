@@ -606,10 +606,7 @@ impl LedgerStore for PgLedgerStore {
 }
 
 /// Removes the binding of `instance_uid` inside the caller's transaction: the Host it was bound to,
-/// `None` when it was bound to none. The Hosts' arrays keep it where a release before them
-/// listed it: this release names them in no statement, and a Server of 0.8.4 beside it reads each
-/// array only to discard it. The release after this one removes the arrays
-/// (SRV-state-stores-contract-pair §22).
+/// `None` when it was bound to none.
 async fn unbind_in(
     client: &impl GenericClient,
     instance_uid: &str,
@@ -1505,8 +1502,9 @@ mod tests {
     }
 
     /// Lists each Host's `instance_uid`s in its array, as a release before the bindings' table
-    /// wrote them: this release writes none there.
+    /// wrote them, on the columns of the contract pair added back.
     fn listed_in_the_arrays(test: &TestDatabase, hosts: &BTreeMap<String, Host>) {
+        test.with_the_contract_pair();
         for (name, entry) in hosts {
             let uids: Vec<&str> = entry.instance_uids.iter().map(String::as_str).collect();
             test.sql(&format!(
@@ -2677,120 +2675,6 @@ mod tests {
         store.bind("02", "a").expect("bind");
         store.save_hosts(&after).expect("save");
         assert_eq!(store.load().expect("load").hosts, after);
-    }
-
-    /// The load reads no Host's `instance_uids` array, so a column let be `NULL` leaves the load
-    /// of this one standing
-    /// (SRV-state-stores-contract-pair §22).
-    /// Verifies: SRV-state-stores-contract-pair
-    #[test]
-    fn the_load_reads_no_hosts_array() {
-        let Some(test) = TestDatabase::named() else {
-            return;
-        };
-        let database = test.open();
-        let store = PgLedgerStore::new(database.clone());
-        store
-            .save_hosts(&BTreeMap::from([("a".to_string(), host(&[], false))]))
-            .expect("save");
-        test.sql(
-            "INSERT INTO host_bindings VALUES ('01', 'a'); \
-             ALTER TABLE hosts ALTER COLUMN instance_uids DROP NOT NULL; \
-             UPDATE hosts SET instance_uids = NULL WHERE host = 'a'",
-        );
-        assert_eq!(
-            store.load().expect("load").hosts,
-            BTreeMap::from([("a".to_string(), host(&["01"], false))])
-        );
-    }
-
-    /// This release names the Hosts' `instance_uids` arrays in no statement. What a release
-    /// before the bindings' table listed there stays as it was through every bind, rekey, release,
-    /// save and Gateway mark, and a new Host's array takes its default. A Server of 0.8.4 beside
-    /// it reads each array only to discard it. With the column dropped, as the release after this
-    /// one drops it, every one of these writes and the load still succeed
-    /// (SRV-state-stores-contract-pair §22).
-    /// Verifies: SRV-state-stores-contract-pair
-    #[test]
-    fn the_hosts_arrays_are_named_no_more() {
-        let Some(test) = TestDatabase::named() else {
-            return;
-        };
-        let database = test.open();
-        let store = PgLedgerStore::new(database.clone());
-        let arrays = || test.rows("SELECT host, instance_uids::text FROM hosts ORDER BY host");
-        let row = |host: &str, uids: &str| vec![Some(host.to_string()), Some(uids.to_string())];
-        // A Host bound, and listed in its array as a release before the bindings' table left it.
-        store
-            .save_hosts(&BTreeMap::from([("a".to_string(), host(&[], false))]))
-            .expect("save");
-        test.sql(
-            "INSERT INTO host_bindings VALUES ('01', 'a'), ('02', 'a'); \
-             UPDATE hosts SET instance_uids = '{01,02}' WHERE host = 'a'",
-        );
-        let writes = |round: &str| {
-            let (a, b) = (format!("a{round}"), format!("b{round}"));
-            let uid = |n: u8| format!("{round}{n}");
-            assert_eq!(
-                store.bind_seen(&uid(1), &a, &host(&[], false)),
-                Ok(Bound::Bound)
-            );
-            assert_eq!(store.bind(&uid(2), &a), Ok(Bound::Bound));
-            assert_eq!(
-                store.rebind(&uid(2), &uid(3)),
-                Ok(Some((a.clone(), Bound::Bound)))
-            );
-            assert_eq!(store.unbind(&uid(1)), Ok(Some(a.clone())));
-            let mut hosts = store.load().expect("load").hosts;
-            hosts.insert(b.clone(), host(&[], false));
-            store.save_hosts(&hosts).expect("save");
-            assert_eq!(
-                store.write_host_act(&HostAct::Seen {
-                    host: format!("c{round}"),
-                    entry: host(&[], false),
-                }),
-                Ok(true)
-            );
-            assert_eq!(
-                store.write_host_act(&HostAct::Gateway {
-                    host: b.clone(),
-                    gateway: true,
-                }),
-                Ok(true)
-            );
-        };
-
-        writes("1");
-        assert_eq!(store.unbind("01"), Ok(Some("a".to_string())));
-        assert_eq!(
-            store.write_host_act(&HostAct::Gateway {
-                host: "a".to_string(),
-                gateway: true,
-            }),
-            Ok(true)
-        );
-        assert_eq!(
-            arrays(),
-            [
-                row("a", "{01,02}"),
-                row("a1", "{}"),
-                row("b1", "{}"),
-                row("c1", "{}"),
-            ],
-            "what a release before listed stays, and a new Host's is the default"
-        );
-
-        // An `instance_uid` only an array lists is not read: it binds where it is seen.
-        assert_eq!(store.bind("02", "a1"), Ok(Bound::Bound));
-
-        test.sql("ALTER TABLE hosts DROP COLUMN instance_uids");
-        writes("2");
-        let hosts = store.load().expect("load").hosts;
-        assert_eq!(
-            hosts["a2"].instance_uids,
-            BTreeSet::from(["23".to_string()])
-        );
-        assert!(hosts["b2"].gateway, "{hosts:?}");
     }
 
     /// A Gateway's Host is bound none when the bindings leave the arrays: an `instance_uid` a
