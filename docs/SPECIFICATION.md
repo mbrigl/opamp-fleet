@@ -142,6 +142,13 @@ thing that closes the loop and widens only as the protocol and its agents actual
 
 ## Goals / Success Criteria
 
+Acceptance criteria a test can decide, where it helps in the form *When <trigger>, the system
+shall <response>*. Each starts with a bold `G-n`, which a test cites with `Verifies: G-n`. Until
+that test exists the criterion is pending work, and the traceability check lists it
+([NUC-decisions-cite-tests §5](adr/NUC-decisions-cite-tests.md)). Identifiers are never reused.
+Only a normalization renumbers them
+([NUC-decisions-cite-tests §1](adr/NUC-decisions-cite-tests.md)).
+
 1. **G-1** — **The loop closes.** When a rollout releases a configuration to an Agent, the Server
    shall send it to that Agent without the Agent asking for it: at once over a WebSocket, and in
    its next reply over plain HTTP. The Agent shall report it applied.
