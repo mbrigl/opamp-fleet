@@ -38,12 +38,16 @@ Question the framing and your own draft. A draft written ahead of the answers is
 alternative to reject.
 
 When the catalogue has an entry for the decision, read it in
-[`concepts/README.md`](concepts/README.md) before the first round and put its candidates to the
-human: the two or three whose *Fits when* matches the quality goals, what each one's *Does not
-fit* says about this project, and the simplest form as one of them. Between candidates that fit
-equally, prefer the one whose rule a test or check can decide: what a computational sensor holds
-needs no reviewer to remember it. The human chooses; a candidate nobody chose is an alternative
-in the record.
+[`concepts/README.md`](concepts/README.md) before the first round. Put its candidates to the
+human:
+
+- the two or three whose *Fits when* matches the quality goals;
+- what each one's *Does not fit* says about this project;
+- the simplest form, as one of them.
+
+Between candidates that fit equally, prefer the one whose rule a test or check can decide: what
+a computational sensor holds needs no reviewer to remember it. The human chooses; a candidate
+nobody chose is an alternative in the record.
 
 ## 3. Write the record
 

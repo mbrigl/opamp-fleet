@@ -200,7 +200,8 @@ function resolve(tok, to,  n, parts, i, dedupe) {
       }
     }
     if (rep == "" && tok != "") {
-      # A dropped identifier takes one separator with it: the one before, or after a colon the one after.
+      # A dropped identifier takes one separator with it: the one before, or after a colon the one
+      # after.
       pre = substr(line, 1, at - 1)
       post = substr(line, at + len)
       if (out pre ~ /:[ \t]*$/) sub(/^[ ,]+/, "", post)

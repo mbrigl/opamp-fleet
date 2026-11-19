@@ -14,6 +14,10 @@
 # GitHub-hosted runner image ships it preinstalled, and the Dev Container installs it on creation
 # (.devcontainer/devcontainer.json). Elsewhere, when shellcheck is not on PATH, the check skips
 # it with a notice (CI remains the gate); in a CI run (CI=true) it is an error, never a silent skip.
+# The two sources may differ in release: the Dev Container takes the Debian package of its base
+# image, and the runner image ships a newer release that moves with the image. A newer release
+# may report a code the older one does not, so a disable comment may need the codes of both, and a
+# green local lint does not imply a green shell job. The shell job in CI is the gate.
 #
 # Beyond ShellCheck it refuses GNU sed's in-place flag, `sed -i`, which BSD sed on macOS reads as
 # taking a suffix: check-all.sh, and with it the pre-push hook, runs on any host. Comment lines are

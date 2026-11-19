@@ -17,8 +17,8 @@
 # outside the rules, the working tree with an untracked ADR, and a base that does not resolve. The
 # cases of '--require' stand in the fixture table scripts/fixtures/plain-rules.txt: what fails in a
 # project ADR and is reported in a NUC- ADR and in AGENTS.md, the qualifiers of an _Avoid:_ item, an
-# item a line break splits, a renamed ADR, and a take-up on comb's glossary. Two cases read the
-# glossary reader's rows directly.
+# item a line break splits, a renamed ADR, an ADR identifier read as one token, and a take-up on
+# comb's glossary. Two cases read the glossary reader's rows directly.
 #
 # Inputs: scripts/sensor-plain-rules.sh scripts/lib/ scripts/fixtures/plain-rules.txt
 #
@@ -325,8 +325,8 @@ chmod +x "$work/take/awk"
 out="$(PATH="$work/take:$PATH" bash "$SENSOR" --root "$r" main 2>&1)"; rc=$?
 check "a glossary reader that fails: exit 2, saying so" test "$rc" -eq 2 -a "${out/could not read docs\/GLOSSARY.md/}" != "$out"
 
-# A listing that breaks: a git on PATH that fails on '--name-status', which only rule_stream asks for
-# when it lists the files a change touches, and hands every other command to the real git.
+# A listing that breaks: a git on PATH that fails on '--name-status', which only rule_stream asks
+# for when it lists the files a change touches, and hands every other command to the real git.
 unlisted="$work/broken-git"
 mkdir -p "$unlisted"
 # shellcheck disable=SC2016 # the script is written as it runs, its variables unexpanded
@@ -355,6 +355,10 @@ step() {
     glossary)
       glossary "$dir" "$(awk -F ' [|] ' -v n="$rest" '$1 == "= " n { print $2 }' "$TABLE")" ;;
     base) git_in "$dir" branch -f main HEAD ;;
+    category)
+      printf '# ADRs\n\n## Categories\n\n- **%s** — K.\n' "$rest" > "$dir/docs/adr/README.md"
+      git_in "$dir" add docs/adr/README.md
+      git_in "$dir" commit -q -m category ;;
     rename)
       from="${rest%% *}"; to="${rest#* }"
       git_in "$dir" mv "docs/adr/$from.md" "docs/adr/$to.md"

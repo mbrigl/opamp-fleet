@@ -20,7 +20,8 @@
 # session and the reviewer of AGENTS.md section 5 start from the same list.
 #
 # Pure bash + git. Usage:
-#     scripts/sensor-binding-adrs.sh [--root <dir>] [--sections] {[--path <path>]... | [base [head]]}
+#     scripts/sensor-binding-adrs.sh [--root <dir>] [--sections]
+#                                    {[--path <path>]... | [base [head]]}
 # It reads the repository it lives in, as the checks do; --root names another, as its self-test
 # does with each fixture. With --sections it prints after the list what a session reads of the
 # record (AGENTS.md section 2): of each ADR listed its header and the sections ADR_RULE_SECTIONS of

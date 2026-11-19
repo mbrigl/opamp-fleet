@@ -79,8 +79,9 @@ adr_files() { LC_ALL=C find "$1" -maxdepth 1 -type f -name "$ADR_GLOB" | LC_ALL=
 
 # adr_blobs <dir> — the blob list (NUC-base-is-fixed §2), '<blob> <file name>' a line:
 # the 'NUC-' files in the directory, in the order adr_files gives, then the rule file
-# AGENTS.md two levels up; nothing without a 'NUC-' file. git reads each file as it would store it, its line endings
-# converted, so the list holds on every platform. Fails, saying so, when git cannot hash a file.
+# AGENTS.md two levels up; nothing without a 'NUC-' file. git reads each file as it would store
+# it, its line endings converted, so the list holds on every platform. Fails, saying so, when git
+# cannot hash a file.
 adr_blobs() {
   local names=() f blobs
   while IFS= read -r f; do [[ "${f##*/}" == NUC-* ]] && names+=("${f##*/}"); done < <(adr_files "$1")
@@ -98,7 +99,8 @@ adr_is_file() { [[ "${1##*/}" =~ ^$ADR_FILE_RE$ ]]; }
 adr_key_of() { ADR_ID="${1##*/}" ADR_ID="${ADR_ID%.md}"; }
 adr_id() { adr_key_of "$1"; printf '%s\n' "$ADR_ID"; }
 
-# The sections of an ADR a session reads, in order, and the writing rule of AGENTS.md section 4 covers.
+# The sections of an ADR a session reads, in order, and the writing rule of AGENTS.md section 4
+# covers.
 ADR_RULE_SECTIONS='Decision|Enforcement'
 # ADR_FENCE_AWK — the awk function fenced(<line>), which reads fenced code as Markdown does: 2 on
 # the line that opens a fence, three or more backticks or tildes, 1 on each line inside it and on

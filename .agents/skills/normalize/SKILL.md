@@ -38,9 +38,10 @@ with its files:
   [Git hooks](../../../CONTRIBUTING.md#git-hooks) in the contributing guide says; a Dev Container
   rebuilt from the new configuration does it on every start.
 - **Before the take-up reaches `main`,** a maintainer walks
-  [Repository settings](../../../CONTRIBUTING.md#repository-settings) against the GitHub repository:
-  for an adoption all of it, for a release what changed in the template's section between the
-  two tags, such as the merge method or a required check.
+  [Repository settings](../../../CONTRIBUTING.md#repository-settings) against the GitHub
+  repository. For an adoption, the maintainer walks all of it. For a release, the maintainer walks
+  what changed in the template's section between the two tags, such as the merge method or a
+  required check.
   [`scripts/sensor-repo-settings.sh`](../../../scripts/sensor-repo-settings.sh), run on the
   maintainer's instruction ([NUC-checks-are-bash §7](../../../docs/adr/NUC-checks-are-bash.md)),
   reports what differs once the new contributing guide is in.
@@ -81,8 +82,16 @@ has decided each: accepted, with the ADRs it supersedes flipped to superseded, o
 Propose the new record to the human before writing it, as a table: identifier, title, the old
 ADRs it restates, and the group it belongs to. An ADR restated alone keeps its identifier; a merged
 or split one takes a new identifier. Order it as the mechanics say. Point out
-every merge and every split, and every old ADR that maps to none. Write nothing until the human
-has agreed the cut.
+every merge and every split, and every old ADR that maps to none. For example:
+
+| Identifier | Title | Restates | Group |
+|---|---|---|---|
+| `SEC-host-socket-closed` | The host's socket stays out of reach | `SEC-host-socket-closed` | SEC |
+| `OPS-one-build-entry` | One script builds, tests, and lints | `OPS-make-builds`, `OPS-lint-in-ci` | OPS |
+| — | — | `API-rest-v1`, no successor | — |
+
+The second row is a merge; the third is an old ADR that maps to none. Write nothing until the
+human has agreed the cut.
 
 ## 5. The record
 
@@ -99,9 +108,11 @@ has agreed the cut.
    successor, or to `-` where it has none, and a split names each successor. A successor that is
    itself mapped is refused, so a map has no chain. Check it with `remap.sh --check`, apply it
    with `remap.sh`, and rewrite by hand what it lists as left; `--check` then reports nothing.
-   Under `--check`, exit 1 means a move or a refusal: a move prints its line on stdout, a refusal
-   nothing on stdout and its reason on stderr, and a reference left follows `remap: references
-   left to rewrite by hand:` on stderr even when exit 1 reports a move.
+   Under `--check`, exit 1 means a move or a refusal:
+   - A move prints its line on stdout.
+   - A refusal prints nothing on stdout and its reason on stderr.
+   - A reference left follows `remap: references left to rewrite by hand:` on stderr, even when
+     exit 1 reports a move.
 5. Make the tests cite the new identifiers where `remap.sh` did not reach, and update
    [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) where the cut changed what it cites.
 6. Run `scripts/check-all.sh`.
@@ -109,8 +120,8 @@ has agreed the cut.
 ## 6. Review and hand-off
 
 Hand the change to the [`review`](../review/SKILL.md) skill with the old record at the base
-commit, the map, and the clause table: the reviewer walks the table, reads each clause against the
-new ADR that carries it, and reports any decision that moved and any clause the table misses.
+commit, the map, and the clause table. The reviewer walks the table and reads each clause against
+the new ADR that carries it. It reports any decision that moved and any clause the table misses.
 Commit with the map in the commit body, and hand the branch to the human with both maps, the
 cut, the clause table, and the review in its hand-off. One pull request lands the branch
 ([NUC-main-only-via-pr §4](../../../docs/adr/NUC-main-only-via-pr.md)).

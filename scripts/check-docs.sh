@@ -130,12 +130,12 @@
 #      intro, its Why NUC section, and the Dev Container name, the template's repository in the
 #      README badges, the copyright holder in LICENSE, the security contact in SECURITY.md, the
 #      reporting contact in CODE_OF_CONDUCT.md, and a CODEOWNERS with no active rule or with its
-#      TODO. Step 3: the '<Project Name>' title of the specification, the overview, the glossary, and the
-#      conventions, a criterion of the specification still reading '…' or '<Quality', and the
-#      scaffold's '<Part>', '<Term>', and '<Convention>' entries. Step 5: a 'TODO' as the Build,
-#      Test, Lint, or Run command of the README, its Overview sentence, and its Usage TODO. The
-#      close: the issue template .github/ISSUE_TEMPLATE/template-finding.md, whose findings go to
-#      the template's repository (NUC-template-learns-from-projects §6). A placeholder that
+#      TODO. Step 3: the '<Project Name>' title of the specification, the overview, the glossary,
+#      and the conventions, a criterion of the specification still reading '…' or '<Quality', and
+#      the scaffold's '<Part>', '<Term>', and '<Convention>' entries. Step 5: a 'TODO' as the
+#      Build, Test, Lint, or Run command of the README, its Overview sentence, and its Usage TODO.
+#      The close: the issue template .github/ISSUE_TEMPLATE/template-finding.md, whose findings go
+#      to the template's repository (NUC-template-learns-from-projects §6). A placeholder that
 #      survives the setup describes the template, not the project. A file that does not exist has
 #      nothing to check.
 #   docs/opens-no-issue
@@ -222,9 +222,9 @@
 # wherever they appear, but '§' in source code is an ordinary character (see is_doc_file),
 # and flagging it there would make a project's own string literals fail this repository's CI.
 #
-# Pure bash + coreutils/grep/sed/awk/find, plus git to enumerate the repository's files — all present
-# in the Dev Container base image, so running it adds no toolchain and no dependency that would
-# require an ADR.
+# Pure bash + coreutils/grep/sed/awk/find, plus git to enumerate the repository's files — all
+# present in the Dev Container base image, so running it adds no toolchain and no dependency that
+# would require an ADR.
 #
 # Usage:
 #     scripts/check-docs.sh [--root <dir>]        (or: bash scripts/check-docs.sh)
@@ -560,9 +560,9 @@ instruction_needle() {
 # Every ADR's '**Status:**' line carries exactly one legend emoji plus the word that belongs to it,
 # and no ADR still carries the instruction paragraph from template.md. check_adr_index reads the
 # status as the first emoji status_emoji finds, so on its own it would accept a line that kept a
-# list of alternatives ('🟡 proposed | 🟢 accepted | …') as whatever stands first, and a line whose word
-# and emoji disagree passes there on the strength of the emoji — while the word is what a reader
-# believes. A missing or emoji-less status line is left to check_adr_index, which reports it.
+# list of alternatives ('🟡 proposed | 🟢 accepted | …') as whatever stands first, and a line whose
+# word and emoji disagree passes there on the strength of the emoji — while the word is what a
+# reader believes. A missing or emoji-less status line is left to check_adr_index, which reports it.
 check_adr_headers() {  # docs/adr-header
   local f base line expected word stray
   for f in "${ADR_LIST[@]}"; do
@@ -1158,11 +1158,11 @@ check_check_lists() {  # docs/check-lists
       || add_error "$s: no workflow and not $rel_all runs it — add it to both lists, or name it on an '# On instruction:' line of $rel_all [docs/check-lists:orphan]"
   done < <(find "$ROOT/scripts" -maxdepth 1 -type f -name '*.sh' | LC_ALL=C sort)
 
-  # The contributing guide: the check names fenced by the 'required-checks' markers, which a maintainer copies
-  # into the ruleset. Rulesets name checks as they report: a job by its name, a job with a matrix
-  # by one check run per entry, '<job> (<values>)'. A name that does not report is a required
-  # check that never arrives and blocks every pull request. Which values a matrix has is the
-  # workflow's; the check holds only the form.
+  # The contributing guide: the check names fenced by the 'required-checks' markers, which a
+  # maintainer copies into the ruleset. Rulesets name checks as they report: a job by its name, a
+  # job with a matrix by one check run per entry, '<job> (<values>)'. A name that does not report
+  # is a required check that never arrives and blocks every pull request. Which values a matrix
+  # has is the workflow's; the check holds only the form.
   local in_block=0 readme_names=() readme_jobs=() base
   while IFS= read -r line; do
     [[ "$line" == *"required-checks begin"* ]] && { in_block=1; continue; }

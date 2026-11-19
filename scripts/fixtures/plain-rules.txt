@@ -35,6 +35,8 @@
 #                                 per concept; list under _Avoid:_ the synonyms it displaces.', and
 #                                 after a blank line each <line> of the lines '= <name> | <line>', so that they start on line 5
 #   base                          main moved to the branch's commit
+#   category <KEY>                docs/adr/README.md, committed: a heading '## Categories' and the
+#                                 item '- **<KEY>** — K.', so that the index defines the category
 #   rename <from> <to>            docs/adr/<from>.md moved to docs/adr/<to>.md, its heading naming
 #                                 <to>, committed
 #   takeup                        the NUC- files, the blob list, and AGENTS.md of this repository
@@ -64,6 +66,10 @@
 = split | - **Item** — one entry of a list.
 = split |   _Avoid:_ one, some long
 = split |   odd phrase, two.
+
+# An entry whose avoided words a category key and a NUC- identifier hold.
+= ui | - **User interface** — what a human sees and uses.
+= ui |   _Avoid:_ UI, daemon.
 
 # The entries of comb's glossary that list words under _Avoid:_, as comb wrote them.
 = comb | - **Connector** — a point on a node where an edge starts or ends.
@@ -117,3 +123,11 @@ pass | rules/avoid-list:unread @ docs/GLOSSARY.md:6 @ "some long odd phrase" @ "
 pass | !rules/soft-modal:verb | a renamed ADR whose only change is its identifier | add docs/adr/FIX-rule-x.md Decision The session should read it.; base; rename FIX-rule-x FIX-rule-z
 fail | rules/soft-modal:verb @ docs/adr/FIX-rule-z.md:11 @ "could" | a renamed ADR: the lines its rename changes are read | add docs/adr/FIX-rule-x.md Decision The session should read it.; base; rename FIX-rule-x FIX-rule-z; add docs/adr/FIX-rule-z.md Decision It could run.
 pass | - | comb's glossary and its NUC- files and AGENTS.md after a take-up | glossary comb; base; takeup
+pass | !rules/avoided-term:listed | an identifier of a category the index defines, whose key the glossary avoids: one token | glossary ui; category UI; add docs/adr/FIX-rule-x.md Decision It follows [UI-some-view](UI-some-view.md).
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "ui" | the same key bare in prose: the word | glossary ui; category UI; add docs/adr/FIX-rule-x.md Decision The UI is drawn.
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "ui" | an identifier of a category the index does not define: its words | glossary ui; add docs/adr/FIX-rule-x.md Decision It follows UI-some-view.
+pass | !rules/avoided-term:listed | a NUC- identifier that holds an avoided word, as a link: one token | glossary ui; add docs/adr/FIX-rule-x.md Decision It follows [NUC:container-hides-host-daemon](NUC:container-hides-host-daemon.md).
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "daemon" | a NUC- identifier inside a longer word: its words | glossary ui; add docs/adr/FIX-rule-x.md Decision It follows xNUC:container-hides-host-daemon.
+pass | rules/long-sentence:words @ docs/adr/FIX-rule-x.md:11 @ 27 | a long sentence: the identifier still counts as a word | add docs/adr/FIX-rule-x.md Decision The session that reads NUC:container-hides-host-daemon before it starts any work must find every single word of it in the glossary and must also know who acts here.
+pass | !rules/avoided-term:listed | a NUC- identifier that starts a line of the paragraph: one token | glossary ui; add docs/adr/FIX-rule-x.md Decision It follows the\nNUC:container-hides-host-daemon rule.
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "daemon" | a NUC- identifier right after another that is no word of its own: its words | glossary ui; add docs/adr/FIX-rule-x.md Decision It follows NUC:a-bNUC:container-hides-host-daemon.

@@ -10,8 +10,11 @@
 # on an added line: should, could, might, ideally, and each word on an added line that an entry of
 # docs/GLOSSARY.md lists under _Avoid:_, with the term to write instead. A verb or a word counts
 # whole, case insensitive, and not inside an identifier, where a letter, a digit, or an underscore
-# adjoins it. A word does not count inside a longer term of the glossary that holds it, such as
-# 'node shape' for 'shape', whether the item says 'alone' or another entry lists the word bare.
+# adjoins it, nor inside an ADR identifier of a category the ADR index of the change defines or
+# fixes, 'NUC-' included, which it reads as one token where it stands as a word of its own; the
+# sentence still counts it as a word. A word does not count inside a longer term of the glossary
+# that holds it, such as 'node shape' for 'shape', whether the item says 'alone' or another entry
+# lists the word bare.
 # It lists each item of an _Avoid:_ list that scripts/lib/rules.sh cannot read. A listed word
 # that the line break of a paragraph splits counts when either line is added, on the line it
 # starts on if that line is added, else on the next; the gap a code span or an italic leaves at
@@ -53,7 +56,8 @@ rest_args "${BASH_SOURCE[0]}" "$usage" 2 "$@"
 MAX_WORDS=25
 resolve_change "Plain rules sensor" "${1:-}" "${2:-}" || exit 0
 base="$CHANGE_BASE" head="$CHANGE_HEAD"
-# at — the head a file is read at, empty for the working tree, as rule_stream and change_file take it.
+# at — the head a file is read at, empty for the working tree, as rule_stream and change_file take
+# it.
 at="$( ((CHANGE_WORKTREE)) || echo "$head")"
 range="$(git rev-parse --short "$base")..$(git rev-parse --short "$head")"
 [[ -n "$at" ]] || range="${range%..*}..working tree"
@@ -70,9 +74,17 @@ change_file "$at" docs/GLOSSARY.md > "$glossary" 2>/dev/null
 avoid="$(avoid_terms "$glossary")"; rc=$?
 rm -f "$glossary"
 ((rc == 0)) || { echo "Plain rules sensor ($range): could not read docs/GLOSSARY.md." >&2; exit 2; }
+# The categories as the change has them, from its ADR index: an identifier of one of them is a
+# token, not words of prose. The awk pattern holds no interval, which an older awk lacks; the
+# reader counts the parts of the slug itself.
+index_file="$(mktemp)"
+change_file "$at" docs/adr/README.md > "$index_file" 2>/dev/null
+adr_categories "$index_file"
+rm -f "$index_file"
+ref_pattern="$(IFS="|"; echo "(${ADR_CATEGORIES[*]})-[a-z0-9]+(-[a-z0-9]+)+")"
 # The rows of the glossary and the rules reach awk through the environment and stdin: an awk of
 # the BWK line refuses a newline in a '-v' value.
-out="$(AVOID="$avoid" awk -F '\t' -v max="$MAX_WORDS" '
+out="$(AVOID="$avoid" awk -F '\t' -v max="$MAX_WORDS" -v refs="$ref_pattern" '
     # A row of avoid_terms: an item it reads (A), a term (T), or an item it cannot read (U).
     BEGIN {
       n = split(ENVIRON["AVOID"], rows, "\n"); na = 0; nt = 0
@@ -102,7 +114,24 @@ out="$(AVOID="$avoid" awk -F '\t' -v max="$MAX_WORDS" '
       }
       count = 0; start = 0; split("", seen)
     }
-    # squash <text> — the text in lower case without the white space at its ends, one space at either end.
+    # unref <text> — the text with each ADR identifier of a known category blanked, where it stands
+    # as a word of its own and its slug has two to five parts: an identifier is no prose. The char
+    # before a match at the start of the rest is the last one read, since substr(s, 0, 1) of mawk
+    # returns the first char of s.
+    function unref(s,  out, id, b, n, parts, before) {
+      out = ""
+      while (match(s, refs)) {
+        id = substr(s, RSTART, RLENGTH); n = split(id, parts, "-") - 1
+        before = (RSTART > 1) ? substr(s, RSTART - 1, 1) : substr(out, length(out), 1)
+        if (before !~ /[A-Za-z0-9_-]/ && substr(s, RSTART + RLENGTH, 1) !~ /[A-Za-z0-9_-]/ && n >= 2 && n <= 5) {
+          b = id; gsub(/./, " ", b)
+        } else b = id
+        out = out substr(s, 1, RSTART - 1) b; s = substr(s, RSTART + RLENGTH)
+      }
+      return out s
+    }
+    # squash <text> — the text in lower case without the white space at its ends, one space at
+    # either end.
     function squash(t) { t = tolower(t); sub(/^[[:space:]]+/, "", t); sub(/[[:space:]]+$/, "", t); return " " t " " }
     # found <text> <word> <break> — whether the word stands whole in the text; with a break, only
     # where it spans that position. FOUND is where it stands.
@@ -121,16 +150,17 @@ out="$(AVOID="$avoid" awk -F '\t' -v max="$MAX_WORDS" '
       told[nr, i] = 1
       print fails file ":" nr ": \"" word[i] "\" is listed under _Avoid:_ in docs/GLOSSARY.md — write \"" term[i] "\" [rules/avoided-term:listed]"
     }
-    # A finding that fails with --require is marked "!": in a project ADR, not in a NUC- ADR or AGENTS.md.
+    # A finding that fails with --require is marked "!": in a project ADR, not in a NUC- ADR or
+    # AGENTS.md.
     $1 == "F" { flush(); file = $2; prev = ""; split("", told); fails = (file ~ /^docs\/adr\/[^\/]+$/ && file !~ /^docs\/adr\/NUC-/) ? "!" : ""; next }
     $1 == "P" { flush(); prev = ""; next }
     {
-      nr = $2; text = $4; low = squash(text)
+      nr = $2; text = $4; prose = unref(text); low = squash(prose)
       if (prev != "" && ($3 == 1 || prevadded)) {
         joined = prev " " substr(low, 2)
         for (i = 1; i <= na; i++) if (found(bare(joined, i), word[i], length(prev) + 1)) avoided(prevadded ? prevnr : nr, i)
       }
-      prev = tolower(text); sub(/^[[:space:]]+/, "", prev); prev = " " prev; prevnr = nr; prevadded = ($3 == 1)
+      prev = tolower(prose); sub(/^[[:space:]]+/, "", prev); prev = " " prev; prevnr = nr; prevadded = ($3 == 1)
       if ($3 == 1) {
         n = split("should could might ideally", soft, " ")
         for (i = 1; i <= n; i++)
@@ -139,7 +169,8 @@ out="$(AVOID="$avoid" awk -F '\t' -v max="$MAX_WORDS" '
       }
       w = split(text, words, /[[:space:]]+/)
       for (i = 1; i <= w; i++) {
-        # A token without a letter or a digit, such as what a link leaves, ends a sentence by a stop.
+        # A token without a letter or a digit, such as what a link leaves, ends a sentence by a
+        # stop.
         if (words[i] !~ /[A-Za-z0-9]/) { if (count && words[i] ~ /[.!?]/) flush(); continue }
         if (!count) start = nr
         count++; if (!(nr in seen) || $3 == 1) seen[nr] = $3

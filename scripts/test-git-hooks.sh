@@ -24,9 +24,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/selftest.sh"
 HOOKS="$ROOT/.githooks"
 
 # g <dir> <git args...> — git in the fixture with an identity, so that commits need no config.
+# It refuses a path that is no fixture: a helper that printed git output with its path would
+# otherwise hand this repository a relative path inside it.
 g() {
   local dir="$1"; shift
-  git -C "${dir:?}" -c user.name=t -c user.email=t@example.invalid "$@"
+  fixture "$dir"
+  git -C "$dir" -c user.name=t -c user.email=t@example.invalid "$@"
 }
 
 # repo <name> — a fixture repository with one commit on main, the hooks and the Dev Container's
@@ -46,12 +49,14 @@ repo() {
 
 # checks <dir> <exit code> — give the fixture a scripts/check-all.sh that exits as told.
 checks() {
+  fixture "$1"
   mkdir -p "$1/scripts"
   printf '#!/usr/bin/env bash\necho "check output for the test, args: $*"\nexit %s\n' "$2" > "$1/scripts/check-all.sh"
 }
 
 # docs <dir> <exit code> — give the fixture a scripts/check-docs.sh that exits as told.
 docs() {
+  fixture "$1"
   mkdir -p "$1/scripts"
   printf '#!/usr/bin/env bash\necho "docs output for the test"\nexit %s\n' "$2" > "$1/scripts/check-docs.sh"
 }
@@ -121,6 +126,7 @@ expect pass "a push while the checks are green" "$d" "" push -q origin feature
 # verdict from outside the tree, so the same tree can turn red. A rework that keeps the tree, an
 # amend here, passes on the record; local changes, an untracked file, or a new tree run them.
 d="$(repo green-tree)"
+fixture "$d"
 git -C "${d:?}" switch -q -c feature
 mkdir -p "$d/scripts"
 # shellcheck disable=SC2016  # the command substitution is the fixture script's, not this one's
@@ -187,15 +193,32 @@ check "a fixture under core.autocrlf=true is checked out with LF and no warning"
 [[ "${crlf%%|*}" == $'LF\n' ]] || printf '    %s\n' "${crlf%%|*}" >&2
 check "a self-test asks MSYS for native symlinks, once" test "${crlf#*|}" = "winsymlinks:nativestrict"
 # shellcheck disable=SC2016 # expanded by the inner shell
-for target in '' '$ROOT' '$outside' '$work/plain' '$work/fixture'; do
-  out="$(outside="$outside" bash -c 'source "$1"; mkdir -p "$work/plain" "$work/fixture/.git"; fixture "'"$target"'" && echo accepted' _ "$lib" 2>&1)"
-  want="refused"; [[ "$target" == '$work/fixture' ]] && want="accepted"
+for target in '' '$ROOT' '$outside' '$work/plain' '$work/fixture' '$work/linked'; do
+  out="$(outside="$outside" bash -c 'source "$1"; mkdir -p "$work/plain" "$work/fixture/.git" "$work/linked"; echo "gitdir: x" > "$work/linked/.git"; fixture "'"$target"'" && echo accepted' _ "$lib" 2>&1)"
+  want="refused"; [[ "$target" == '$work/fixture' || "$target" == '$work/linked' ]] && want="accepted"
   if [[ ("$want" == "accepted" && "$out" == "accepted") || ("$want" == "refused" && "$out" == *"no fixture repository"*) ]]; then
     passed=$((passed + 1))
   else
     failed=$((failed + 1)); echo "FAIL: the fixture guard on '$target' (expected $want): $out" >&2
   fi
 done
+
+# A helper whose git command failed prints git's output before its path. Run from inside a
+# repository, the relative path that results lies in that repository. A helper refuses it rather
+# than create it; g refuses it even where it exists, rather than act on the repository around it.
+host="$work/host"
+git init -q -b main "$host" && g "$host" commit -q --allow-empty -m host
+bad=$'On branch feature\n'"$work/stray"
+out="$(cd "$host" && docs "$bad" 0 2>&1)"
+check "a helper refuses a path that git output put before a fixture's" \
+  grep -q "no fixture repository" <<< "$out"
+check "a helper's refused path creates nothing in the directory it was run from" \
+  test "$(ls -A "$host")" = .git
+out="$(cd "$host" && mkdir -p "$bad" && g "$bad" switch -q -c feature 2>&1)"
+check "g refuses a path that git output put before a fixture's, where it exists" \
+  grep -q "no fixture repository" <<< "$out"
+check "g's refused path leaves the repository it was run from on its branch" \
+  test "$(git -C "$host" branch --format='%(refname:short)')" = main
 
 # A clone without the merge settings still commits and pushes; the push gates what a
 # fast-forward brought past pre-merge-commit.
@@ -265,6 +288,7 @@ check "the feat/ branch stands at the branch it took up" \
 conflict() {
   local d
   d="$(merging "$1" 0 "$2")"
+  fixture "$d"
   git -C "${d:?}" switch -q "$3" 2>/dev/null || git -C "${d:?}" switch -q -c "$3" main
   echo other > "$d/f"
   g "$d" add f
@@ -313,6 +337,7 @@ edit_index() {
 indexed() {
   local d index
   d="$(merging "$1" 0 0)"
+  fixture "$d"
   index="$d/docs/adr/README.md"
   [[ "${5:-}" == none ]] \
     || git -C "${d:?}" config merge.adr-index.driver "$HOOKS/merge-adr-index %O %A %B %S %X %Y"

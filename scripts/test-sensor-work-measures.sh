@@ -35,8 +35,9 @@ chmod +x "$fake"
 # at <date> <dir> <git args...> — git in the fixture with an identity, its commit made at the date.
 at() {
   local when="$1" dir="$2"; shift 2
+  fixture "$dir"
   GIT_AUTHOR_DATE="$when" GIT_COMMITTER_DATE="$when" \
-    git -C "${dir:?}" -c user.name=t -c user.email=t@example.invalid "$@"
+    git -C "$dir" -c user.name=t -c user.email=t@example.invalid "$@"
 }
 
 # repo <name> — a fixture with one commit on main, printed as its path; its gh answers under fix/.
@@ -54,6 +55,7 @@ repo() {
 # at its date, merged into main as GitHub merges pull request <n>.
 merged() {
   local dir="$1" n="$2" branch="$3" first="$4" merge="$5"
+  fixture "$dir"
   git -C "$dir" switch -q -c "$branch" main
   echo "$n a" > "$dir/$n.txt"
   at "$first" "$dir" add -A

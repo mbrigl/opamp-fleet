@@ -4,6 +4,10 @@
 # message that names the version it needs, instead of failing on a construct its bash lacks. It is
 # written for bash 3.2. BASH_GUARD_VERSION stands in for the version found, for the self-tests.
 #
+# The same holds for a CI job on a macOS runner: its bash is the 3.2 that macOS ships, so a script
+# that sources this floor stops there. A CI step on macOS that runs one must be skipped on that
+# runner, or must install a newer bash first and run the script with it.
+#
 # Usage, from scripts/<name>.sh:
 #     # shellcheck source-path=SCRIPTDIR source=lib/bash.sh
 #     source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"

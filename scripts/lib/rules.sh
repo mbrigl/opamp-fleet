@@ -107,12 +107,13 @@ rule_stream() {
 
 # avoid_terms <glossary> — the items an entry of the glossary lists under _Avoid:_, its lines
 # joined, split at commas and semicolons, without a leading 'and', a trailing period, italics, code
-# span backticks, or a placeholder in angle brackets. Each item it reads is 'A<TAB>word<TAB>term<TAB>
-# qualifier': one to three words in lower case, letters beyond ASCII among them, then 'alone' where
-# the item ends so, else nothing; 'in prose' at its end reads as nothing, since only prose is read.
-# Each item it cannot read is 'U<TAB>line<TAB>item<TAB>term', by the line it starts on, each term
-# 'T<TAB>term' in lower case. An entry is its '- **Term**' line and the indented lines after it;
-# prose outside one lists nothing (NUC-documents-are-fixed §5); an indented list item ends a list.
+# span backticks, or a placeholder in angle brackets. Each item it reads is
+# 'A<TAB>word<TAB>term<TAB>qualifier': one to three words in lower case, letters beyond ASCII
+# among them, then 'alone' where the item ends so, else nothing; 'in prose' at its end reads as
+# nothing, since only prose is read. Each item it cannot read is 'U<TAB>line<TAB>item<TAB>term', by
+# the line it starts on, each term 'T<TAB>term' in lower case. An entry is its '- **Term**' line
+# and the indented lines after it; prose outside one lists nothing (NUC-documents-are-fixed §5); an
+# indented list item ends a list.
 avoid_terms() {
   [[ -f "$1" ]] || return 0
   awk '

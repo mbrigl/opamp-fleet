@@ -38,7 +38,8 @@ chmod +x "$fake"
 # g <dir> <git args...> — git in the fixture with an identity.
 g() {
   local dir="$1"; shift
-  git -C "${dir:?}" -c user.name=t -c user.email=t@example.invalid "$@"
+  fixture "$dir"
+  git -C "$dir" -c user.name=t -c user.email=t@example.invalid "$@"
 }
 
 # repo <name> — a fixture with one commit on main, printed as its path; its gh answers under fix/.

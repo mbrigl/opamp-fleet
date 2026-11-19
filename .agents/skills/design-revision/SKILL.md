@@ -47,9 +47,12 @@ For each module touched, look for what a single change cannot see and a check do
 - a shape the code has grown into that no ADR decides, or one that the *Does not fit* of its
   entry in the catalogue of `propose-adr` describes.
 
-One candidate at a time, each with the ADR or convention it offends, or the name of the smell
-where none does, and with its evidence: a review finding, a commit that was red alone, a rework,
-or a cost of step 6. A candidate without evidence goes into the hand-off, not into a ticket
+Take one candidate at a time. Name with each:
+
+- the ADR or convention it offends, or the name of the smell where none does;
+- its evidence: a review finding, a commit that was red alone, a rework, or a cost of step 6.
+
+A candidate without evidence goes into the hand-off, not into a ticket
 ([NUC-design-is-revised §3](../../../docs/adr/NUC-design-is-revised.md)).
 
 ## 3. Check the overview against the tree
@@ -63,12 +66,15 @@ described: each is a finding, because a stale overview is believed.
 Take the ADRs in force whose *Applies to* names a touched module:
 [`scripts/sensor-binding-adrs.sh`](../../../scripts/sensor-binding-adrs.sh) `--sections`, with a
 `--path` for each, prints their header, *Decision*, and *Enforcement*, and the *Applies to* written
-in prose to match. Read in full each whose *Decision* the survey of step 2 or the system
-questions, and each whose *Context* names what the work touched, because the revision weighs its
-forces against the system; one the system still bears out, its forces untouched, stands on those
-three parts. Decisions that have grown into one, each ADR true on its own
-and the set said in one sentence, are a candidate for one superseding ADR that consolidates
-them ([mechanics](../../../docs/adr/README.md#mechanics)).
+in prose to match. Read in full, because the revision weighs their forces against the system:
+
+- each ADR whose *Decision* the survey of step 2 or the system questions;
+- each ADR whose *Context* names what the work touched.
+
+One the system still bears out, its forces untouched, stands on those three parts. Decisions
+that have grown into one, each ADR true on its own and the set said in one sentence, are a
+candidate for one superseding ADR that consolidates them
+([mechanics](../../../docs/adr/README.md#mechanics)).
 
 Then the criteria of [`docs/SPECIFICATION.md`](../../../docs/SPECIFICATION.md) the feature spec
 named as served; without a spec, the criteria a `Verifies:` marker cites from the directories
@@ -88,13 +94,17 @@ Then the reverse: a convention or a check that prevented nothing during the work
 dropped, unless an ADR or a criterion cites it
 ([NUC-decisions-cite-tests §2](../../../docs/adr/NUC-decisions-cite-tests.md)).
 
-Then the rules added since the last revision: every rule written into
-[`AGENTS.md`](../../../AGENTS.md), the mechanics of [`CONTRIBUTING.md`](../../../CONTRIBUTING.md),
-or the [record's mechanics](../../../docs/adr/README.md#mechanics), and every step written into a
-skill, read from the diff of those files since the commit that set the date of the `Last design
+Then the rules added since the last revision:
+
+- every rule written into [`AGENTS.md`](../../../AGENTS.md), the mechanics of
+  [`CONTRIBUTING.md`](../../../CONTRIBUTING.md), or the
+  [record's mechanics](../../../docs/adr/README.md#mechanics);
+- every step written into a skill.
+
+Read them from the diff of those files since the commit that set the date of the `Last design
 revision` line, where [`scripts/sensor-revision-due.sh`](../../../scripts/sensor-revision-due.sh)
-starts its count, or from all history while the line reads `none yet`. A rule in prose is the
-fallback for what no check can decide
+starts its count. While the line reads `none yet`, read them from all history. A rule in prose is
+the fallback for what no check can decide
 ([`AGENTS.md` §5](../../../AGENTS.md#5-quality-bar--definition-of-done)), so each names the
 mistake it prevents, or it is a candidate to drop. Each that stays is set against the older ones
 beside it, and an older one it makes needless is a candidate too. One an ADR decides is dropped
@@ -107,10 +117,10 @@ file gained and lost (`git diff --stat`), so the growth of the rule set is seen 
 
 Read what the work in scope cost. Four sources hold it:
 
-- the `Measures:` line of each pull request's hand-off, a `feat/` branch's gathering its tickets',
-  in the form of
+- the `Measures:` line of each pull request's hand-off, in the form of
   [`.github/PULL_REQUEST_TEMPLATE.md`](../../../.github/PULL_REQUEST_TEMPLATE.md): the tokens,
-  the seconds of the checks, and the rounds of review;
+  the seconds of the checks, and the rounds of review. A `feat/` branch's line gathers its
+  tickets';
 - [`scripts/sensor-work-measures.sh`](../../../scripts/sensor-work-measures.sh): the hours from
   each branch's first commit to its merge, and the rounds of review. It reads GitHub, so it runs
   on the human's instruction ([NUC-main-only-via-pr §2](../../../docs/adr/NUC-main-only-via-pr.md));
@@ -177,26 +187,40 @@ declined.
 
 ## 7. File, do not fix
 
-The conventions and the overview are corrected inline, as their documents ask. Everything else,
-except the drafts of step 6, which stay under `.scratch/`, is filed before the revision ends
-rather than implemented here: a ticket per candidate the survey found with its evidence, a ticket
-per rule to drop, a ticket per check to write, a `proposed` ADR through `propose-adr` where a
-finding is a decision, a consolidating one included, and a drafted specification change as a
-ticket whose *Mode* is "with the human". The tickets go into
-`docs/plan/revision-<YYYY-MM-DD>/`, in the shape of the `plan-feature` skill's ticket template,
-without a spec; a second revision on one day numbers on in the same directory. List the backlog
-entries that touch the modules in scope, from
-[`scripts/sensor-backlog.sh`](../../../scripts/sensor-backlog.sh) or the host's issues, as
-candidates for the human
-([NUC-design-is-revised §3](../../../docs/adr/NUC-design-is-revised.md)); a ticket made from one
-deletes the entry in the same commit. The hand-off proposes to the human the deletion of each
-stale entry ([NUC-design-is-revised §6](../../../docs/adr/NUC-design-is-revised.md)): one
-added (`git log --diff-filter=A --format=%as -- docs/backlog/<entry>`, or the date the host
-shows for an issue) before two dates of the `Last design revision` line
-(`git log -L '/Last design revision/,+1:docs/ARCHITECTURE.md'`), with no ticket made from it.
-A date with an ordinal counts on its own; while the line has read fewer than two dates, no entry
-is stale. Where the
-revision took the count, move the `Last design revision` line of
-[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) to today's date; where it reads today's
+The conventions and the overview are corrected inline, as their documents ask. Everything else
+is filed before the revision ends rather than implemented here, except the drafts of step 6,
+which stay under `.scratch/`:
+
+- a ticket per candidate the survey found with its evidence;
+- a ticket per rule to drop;
+- a ticket per check to write;
+- a `proposed` ADR through `propose-adr` where a finding is a decision, a consolidating one
+  included;
+- a drafted specification change, as a ticket whose *Mode* is "with the human".
+
+The tickets go into `docs/plan/revision-<YYYY-MM-DD>/`, in the shape of the `plan-feature`
+skill's ticket template, without a spec. A second revision on one day numbers on in the same
+directory.
+
+List the backlog entries that touch the modules in scope as candidates for the human
+([NUC-design-is-revised §3](../../../docs/adr/NUC-design-is-revised.md)). They come from
+[`scripts/sensor-backlog.sh`](../../../scripts/sensor-backlog.sh) or the host's issues. A ticket
+made from one deletes the entry in the same commit.
+
+The hand-off proposes to the human the deletion of each stale entry
+([NUC-design-is-revised §6](../../../docs/adr/NUC-design-is-revised.md)). An entry is stale when
+both hold:
+
+- it was added before two dates of the `Last design revision` line. The date it was added is
+  `git log --diff-filter=A --format=%as -- docs/backlog/<entry>`, or the date the host shows for
+  an issue. The dates of the line are
+  `git log -L '/Last design revision/,+1:docs/ARCHITECTURE.md'`.
+- no ticket was made from it.
+
+A date with an ordinal counts on its own. While the line has read fewer than two dates, no entry
+is stale.
+
+Where the revision took the count, move the `Last design revision` line of
+[`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md) to today's date. Where it reads today's
 date already, add this revision's ordinal of the day after it, `(2)` for the second. Then delete
 the `spec.md` of a spec in scope: it is closed.

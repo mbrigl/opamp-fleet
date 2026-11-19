@@ -40,9 +40,11 @@ failed=0
 passed=0
 
 # fixture <dir> — refuse a path that is no fixture repository under $work: 'git -C ""' acts on
-# this repository, and a path outside $work may be this repository or another one.
+# this repository, and a path outside $work may be this repository or another one. A linked
+# worktree under $work is a fixture too; its .git is a file. A self-test adds a linked worktree
+# only of a fixture, since one of this repository would pass the guard and share its refs.
 fixture() {
-  [[ -n "${1:-}" && "$1" == "$work"/* && -d "$1/.git" ]] \
+  [[ -n "${1:-}" && "$1" == "$work"/* && -e "$1/.git" ]] \
     || { echo "fixture: '${1:-}' is no fixture repository under $work" >&2; exit 1; }
 }
 

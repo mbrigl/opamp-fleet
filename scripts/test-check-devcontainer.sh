@@ -151,7 +151,8 @@ check "a copy of the check rewords each message with a key" \
 CHECK="$copy/check-devcontainer.sh"
 table_cases reworded
 
-# holds and lacks <output> <field>, and refused <field> — what the reader of a table says of a field.
+# holds and lacks <output> <field>, and refused <field> — what the reader of a table says of a
+# field.
 # shellcheck disable=SC2317,SC2329 # run by check
 holds() { (table_holds "$1" "$2") 2>/dev/null; }
 # shellcheck disable=SC2317,SC2329 # run by check

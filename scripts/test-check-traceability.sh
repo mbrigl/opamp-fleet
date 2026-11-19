@@ -77,7 +77,8 @@ adr() {
   } > "$dir/docs/adr/$(adr_id "$n").md"
 }
 
-# expect <pass|fail> <name> <dir> [needle] — run the check; when a needle is given, its output must contain it.
+# expect <pass|fail> <name> <dir> [needle] — run the check; when a needle is given, its output must
+# contain it.
 expect() {
   local want="$1" name="$2" dir="$3" needle="${4:-}"
   local out rc
