@@ -8,7 +8,49 @@ use std::path::Path;
 
 fn workflow() -> String {
     let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/release.yml");
-    std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()))
+    let text = std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()));
+    without_comments(&text)
+}
+
+/// `text` without its YAML comment lines, so that a word a comment holds, such as an ADR's
+/// identifier, is never read as a key or a value. A line of a block scalar (`run: |`) is the
+/// scalar's text, not a comment, and stays, `#` or not: a block runs from a line that ends in `|`
+/// or `>` (with its chomping sign) to the next line that is no further indented than that line.
+fn without_comments(text: &str) -> String {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut block: Option<usize> = None;
+    let mut out = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(opened_at) = block {
+            if trimmed.is_empty() || indent(line) > opened_at {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            block = None;
+        }
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let value = trimmed.split(" #").next().unwrap_or(trimmed).trim_end();
+        let indicator = value.rsplit_once(": ").map_or(value, |(_, after)| after);
+        if ["|", "|-", "|+", ">", ">-", ">+"].contains(&indicator) {
+            block = Some(indent(line));
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn a_comment_line_is_dropped_and_a_block_scalars_lines_are_kept() {
+    let text = "jobs:\n  # attestations: write\n  image:\n    run: |\n      # a shell comment\n      echo hi\n    # a comment again\n    needs: [build]\n";
+    assert_eq!(
+        without_comments(text),
+        "jobs:\n  image:\n    run: |\n      # a shell comment\n      echo hi\n    needs: [build]\n"
+    );
 }
 
 /// The rows of the build matrix: each `- { key: value, … }` line, as a map.
@@ -768,8 +810,8 @@ fn the_image_job_builds_checks_and_pushes_by_digest_alone() {
         ["contents: read", "packages: write"]
     );
     assert!(!image.contains("id-token"), "{image}");
-    // The permission key and the attesting action; a comment may cite the ADR, whose identifier
-    // holds the word.
+    // The permission key and the attesting action; `workflow` has dropped the comments, which may
+    // cite the ADR whose identifier holds the word.
     assert!(!image.contains("attestations:"), "{image}");
     assert!(!image.contains("actions/attest"), "{image}");
     let uses: Vec<&str> = image
