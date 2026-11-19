@@ -381,7 +381,7 @@ ADR-0012 (the TLS provider),
 (the package
 signature), [ADR-0034](adr/0034-package-versions-high-water-mark-and-floor.md) (the floor's
 signature) and
-[ADR-0023](adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+[ADR-0039](adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
 (its stores' TLS without
 aws-lc-rs), and touch [ADR-0020](adr/0020-the-client-updates-itself-from-a-signed-package.md),
 whose self-update rests on the package signature.
