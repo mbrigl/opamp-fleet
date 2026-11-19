@@ -11,6 +11,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
+use quote::ToTokens;
+
+// The Server's reader of shipped code, which cuts what only the tests build.
+#[path = "../../fleet-server/tests/source/mod.rs"]
+mod source;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Role {
     /// Domain or port: holds the rule.
@@ -371,163 +378,81 @@ enum Token {
     Punct(char),
 }
 
-/// Rust source as identifiers, `::`, and punctuation, with comments, strings, and characters
-/// dropped, each token with its line.
+/// The shipped code of Rust source `src`, as [`source::shipped`] cuts it, as identifiers, `::`,
+/// and punctuation, each token with its line. Comments, doc comments, literals and the quote of a
+/// lifetime are no tokens.
 fn tokenize(src: &str) -> Vec<(Token, usize)> {
-    let chars: Vec<char> = src.chars().collect();
-    let (mut i, mut line, mut out) = (0, 1, Vec::new());
-    let at = |i: usize| chars.get(i).copied().unwrap_or('\0');
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\n' {
-            line += 1;
-            i += 1;
-        } else if c.is_whitespace() {
-            i += 1;
-        } else if c == '/' && at(i + 1) == '/' {
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-        } else if c == '/' && at(i + 1) == '*' {
-            let mut depth = 0;
-            loop {
-                if at(i) == '/' && at(i + 1) == '*' {
-                    depth += 1;
-                    i += 2;
-                } else if at(i) == '*' && at(i + 1) == '/' {
-                    depth -= 1;
-                    i += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    if at(i) == '\n' {
-                        line += 1;
-                    }
-                    i += 1;
-                }
-            }
-        } else if (c == 'r' || c == 'b')
-            && (at(i + 1) == '"' || at(i + 1) == '#' || (c == 'b' && at(i + 1) == 'r'))
-            && {
-                // A raw or byte string: r"..", r#".."#, b"..", br#".."#.
-                let mut j = i + 1;
-                if c == 'b' && at(j) == 'r' {
-                    j += 1;
-                }
-                while at(j) == '#' {
-                    j += 1;
-                }
-                at(j) == '"'
-            }
-        {
-            let raw = c == 'r' || at(i + 1) == 'r';
-            while at(i) != '"' {
-                i += 1;
-            }
-            let hashes = chars[..i].iter().rev().take_while(|&&h| h == '#').count();
-            i += 1;
-            loop {
-                if at(i) == '\n' {
-                    line += 1;
-                }
-                if !raw && at(i) == '\\' {
-                    i += 2;
-                    continue;
-                }
-                if at(i) == '"' && (0..hashes).all(|k| at(i + 1 + k) == '#') {
-                    i += 1 + hashes;
-                    break;
-                }
-                i += 1;
-            }
-        } else if c == '"' {
-            i += 1;
-            while at(i) != '"' {
-                if at(i) == '\n' {
-                    line += 1;
-                }
-                i += if at(i) == '\\' { 2 } else { 1 };
-            }
-            i += 1;
-        } else if c == '\'' {
-            // A character literal, or a lifetime.
-            if at(i + 1) == '\\' {
-                i += 2;
-                while at(i) != '\'' {
-                    i += 1;
-                }
-                i += 1;
-            } else if at(i + 2) == '\'' {
-                i += 3;
-            } else {
-                i += 1;
-            }
-        } else if c.is_alphabetic() || c == '_' {
-            let start = i;
-            while at(i).is_alphanumeric() || at(i) == '_' {
-                i += 1;
-            }
-            let ident: String = chars[start..i].iter().collect();
-            out.push((Token::Ident(ident), line));
-        } else if c == ':' && at(i + 1) == ':' {
-            out.push((Token::PathSep, line));
-            i += 2;
-        } else {
-            out.push((Token::Punct(c), line));
-            i += 1;
-        }
-    }
+    let file = source::shipped(src).expect("the source parses");
+    let mut out = Vec::new();
+    push_tokens(file.to_token_stream(), &mut out);
     out
 }
 
-/// The tokens without the items under `#[cfg(test)]`.
-fn without_test_code(tokens: Vec<(Token, usize)>) -> Vec<(Token, usize)> {
-    let cfg_test = [
-        Token::Punct('#'),
-        Token::Punct('['),
-        Token::Ident("cfg".into()),
-        Token::Punct('('),
-        Token::Ident("test".into()),
-        Token::Punct(')'),
-        Token::Punct(']'),
-    ];
-    let mut out = Vec::new();
+/// Appends the tokens of `stream` to `out`, as [`tokenize`] reads them. A group's delimiters
+/// stand as tokens of their own.
+fn push_tokens(stream: TokenStream, out: &mut Vec<(Token, usize)>) {
+    let trees: Vec<TokenTree> = stream.into_iter().collect();
     let mut i = 0;
-    while i < tokens.len() {
-        let is_cfg_test = tokens.len() - i >= cfg_test.len()
-            && tokens[i..i + cfg_test.len()]
-                .iter()
-                .map(|(t, _)| t)
-                .eq(cfg_test.iter());
-        if !is_cfg_test {
-            out.push(tokens[i].clone());
-            i += 1;
-            continue;
-        }
-        // Skip the item: up to its `;`, or through its outermost braces.
-        i += cfg_test.len();
-        let mut depth = 0;
-        while i < tokens.len() {
-            match tokens[i].0 {
-                Token::Punct('{') => depth += 1,
-                Token::Punct('}') => {
-                    depth -= 1;
-                    if depth == 0 {
-                        i += 1;
-                        break;
-                    }
-                }
-                Token::Punct(';') if depth == 0 => {
-                    i += 1;
-                    break;
-                }
-                _ => {}
+    while i < trees.len() {
+        let line = trees[i].span().start().line;
+        match &trees[i] {
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                let name = name.strip_prefix("r#").unwrap_or(&name);
+                out.push((Token::Ident(name.to_owned()), line));
             }
-            i += 1;
+            TokenTree::Punct(p) if p.as_char() == '#' && is_doc(&trees[i + 1..]) => {
+                // `#[doc = "…"]` or `#![doc = "…"]`: a doc comment in the tree.
+                i += if matches!(&trees[i + 1], TokenTree::Punct(bang) if bang.as_char() == '!') {
+                    2
+                } else {
+                    1
+                };
+            }
+            TokenTree::Punct(p)
+                if p.as_char() == ':'
+                    && p.spacing() == Spacing::Joint
+                    && matches!(trees.get(i + 1), Some(TokenTree::Punct(next)) if next.as_char() == ':') =>
+            {
+                out.push((Token::PathSep, line));
+                i += 1;
+            }
+            TokenTree::Punct(p) if p.as_char() == '\'' => {}
+            TokenTree::Punct(p) => out.push((Token::Punct(p.as_char()), line)),
+            TokenTree::Group(group) => {
+                let delimiters = match group.delimiter() {
+                    Delimiter::Parenthesis => Some(('(', ')')),
+                    Delimiter::Brace => Some(('{', '}')),
+                    Delimiter::Bracket => Some(('[', ']')),
+                    Delimiter::None => None,
+                };
+                if let Some((open, _)) = delimiters {
+                    out.push((Token::Punct(open), group.span_open().start().line));
+                }
+                push_tokens(group.stream(), out);
+                if let Some((_, close)) = delimiters {
+                    out.push((Token::Punct(close), group.span_close().start().line));
+                }
+            }
+            TokenTree::Literal(_) => {}
         }
+        i += 1;
     }
-    out
+}
+
+/// Whether `rest`, what follows a `#`, is the body of a doc attribute: `[doc = …]`, or `![doc =
+/// …]`.
+fn is_doc(rest: &[TokenTree]) -> bool {
+    let body = match rest {
+        [TokenTree::Punct(bang), TokenTree::Group(body), ..] if bang.as_char() == '!' => body,
+        [TokenTree::Group(body), ..] => body,
+        _ => return false,
+    };
+    body.delimiter() == Delimiter::Bracket
+        && matches!(
+            body.stream().into_iter().next(),
+            Some(TokenTree::Ident(ident)) if ident == "doc"
+        )
 }
 
 /// A path the source names, where, and — for `use … as` — the name it is known by.
@@ -809,7 +734,7 @@ fn reexports() -> Reexports {
         rust_files(&src, &mut files);
         for file in files {
             let module = module_path(&src, &file);
-            let tokens = without_test_code(tokenize(&fs::read_to_string(&file).unwrap()));
+            let tokens = tokenize(&fs::read_to_string(&file).unwrap());
             let (_, declared) = split_reexports(tokens);
             for named in paths(&declared) {
                 if let Some(name) = named.name() {
@@ -836,7 +761,7 @@ fn the_core_depends_on_no_adapter_and_no_technology() {
         let mut modules = Vec::new();
         for file in &files {
             let module = module_path(&src, file);
-            let tokens = without_test_code(tokenize(&fs::read_to_string(file).unwrap()));
+            let tokens = tokenize(&fs::read_to_string(file).unwrap());
             modules.extend(inline_modules(&module, &tokens));
             modules.push(module);
         }
@@ -854,7 +779,7 @@ fn the_core_depends_on_no_adapter_and_no_technology() {
             if role != Core {
                 continue;
             }
-            let tokens = without_test_code(tokenize(&fs::read_to_string(&file).unwrap()));
+            let tokens = tokenize(&fs::read_to_string(&file).unwrap());
             let (own, _) = split_reexports(tokens);
             let found: Vec<String> = paths(&own)
                 .into_iter()
@@ -923,7 +848,7 @@ fn a_role_without_a_source_file_is_reported() {
     assert!(roles_without_module(roles, &modules).is_empty());
 
     let src = "pub mod proto { include!(\"x.rs\"); }\nmod file;\n#[cfg(test)]\nmod tests {}";
-    let tokens = without_test_code(tokenize(src));
+    let tokens = tokenize(src);
     assert_eq!(inline_modules("", &tokens), vec!["proto"]);
     assert_eq!(inline_modules("fs", &tokens), vec!["fs::proto"]);
 }
@@ -946,7 +871,7 @@ fn the_reader_finds_the_paths_code_names() {
         fn g() { libc::getpid(); }
         fn h() { std::time::Instant::now(); }
     "##;
-    let found: Vec<String> = paths(&without_test_code(tokenize(src)))
+    let found: Vec<String> = paths(&tokenize(src))
         .into_iter()
         .map(|named| named.segments.join("::"))
         .collect();
@@ -1078,7 +1003,7 @@ fn no_adapter_names_the_composition_roots_kept_from_adapters() {
             {
                 continue;
             }
-            let tokens = without_test_code(tokenize(&fs::read_to_string(&file).unwrap()));
+            let tokens = tokenize(&fs::read_to_string(&file).unwrap());
             let (own, _) = split_reexports(tokens);
             for Named { segments, line, .. } in paths(&own) {
                 let Target::Internal(target, segments) = resolve(krate, &module, &segments) else {
