@@ -91,9 +91,10 @@ impl DeploymentBackend for PgDeploymentBackend {
     }
 
     /// One transaction: every Deployment that holds the member is held `FOR UPDATE`, in name
-    /// order, and loses it. The deletion of the member took it out of every Deployment already,
-    /// in its own transaction ([`drop_member_rows`]), so this finds one only where a Server of
-    /// 0.8.0 beside this one added it after.
+    /// order, and loses it, as the port's contract asks of every adapter. After the deletion of
+    /// the member this finds none: the deletion took it out of every Deployment in its own
+    /// transaction ([`drop_member_rows`]), and an add holds the member's row `FOR KEY SHARE` and
+    /// is refused once it is gone.
     fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String> {
         let member = member.clone();
         self.database.run(move |pool| async move {

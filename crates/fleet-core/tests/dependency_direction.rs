@@ -379,8 +379,8 @@ enum Token {
 }
 
 /// The shipped code of Rust source `src`, as [`source::shipped`] cuts it, as identifiers, `::`,
-/// and punctuation, each token with its line. Comments, doc comments, literals and the quote of a
-/// lifetime are no tokens.
+/// and punctuation, each token with its line. Comments, literals and the quote of a lifetime are
+/// no tokens; a doc comment leaves its attribute's `doc`, which names no path.
 fn tokenize(src: &str) -> Vec<(Token, usize)> {
     let file = source::shipped(src).expect("the source parses");
     let mut out = Vec::new();
@@ -400,14 +400,6 @@ fn push_tokens(stream: TokenStream, out: &mut Vec<(Token, usize)>) {
                 let name = ident.to_string();
                 let name = name.strip_prefix("r#").unwrap_or(&name);
                 out.push((Token::Ident(name.to_owned()), line));
-            }
-            TokenTree::Punct(p) if p.as_char() == '#' && is_doc(&trees[i + 1..]) => {
-                // `#[doc = "…"]` or `#![doc = "…"]`: a doc comment in the tree.
-                i += if matches!(&trees[i + 1], TokenTree::Punct(bang) if bang.as_char() == '!') {
-                    2
-                } else {
-                    1
-                };
             }
             TokenTree::Punct(p)
                 if p.as_char() == ':'
@@ -438,21 +430,6 @@ fn push_tokens(stream: TokenStream, out: &mut Vec<(Token, usize)>) {
         }
         i += 1;
     }
-}
-
-/// Whether `rest`, what follows a `#`, is the body of a doc attribute: `[doc = …]`, or `![doc =
-/// …]`.
-fn is_doc(rest: &[TokenTree]) -> bool {
-    let body = match rest {
-        [TokenTree::Punct(bang), TokenTree::Group(body), ..] if bang.as_char() == '!' => body,
-        [TokenTree::Group(body), ..] => body,
-        _ => return false,
-    };
-    body.delimiter() == Delimiter::Bracket
-        && matches!(
-            body.stream().into_iter().next(),
-            Some(TokenTree::Ident(ident)) if ident == "doc"
-        )
 }
 
 /// A path the source names, where, and — for `use … as` — the name it is known by.
@@ -854,7 +831,7 @@ fn a_role_without_a_source_file_is_reported() {
 }
 
 /// The reader the test stands on: a path in a string, a comment, or test code is not a
-/// dependency, and a `use` group names each of its members.
+/// dependency, a `use` group names each of its members, and each path names its line.
 #[test]
 fn the_reader_finds_the_paths_code_names() {
     let src = r##"
@@ -871,10 +848,14 @@ fn the_reader_finds_the_paths_code_names() {
         fn g() { libc::getpid(); }
         fn h() { std::time::Instant::now(); }
     "##;
-    let found: Vec<String> = paths(&tokenize(src))
-        .into_iter()
+    let named = paths(&tokenize(src));
+    let found: Vec<String> = named
+        .iter()
         .map(|named| named.segments.join("::"))
         .collect();
+    // Each path carries the line of the source it stands on.
+    let lines: Vec<usize> = named.iter().map(|named| named.line).collect();
+    assert_eq!(lines, [2, 2, 3, 3, 8, 13]);
     assert_eq!(
         found,
         [
