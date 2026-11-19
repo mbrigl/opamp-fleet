@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-08
 - **Deciders:** NUC maintainer
-- **Applies to:** the git hooks under `.githooks/`, the git settings the Dev Container sets for them, every commit, merge, and push, the integration steps on `feat/` branches, the repository settings of the remote, the sections *Git hooks*, *Integration branches*, and *Repository settings* of `CONTRIBUTING.md`, `scripts/ready-for-main.sh`, `scripts/drop-merged-branch.sh`, and `scripts/sensor-repo-settings.sh`
+- **Applies to:** the git hooks under `.githooks/`, the git settings the Dev Container sets for them, every commit, merge, and push, the integration steps on `feat/` branches, the repository settings of the remote, the sections *Git hooks*, *Integration branches*, and *Repository settings* of `CONTRIBUTING.md`, `scripts/ready-for-main.sh`, `scripts/drop-merged-branch.sh`, `scripts/sensor-repo-settings.sh`, and `scripts/sensor-review-binding.sh`
 
 ## Context
 
@@ -54,11 +54,15 @@ through merged pull requests.
    what has reached `main`.
 5. **Integration branch.** On a human's instruction, a branch reviewed per
    [`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done) may integrate first on a
-   `feat/` branch. It integrates by a local merge or a pull request.
-   - Each integration must be one merge commit, its message the hand-off in the sections of the
-     pull request template.
-   - Until the `feat/` branch merges into `main`, the human may rework and push all of it again,
-     merged pull requests included.
+   `feat/` branch.
+   - It integrates linearly: its commits are rebased onto the `feat/` branch, which moves forward
+     to them. A `feat/` branch carries no merge commit.
+   - Before its pull request into `main`, the `feat/` branch is rebuilt on `main` as one commit per
+     topic. A topic that changes ADRs carries them in a commit of ADRs only, before its code. Each
+     topic's message names the work it folds.
+   - The description of that pull request is the hand-off of the whole branch, with a review of
+     the whole branch at its head.
+   - Until the `feat/` branch merges into `main`, the human may rework and push all of it again.
 6. **Hooks.** The git hooks under `.githooks/` must enforce each rule of this ADR that a file
    decides.
    - An agent must not bypass a hook: no `--no-verify`, no git without the hooks, no hand-moved
@@ -85,7 +89,8 @@ A project may choose:
 
 - whether its harness grants the standing instruction for the push of a claim, which the harness
   ADR records ([catalogue entry](../../.agents/skills/propose-adr/concepts/harness.md));
-- whether branches integrate on a `feat/` branch first, and by local merge or by pull request;
+- whether branches integrate on a `feat/` branch first, and whether a pull request against it
+  tests a branch before the fast-forward;
 - further hooks, checks, and repository settings that hold its own rules.
 
 The catalogue has no entry for the last two choices, and neither needs an ADR.
@@ -94,10 +99,14 @@ The catalogue has no entry for the last two choices, and neither needs an ADR.
 
 - **Push to `main` directly, trunk-based.** It is fast and needs no pull request. Every push
   skips the required checks and the Code Owners review, and a red tree reaches every clone.
-- **Squash merges.** The history of `main` gets one commit per change. The merges of a `feat/`
-  branch and the hand-off of each branch are lost, and so is the regrouped history.
+- **Squash merges.** The history of `main` gets one commit per change. The topics of a `feat/`
+  branch and its commits of ADRs only fold into one, and the merge of its pull request is lost.
 - **Rebase merges.** The history stays linear. GitHub writes new commits with new identifiers, so
-  the commits a review saw no longer exist, and the integration merges flatten.
+  the commits a review saw no longer exist.
+- **One merge per integration on a `feat/` branch, its hand-off as the message.** Each reviewed
+  branch keeps its own merge. The history of `main` grows a merge per ticket, nested under the
+  merge of the pull request, and reads by the tickets, not by the topics. The hand-offs repeat what
+  the pull request's description says for the whole branch.
 - **Gates in each tool's configuration.** A permission prompt or a deny list is quick to write.
   It holds for one agent only, and a prompt asks about a command, not the branch it lands on.
 - **Repository settings alone.** They hold for everyone on the remote. A red push still leaves the
@@ -131,7 +140,8 @@ The catalogue has no entry for the last two choices, and neither needs an ADR.
 ## Consequences
 
 - Positive: nothing reaches `main` or the remote without a human and the required checks.
-- Positive: the history of `main` keeps each merge and its hand-off.
+- Positive: the history of `main` reads one commit per topic, and the merge of each pull request
+  carries the hand-off of its branch.
 - Positive: the binding sensor routes a change to the hooks or the integration steps here.
 - Negative: every push waits for a human, and an agent cannot finish an integration alone.
 - Negative: hooks are enabled per clone, so a clone without them relies on the remote alone.
@@ -140,15 +150,18 @@ The catalogue has no entry for the last two choices, and neither needs an ADR.
 
 Four self-tests cite this ADR:
 
-- `scripts/test-git-hooks.sh`: no commit or merge on `main` (clause 1), and no push to it or move
-  of it past `origin/main` (clause 4);
+- `scripts/test-git-hooks.sh`: no commit or merge on `main` (clause 1), no push to it or move of
+  it past `origin/main` (clause 4). It also refuses a merge on a `feat/` branch (clause 5);
 - `scripts/test-ready-for-main.sh` and `scripts/test-drop-merged-branch.sh`: no fixup reaches
-  `main`, and the local `main` only takes up the remote's (clause 4);
+  `main`, and the local `main` only takes up the remote's (clause 4). The readiness script also
+  refuses a branch that carries a merge (clause 5);
 - `scripts/test-sensor-repo-settings.sh`: the sensor reports each repository setting that differs
   (clause 7).
 
-`merge.ff false` makes each local merge a merge commit (clause 5). The ruleset on `main` holds
-clause 4 on the remote.
+The ruleset on `main` holds clause 4 on the remote. Given the pull request's description with
+`--hand-off`, `scripts/sensor-review-binding.sh` reports whether the review stands at the head.
+It also lists a merge on the branch (clause 5), and it never fails.
 
-**Not mechanically decidable:** the review holds clauses 2 and 3 and the message of clause 5. It
-also holds a bypass under clause 6, and clause 7 beyond the repository settings.
+**Not mechanically decidable:** the review holds clauses 2 and 3, and whether a `feat/` branch is
+folded by topic before its pull request (clause 5). It also holds a bypass under clause 6, and
+clause 7 beyond the repository settings.

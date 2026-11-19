@@ -2,14 +2,14 @@
 #
 # Self-test of scripts/sensor-release-notes.sh.
 #
-# Each case builds a fixture repository with a release tag and merges after it: merges of pull
-# requests on main, and merges of tickets into a feat/ branch whose message is the hand-off. The
-# sensor reads the descriptions of the pull requests through gh; here a stand-in named by GH
-# answers instead, with the description kept in a fixture file per pull request. The cases assert
-# the field 'A derived project acts on' of each hand-off since the tag, a field that says none, an
-# empty field, a description with CRLF line ends, a field a ticket merge carries, one listed once
-# where the pull request repeats it, the tag of the highest version as the default, the option
-# --since, and the exit codes.
+# Each case builds a fixture repository with a release tag and merges of pull requests on main
+# after it. The sensor reads the descriptions of the pull requests through gh; here a stand-in
+# named by GH answers instead, with the description kept in a fixture file per pull request. The
+# cases assert the field 'A derived project acts on' of each hand-off since the tag, a field that
+# says none, an empty field, a description with CRLF line ends, the pull request of a feat/ branch
+# whose inner merge lies off the first-parent line and is not read, a merge on main that is no
+# pull request, the tag of the highest version as the default, the option --since, and the exit
+# codes.
 #
 # Verifies: NUC-releases-are-semver-tags NUC-checks-are-bash
 # Inputs: scripts/sensor-release-notes.sh scripts/lib/
@@ -72,16 +72,6 @@ pr() {
   g "$dir" merge -q --no-ff -m "Merge pull request #$n from owner/$b" "$b"
   (($# > 3)) && printf '%s\n' "$4" > "$dir/fix/pr-$n"
   return 0
-}
-
-# ticket <dir> <ticket> <feat> <message> — a ticket branch merged into the feat/ branch, the
-# hand-off its merge message.
-ticket() {
-  local dir="$1"
-  git -C "$dir" rev-parse -q --verify "refs/heads/$3" > /dev/null || g "$dir" branch "$3" main
-  branch "$dir" "$2" "$3"
-  g "$dir" switch -q "$3"
-  g "$dir" merge -q --no-ff -m "$4" "$2"
 }
 
 # handoff <field> — a hand-off whose Doubts end in the field 'A derived project acts on'.
@@ -171,34 +161,29 @@ expect "a description gh cannot read, the field in the merge message" "$d" 0 \
   "  - #8 fix/eight, from its merge message, since its pull request description was not read:
       drop the file x."
 
-# A feat/ branch: each ticket merged into it carries its hand-off as its message. The pull request
-# of the branch repeats one ticket's field, which is listed once, from the pull request.
+# A feat/ branch integrates linearly; its pull request into main carries the field of the whole
+# branch. A merge into the feat/ branch, off the first-parent line of main, is not read, even
+# one whose message carries the field; nor is a merge on main that is no pull request.
 d="$(repo feat)"
 tag "$d" v2.0.0
-ticket "$d" ticket/s/01-one feat/s "Merge ticket/s/01-one: feat: one
-
-$(handoff ' the sensor y needs gh.')"
-ticket "$d" ticket/s/02-two feat/s "Merge ticket/s/02-two: feat: two
-
-$(handoff ' rename z.')"
-g "$d" switch -q main
-echo later > "$d/later.txt"
-g "$d" add -A
-g "$d" commit -q -m "a commit on main"
+branch "$d" feat/s main
+branch "$d" ticket/s/01-one feat/s
 g "$d" switch -q feat/s
-g "$d" merge -q --no-ff -m "Merge branch 'main' into feat/s" main
+g "$d" merge -q --no-ff -m "Merge ticket/s/01-one
+
+$(handoff ' the sensor y needs gh.')" ticket/s/01-one
 pr "$d" 9 feat/s "$(handoff ' rename z.')"
-one="$(git -C "$d" log --format=%h -n 1 --grep '^Merge ticket/s/01-one' --all)"
-two="$(git -C "$d" log --format=%h -n 1 --grep '^Merge ticket/s/02-two' --all)"
-expect "a ticket merge carries the field in its message" "$d" 0 \
-  "  - $one Merge ticket/s/01-one: feat: one, from its merge message:
-      the sensor y needs gh."
-expect "the field of a ticket the pull request repeats is listed once, from the pull request" "$d" 0 \
-  "  - $two Merge ticket/s/02-two: feat: two: the same as #9, listed there."
+branch "$d" other main
+g "$d" switch -q main
+g "$d" merge -q --no-ff -m "Merge branch 'other'
+
+$(handoff ' drop w.')" other
 expect "the pull request of the feat/ branch" "$d" 0 \
-  "  - #9 feat/s, from its pull request description:
+  "Release notes sensor: what a derived project acts on, from the 1 merge listed since v2.0.0:
+  - #9 feat/s, from its pull request description:
       rename z."
-absent "a merge without the field and no pull request is not listed" "$d" "Merge branch 'main'"
+absent "a merge into the feat/ branch is not read" "$d" "the sensor y needs gh."
+absent "a merge on main that is no pull request is not read" "$d" "drop w."
 
 # The highest version reachable from HEAD is the default, not the nearest tag, nor the
 # highest by the letters: v0.10.0 before v0.9.0, which a later commit carries.
@@ -221,18 +206,11 @@ expect "a description with CRLF line ends" "$d" 0 \
       delete b."
 absent "a description with CRLF line ends leaves no carriage return" "$d" $'\r'
 
-# An empty field, on a pull request and on a ticket merge, prints as empty, and the two empty
-# fields are not taken for the same text.
+# An empty field on a pull request prints as empty.
 d="$(repo blank)"
 tag "$d" v0.1.0
-ticket "$d" ticket/s/01-one feat/s "Merge ticket/s/01-one: feat: one
-
-$(handoff '')"
 pr "$d" 1 feat/s "$(handoff '')"
-one="$(git -C "$d" log --format=%h -n 1 --grep '^Merge ticket/s/01-one' --all)"
 expect "an empty field on a pull request" "$d" 0 "  - #1 feat/s, from its pull request description: empty"
-expect "an empty field on a ticket merge" "$d" 0 \
-  "  - $one Merge ticket/s/01-one: feat: one, from its merge message: empty"
 absent "an empty field raises no error" "$d" "bad array subscript"
 
 # Nothing since the tag, no tag, no repository, no gh, a missing root, and an unknown argument.

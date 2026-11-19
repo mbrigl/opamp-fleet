@@ -202,7 +202,7 @@ run "Protocol Baseline" scripts/check-protocol-baseline.sh
 run "Manual check self-test" scripts/test-check-manual.sh
 run "Manual cites no ADR" scripts/check-manual.sh
 run "Normalize map self-test" scripts/test-normalize-remap.sh
-# The readiness script merges and commits on a human's instruction, as step 7 of
+# The readiness script rebases a branch on a human's instruction, as step 7 of
 # Integration branches in CONTRIBUTING.md; its self-test runs here.
 # On instruction: scripts/ready-for-main.sh
 run "Readiness script self-test" scripts/test-ready-for-main.sh

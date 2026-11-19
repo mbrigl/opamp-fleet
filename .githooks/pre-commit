@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Git pre-commit hook: no commit on main; on any other branch a commit only while the
-# documentation check passes, and the commit that concludes a conflicted merge only while all the
-# checks pass on it.
+# documentation check passes, and the commit that concludes a conflicted merge only off a feat/
+# branch and while all the checks pass on it.
 #
 # An agent commits on a branch, never on main, and changes reach main through a pull request
 # (NUC-main-only-via-pr §1, §4). A permission prompt cannot decide this — it asks a human about a
@@ -11,7 +11,9 @@
 # scripts/check-docs.sh takes about a second and runs on every commit. It reads the working tree,
 # so a partial commit is judged on more than it holds. A merge that stops on a conflict is
 # concluded by 'git commit', which runs this hook and not pre-merge-commit; its resolution is
-# written by hand, so all of scripts/check-all.sh runs on it, with --changed as before a push.
+# written by hand, so all of scripts/check-all.sh runs on it, with --changed as before a push. A
+# feat/ branch carries no merge commit (NUC-main-only-via-pr §5), so its conclusion there is
+# refused, as pre-merge-commit refuses the merge.
 # Enabled as the "Git hooks" of CONTRIBUTING.md says.
 #
 # Bypassable with 'git commit --no-verify'; NUC-main-only-via-pr §6 says who may.
@@ -34,7 +36,10 @@ merging="$(git rev-parse -q --verify MERGE_HEAD || true)"
 # shellcheck disable=SC2046 # one variable name per word
 unset $(git rev-parse --local-env-vars)
 
-if [[ -n "$merging" ]]; then
+if [[ -n "$merging" && "$branch" == feat/* ]]; then
+  echo "pre-commit: refused — the checkout is on the feat/ branch '$branch', which carries no merge commit (NUC-main-only-via-pr §5). git merge --abort, then rebase the branch onto it and move it forward: git rebase $branch <branch>, then git switch $branch && git merge --ff-only <branch>" >&2
+  exit 1
+elif [[ -n "$merging" ]]; then
   if [[ -n "$root" && -f "$root/scripts/check-all.sh" ]] \
      && ! bash "$root/scripts/check-all.sh" --changed; then
     echo >&2

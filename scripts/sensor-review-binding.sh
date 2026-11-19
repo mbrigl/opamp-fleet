@@ -4,37 +4,30 @@
 # section 3 — the ADRs reviewed apart from their implementation).
 #
 # Whether the review ran in a fresh context no script can tell; the session that wrote a change
-# can write any line the reviewer could. What it can tell is which commit the review saw. The
-# hand-off of a change, the message of its merge into a feat/ branch, carries in its *Review*
-# section the line 'Reviewed at: <commit>' (.github/PULL_REQUEST_TEMPLATE.md). For every merge on
-# the first-parent line between a base and a head, this sensor reads that line and holds it
-# against the merged branch, the merge's second parent:
+# can write any line the reviewer could. What it can tell is which commit the review saw. A
+# branch integrates linearly (NUC-main-only-via-pr §5), so no merge message carries a hand-off:
+# the hand-off of a branch is the description of its pull request. Its *Review* section carries
+# the line 'Reviewed at: <commit>' (.github/PULL_REQUEST_TEMPLATE.md). Given that description as
+# a file with --hand-off, this sensor holds the line against the commits between a base and a
+# head:
 #
 #   1. No line, or one without a commit: the review is bound to nothing.
-#   2. Anything but the hash of a commit of the merged branch that the line merged into did not
-#      already have: a hash that does not resolve, a commit elsewhere, or a name such as the
-#      branch's, which moves with the branch and so binds nothing.
-#   3. Commits between the reviewed one and the branch tip: what landed unreviewed, usually the
-#      fixes made after the findings. They are listed, with the diffstat they add up to.
+#   2. Anything but the hash of a commit of the branch since the base: a hash that does not
+#      resolve, a commit elsewhere, or a name such as the branch's, which moves with the branch
+#      and so binds nothing.
+#   3. Commits between the reviewed one and the head: what landed unreviewed, usually the fixes
+#      made after the findings, or a rework. They are listed, with the diffstat they add up to.
 #
-# A commit on the first-parent line that is no merge landed outside any merge, so no hand-off
-# names it. Those commits are listed too, as named by no review.
+# Reviewed at the head, the hand-off covers every commit since the base. Without --hand-off, as
+# scripts/check-all.sh runs it, the sensor counts the commits and says that only a hand-off binds
+# them. A rework, a rebase or a regroup, rewrites the commit the line names; the review that binds
+# after one is a review of the whole branch at its head.
 #
-# A merge whose second parent the base already has, such as the feat/ branch taking up main,
-# lands no branch and is passed over. A merge reviewed at its tip is counted and not listed. The
-# third and later parents of an octopus merge are not read. The resolution of a conflicting merge
-# lies past the tip and is not read, and a merge is read only once it is made, so the pre-merge
-# hook does not see the one it gates. It reports and never fails on what it finds; the human who
-# decides the merge, or the reviewer of the pull request into main, reads it.
-#
-# A rework of the feat/ branch, a rebase or a regroup, rewrites the commits these lines name, or
-# drops the merges that carry them. The review that binds after one is the review of the whole
-# branch, named on the same line in the hand-off of its pull request, its description. Given as a
-# file, it is held against the head first: reviewed at the head, it covers every merge the branch
-# carries and every commit outside one, and nothing else is read; otherwise it is reported like a
-# merge, and the merges follow. Reviewed at an earlier commit of the branch, its list of what came
-# after names the commits outside a merge that are unreviewed, so they are not listed again;
-# bound to nothing, it leaves them listed.
+# A merge between the base and the head is listed, since a feat/ branch carries none
+# (NUC-main-only-via-pr §5); the commits it brought are counted with the others, and its message
+# is not read. A synthetic merge of CI is no such merge: CI passes the pull request's head. It
+# reports and never fails on what it finds; the human who decides the merge, or the reviewer of
+# the pull request into main, reads it.
 #
 # The review of an ADR comes before its implementation, and the commits keep the two apart
 # (NUC-decisions-are-proposed-then-accepted §3, §4). Every commit between the base and the head,
@@ -50,8 +43,8 @@
 #     scripts/sensor-review-binding.sh [--root <dir>] [--hand-off <file>] [base [head]]
 # It reads the repository it lives in, as the checks do; --root names another, as its self-test
 # does with each fixture.
-# The head defaults to HEAD, the feat/ branch checked out. Without a base, the merge base of head
-# with origin/main (else main) is used: the merges of the branch not yet on the remote's main. CI
+# The head defaults to HEAD, the branch checked out. Without a base, the merge base of head with
+# origin/main (else main) is used: the commits of the branch not yet on the remote's main. CI
 # passes the pull request's base and head, never its synthetic merge commit, and its description
 # as the hand-off. A base of zeros, which a push event reports for a new branch, counts as none.
 # Exit code 0 always, except 2 on a base or head that does not resolve, a hand-off that is no
@@ -88,7 +81,6 @@ rest_args "${BASH_SOURCE[0]}" "$usage" 2 "$@"
 resolve_change "Review binding sensor" "${1:-}" "${2:-HEAD}" || exit 0
 base="$CHANGE_BASE" head="$CHANGE_HEAD"
 
-at_tip=0
 findings=()
 
 # bind <label> <message> <tip> <before> <what> — hold the message's 'Reviewed at:' line against
@@ -153,56 +145,45 @@ report_mixed() {
   printf '  - %s\n' "${mixed[@]}"
 }
 
-mapfile -t all < <(git rev-list --first-parent --merges --reverse "$base..$head")
-merges=()
-for m in "${all[@]}"; do
-  git merge-base --is-ancestor "$m^2" "$base" || merges+=("$m")
-done
+mapfile -t merges < <(git rev-list --merges --reverse "$base..$head")
+n="$(git rev-list --count --no-merges "$base..$head")"
+commits="$n commit$( ((n == 1)) || echo s)"
+since="$(git rev-parse --short "$base")"
 
-# The commits that landed on the first-parent line outside any merge: no merge's line names them.
-mapfile -t linear < <(git rev-list --first-parent --no-merges --reverse "$base..$head")
-
-# below <n> — what the headline says of the n findings listed under it, so that a reader of the
-# headline alone, such as check-all.sh, learns that there are some.
-below() { (($1)) && echo "; $1 finding$( (($1 == 1)) || echo s) below"; }
-
-# The hand-off of the whole branch first: a review of its head covers every merge it carries and
-# every commit outside one, whatever a rework did to the lines in their messages.
-hand_off_bound=1
-if [[ -n "$hand_off" ]]; then
-  bind "the hand-off" "$(cat "$hand_off")" "$head" "$base" "the branch since the base"
-  hand_off_bound=$?
-fi
-if ((hand_off_bound == 0)); then
-  covered=""
-  ((${#merges[@]})) && covered=", which covers the ${#merges[@]} merge$( ((${#merges[@]} == 1)) || echo s) it carries"
-  echo "Review binding sensor: the hand-off was reviewed at the head, $(git rev-parse --short "$head")$covered$(below $(( ${#mixed[@]} > 0 )))."
-  report_mixed
-  exit 0
-fi
-
-for m in "${merges[@]}"; do
-  if bind "$(git log -1 --format='%h %s' "$m")" "$(git log -1 --format=%B "$m")" "$m^2" "$m^1" \
-    "the merged branch"; then
-    at_tip=$((at_tip + 1))
-  fi
-done
-
-# A hand-off reviewed at a commit of the branch has listed what came after it, the commits
-# outside a merge among them.
-if ((${#linear[@]} && hand_off_bound != 2)); then
-  finding="${#linear[@]} commit$( ((${#linear[@]} == 1)) || echo s) landed outside a merge, named by no review:"
-  for c in "${linear[@]}"; do finding+=$'\n'"    $(git log -1 --format='%h %s' "$c")"; done
+if ((${#merges[@]})); then
+  finding="${#merges[@]} merge$( ((${#merges[@]} == 1)) || echo s) between the base and the head; a feat/ branch carries none (NUC-main-only-via-pr §5), and no review is read from $( ((${#merges[@]} == 1)) && echo its || echo their) message$( ((${#merges[@]} == 1)) || echo s):"
+  for m in "${merges[@]}"; do finding+=$'\n'"    $(git log -1 --format='%h %s' "$m")"; done
   findings+=("$finding")
 fi
 
-if ((${#merges[@]} == 0)); then
-  echo "Review binding sensor: no merge since $(git rev-parse --short "$base")$( ((${#findings[@]} + ${#mixed[@]})) || echo " — nothing to read")$(below $(( ${#findings[@]} + (${#mixed[@]} > 0) )))."
-else
-  echo "Review binding sensor: ${#merges[@]} merge$( ((${#merges[@]} == 1)) || echo s) since $(git rev-parse --short "$base"), $at_tip reviewed at the tip of its branch$(below $(( ${#findings[@]} + (${#mixed[@]} > 0) )))."
+# below — what the headline says of the findings listed under it, the mixed commits as one, so
+# that a reader of the headline alone, such as check-all.sh, learns that there are some.
+below() {
+  local k=$(( ${#findings[@]} + (${#mixed[@]} > 0) ))
+  ((k)) && echo "; $k finding$( ((k == 1)) || echo s) below"
+}
+
+# report — print the findings and the mixed commits under the headline, and stop.
+report() {
+  local f
+  for f in "${findings[@]}"; do printf '  - %s\n' "$f"; done
+  report_mixed
+  exit 0
+}
+
+if ((n == 0 && ${#merges[@]} == 0)); then
+  echo "Review binding sensor: no commit since $since — nothing to read."
+  exit 0
 fi
-for f in "${findings[@]}"; do
-  printf '  - %s\n' "$f"
-done
-report_mixed
-exit 0
+
+if [[ -z "$hand_off" ]]; then
+  echo "Review binding sensor: $commits since $since, bound only by a hand-off: name the pull request's description with --hand-off <file>$(below)."
+  report
+fi
+
+if bind "the hand-off" "$(cat "$hand_off")" "$head" "$base" "the branch since the base"; then
+  echo "Review binding sensor: the hand-off was reviewed at the head, $(git rev-parse --short "$head"), which covers the $commits since $since$(below)."
+else
+  echo "Review binding sensor: $commits since $since, bound only by the hand-off$(below)."
+fi
+report

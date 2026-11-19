@@ -6,16 +6,18 @@
 #
 #   1. Fetches origin and refuses while the branch carries a fixup the rework has not folded in
 #      (a subject starting 'fixup!', 'squash!', or 'amend!'), since main keeps what it merges.
-#   2. Takes up origin/main by a merge, unless the branch already contains it. A merge that stops
-#      on a conflict, or that the pre-merge-commit hook refuses, stops this script; once the merge
-#      is concluded, it runs again.
+#      It refuses as well while the branch carries a merge commit origin/main lacks, since a feat/
+#      branch carries none (NUC-main-only-via-pr §5) and a rebase would flatten it.
+#   2. Takes up origin/main by a rebase onto it, unless the branch already contains it, so that the
+#      branch stays linear (NUC-main-only-via-pr §5). A rebase that stops on a conflict stops this
+#      script; once the rebase is continued to its end, it runs again.
 #
-# It pushes nothing and touches no pull request: it ends by naming the push, with
-# --force-with-lease where the branch was reworked after its last push, and 'gh pr ready'. The
-# pre-push hook runs the checks on what goes out.
+# It pushes nothing and touches no pull request: it ends by naming the review again where it
+# rebased, then the push, with --force-with-lease where the branch was reworked or rebased after
+# its last push, and 'gh pr ready'. The pre-push hook runs the checks on what goes out.
 #
 # It refuses the checkout of main, a detached HEAD, a working tree with changes or untracked
-# files, a merge in progress, and a repository without origin or without origin/main.
+# files, a merge or a rebase in progress, and a repository without origin or without origin/main.
 #
 # Pure bash + coreutils/grep, plus git.
 #
@@ -39,6 +41,12 @@ rest_args "${BASH_SOURCE[0]}" "$usage" 0 "$@"
 
 refuse() { echo "ready-for-main: refused — $1" >&2; exit 1; }
 
+# A stopped rebase detaches HEAD, so it is named before the detached HEAD.
+for dir in rebase-merge rebase-apply; do
+  [[ ! -d "$(git rev-parse --git-path "$dir")" ]] \
+    || refuse "a rebase is in progress; continue it with git rebase --continue, or abort it, then run this again"
+done
+
 branch="$(git symbolic-ref --short -q HEAD)" \
   || refuse "HEAD is detached; switch to the branch of the pull request into main"
 [[ "$branch" != main ]] \
@@ -61,13 +69,23 @@ if ((${#fixups[@]})); then
   exit 1
 fi
 
+# A merge on the branch, refused rather than flattened by the rebase below.
+mapfile -t merges < <(git log --merges --format='%h %s' origin/main..HEAD)
+if ((${#merges[@]})); then
+  echo "ready-for-main: refused — the branch carries ${#merges[@]} merge commit(s) origin/main lacks; rebuild it linearly, one commit per topic (NUC-main-only-via-pr §5; CONTRIBUTING.md, Integration branches, step 7):" >&2
+  printf '  %s\n' "${merges[@]}" >&2
+  exit 1
+fi
+
 # 2. The remote's main, taken up.
+review=""
 if git merge-base --is-ancestor origin/main HEAD; then
   echo "ready-for-main: $branch already contains origin/main."
 else
-  git merge -q --no-edit origin/main \
-    || refuse "the merge of origin/main stopped; resolve and conclude it with git commit, or abort it, then run this again"
-  echo "ready-for-main: $branch took up origin/main."
+  git rebase -q origin/main \
+    || refuse "the rebase onto origin/main stopped; resolve, git add, and git rebase --continue, or git rebase --abort, then run this again"
+  echo "ready-for-main: $branch is rebased onto origin/main."
+  review="review the rebased branch at its head (CONTRIBUTING.md, Integration branches, step 5), then "
 fi
 
 if upstream="$(git rev-parse -q --verify '@{upstream}' 2> /dev/null)"; then
@@ -79,4 +97,4 @@ if upstream="$(git rev-parse -q --verify '@{upstream}' 2> /dev/null)"; then
 else
   push="git push -u origin $branch"
 fi
-echo "ready-for-main: ready. Next, on instruction: $push, then gh pr ready."
+echo "ready-for-main: ready. Next, on instruction: ${review}$push, then gh pr ready."

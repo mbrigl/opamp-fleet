@@ -17,8 +17,8 @@ The reviewer runs in a context that did not write the change and is handed only:
 - the task: the ticket or the request, with its acceptance criteria;
 - [`AGENTS.md` §1](../../../AGENTS.md#1-principles) and
   [§5](../../../AGENTS.md#5-quality-bar--definition-of-done);
-- the *Doubts* section of the hand-off draft under `.scratch/`, the pull request description or
-  merge message that fills the sections of the pull request template
+- the *Doubts* section of the hand-off draft under `.scratch/`, the pull request description that
+  fills the sections of the pull request template
   ([NUC-main-only-via-pr §5](../../../docs/adr/NUC-main-only-via-pr.md)): what the implementer
   disagreed with, what it was unsure of, what it could not confirm, and what a derived project
   acts on;
@@ -89,14 +89,15 @@ the suite and is the first finding.
 Findings, concrete and ranked, with file and line, and what the reviewer itself could not verify:
 each finding that must be fixed before the hand-off with its scenario, a lesser one a line, and no
 account of what is in order. No fixes applied. The implementer fixes the first kind before the
-hand-off, and a lesser one it fixes or names in the hand-off's *Doubts*. On a branch that integrates
-on a `feat/` branch, a fix that corrects one commit is a fixup of it (`git commit --fixup=<commit>`,
-its body saying what the finding was), so the rework folds it in by `git rebase -i --autosquash`
-([Integration branches](../../../CONTRIBUTING.md#integration-branches), step 4) instead of by hand.
-A fix that spans commits, and every fix on a branch whose own pull request goes into `main`, which
-keeps what it merges, is a commit of its own. It records in its *Review* section who reviewed, the
-findings on both axes, what was fixed, and the commit the reviewer was handed, on its `Reviewed at:`
-line. The fixes come after that commit;
+hand-off, and a lesser one it fixes or names in the hand-off's *Doubts*. On a `feat/` branch and
+on a branch that integrates on one, a fix that corrects one commit is a fixup of it
+(`git commit --fixup=<commit>`, its body saying what the finding was). The rework folds it in by
+`git rebase -i --autosquash`, at the latest when the `feat/` branch is rebuilt by topic
+([Integration branches](../../../CONTRIBUTING.md#integration-branches), steps 4 and 7), instead
+of by hand. A fix that spans commits is a commit of its own, and so is every fix on any other
+branch, since `main` keeps what it merges. The hand-off records in its *Review* section who
+reviewed, the findings on both axes, what was fixed, and the commit the reviewer was handed, on its
+`Reviewed at:` line. The fixes come after that commit;
 [`scripts/sensor-review-binding.sh`](../../../scripts/sensor-review-binding.sh) lists them for the
 human who decides the merge, unless a second review sees them first and the line moves. After a
 rework, the pull request's description carries that line.

@@ -22,8 +22,8 @@ itself. The rest of this skill holds as written.
 
 Take the feature spec and its merged tickets: once only its `spec.md` is left, the tickets are the
 files the history deleted from its directory (`git log --diff-filter=D -- docs/plan/<spec>/`).
-The modules those tickets' merges touched are the scope; the rest of the tree is context, not a
-target. One session, one spec.
+The modules the commits those tickets landed touched are the scope; the rest of the tree is
+context, not a target. One session, one spec.
 
 Without a spec, when [`scripts/sensor-revision-due.sh`](../../../scripts/sensor-revision-due.sh)
 says the revision is due, the scope is the directories it lists: the changes since the last
@@ -79,8 +79,8 @@ the accepted ADRs it would move; never land it.
 
 ## 5. Go through the mistakes
 
-From the review findings and the history of the merges in scope, those of the spec's
-tickets or those of the counted changes, list what went wrong on the way. For each: could a
+From the review findings and the history of the commits in scope, those the spec's
+tickets landed or the counted changes, list what went wrong on the way. For each: could a
 check have caught it? Then it becomes a check. Could a convention have prevented it?
 Then it is an entry in [`docs/CONVENTIONS.md`](../../../docs/CONVENTIONS.md).
 
@@ -105,9 +105,10 @@ file gained and lost (`git diff --stat`), so the growth of the rule set is seen 
 
 ## 6. What the work cost and what slowed it
 
-Read what the merges in scope cost. Four sources hold it:
+Read what the work in scope cost. Four sources hold it:
 
-- the `Measures:` line of each merge's hand-off, in the form of
+- the `Measures:` line of each pull request's hand-off, a `feat/` branch's gathering its tickets',
+  in the form of
   [`.github/PULL_REQUEST_TEMPLATE.md`](../../../.github/PULL_REQUEST_TEMPLATE.md): the tokens,
   the seconds of the checks, and the rounds of review;
 - [`scripts/sensor-work-measures.sh`](../../../scripts/sensor-work-measures.sh): the hours from

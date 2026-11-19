@@ -212,7 +212,7 @@ expect pass "a commit on a detached HEAD is not on main" "$d" "" commit -q --all
 
 # merging <name> <docs exit code> <checks exit code> — a fixture with documentation check and
 # check output as told, a branch 'feature' one commit ahead of main that a fast-forward could
-# take, and the integration branch 'feat/x' at main checked out.
+# take, and the branch 'topic' at main checked out.
 merging() {
   local d
   d="$(repo "$1")"
@@ -222,7 +222,7 @@ merging() {
   echo feature > "$d/f"
   g "$d" add f
   g "$d" commit -q --no-verify -m feature
-  git -C "${d:?}" switch -q -c feat/x main
+  git -C "${d:?}" switch -q -c topic main
   echo "$d"
 }
 
@@ -249,12 +249,23 @@ d="$(merging merge-main 0 0)"
 git -C "${d:?}" switch -q main
 expect refuse "a merge on main, though the checks are green" "$d" "on 'main'" merge -q -m m feature
 
-# conflict <name> <checks exit code> <branch> — a merge into the branch stopped on a conflict,
-# resolved and staged, with a green documentation check.
+d="$(merging merge-feat 0 0)"
+git -C "${d:?}" switch -q -c feat/x main
+expect refuse "a merge on a feat/ branch, though the checks are green" "$d" \
+  "which carries no merge commit (NUC-main-only-via-pr §5)" merge -q -m m feature
+
+d="$(merging merge-feat-ff 1 0)"
+git -C "${d:?}" switch -q -c feat/x main
+expect pass "a feat/ branch moves forward by a fast-forward, which runs no hook" "$d" "" merge -q --ff-only feature
+check "the feat/ branch stands at the branch it took up" \
+  test "$(git -C "$d" rev-parse feat/x)" = "$(git -C "$d" rev-parse feature)"
+
+# conflict <name> <checks exit code> <branch> — a merge into the branch, created at main where it
+# is missing, stopped on a conflict, resolved and staged, with a green documentation check.
 conflict() {
   local d
   d="$(merging "$1" 0 "$2")"
-  git -C "${d:?}" switch -q "$3"
+  git -C "${d:?}" switch -q "$3" 2>/dev/null || git -C "${d:?}" switch -q -c "$3" main
   echo other > "$d/f"
   g "$d" add f
   g "$d" commit -q --no-verify -m other
@@ -264,18 +275,22 @@ conflict() {
   echo "$d"
 }
 
-d="$(conflict conflict-red 1 feat/x)"
+d="$(conflict conflict-red 1 topic)"
 expect refuse "concluding a conflicted merge while the checks are red" "$d" "pre-commit: refused — the checks are red" commit -q --no-edit
 
-d="$(conflict conflict-red-clause 1 feat/x)"
+d="$(conflict conflict-red-clause 1 topic)"
 expect refuse "the refusal of a conflicted merge names the clause that runs the checks" "$d" \
   "takes up another (NUC-checks-are-bash §6)" commit -q --no-edit
 
-d="$(conflict conflict-changed 1 feat/x)"
+d="$(conflict conflict-changed 1 topic)"
 expect refuse "concluding a conflicted merge runs the checks with --changed" "$d" "args: --changed" commit -q --no-edit
 
-d="$(conflict conflict-green 0 feat/x)"
+d="$(conflict conflict-green 0 topic)"
 expect pass "concluding a conflicted merge while the checks are green" "$d" "" commit -q --no-edit
+
+d="$(conflict conflict-feat 0 feat/x)"
+expect refuse "concluding a conflicted merge on a feat/ branch, though the checks are green" "$d" \
+  "which carries no merge commit (NUC-main-only-via-pr §5)" commit -q --no-edit
 
 d="$(conflict conflict-main 0 main)"
 expect refuse "concluding a conflicted merge on main, though the checks are green" "$d" "on 'main'" commit -q --no-edit
@@ -290,10 +305,10 @@ edit_index() {
   ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
 }
 
-# indexed <name> <rule on feature> <rule on feat/x> <line below the table on feat/x> [driver] — a
+# indexed <name> <rule on feature> <rule on topic> <line below the table on topic> [driver] — a
 # fixture whose ADR index holds a rule, a row, and a line right below the table, with the
-# repository's .gitattributes and green checks; 'feature' and 'feat/x' each append a row and set the
-# rule as told, and feat/x the line below. The merge driver is configured as CONTRIBUTING.md says,
+# repository's .gitattributes and green checks; 'feature' and 'topic' each append a row and set the
+# rule as told, and topic the line below. The merge driver is configured as CONTRIBUTING.md says,
 # unless the fifth argument is 'none'.
 indexed() {
   local d index
@@ -311,7 +326,7 @@ indexed() {
   g "$d" merge -q --no-verify -m main main
   edit_index "$index" "$2" "| [0002](0002-b.md) |" one
   g "$d" commit -q --no-verify -am row
-  git -C "${d:?}" switch -q -C feat/x main
+  git -C "${d:?}" switch -q -C topic main
   edit_index "$index" "$3" "| [0003](0003-c.md) |" "$4"
   g "$d" commit -q --no-verify -am row
   echo "$d"

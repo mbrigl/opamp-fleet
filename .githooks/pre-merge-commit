@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
-# Git pre-merge-commit hook: no merge on main, and a merge into any other branch passes the
-# documentation check before the branch moves.
+# Git pre-merge-commit hook: no merge on main or on a feat/ branch, and a merge into any other
+# branch passes the documentation check before the branch moves.
 #
 # Changes reach main through a pull request, and the local main only takes up the remote's by a
-# fast-forward. Branches integrate first on a feat/ branch by a local merge
-# (NUC-main-only-via-pr §4, §5).
+# fast-forward (NUC-main-only-via-pr §4). A feat/ branch carries no merge commit: a branch is
+# rebased onto it, and it moves forward by a fast-forward (NUC-main-only-via-pr §5), which makes no
+# commit and runs no hook. Any other merge, on a branch of its own, still passes the gate below.
 # Two branches green on their own collide at a merge mostly in the record: the same ADR identifier,
 # an index row, a link or an anchor the other moved. scripts/check-docs.sh decides those in about a
 # second, so it runs here on the merged tree, which git has written before this hook and before the
@@ -24,7 +25,12 @@ set -uo pipefail
 branch="$(git symbolic-ref --short -q HEAD 2>/dev/null || true)"
 
 if [[ "$branch" == "main" ]]; then
-  echo "pre-merge-commit: refused — the checkout is on 'main', and changes reach main through a pull request (NUC-main-only-via-pr §1, §4). git merge --abort, then merge into a feat/ branch, or take up the remote's main: git merge --ff-only origin/main" >&2
+  echo "pre-merge-commit: refused — the checkout is on 'main', and changes reach main through a pull request (NUC-main-only-via-pr §1, §4). git merge --abort, then rebase the branch onto a feat/ branch, or take up the remote's main: git merge --ff-only origin/main" >&2
+  exit 1
+fi
+
+if [[ "$branch" == feat/* ]]; then
+  echo "pre-merge-commit: refused — the checkout is on the feat/ branch '$branch', which carries no merge commit (NUC-main-only-via-pr §5). git merge --abort, then rebase the branch onto it and move it forward: git rebase $branch <branch>, then git switch $branch && git merge --ff-only <branch>" >&2
   exit 1
 fi
 

@@ -4,20 +4,19 @@
 #
 # The tag annotation and the GitHub release must say what a derived project does to take a
 # release up (NUC-releases-are-semver-tags §2). Every hand-off says it under Doubts, in the field
-# 'A derived project acts on' of .github/PULL_REQUEST_TEMPLATE.md. For each merge since the last
-# release tag, the oldest first, this sensor prints that field, the lines that follow it indented
-# included, and where it came from:
-#
-#   - a merge of a pull request, 'Merge pull request #<n> from …': the field of its description,
-#     read through gh; where gh cannot read it, the field of its merge message, if any. The
-#     subject and the gh call are those of scripts/sensor-work-measures.sh, its twin;
-#   - any other merge whose message carries the field, such as a ticket merged into a feat/
-#     branch, whose message is its hand-off. One whose field a pull request repeats word for word
-#     is named once, as the same as that pull request.
+# 'A derived project acts on' of .github/PULL_REQUEST_TEMPLATE.md. The hand-off of a branch is the
+# description of its pull request into main; a feat/ branch integrates linearly, so no other
+# merge carries one (NUC-main-only-via-pr §5). For each merge of a pull request on the
+# first-parent line of main since the last release tag, 'Merge pull request #<n> from …', the
+# oldest first, this sensor prints that field, the lines that follow it indented included, and
+# where it came from: the description, read through gh; where gh cannot read it, the merge
+# message, if it carries the field. The subject and the gh call are those of
+# scripts/sensor-work-measures.sh, its twin. Any other merge is not read.
 #
 # A field that says none, nothing, or '-' stands on one line, as do an empty field and a
 # description without the field. The headline counts the merges listed. Whoever cuts the release
-# writes the notes from this list (CONTRIBUTING.md → Cutting a release).
+# writes the notes from this list (NUC-releases-are-semver-tags §2). This project tags its
+# releases version/X.Y.Z (README.md → Releases), so it runs with --since version/X.Y.Z.
 #
 # It runs on a human's instruction, not in scripts/check-all.sh or checks.yml, since it reads
 # GitHub (NUC-checks-are-bash §7). It reports and never fails. scripts/test-sensor-release-notes.sh
@@ -80,10 +79,10 @@ field() {
     END { exit !found }'
 }
 
-# Every merge since the tag, the oldest first: '<hash> <subject>'.
-mapfile -t merges < <(git -C "$ROOT" log --reverse --merges --format='%H %s' "$since..HEAD" --)
+# Every merge on the first-parent line since the tag, the oldest first: '<hash> <subject>'.
+mapfile -t merges < <(git -C "$ROOT" log --reverse --first-parent --merges --format='%H %s' "$since..HEAD" --)
 
-# First the field of each merge, so that a ticket's field a pull request repeats is named once.
+# The field of each merge of a pull request.
 declare -A text from pr_of
 for entry in "${merges[@]}"; do
   hash="${entry%% *}" subject="${entry#* }"
@@ -97,35 +96,19 @@ for entry in "${merges[@]}"; do
       from[$hash]=message
       text[$hash]="$(field <<< "$message")" || from[$hash]=unread
     fi
-  elif text[$hash]="$(field <<< "$message")"; then
-    from[$hash]=merge
   fi
-done
-
-# The pull request whose field is the same text, by its words.
-words() { tr -s ' \t\n' ' ' <<< "$1" | sed 's/^ //; s/ $//'; }
-declare -A by_words
-for hash in "${!pr_of[@]}"; do
-  [[ "${from[$hash]}" == description || "${from[$hash]}" == message ]] || continue
-  [[ -n "${text[$hash]}" ]] || continue
-  by_words[$(words "${text[$hash]}")]="${pr_of[$hash]%% *}"
 done
 
 lines=()
 for entry in "${merges[@]}"; do
-  hash="${entry%% *}" subject="${entry#* }"
+  hash="${entry%% *}"
   [[ -n "${from[$hash]:-}" ]] || continue
-  if [[ -n "${pr_of[$hash]:-}" ]]; then name="${pr_of[$hash]}"; else name="$(git -C "$ROOT" rev-parse --short "$hash") $subject"; fi
+  name="${pr_of[$hash]}"
   case "${from[$hash]}" in
     no-field) lines+=("  - $name: its pull request description has no field 'A derived project acts on'."); continue ;;
     unread) lines+=("  - $name: its pull request description was not read, and its merge message has no field 'A derived project acts on'."); continue ;;
     description) source_of="from its pull request description" ;;
     message) source_of="from its merge message, since its pull request description was not read" ;;
-    merge)
-      same=""
-      [[ -z "${text[$hash]}" ]] || same="${by_words[$(words "${text[$hash]}")]:-}"
-      if [[ -n "$same" ]]; then lines+=("  - $name: the same as $same, listed there."); continue; fi
-      source_of="from its merge message" ;;
   esac
   value="${text[$hash]}"
   if [[ -z "$value" ]]; then

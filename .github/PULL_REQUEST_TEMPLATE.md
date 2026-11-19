@@ -1,8 +1,8 @@
-<!-- The hand-off of a change: the description of its pull request, or the message of its merge
-     into a feat/ branch ([NUC-main-only-via-pr §5](../docs/adr/NUC-main-only-via-pr.md)). Keep
-     changes small and reviewable. Write everything in English. State what a reviewer can verify
-     against the diff, a test, or an output; a claim nothing shows is one the reviewer has to redo.
-     -->
+<!-- The hand-off of a change: the description of its pull request. The pull request of a feat/
+     branch hands off the whole branch and gathers the hand-offs of the branches it integrates
+     ([NUC-main-only-via-pr §5](../docs/adr/NUC-main-only-via-pr.md)). Keep changes small and
+     reviewable. Write everything in English. State what a reviewer can verify against the diff,
+     a test, or an output; a claim nothing shows is one the reviewer has to redo. -->
 
 ## Summary
 
@@ -83,6 +83,6 @@
      its findings on the two axes (does it do what was asked, does it meet the bar), and what
      was fixed. The commit the review saw, by hash: scripts/sensor-review-binding.sh lists what
      landed after it. In the description of a feat/ branch's pull request, the review of the whole
-     branch at its head, which covers the merges it carries. -->
+     branch at its head, which covers every commit it carries. -->
 
 - Reviewed at:

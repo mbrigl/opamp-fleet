@@ -85,15 +85,21 @@ itself. The rest of this skill holds as written.
 
 1. Each finished branch goes to a fresh session that did not write it, through
    [`review`](../review/SKILL.md), of the agent and model the harness ADR names for reviewing.
-2. The branch reaches `main` by its pull request, or merges into the `feat/` branch the human
-   names ([NUC-main-only-via-pr §5](../../../docs/adr/NUC-main-only-via-pr.md)); its hand-off is the
-   pull request's description or the merge's message. A ticket whose spec has no ticket file left
-   hands that spec to [`design-revision`](../design-revision/SKILL.md).
-3. Remove each finished worktree (`git worktree remove .scratch/worktrees/<spec>-<NN>-<slug>`)
-   and, once its work is on `main`, its branch: a ticket merged into a `feat/` branch keeps its
-   branch until then, since `main` still has its file and the branch is what claims it; prune
-   the branches a remote has deleted (`git fetch --prune`),
-   since the sensor reads remote ones as claims; run it again, and claim from the new frontier.
-   A claim given up without a merge is released by deleting its branch, only on the human's
+2. The branch reaches `main` by its pull request, or is rebased onto the `feat/` branch the human
+   names ([NUC-main-only-via-pr §5](../../../docs/adr/NUC-main-only-via-pr.md)). Its hand-off is
+   the pull request's description; on a `feat/` branch, the description of that branch's pull
+   request gathers it. A ticket whose spec has no ticket file left hands that spec to
+   [`design-revision`](../design-revision/SKILL.md).
+3. Before it removes a finished worktree, the dispatching session copies the ticket's hand-off
+   draft from the worktree's `.scratch/` to `.scratch/<spec>-<NN>-<slug>.md` of the main checkout.
+   There the pull request of a `feat/` branch gathers it
+   ([Integration branches](../../../CONTRIBUTING.md#integration-branches), step 6). Then remove
+   the worktree (`git worktree remove .scratch/worktrees/<spec>-<NN>-<slug>`) and, once its work
+   is on `main`, its branch. A ticket rebased onto a `feat/` branch keeps its branch until then,
+   since `main` still has its file and the branch is what claims it. The rebuild of the `feat/`
+   branch by topic rewrites its commits, so its deletion then takes `git branch -D`. Prune the
+   branches a remote has deleted (`git fetch --prune`), since the sensor reads remote ones as
+   claims; run it again, and claim from the new frontier.
+   A claim given up without landing is released by deleting its branch, only on the human's
    instruction ([NUC-main-only-via-pr §2](../../../docs/adr/NUC-main-only-via-pr.md)); on a
    remote, the human deletes it, since the push the harness ADR grants only creates.

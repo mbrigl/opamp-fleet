@@ -162,6 +162,28 @@ each ticket by its branch in a git worktree of its own and starts a fresh sessio
 non-interactive command of whichever agent the project's harness ADR names, and the session works
 the ticket through the `work-tickets` skill.
 
+### Measuring a session
+
+Claude Code exports tokens and cost per session, model, and call through OpenTelemetry, as one
+harness's example. A contributor turns it on in the `env` of the user settings
+`~/.claude/settings.json`, which no commit carries:
+
+```json
+"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+"OTEL_METRICS_EXPORTER": "otlp",
+"OTEL_LOGS_EXPORTER": "otlp",
+"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+"OTEL_EXPORTER_OTLP_ENDPOINT": "http://172.17.0.1:4318"
+```
+
+The collector runs on the host, outside the container, which starts no container of its own
+([NUC-container-hides-host-daemon](docs/adr/NUC-container-hides-host-daemon.md)).
+`172.17.0.1` is the host on the default bridge of Docker on Linux; Docker Desktop names it
+`host.docker.internal`. The collector listens on that interface. The event
+`claude_code.api_request` carries the tokens of each call. The tokens of a hand-off's `Measures:`
+line come from there, or from `nuc measure` of
+[hivevm/nuc-tools#81](https://github.com/hivevm/nuc-tools/issues/81).
+
 ## Git hooks
 
 Git does not version its hooks, so the repository keeps them under [`.githooks/`](.githooks/).
@@ -175,19 +197,22 @@ git config pull.ff only
 git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'
 ```
 
-`merge.ff false` makes every merge a merge commit, as a `feat/` branch keeps them
-([NUC-main-only-via-pr §5](docs/adr/NUC-main-only-via-pr.md)); a fast-forward would make no commit
-and run no hook. `pull.ff only` keeps a pull from then making a merge. Without the two settings the
-hooks still hold: a fast-forward skips the documentation check of `pre-merge-commit`, and the push
-still gates what it brought. The merge driver of the ADR index keeps the rows both sides add and
-stops on its prose ([`.githooks/merge-adr-index`](.githooks/merge-adr-index)); without it, every row
-two branches append conflicts.
+`merge.ff false` makes every merge a merge commit, so that any merge on `main` is a merge commit
+the `pre-merge-commit` hook refuses, and any other merge one it gates; a fast-forward would make
+no commit and run no hook. A `feat/` branch carries no merge commit
+([NUC-main-only-via-pr §5](docs/adr/NUC-main-only-via-pr.md)), and the hook refuses one there
+too: it moves forward only by `git merge --ff-only`, which overrides the setting. `pull.ff only`
+keeps a pull from then making a merge. Without the two settings the hooks still hold: a
+fast-forward skips the documentation check of `pre-merge-commit`, and the push still gates what it
+brought. The merge driver of the ADR index keeps the rows both sides add and stops on its prose
+([`.githooks/merge-adr-index`](.githooks/merge-adr-index)); without it, every row two branches
+append conflicts.
 
 | Hook | Refuses | Bypassed by |
 |---|---|---|
 | `reference-transaction` | moving the local `main` to a commit `origin/main` lacks: by a commit, merge, cherry-pick, reset, or `git branch -f`. It lets through `git merge --ff-only origin/main`, a reset to it, `git fetch origin main:main`, a write of `main` where it already is, and a deletion. Needs git 2.28 or later. | running git without the hooks (`git -c core.hooksPath=/dev/null`), or moving `origin/main` by hand; not by `--no-verify` |
-| `pre-commit` | a commit on `main`; any other commit while `scripts/check-docs.sh` is red on the working tree; the conclusion of a conflicted merge while `scripts/check-all.sh --changed` is red | `--no-verify` |
-| `pre-merge-commit` | a merge on `main`; a merge into any other branch while `scripts/check-docs.sh` is red | `--no-verify` |
+| `pre-commit` | a commit on `main`; any other commit while `scripts/check-docs.sh` is red on the working tree; the conclusion of a conflicted merge on a `feat/` branch, and elsewhere while `scripts/check-all.sh --changed` is red | `--no-verify` |
+| `pre-merge-commit` | a merge on `main` or on a `feat/` branch; a merge into any other branch while `scripts/check-docs.sh` is red | `--no-verify` |
 | `pre-push` | a push to the remote's `main`, a deletion included; any other push while `scripts/check-all.sh --changed` is red, except one that only deletes, and one from a clean working tree whose tree the checks passed on before, as after a rework that only regroups | `--no-verify`, as the claim on a ticket does ([NUC-main-only-via-pr §6](docs/adr/NUC-main-only-via-pr.md)); a tree written by hand into `checks-green-trees` of the git directory |
 
 With `--changed`, the self-tests of what the branch left untouched since `main` are skipped; CI runs
@@ -199,42 +224,56 @@ says what to do instead.
 ## Integration branches
 
 A change reaches `main` through a pull request. Several branches may integrate first on a
-`feat/` branch, by local merges or by pull requests against it, and it stays the human's to
-rework until its pull request into `main` merges
-([NUC-main-only-via-pr §5](docs/adr/NUC-main-only-via-pr.md)). Each step waits for a human's
-instruction ([NUC-main-only-via-pr §2](docs/adr/NUC-main-only-via-pr.md)).
+`feat/` branch, each rebased onto it, and it stays the human's to rework until its pull request
+into `main` merges ([NUC-main-only-via-pr §5](docs/adr/NUC-main-only-via-pr.md)). A `feat/`
+branch carries no merge commit. Each step waits for a human's instruction
+([NUC-main-only-via-pr §2](docs/adr/NUC-main-only-via-pr.md)).
 
 1. Start it at the remote's `main`: `git fetch origin`, then
    `git switch -c feat/<topic> origin/main`.
-2. Merge a reviewed branch into it with its hand-off as the message, written to a file since an
-   editor strips its headings: `git merge --no-ff -F .scratch/<hand-off>.md <branch>`. The
-   documentation check gates the merge, and the push of step 6 runs the rest. One that stops on a
-   conflict is concluded, once resolved and staged, with `git commit -F .scratch/<hand-off>.md`,
-   and all the checks gate that commit.
-3. Or merge it by a pull request against the `feat/` branch, so that its pipelines run what the
-   local gate cannot, such as another platform or a service
-   ([NUC-main-only-via-pr §5](docs/adr/NUC-main-only-via-pr.md)). With both branches pushed, on
-   the branch: `gh pr create --base feat/<topic> --body-file .scratch/<hand-off>.md`, and once it
-   is green, `gh pr merge <number> --merge --body-file .scratch/<hand-off>.md`, never by the web
-   interface, whose merge commit drops the hand-off. Then, on the `feat/` branch,
-   `git fetch origin` and `git merge --ff-only origin/feat/<topic>`.
+2. Integrate a reviewed branch linearly. On it, `git rebase feat/<topic>`; then, on the `feat/`
+   branch, `git merge --ff-only <branch>`, which moves it forward to the rebased commits. A
+   rebase that stops on a conflict goes on, once resolved and staged, with
+   `git rebase --continue`. The push of step 6 runs the checks. The branch's hand-off draft stays
+   under `.scratch/` of the main checkout for the description of step 6. The dispatching session
+   copies a ticket's draft there as `.scratch/<spec>-<NN>-<slug>.md` before it removes the
+   ticket's worktree, as the `work-tickets` skill says.
+3. Or test it in the pipelines first, so that they run what the local gate cannot, such as
+   another platform or a service
+   ([NUC-main-only-via-pr §5](docs/adr/NUC-main-only-via-pr.md)). Rebase it onto the `feat/`
+   branch as in step 2, push both, and on the branch
+   `gh pr create --base feat/<topic> --body-file .scratch/<hand-off>.md`. Once it is green, move
+   the `feat/` branch forward to it by `git merge --ff-only` as in step 2, and push it. GitHub
+   marks the pull request merged only when its current head reaches the base. If the `feat/`
+   branch moved since the pull request opened, rebase the branch onto it again, push it with
+   `git push --force-with-lease`, and wait for green before the fast-forward. Never merge it by
+   `gh pr merge` or the web interface, which write a merge commit or new commits. Never use
+   GitHub's "Update branch", which writes a merge; only "Update with rebase" keeps it linear.
 4. Rework it as often as needed: rebase it, regroup its commits, or drop what did not hold,
-   with `git rebase -i --autosquash --rebase-merges`. `--autosquash` folds in the fixups a review
-   leaves, as the `review` skill says; without `--rebase-merges` the merges flatten, and their
-   hand-offs with them. A pull request still open against the `feat/` branch is rebased onto the
+   with `git rebase -i --autosquash`. `--autosquash` folds in the fixups a review leaves, as the
+   `review` skill says. A pull request still open against the `feat/` branch is rebased onto the
    rework.
 5. After a rework, review the whole branch at its head
    ([`AGENTS.md` §5](AGENTS.md#5-quality-bar--definition-of-done)) and name that commit on the
    `Reviewed at:` line of the pull request of step 6, which
    [`review-binding.yml`](.github/workflows/review-binding.yml) reads on every push and edit.
 6. Test it in the pipelines: `git push -u origin feat/<topic>`, then open a draft pull request,
-   `gh pr create --draft --base main`, which runs them on every push against what the merge
-   into `main` would produce. A branch kept without a pull request, such as an experiment, runs
-   them by hand: `gh workflow run checks.yml --ref feat/<topic>`. A rework already pushed goes out
-   with `git push --force-with-lease`.
-7. Make the pull request ready: [`scripts/ready-for-main.sh`](scripts/ready-for-main.sh) refuses
-   a fixup steps 4 to 6 left and takes up the remote's `main`; then the push it names and
-   `gh pr ready`. What `main` gains later is taken up the same way.
+   `gh pr create --draft --base main --body-file .scratch/<hand-off>.md`, which runs them on every
+   push against what the merge into `main` would produce. Its description is the hand-off of the
+   whole branch: it gathers the summaries, the doubts, and what a derived project acts on from the
+   hand-off drafts of the branches it integrates, which step 2 keeps under `.scratch/`. A branch
+   kept without a pull request, such as an experiment, runs them by hand:
+   `gh workflow run checks.yml --ref feat/<topic>`. A rework already pushed goes out with
+   `git push --force-with-lease`.
+7. Make the pull request ready. First rebuild the branch on `main` as one commit per topic:
+   `git fetch origin`, then `git rebase -i --autosquash origin/main`. A topic that changes ADRs
+   carries them in a commit of ADRs only, before its code. Each topic's message names the work it
+   folds, such as the tickets and the reviewed branches.
+   [`scripts/ready-for-main.sh`](scripts/ready-for-main.sh) then refuses a fixup the rework left,
+   and rebases the branch onto the remote's `main` where it lacks it. The rebuild is a rework, so
+   the review of step 5 follows; then the push the script names, and `gh pr ready`. What `main`
+   gains later is taken up by the script again, and the review of step 5 follows it again. Never
+   take `main` up by GitHub's "Update branch", which writes a merge into the branch.
 8. Once the pull request into `main` has merged as a merge commit, take it up and drop the branch:
    on it, [`scripts/drop-merged-branch.sh`](scripts/drop-merged-branch.sh) refuses a branch
    `origin/main` lacks, takes up the remote's `main`, and deletes the local branch; then the
@@ -248,8 +287,9 @@ repository itself, configured once by a maintainer and worth re-checking after a
 or transfer:
 
 - a **ruleset on `main`** that requires pull requests and allows the merge method **merge commit**
-  only, since squash and rebase discard the merges a `feat/` branch carries and the commits it
-  was reworked into ([NUC-main-only-via-pr §4](docs/adr/NUC-main-only-via-pr.md)); requires the
+  only, since squash folds the topics of a `feat/` branch into one, and rebase writes new
+  commits in place of those a review saw
+  ([NUC-main-only-via-pr §4](docs/adr/NUC-main-only-via-pr.md)); requires the
   <!-- required-checks begin — compared with the workflow's jobs by scripts/check-docs.sh -->
   `docs`, `traceability`, `devcontainer`, `actions`, `sensors`, `shell`, `rust`,
   `client-windows`, `client-macos`, `s3-store`, and `postgres-store`

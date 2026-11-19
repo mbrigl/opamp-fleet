@@ -3,14 +3,14 @@
 # Self-test of scripts/sensor-review-binding.sh.
 #
 # Each case builds a throwaway git repository under a temporary directory with a main tagged
-# 'base' and a feat/ branch at it, merges one or more branches into that with --no-ff and a chosen
-# message, runs the sensor against the base, and asserts the exit code and the line a reader would
-# meet. The cases cover a review at the tip, commits after the review, the three ways the line
-# binds nothing, the feat/ branch taking up main, the defaults, a rework and the hand-off of the
-# whole branch that covers it, commits outside any merge, alone and among merges, listed unless
-# the hand-off covers them, and a base that does not resolve. The cases after them commit ADRs
-# and code together and apart: the text of an ADR with other paths is listed, its Status, Date,
-# and Deciders lines and the index are not, inside a merged branch too.
+# 'base' and a feat/ branch at it, commits onto that branch linearly, runs the sensor against the
+# base, with or without a hand-off, and asserts the exit code and the line a reader would meet.
+# The cases cover a branch without commits, commits bound only by a hand-off when none is given,
+# a hand-off reviewed at the head, commits after its review, the ways its line binds nothing,
+# the defaults, the synthetic merge of CI, a rework, a merge on the branch and main taken up by
+# one, and a base that does not resolve. The cases after them commit ADRs and code together and
+# apart: the text of an ADR with other paths is listed, its Status, Date, and Deciders lines and
+# the index are not, inside a merged branch too.
 #
 # Verifies: NUC-checks-are-bash
 # Inputs: scripts/sensor-review-binding.sh scripts/lib/
@@ -60,193 +60,15 @@ merge() {
   g "$1" merge -q --no-ff -m "$3" "$2"
 }
 
-# expect <exit code> <name> <dir> <needle> [base] — run the sensor in the repository against the
-# given base (default 'base'); the output must contain the needle.
-expect() {
-  local want="$1" name="$2" dir="$3" needle="$4" base="${5-base}"
-  local out rc
+# report <name> <dir> <exit code> <needle> <absent> [args...] — run the sensor in the repository
+# with the arguments (default 'base'); it must exit with the code, and its output must contain
+# the needle and, unless empty, not the absent.
+report() {
+  local name="$1" dir="$2" want="$3" needle="$4" absent="$5" out rc
+  shift 5
+  (($#)) || set -- base
   fixture "$dir"
-  out="$(bash "$SENSOR" --root "$dir" "$base" 2>&1)"; rc=$?
-  if [[ $rc -eq "$want" && "$out" == *"$needle"* ]]; then
-    passed=$((passed + 1))
-    return
-  fi
-  failed=$((failed + 1))
-  echo "FAIL: $name (expected exit $want with \"$needle\", got exit $rc)" >&2
-  while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
-}
-
-# reject <name> <dir> <needle> [base] — run the sensor against the given base (default 'base');
-# the output must not contain the needle.
-reject() {
-  local name="$1" dir="$2" needle="$3" base="${4-base}" out
-  fixture "$dir"
-  out="$(bash "$SENSOR" --root "$dir" "$base" 2>&1)"
-  if [[ "$out" != *"$needle"* ]]; then
-    passed=$((passed + 1))
-    return
-  fi
-  failed=$((failed + 1))
-  echo "FAIL: $name (\"$needle\" reported)" >&2
-  while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
-}
-
-# --- cases -----------------------------------------------------------------------------------
-
-d="$(repo at-tip)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-tip="$(g "$d" rev-parse topic)"
-merge "$d" topic "$(printf 'Merge topic\n\n## Review\n\n- Reviewed at: %s\n' "$tip")"
-expect 0 "a review at the tip is counted" "$d" "1 merge since"
-expect 0 "a review at the tip is reported as such" "$d" "1 reviewed at the tip of its branch"
-reject "a review at the tip lists nothing" "$d" "  - "
-
-d="$(repo short-sha)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-tip="$(g "$d" rev-parse --short topic)"
-# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
-merge "$d" topic "$(printf 'Merge topic\n\nReviewed at: `%s`\n' "$tip")"
-expect 0 "a short commit in backticks binds the review" "$d" "1 reviewed at the tip"
-
-d="$(repo after-review)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "reviewed work"
-reviewed="$(g "$d" rev-parse topic)"
-change "$d" src/b.py "fix the findings"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$reviewed")"
-expect 0 "commits after the review are counted" "$d" "1 commit after the review at ${reviewed:0:7}, unreviewed:"
-expect 0 "commits after the review are listed" "$d" "fix the findings"
-expect 0 "the unreviewed diff is summed up" "$d" "src/b.py"
-reject "the reviewed commit is not listed" "$d" "reviewed work"
-reject "the reviewed diff is not summed up" "$d" "src/a.py"
-expect 0 "a merge with commits after the review is not at the tip" "$d" "0 reviewed at the tip"
-
-d="$(repo branch-name)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: topic\n')"
-expect 0 "a name that moves with the branch binds nothing" "$d" "reviewed at 'topic', which is no commit of the merged branch"
-
-d="$(repo hex-ref)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-g "$d" tag cafe123
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: cafe123\n')"
-expect 0 "a ref whose name looks like a hash binds nothing" "$d" "reviewed at 'cafe123', which is no commit of the merged branch"
-
-d="$(repo two-lines)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at:\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"
-expect 0 "an empty placeholder before the filled line is passed over" "$d" "1 reviewed at the tip"
-
-d="$(repo no-line)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "Merge topic"
-expect 0 "a merge message without the line" "$d" "no 'Reviewed at:' commit in its message"
-
-d="$(repo empty-line)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at:\n')"
-expect 0 "the template's line left empty" "$d" "no 'Reviewed at:' commit in its message"
-
-d="$(repo unknown-sha)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: deadbeef\n')"
-expect 0 "a commit that does not resolve" "$d" "reviewed at 'deadbeef', which is no commit of the merged branch"
-
-d="$(repo main-sha)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse base)")"
-expect 0 "a commit the feat/ branch already had before the merged one" "$d" "which is no commit of the merged branch"
-
-d="$(repo other-branch)"
-g "$d" switch -q -c other
-change "$d" src/o.py "elsewhere"
-other="$(g "$d" rev-parse other)"
-g "$d" switch -q feat/x
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$other")"
-expect 0 "a commit of another branch" "$d" "which is no commit of the merged branch"
-
-d="$(repo two-merges)"
-g "$d" switch -q -c one
-change "$d" src/a.py "one"
-merge "$d" one "$(printf 'Merge one\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse one)")"
-g "$d" switch -q -c two
-change "$d" src/b.py "two"
-merge "$d" two "Merge two"
-expect 0 "every merge since the base is read" "$d" "2 merges since"
-expect 0 "the merge without the line is the one listed" "$d" "Merge two: no 'Reviewed at:'"
-reject "the merge reviewed at its tip is not listed" "$d" "Merge one:"
-
-d="$(repo branch-merges)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-g "$d" switch -q -c inner
-change "$d" src/b.py "inner work"
-g "$d" switch -q topic
-g "$d" merge -q --no-ff -m "Merge inner" inner
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"
-expect 0 "a merge inside the branch is not a hand-off" "$d" "1 merge since"
-
-# Without a head or base, the branch checked out is read from its merge base with main.
-d="$(repo defaults)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"
-out="$(bash "$SENSOR" --root "$d" 2>&1)"
-if [[ "$out" == *"1 merge since $(g "$d" rev-parse --short base)"* ]]; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1))
-  echo "FAIL: without arguments, the branch checked out is read from its merge base with main" >&2
-  while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
-fi
-
-# The feat/ branch takes up what main gained: that merge lands no branch and is passed over.
-d="$(repo take-up)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"
-g "$d" switch -q main
-change "$d" src/m.py "on main"
-g "$d" switch -q feat/x
-g "$d" merge -q --no-ff -m "Merge branch 'main' into feat/x" main
-expect 0 "taking up main is passed over" "$d" "1 merge since" "main"
-reject "taking up main is no hand-off" "$d" "Merge branch 'main'" "main"
-
-# CI checks out a synthetic merge of the pull request into its base and passes the head.
-d="$(repo pull-request)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"
-pr_head="$(g "$d" rev-parse feat/x)"
-g "$d" switch -q --detach base
-g "$d" merge -q --no-ff -m "Merge $pr_head into base" "$pr_head"
-out="$(bash "$SENSOR" --root "$d" base "$pr_head" 2>&1)"
-if [[ "$out" == *"1 reviewed at the tip"* && "$out" != *"Merge $pr_head"* ]]; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1))
-  echo "FAIL: the pull request's head is read, not the synthetic merge" >&2
-  while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
-fi
-
-# hand_off <exit code> <name> <dir> <needle> <absent> <text> — run the sensor against 'base' with
-# the text as the hand-off; the output must contain the needle and, unless empty, not the absent.
-hand_off() {
-  local want="$1" name="$2" dir="$3" needle="$4" absent="$5" out rc
-  fixture "$dir"
-  printf '%s\n' "$6" > "$work/hand-off.md"
-  out="$(bash "$SENSOR" --root "$dir" --hand-off "$work/hand-off.md" base 2>&1)"; rc=$?
+  out="$(bash "$SENSOR" --root "$dir" "$@" 2>&1)"; rc=$?
   if [[ $rc -eq "$want" && "$out" == *"$needle"* && ( -z "$absent" || "$out" != *"$absent"* ) ]]; then
     passed=$((passed + 1))
     return
@@ -256,44 +78,84 @@ hand_off() {
   while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
 }
 
-# A rework: main gains a commit and the feat/ branch is rebased onto it, merges kept. The line
-# in the merge names a commit the rebase replaced.
-d="$(repo rework)"
-g "$d" switch -q -c topic
-change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"
-g "$d" switch -q main
-change "$d" src/m.py "on main"
-g "$d" tag base -f >/dev/null
-g "$d" switch -q feat/x
-g "$d" rebase -q --rebase-merges main >/dev/null 2>&1
-expect 0 "a rebase leaves the merge bound to a commit it replaced" "$d" "which is no commit of the merged branch"
-hand_off 0 "a hand-off reviewed at the head covers the merges" "$d" \
-  "the hand-off was reviewed at the head" "Merge topic" "$(printf '## Review\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse HEAD)")"
+# expect <exit code> <name> <dir> <needle> — the sensor against 'base' prints the needle.
+expect() { report "$2" "$3" "$1" "$4" ""; }
 
-d="$(repo hand-off-after)"
-g "$d" switch -q -c topic
+# reject <name> <dir> <needle> — the sensor against 'base' does not print the needle.
+reject() { report "$1" "$2" 0 "" "$3"; }
+
+# hand_off <exit code> <name> <dir> <needle> <absent> <text> — run the sensor against 'base' with
+# the text as the hand-off; the output must contain the needle and, unless empty, not the absent.
+hand_off() {
+  printf '%s\n' "$6" > "$work/hand-off.md"
+  report "$2" "$3" "$1" "$4" "$5" --hand-off "$work/hand-off.md" base
+}
+
+# --- a branch without a hand-off -------------------------------------------------------------
+
+d="$(repo empty)"
+expect 0 "a branch without commits has nothing to read" "$d" \
+  "no commit since $(g "$d" rev-parse --short base) — nothing to read."
+
+d="$(repo linear)"
+change "$d" src/a.py "first linear"
+change "$d" src/b.py "second linear"
+expect 0 "commits without a hand-off are bound only by one, and the option is named" "$d" \
+  "2 commits since $(g "$d" rev-parse --short base), bound only by a hand-off: name the pull request's description with --hand-off <file>."
+reject "commits without a hand-off are no finding" "$d" "  - "
+reject "commits without a hand-off leave nothing that reads as clean" "$d" "nothing to read"
+
+d="$(repo one)"
 change "$d" src/a.py "work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"
-reviewed="$(g "$d" rev-parse HEAD)"
-change "$d" src/b.py "fix the findings"
-hand_off 0 "commits after the hand-off's review are listed" "$d" \
-  "the hand-off: 1 commit after the review at ${reviewed:0:7}, unreviewed:" "" "- Reviewed at: $reviewed"
+expect 0 "one commit is counted as one" "$d" "1 commit since"
+reject "a history without ADRs mixes nothing" "$d" "mixing ADR text"
+
+# --- the hand-off of the whole branch --------------------------------------------------------
+
+d="$(repo at-head)"
+change "$d" src/a.py "first linear"
+change "$d" src/b.py "second linear"
+hand_off 0 "a hand-off reviewed at the head covers the commits" "$d" \
+  "the hand-off was reviewed at the head, $(g "$d" rev-parse --short HEAD), which covers the 2 commits since $(g "$d" rev-parse --short base)." \
+  "  - " "$(printf '## Review\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse HEAD)")"
+# shellcheck disable=SC2016  # the backticks are literal Markdown, not a command substitution
+hand_off 0 "a short commit in backticks binds the review" "$d" \
+  "the hand-off was reviewed at the head" "" "$(printf 'Reviewed at: `%s`\n' "$(g "$d" rev-parse --short HEAD)")"
+hand_off 0 "an empty placeholder before the filled line is passed over" "$d" \
+  "the hand-off was reviewed at the head" "" \
+  "$(printf -- '- Reviewed at:\n- Reviewed at: %s\n' "$(g "$d" rev-parse HEAD)")"
+hand_off 0 "a hand-off reviewed before the head lists the commits after the review" "$d" \
+  "the hand-off: 1 commit after the review at $(g "$d" rev-parse --short HEAD~1), unreviewed:"$'\n'"    $(g "$d" rev-parse --short HEAD) second linear" \
+  "first linear" "- Reviewed at: $(g "$d" rev-parse HEAD~1)"
+hand_off 0 "the unreviewed diff is summed up" "$d" "src/b.py" "src/a.py" \
+  "- Reviewed at: $(g "$d" rev-parse HEAD~1)"
+hand_off 0 "the headline of a hand-off before the head counts the finding below" "$d" \
+  "2 commits since $(g "$d" rev-parse --short base), bound only by the hand-off; 1 finding below." "" \
+  "- Reviewed at: $(g "$d" rev-parse HEAD~1)"
 hand_off 0 "a comma after the hash leaves it readable" "$d" \
-  "the hand-off: 1 commit after the review at ${reviewed:0:7}" "" "- Reviewed at: ${reviewed:0:7}, two rounds"
-hand_off 0 "a hand-off not reviewed at the head leaves the merges read" "$d" \
-  "1 merge since" "" "- Reviewed at: $reviewed"
+  "the hand-off: 1 commit after the review at $(g "$d" rev-parse --short HEAD~1)" "" \
+  "- Reviewed at: $(g "$d" rev-parse --short HEAD~1), two rounds"
 
-d="$(repo hand-off-empty)"
-change "$d" src/a.py "work"
 hand_off 0 "a hand-off without the line" "$d" "the hand-off: no 'Reviewed at:' commit" "nothing to read" \
   "$(printf '## Review\n\n- Reviewed at:\n')"
+hand_off 0 "a hand-off bound to nothing names no option" "$d" "bound only by the hand-off; 1 finding below." \
+  "--hand-off <file>" "- Reviewed at:"
 hand_off 0 "a hand-off naming a commit before the branch" "$d" \
   "the hand-off: reviewed at '$(g "$d" rev-parse base)', which is no commit of the branch since the base" "" \
   "- Reviewed at: $(g "$d" rev-parse base)"
-
-hand_off 0 "a hand-off reviewed at the head of a branch without merges claims to cover none" "$d" \
-  "the hand-off was reviewed at the head" "covers" "- Reviewed at: $(g "$d" rev-parse HEAD)"
+hand_off 0 "a hand-off naming a commit that does not resolve" "$d" \
+  "reviewed at 'deadbeef', which is no commit of the branch since the base" "" "- Reviewed at: deadbeef"
+hand_off 0 "a name that moves with the branch binds nothing" "$d" \
+  "reviewed at 'feat/x', which is no commit of the branch since the base" "" "- Reviewed at: feat/x"
+g "$d" tag cafe123
+hand_off 0 "a ref whose name looks like a hash binds nothing" "$d" \
+  "reviewed at 'cafe123', which is no commit of the branch since the base" "" "- Reviewed at: cafe123"
+g "$d" switch -q -c other base
+change "$d" src/o.py "elsewhere"
+other="$(g "$d" rev-parse other)"
+g "$d" switch -q feat/x
+hand_off 0 "a hand-off naming a commit of another branch" "$d" \
+  "which is no commit of the branch since the base" "" "- Reviewed at: $other"
 
 out="$(bash "$SENSOR" --root "$d" --hand-off "$work/no-such-file" base 2>&1)"; rc=$?
 if [[ $rc -eq 2 && "$out" == *"is no file"* ]]; then
@@ -303,36 +165,69 @@ else
   echo "FAIL: a hand-off that is no file exits 2 (got $rc)" >&2
 fi
 
-d="$(repo no-merge)"
+# Without a head or base, the branch checked out is read from its merge base with main.
+d="$(repo defaults)"
 change "$d" src/a.py "work"
-expect 0 "a history without merges lists its commit" "$d" "1 commit landed outside a merge, named by no review:"
-reject "a history without merges and without ADRs mixes nothing" "$d" "mixing ADR text"
+out="$(bash "$SENSOR" --root "$d" 2>&1)"
+if [[ "$out" == *"1 commit since $(g "$d" rev-parse --short base)"* ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1))
+  echo "FAIL: without arguments, the branch checked out is read from its merge base with main" >&2
+  while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
+fi
 
-d="$(repo linear)"
-change "$d" src/a.py "first linear"
-change "$d" src/b.py "second linear"
-expect 0 "linear commits are counted" "$d" "2 commits landed outside a merge, named by no review:"
-expect 0 "linear commits are listed" "$d" "second linear"
-reject "linear commits leave nothing that reads as clean" "$d" "nothing to read"
-expect 0 "the headline counts the findings below it" "$d" "no merge since $(g "$d" rev-parse --short base); 1 finding below."
-hand_off 0 "a hand-off reviewed at the head covers the linear commits" "$d" \
-  "the hand-off was reviewed at the head" "outside a merge" "- Reviewed at: $(g "$d" rev-parse HEAD)"
-hand_off 0 "a hand-off reviewed before the head lists the linear commits after the review" "$d" \
-  "the hand-off: 1 commit after the review at $(g "$d" rev-parse --short HEAD~1), unreviewed:"$'\n'"    $(g "$d" rev-parse --short HEAD) second linear" \
-  "outside a merge" "- Reviewed at: $(g "$d" rev-parse HEAD~1)"
-hand_off 0 "a hand-off bound to nothing leaves the linear commits listed" "$d" \
-  "2 commits landed outside a merge" "" "- Reviewed at:"
+# CI checks out a synthetic merge of the pull request into its base and passes the head.
+d="$(repo pull-request)"
+change "$d" src/a.py "work"
+pr_head="$(g "$d" rev-parse feat/x)"
+g "$d" switch -q --detach base
+g "$d" merge -q --no-ff -m "Merge $pr_head into base" "$pr_head"
+printf -- '- Reviewed at: %s\n' "$pr_head" > "$work/hand-off.md"
+report "the pull request's head is read, not the synthetic merge" "$d" 0 \
+  "the hand-off was reviewed at the head" "Merge $pr_head" --hand-off "$work/hand-off.md" base "$pr_head"
 
-d="$(repo mixed-history)"
+# A rework: main gains a commit and the feat/ branch is rebased onto it. A hand-off reviewed at
+# the head before the rework names a commit the rebase replaced.
+d="$(repo rework)"
+change "$d" src/a.py "work"
+before="$(g "$d" rev-parse HEAD)"
+g "$d" switch -q main
+change "$d" src/m.py "on main"
+g "$d" tag base -f >/dev/null
+g "$d" switch -q feat/x
+g "$d" rebase -q main >/dev/null 2>&1
+hand_off 0 "a rebase leaves the hand-off bound to a commit it replaced" "$d" \
+  "which is no commit of the branch since the base" "" "- Reviewed at: $before"
+hand_off 0 "a hand-off reviewed at the head after the rework covers the branch" "$d" \
+  "the hand-off was reviewed at the head" "" "- Reviewed at: $(g "$d" rev-parse HEAD)"
+
+# --- merges on the branch --------------------------------------------------------------------
+
+d="$(repo merged)"
 g "$d" switch -q -c topic
 change "$d" src/a.py "merged work"
-merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"
+merge "$d" topic "Merge topic"
 change "$d" src/b.py "straight onto the branch"
-expect 0 "merges and linear commits: the merge is read" "$d" "1 merge since"
-expect 0 "merges and linear commits: the linear one is listed" "$d" \
-  "1 commit landed outside a merge, named by no review:"$'\n'"    $(g "$d" rev-parse --short HEAD) straight onto the branch"
-reject "merges and linear commits: the merged branch's commit is not listed as outside" "$d" \
-  "merged work"
+expect 0 "a merge on the branch is a finding" "$d" \
+  "1 merge between the base and the head; a feat/ branch carries none (NUC-main-only-via-pr §5), and no review is read from its message:"$'\n'"    $(g "$d" rev-parse --short HEAD~1) Merge topic"
+expect 0 "the commits a merge brought count with the others" "$d" "2 commits since"
+expect 0 "the headline counts the merge finding" "$d" "bound only by a hand-off: name the pull request's description with --hand-off <file>; 1 finding below."
+hand_off 0 "a hand-off reviewed at the head leaves the merge listed" "$d" \
+  "Merge topic" "" "- Reviewed at: $(g "$d" rev-parse HEAD)"
+hand_off 0 "a hand-off reviewed at the head covers the merged commits too" "$d" \
+  "which covers the 2 commits since $(g "$d" rev-parse --short base); 1 finding below." "" \
+  "- Reviewed at: $(g "$d" rev-parse HEAD)"
+
+# The feat/ branch takes up what main gained by a merge, instead of a rebase.
+d="$(repo take-up)"
+change "$d" src/a.py "work"
+g "$d" switch -q main
+change "$d" src/m.py "on main"
+g "$d" switch -q feat/x
+g "$d" merge -q --no-ff -m "Merge branch 'main' into feat/x" main
+expect 0 "taking up main by a merge is listed" "$d" "Merge branch 'main' into feat/x"
+
 
 # --- ADRs apart from their implementation ----------------------------------------------------
 
@@ -422,10 +317,11 @@ reject "the merge itself is not listed as mixed" "$d" "Merge topic: changes"
 hand_off 0 "a hand-off reviewed at the head still lists the mixed commit" "$d" \
   "mixed on the topic: changes the text" "" "- Reviewed at: $(g "$d" rev-parse HEAD)"
 hand_off 0 "a hand-off reviewed at the head counts the mixed commits in its headline" "$d" \
-  "carries; 1 finding below." "" "- Reviewed at: $(g "$d" rev-parse HEAD)"
+  "which covers the 1 commit since $(g "$d" rev-parse --short base); 2 findings below." "" \
+  "- Reviewed at: $(g "$d" rev-parse HEAD)"
 
 d="$(repo bad-base)"
-expect 2 "a base that does not resolve" "$d" "does not resolve to a commit" "no-such-ref"
+report "a base that does not resolve" "$d" 2 "does not resolve to a commit" "" no-such-ref
 
 # --- summary ---------------------------------------------------------------------------------
 

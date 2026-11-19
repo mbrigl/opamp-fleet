@@ -6,11 +6,12 @@
 # Changes reach main through a pull request (NUC-main-only-via-pr §4); a push to it would skip that,
 # and a ruleset that an administrator may bypass is no reason to try. The git hooks run the checks
 # before a push (NUC-checks-are-bash §6), and CI runs the same checks on every pull request.
-# This hook runs them first, so a red push never leaves the machine, and it is where the merges a
-# feat/ branch took up since its last push are held to all of them; pre-merge-commit runs only the
-# documentation check on each. It runs them with --changed: the self-tests of what the branch left
-# untouched since main are skipped, since CI runs them, and every check itself still runs;
-# check-all.sh says which run. Enabled as the "Git hooks" of CONTRIBUTING.md says.
+# This hook runs them first, so a red push never leaves the machine, and it is where the branches a
+# feat/ branch took up by a rebase since its last push are held to all of them; a rebase runs no
+# check, and pre-merge-commit runs only the documentation check on a merge. It runs them with
+# --changed: the self-tests of what the branch left untouched since main are skipped, since CI
+# runs them, and every check itself still runs; check-all.sh says which run. Enabled as the
+# "Git hooks" of CONTRIBUTING.md says.
 #
 # A push whose every ref is a deletion, such as that of a merged branch, sends nothing to check
 # and proceeds without the checks; a deletion of the remote's main is still refused. A repository
