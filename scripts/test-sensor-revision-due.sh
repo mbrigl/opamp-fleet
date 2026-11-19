@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-revision-due.sh. Verifies: ADR-0006
+# Self-test of scripts/sensor-revision-due.sh. Verifies: NUC-design-is-revised
 #
 # Each case builds a throwaway git repository under a temporary directory with a
 # docs/ARCHITECTURE.md carrying the 'Last design revision' line and commits on chosen dates,
@@ -10,7 +10,7 @@
 # the due message with its directories and their changes, and the three ways the line fails to
 # read.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 # Inputs: scripts/sensor-revision-due.sh scripts/lib/
 #
 # Usage:
@@ -116,6 +116,7 @@ code "$d" scripts/c.sh 2026-01-12
 overview "$d" "**Last design revision:** none yet, due after 3 changes."
 commit "$d" "2026-01-13" "lower the number"
 expect 0 "the number reached marks the revision due" "$d" "3 changes outside docs/ since the first commit, due after 3 — DUE"
+expect 0 "the due message cites the clause it reports on" "$d" "then move the line (NUC-design-is-revised §5)."
 expect 0 "the due message lists the directories touched" "$d" "  - src/ (2 changes)"
 
 # The count starts at the commit that set the date, not at a moment the clock derives from it:
@@ -176,11 +177,13 @@ d="$(repo line-missing)"
 overview "$d" "Nothing about revisions here."
 commit "$d" "2026-01-06" "drop the line"
 expect 1 "no revision line" "$d" "has no '**Last design revision:**' line"
+expect 1 "the missing line cites the clause that places it" "$d" "(NUC-design-is-revised §4)"
 
 d="$(repo line-unreadable)"
 overview "$d" "**Last design revision:** soon, due after some changes."
 commit "$d" "2026-01-06" "garble the line"
 expect 1 "a line that names no date and no number" "$d" "is unreadable"
+expect 1 "the unreadable line cites the clause that shapes it" "$d" "changes.' (NUC-design-is-revised §4)"
 
 d="$(repo number-zero)"
 overview "$d" "**Last design revision:** none yet, due after 0 changes."
@@ -191,6 +194,7 @@ d="$(repo overview-missing)"
 git -C "${d:?}" rm -q docs/ARCHITECTURE.md
 commit "$d" "2026-01-06" "drop the overview"
 expect 1 "no overview at all" "$d" "ARCHITECTURE.md not found"
+expect 1 "the missing overview cites the clause that places the line" "$d" "lives there (NUC-design-is-revised §4)."
 
 # --- summary ---------------------------------------------------------------------------------
 

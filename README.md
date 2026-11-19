@@ -62,7 +62,7 @@ is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
   extension, or any DevContainer-compatible IDE
 - Docker / Podman (rootless) available on the host
 - Outside the Dev Container: bash 4.4 or later for the checks, 3.2 for the git hooks
-  ([ADR-0002](docs/adr/0002-decisions-verified-by-tests.md)); macOS ships 3.2
+  ([NUC-checks-are-bash §1](docs/adr/NUC-checks-are-bash.md)); macOS ships 3.2
 
 ## Getting Started
 
@@ -155,9 +155,9 @@ Deployment, and the Agent reporting it applied. From there:
 
 ## Template
 
-- **Template release:** v0.8.1 — the release of [NUC](https://github.com/hivevm/nuc) this
+- **Template release:** v0.9.1 — the release of [NUC](https://github.com/hivevm/nuc) this
   repository carries; a project moves the line when it takes up a later one
-  ([ADR-0005](docs/adr/0005-template-releases.md)).
+  ([NUC-releases-are-semver-tags §5](docs/adr/NUC-releases-are-semver-tags.md)).
 
 ## Contributing
 

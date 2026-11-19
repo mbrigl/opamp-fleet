@@ -1,0 +1,119 @@
+# Cases of scripts/sensor-plain-rules.sh with '--require', read by scripts/test-sensor-plain-rules.sh.
+#
+# One case per line, four fields separated by ' | ':
+#
+#   <pass or fail> | <what the output holds, '!' and what it lacks, or -> | <name> | <tree>
+#
+# The second field is '<key>', then ' @ <subject>' for each datum the line names: a file and line,
+# or a term in double quotes. A line of the output ends in '[<key>]', the rule and a reason word,
+# and holds each subject, in that order and with no ASCII letter, digit, hyphen, or underscore
+# beside it; the rest of its wording is free. With '!', no such line stands. Where a case is about
+# the place of a finding, its subject '<file>:<line>' decides that place.
+#
+# A line that starts with '#' is a comment, not a case. The subjects are looked for in the part of
+# the line before its key, so that none holds by the key alone. A field may start with '!': it then
+# holds where no line that ends in '[<key>]' holds the subjects in their order, so a field
+# '!<key> @ <a> @ <b>' is not broken by a line that names <b> before <a>.
+#
+# The tree is a list of steps separated by '; ', applied in order to a git repository with the
+# branch main of one commit and the branch 'work' off it, checked out. The commit holds:
+#
+#   AGENTS.md                '# Agent Guide', then '## 1. Rules' with the two items
+#                            '- The human decides.' and '- Old line that says should.'
+#   docs/adr/FIX-rule-x.md   '# FIX-rule-x: X', '- **Status:** 🟢 accepted', and '## Context',
+#                            '## Decision', and '## Enforcement', each with the paragraph
+#                            'The human decides.', a blank line between any two of these lines,
+#                            so that the paragraphs stand on lines 7, 11, and 15
+#   docs/adr/NUC:rule-y.md   the same, headed '# NUC:rule-y: Y'
+#
+# The sensor runs as '--require main' on the branch's commits, reading the change against main.
+#
+#   add <file> <section> <text>   a blank line and the text right after the heading of the section,
+#                                 Rules for the one of AGENTS.md, committed; '\n' in the text breaks
+#                                 the line
+#   glossary <name>               docs/GLOSSARY.md, committed: '# Glossary', the paragraph 'One term
+#                                 per concept; list under _Avoid:_ the synonyms it displaces.', and
+#                                 after a blank line each <line> of the lines '= <name> | <line>', so that they start on line 5
+#   base                          main moved to the branch's commit
+#   rename <from> <to>            docs/adr/<from>.md moved to docs/adr/<to>.md, its heading naming
+#                                 <to>, committed
+#   takeup                        the NUC- files, the blob list, and AGENTS.md of this repository
+#                                 copied over the fixture's, committed, as a take-up does
+#   noflag                        the sensor run without '--require'
+#
+# A sensor run passes with exit code 0 and fails with exit code 1. In a case, 'NUC:' reads as
+# 'NUC-', so that scripts/check-docs.sh reads no reference to an ADR here.
+
+= hook | - **Git hook** — a script git runs.
+= hook |   _Avoid:_ hook script, trigger.
+
+= shape | - **Node shape** — the form in which a node is drawn.
+= shape |   _Avoid:_ *shape* alone, figure.
+= shape | - **Loop** — an edge from a node back to itself.
+= shape |   _Avoid:_ self-edge in prose, self-loop.
+= shape | - **Culling** — leaving out of the draw what lies outside the viewport.
+= shape |   _Avoid:_ frustum culling, outside the wording of the constraint that requires it.
+= shape | - **Diagram element** — a node or an edge.
+= shape |   _Avoid:_ glyph, sprite, and element alone.
+
+# An item the line break of its _Avoid:_ list splits, as nectar wrote it.
+= wrap | - **Chapter** — a part of the book.
+= wrap |   _Avoid:_ include
+= wrap |   file, part,
+= wrap |   ci/cd.
+= split | - **Item** — one entry of a list.
+= split |   _Avoid:_ one, some long
+= split |   odd phrase, two.
+
+# The entries of comb's glossary that list words under _Avoid:_, as comb wrote them.
+= comb | - **Connector** — a point on a node where an edge starts or ends.
+= comb |   _Avoid:_ port, handle, socket, pin.
+= comb | - **Culling** — leaving out of the draw everything outside the viewport.
+= comb |   _Avoid:_ frustum culling, outside the wording of the constraint that requires it.
+= comb | - **Diagram element** — a node or an edge.
+= comb |   _Avoid:_ figure, shape, and element alone.
+= comb | - **Edge** — a connection drawn from one node to another.
+= comb |   _Avoid:_ link, wire, connection.
+= comb | - **Engine** — the Rust code compiled to WebAssembly.
+= comb |   _Avoid:_ core, backend.
+= comb | - **Host application** — the web application that embeds Comb.
+= comb |   _Avoid:_ client, consumer.
+= comb | - **Loop** — an edge from a node back to itself.
+= comb |   _Avoid:_ self-edge in prose, self-loop, reflexive edge.
+= comb | - **Node** — an item on the canvas.
+= comb |   _Avoid:_ vertex, block.
+= comb | - **Node shape** — the form in which a node is drawn and hit.
+= comb |   _Avoid:_ shape alone, figure, symbol.
+= comb | - **Node content** — what a node shows.
+= comb |   _Avoid:_ node template, node renderer.
+= comb | - **Slot** — the index of a node or an edge in the engine's buffers.
+= comb |   _Avoid:_ handle.
+
+fail | rules/soft-modal:verb @ docs/adr/FIX-rule-x.md:11 @ "should" | a soft modal verb in a project ADR's Decision | add docs/adr/FIX-rule-x.md Decision The session should read it.
+pass | rules/soft-modal:verb @ docs/adr/NUC:rule-y.md:11 @ "should" | the same sentence in a NUC- ADR: reported | add docs/adr/NUC:rule-y.md Decision The session should read it.
+pass | rules/soft-modal:verb @ AGENTS.md:5 @ "should" | the same sentence in AGENTS.md: reported | add AGENTS.md Rules - The session should read it.
+pass | rules/soft-modal:verb @ docs/adr/FIX-rule-x.md:11 @ "should" | without --require: reported, failing nothing | noflag; add docs/adr/FIX-rule-x.md Decision The session should read it.
+fail | rules/soft-modal:verb @ docs/adr/FIX-rule-x.md:15 @ "might" | a soft modal verb in a project ADR's Enforcement | add docs/adr/FIX-rule-x.md Enforcement The check might run.
+pass | !rules/soft-modal:verb | a soft modal verb in a project ADR's Context | add docs/adr/FIX-rule-x.md Context The session should read it.
+pass | !rules/soft-modal:verb | a soft modal verb in italics in a project ADR | add docs/adr/FIX-rule-x.md Decision Say *must*, since *should* leaves the reader guessing.
+pass | !rules/soft-modal:verb | a soft modal verb on a line the change does not add | add docs/adr/FIX-rule-x.md Decision The session should read it.; base; add docs/adr/FIX-rule-x.md Enforcement The human decides.
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:15 @ "hook script" @ "Git hook" | an avoided word in a project ADR's Enforcement | glossary hook; add docs/adr/FIX-rule-x.md Enforcement It runs a hook script.
+pass | rules/avoided-term:listed @ docs/adr/NUC:rule-y.md:11 @ "trigger" | an avoided word in a NUC- ADR: reported | glossary hook; add docs/adr/NUC:rule-y.md Decision Each trigger runs.
+pass | !rules/avoided-term:listed | an avoided word in a project ADR's Context | glossary hook; add docs/adr/FIX-rule-x.md Context It runs a hook script.
+pass | rules/long-sentence:words @ docs/adr/FIX-rule-x.md:11 @ 28 | a long sentence in a project ADR: reported | add docs/adr/FIX-rule-x.md Decision The session that reads this rule before it starts any work must find every single word of it in the glossary and must also know who acts here.
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "shape" @ "Node shape" | an item '*shape* alone': the bare word | glossary shape; add docs/adr/FIX-rule-x.md Decision The shape is drawn.
+pass | !rules/avoided-term:listed | another entry lists the word bare: the word inside a longer term passes | glossary comb; add docs/adr/FIX-rule-x.md Decision The node shape is drawn.
+pass | !rules/avoided-term:listed | an item '*shape* alone': the word inside the longer term | glossary shape; add docs/adr/FIX-rule-x.md Decision The node shape is drawn.
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "self-edge" | an item 'self-edge in prose': the word in a rule | glossary shape; add docs/adr/FIX-rule-x.md Decision A self-edge is drawn.
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "frustum culling" | an item the reader cannot read leaves the others of its list | glossary shape; add docs/adr/FIX-rule-x.md Decision Frustum culling runs.
+pass | rules/avoid-list:unread @ docs/GLOSSARY.md:10 @ "outside the wording of the constraint that requires it" @ "Culling" | an item the reader cannot read: reported | glossary shape; add docs/adr/FIX-rule-x.md Decision The node is drawn.
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "glyph" | a qualifier on the last item of a list: the others are bare | glossary shape; add docs/adr/FIX-rule-x.md Decision Each glyph is drawn.
+pass | !rules/avoided-term:listed | a qualifier on the last item of a list: the word inside the longer term | glossary shape; add docs/adr/FIX-rule-x.md Decision Each diagram element is drawn.
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "element" | a qualifier on the last item of a list: the bare word | glossary shape; add docs/adr/FIX-rule-x.md Decision Each element is drawn.
+pass | !rules/avoided-term:listed | an item wrapped across two lines: its second word alone | glossary wrap; add docs/adr/FIX-rule-x.md Decision Each file is read.
+fail | rules/avoided-term:listed @ docs/adr/FIX-rule-x.md:11 @ "include file" | an item wrapped across two lines: the item whole | glossary wrap; add docs/adr/FIX-rule-x.md Decision Each include file is read.
+pass | rules/avoid-list:unread @ docs/GLOSSARY.md:8 @ "ci/cd" @ "Chapter" | an item it cannot read after a wrapped one: reported by its own line | glossary wrap; add docs/adr/FIX-rule-x.md Decision The node is drawn.
+pass | rules/avoid-list:unread @ docs/GLOSSARY.md:6 @ "some long odd phrase" @ "Item" | an item it cannot read wrapped across two lines: reported by the line it starts on | glossary split; add docs/adr/FIX-rule-x.md Decision The node is drawn.
+pass | !rules/soft-modal:verb | a renamed ADR whose only change is its identifier | add docs/adr/FIX-rule-x.md Decision The session should read it.; base; rename FIX-rule-x FIX-rule-z
+fail | rules/soft-modal:verb @ docs/adr/FIX-rule-z.md:11 @ "could" | a renamed ADR: the lines its rename changes are read | add docs/adr/FIX-rule-x.md Decision The session should read it.; base; rename FIX-rule-x FIX-rule-z; add docs/adr/FIX-rule-z.md Decision It could run.
+pass | - | comb's glossary and its NUC- files and AGENTS.md after a take-up | glossary comb; base; takeup

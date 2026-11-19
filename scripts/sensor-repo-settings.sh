@@ -2,9 +2,9 @@
 #
 # Sensor: repository settings.
 #
-# Some rules of this project only the GitHub repository can enforce; CONTRIBUTING.md lists them
-# under 'Repository settings'. This sensor reads them through the GitHub CLI and reports each one
-# that differs from that list (ADR-0002, sensors of the GitHub repository):
+# Some rules of this project only the GitHub repository can enforce (NUC-main-only-via-pr §7);
+# CONTRIBUTING.md lists them under 'Repository settings'. This sensor reads them through the
+# GitHub CLI and reports each one that differs from that list (NUC-checks-are-bash §7):
 #
 #   1. The rules in effect on main, from every ruleset that targets it: a pull request required,
 #      merge commit the only merge method, with no linear history required and a merge queue,
@@ -24,13 +24,16 @@
 # work does not have. It reports and never fails. scripts/test-sensor-repo-settings.sh runs it
 # on fixture responses: GH names the command that stands in for gh.
 #
-# Bash + coreutils + grep + sed, plus the GitHub CLI, authenticated through its web flow (AGENTS.md,
-# section 6); the JSON is read by gh's own --jq. Usage:
+# Bash + coreutils + grep + sed, plus the GitHub CLI, authenticated through its web flow
+# (NUC-main-only-via-pr §3); the JSON is read by gh's own --jq. Usage:
 #     scripts/sensor-repo-settings.sh [repository root]
 # The repository is the one gh resolves from the root's git remote. Exit code 0 always, except
 # 2 when the root does not exist, gh is missing, or gh cannot resolve the repository.
 
 set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR source=lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
 
 ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" 2>/dev/null && pwd)" \
   || { echo "Repository settings sensor: '${1:-}' is not a directory." >&2; exit 2; }

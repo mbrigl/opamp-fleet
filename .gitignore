@@ -1,6 +1,6 @@
 # Dev Container: .devcontainer/devcontainer-lock.json is deliberately NOT ignored — the resolved
 # Feature versions and digests are tracked, so the same commit yields the same environment until
-# the lock is refreshed on purpose (ADR-0004).
+# the lock is refreshed on purpose (NUC-container-hides-host-daemon §3).
 
 # Build artifacts
 /dist/

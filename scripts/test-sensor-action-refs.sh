@@ -7,7 +7,7 @@
 # other case is one thing the sensor reports, or one it must stay silent on. The cases run with
 # --require hold it as a check: the decided form passes, and every other form fails.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 # Inputs: scripts/sensor-action-refs.sh scripts/lib/
 #
 # Usage:

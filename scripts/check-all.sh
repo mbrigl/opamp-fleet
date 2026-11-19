@@ -12,7 +12,8 @@
 # wrong instead of the first thing. The exit code is what a pre-push decision is made on.
 #
 # A check or self-test that passes shows its last line, its summary, and any line that says it
-# skipped something, such as the shell lint without ShellCheck. A sensor shows its first line, the
+# skipped something, such as the shell lint without ShellCheck; so does a sensor run with
+# --require, which is a check (NUC-checks-are-bash §4). A sensor shows its first line, the
 # headline that says what it found, and how many more lines its report has, blank ones not
 # counted. One that fails shows all it printed. A session reads every line a run prints, so a
 # green run costs a line a check. With --verbose every check and sensor shows all it printed; the
@@ -42,18 +43,8 @@
 
 set -uo pipefail
 
-# The checks need bash 4.4 or later (ADR-0002). This guard runs first and is written for bash
-# 3.2, so an older bash, such as the one macOS ships, gets a message instead of a check failing
-# on a construct it lacks. CHECK_ALL_BASH_VERSION stands in for the version found, for the
-# self-test.
-bash_found="${CHECK_ALL_BASH_VERSION:-${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}}"
-bash_major="${bash_found%%.*}" bash_minor="${bash_found#*.}"
-bash_minor="${bash_minor%%.*}"
-if ((bash_major < 4 || (bash_major == 4 && bash_minor < 4))); then
-  echo "check-all: the checks need bash 4.4 or later (ADR-0002); this is bash $bash_found — run them in the Dev Container, or install a current bash" >&2
-  exit 2
-fi
-
+# shellcheck source-path=SCRIPTDIR source=lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/git.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
 
@@ -175,7 +166,7 @@ run() {
   local label="$1" script="$2" i="${#labels[@]}"
   shift 2
   labels+=("$label")
-  kinds+=("$([[ "$script" == scripts/sensor-*.sh ]] && echo sensor || echo check)")
+  kinds+=("$([[ "$script" == scripts/sensor-*.sh && " $* " != *" --require "* ]] && echo sensor || echo check)")
   if ((changed_mode)) && ! needs_run "$script"; then
     echo "skipped — neither it nor its inputs changed against main; CI runs it" > "$out/$i"
     echo 0 > "$out/$i.rc"
@@ -206,10 +197,6 @@ run "Protocol Baseline" scripts/check-protocol-baseline.sh
 run "Manual check self-test" scripts/test-check-manual.sh
 run "Manual cites no ADR" scripts/check-manual.sh
 run "Normalize map self-test" scripts/test-normalize-remap.sh
-# The numbering script commits and runs on a human's instruction, before the pull request that
-# brings drafts to main (ADR-0002); its self-test runs here.
-# On instruction: scripts/number-adrs.sh
-run "Numbering script self-test" scripts/test-number-adrs.sh
 # The readiness script merges and commits on a human's instruction, as step 7 of
 # Integration branches in CONTRIBUTING.md; its self-test runs here.
 # On instruction: scripts/ready-for-main.sh
@@ -227,7 +214,7 @@ run "Tests-kept sensor" scripts/sensor-tests-kept.sh
 run "Binding ADRs sensor self-test" scripts/test-sensor-binding-adrs.sh
 run "Binding ADRs sensor" scripts/sensor-binding-adrs.sh
 run "Plain rules sensor self-test" scripts/test-sensor-plain-rules.sh
-run "Plain rules sensor" scripts/sensor-plain-rules.sh
+run "Plain rules check" scripts/sensor-plain-rules.sh --require
 run "Revision-due sensor self-test" scripts/test-sensor-revision-due.sh
 run "Revision-due sensor" scripts/sensor-revision-due.sh
 run "Plan frontier sensor self-test" scripts/test-sensor-plan-frontier.sh
@@ -253,8 +240,8 @@ run "Fuzz targets" scripts/check-fuzz-targets.sh
 # The store checks themselves run last, below.
 run "Store check self-test" scripts/test-check-store.sh
 run "Fixture isolation" scripts/test-fixture-isolation.sh
-# The repository settings sensor reads GitHub and runs on a human's instruction (ADR-0002); its
-# self-test runs here.
+# The repository settings sensor reads GitHub and runs on a human's instruction
+# (NUC-checks-are-bash §7); its self-test runs here.
 # On instruction: scripts/sensor-repo-settings.sh
 run "Repository settings sensor self-test" scripts/test-sensor-repo-settings.sh
 run "Check runner self-test" scripts/test-check-all.sh

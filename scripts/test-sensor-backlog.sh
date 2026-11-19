@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/sensor-backlog.sh. Verifies: ADR-0006
+# Self-test of scripts/sensor-backlog.sh. Verifies: NUC-large-work-is-planned
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 #
 # Each case builds a throwaway git repository under a temporary directory, records backlog
 # entries under docs/backlog/ on main or on branches, runs the sensor against it, and asserts the

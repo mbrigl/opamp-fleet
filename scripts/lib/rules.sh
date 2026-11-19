@@ -12,35 +12,34 @@
 # italic may wrap within its run of prose; one that does not close in it is text. Fenced code and
 # the sections of an ADR end where adr_section reads them to end (ADR_FENCE_AWK).
 # 'E<TAB><path>' where a reader of that file fails, and 'E<TAB>' with no path where git cannot list
-# the files; the status is then 1, since a rule that cannot be read is no rule that passes.
+# the files; the status is then 1, since a rule that cannot be read is no rule that passes. A
+# renamed file adds the lines its rename changes, as git's rename detection pairs it.
 rule_stream() {
-  local base="$1" head="${2:-}" p lines files failed=0
+  local base="$1" head="${2:-}" p from lines files failed=0
   local -a refs=("$base")
   [[ -n "$head" ]] && refs+=("$head")
   files="$(
     set -o pipefail
-    if [[ -z "$head" ]]; then
-      git -c core.quotePath=false diff --name-only --no-renames "$base" \
-        && git -c core.quotePath=false ls-files --others --exclude-standard
-    else
-      git -c core.quotePath=false diff --name-only --no-renames "$base" "$head"
-    fi | LC_ALL=C sort -u)" || { printf 'E\t\n'; return 1; }
-  while IFS= read -r p; do
+    { git -c core.quotePath=false diff --name-status -M "${refs[@]}" \
+        | awk -F '\t' '{ print $NF "\t" ($1 ~ /^R/ ? $2 : "") }' \
+        && if [[ -z "$head" ]]; then git -c core.quotePath=false ls-files --others --exclude-standard | awk '{ print $0 "\t" }'; fi
+    } | LC_ALL=C sort -u)" || { printf 'E\t\n'; return 1; }
+  while IFS=$'\t' read -r p from; do
     [[ -n "$p" ]] || continue
     [[ "$p" == AGENTS.md ]] || { [[ "$p" == docs/adr/* && "$p" != docs/adr/*/* ]] && adr_is_file "$p"; } || continue
     if [[ -z "$head" ]]; then [[ -f "$p" ]] || continue; else git cat-file -e "$head:$p" 2>/dev/null || continue; fi
     if [[ -z "$head" ]] && ! git ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
       lines="$(awk '{ printf ",%d", NR }' "$p")" || { printf 'E\t%s\n' "$p"; failed=1; continue; }
     else
-      lines="$(set -o pipefail; git diff -U0 --no-renames "${refs[@]}" -- "$p" \
+      lines="$(set -o pipefail; git diff -U0 -M "${refs[@]}" -- ${from:+"$from"} "$p" \
         | awk '/^@@ / { split($3, a, ","); s = substr(a[1], 2); n = (2 in a) ? a[2] : 1; for (i = 0; i < n; i++) printf ",%d", s + i }')" \
         || { printf 'E\t%s\n' "$p"; failed=1; continue; }
     fi
     [[ -n "$lines" ]] || continue
     printf 'F\t%s\n' "$p"
-    ( set -o pipefail; change_file "$head" "$p" | awk \
-      -v added="$lines," -v adr="$([[ "$p" == AGENTS.md ]] || echo 1)" -v sections="^## ($ADR_RULE_SECTIONS)\$" \
-      "$ADR_FENCE_AWK"'
+    ( set -o pipefail; change_file "$head" "$p" | ADDED="$lines," SECTIONS="^## ($ADR_RULE_SECTIONS)\$" awk \
+      -v adr="$([[ "$p" == AGENTS.md ]] || echo 1)" "$ADR_FENCE_AWK"'
+      BEGIN { added = ENVIRON["ADDED"]; sections = ENVIRON["SECTIONS"] }
       # A run of prose is held until it ends, since a code span or an italic may close on a later
       # line of it, and one that never closes is plain text, as Markdown reads it.
       function para() { flush(); if (!gap) print "P"; gap = 1 }
@@ -106,25 +105,36 @@ rule_stream() {
   return "$failed"
 }
 
-# avoid_terms <glossary> — the words the glossary's entries list under _Avoid:_, 'word<TAB>term' a
-# line, the words in lower case, split at commas and semicolons, a leading 'and', a trailing period,
-# and a placeholder in angle brackets dropped. An entry is its '- **Term**' line and the indented
-# lines after it; prose outside an entry lists nothing (ADR-0001). An indented list item, a
-# sub-list of the entry, ends its _Avoid:_ list.
+# avoid_terms <glossary> — the items an entry of the glossary lists under _Avoid:_, its lines
+# joined, split at commas and semicolons, without a leading 'and', a trailing period, italics, code
+# span backticks, or a placeholder in angle brackets. Each item it reads is 'A<TAB>word<TAB>term<TAB>
+# qualifier': one to three words in lower case, letters beyond ASCII among them, then 'alone' where
+# the item ends so, else nothing; 'in prose' at its end reads as nothing, since only prose is read.
+# Each item it cannot read is 'U<TAB>line<TAB>item<TAB>term', by the line it starts on, each term
+# 'T<TAB>term' in lower case. An entry is its '- **Term**' line and the indented lines after it;
+# prose outside one lists nothing (NUC-documents-are-fixed §5); an indented list item ends a list.
 avoid_terms() {
   [[ -f "$1" ]] || return 0
   awk '
-    function take(s,  n, i, w, parts) {
-      n = split(s, parts, /[,;]/)
-      for (i = 1; i <= n; i++) {
-        w = tolower(parts[i]); gsub(/^[[:space:]]*(and[[:space:]]+)?|[.[:space:]]*$/, "", w)
-        if (w != "" && w !~ /[<>]/) printf "%s\t%s\n", w, term
+    # take <list> <line> — the items of a list from that line, "\003" where a line of it breaks.
+    function take(s, line,  n, i, k, w, q, at, parts, parts2) {
+      n = split(s, parts, /[,;]/); for (i = 1; i <= n; i++) {
+        w = " " parts[i] " "; q = w; sub(/[^[:space:]\003].*/, "", q); at = line + gsub(/\003/, "", q); line += gsub(/\003/, "", w); gsub(/[*`]/, "", w)
+        while (match(w, /[^[:alnum:]]_|_[^[:alnum:]]/)) w = substr(w, 1, RSTART - 1 + (substr(w, RSTART, 1) != "_")) substr(w, RSTART + 1 + (substr(w, RSTART, 1) != "_"))
+        w = tolower(w); gsub(/[[:space:]]+/, " ", w); gsub(/^ (and )?| ?[.]? ?$/, "", w)
+        if (w == "" || w ~ /[<>]/) continue
+        q = ""; if (w ~ / alone$/) { q = "alone"; sub(/ alone$/, "", w) } else sub(/ in prose$/, "", w)
+        k = split(w, parts2, " ")
+        if (k > 3 || w ~ /^[-.\047]/ || w ~ /[\[\]!"#$%&()*+,\/:;<=>?@\\^_`{|}~]/) printf "U\t%d\t%s\t%s\n", at, w (q ? " " q : ""), term
+        else printf "A\t%s\t%s\t%s\n", w, term, q
       }
     }
-    /^- \*\*[^*]+\*\*/ { term = $0; sub(/^- \*\*/, "", term); sub(/\*\*.*/, "", term); open = 0; entry = 1 }
-    !/^- \*\*/ && !/^[[:space:]]+[^[:space:]]/ { entry = 0; open = 0; term = "" }
-    /^[[:space:]]+([-*+]|[0-9]+\.)[[:space:]]/ { open = 0 }
-    entry && open && !index($0, "_Avoid:_") && /^[[:space:]]+[^[:space:]-]/ { take($0); next }
-    entry && term != "" && index($0, "_Avoid:_") { open = 1; take(substr($0, index($0, "_Avoid:_") + 8)) }
+    function done() { if (open) take(list, from); open = 0 }
+    /^- \*\*[^*]+\*\*/ { done(); term = $0; sub(/^- \*\*/, "", term); sub(/\*\*.*/, "", term); entry = 1; printf "T\t%s\n", tolower(term) }
+    !/^- \*\*/ && !/^[[:space:]]+[^[:space:]]/ { done(); entry = 0; term = "" }
+    /^[[:space:]]+([-*+]|[0-9]+\.)[[:space:]]/ { done() }
+    entry && open && !index($0, "_Avoid:_") && /^[[:space:]]+[^[:space:]-]/ { list = list "\003" $0; next }
+    entry && term != "" && index($0, "_Avoid:_") { done(); open = 1; from = NR; list = substr($0, index($0, "_Avoid:_") + 8) }
+    END { done() }
   ' "$1"
 }

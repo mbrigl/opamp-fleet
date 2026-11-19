@@ -12,7 +12,7 @@
 # and code together and apart: the text of an ADR with other paths is listed, its Status, Date,
 # and Deciders lines and the index are not, inside a merged branch too.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 # Inputs: scripts/sensor-review-binding.sh scripts/lib/
 #
 # Usage:
@@ -279,6 +279,8 @@ reviewed="$(g "$d" rev-parse HEAD)"
 change "$d" src/b.py "fix the findings"
 hand_off 0 "commits after the hand-off's review are listed" "$d" \
   "the hand-off: 1 commit after the review at ${reviewed:0:7}, unreviewed:" "" "- Reviewed at: $reviewed"
+hand_off 0 "a comma after the hash leaves it readable" "$d" \
+  "the hand-off: 1 commit after the review at ${reviewed:0:7}" "" "- Reviewed at: ${reviewed:0:7}, two rounds"
 hand_off 0 "a hand-off not reviewed at the head leaves the merges read" "$d" \
   "1 merge since" "" "- Reviewed at: $reviewed"
 
@@ -340,8 +342,8 @@ adr_repo() {
   local dir="$work/$1"
   mkdir -p "$dir/docs/adr"
   git -C "${dir:?}" init -q -b main
-  printf '# ADR-0001: One\n\n- **Status:** 🟡 proposed\n- **Date:** 2026-01-01\n- **Deciders:** maintainer\n- **Applies to:** everything\n\n## Decision\n\nOne.\n' \
-    > "$dir/docs/adr/0001-one.md"
+  printf '# FIX-rule-one: One\n\n- **Status:** 🟡 proposed\n- **Date:** 2026-01-01\n- **Deciders:** maintainer\n- **Applies to:** everything\n\n## Decision\n\nOne.\n' \
+    > "$dir/docs/adr/FIX-rule-one.md"
   echo "| 0001 | proposed |" > "$dir/docs/adr/README.md"
   g "$dir" add -A
   g "$dir" commit -q -m "initial"
@@ -362,21 +364,21 @@ commit_all() {
 }
 
 d="$(adr_repo adr-mixed)"
-echo "More." >> "$d/docs/adr/0001-one.md"
+echo "More." >> "$d/docs/adr/FIX-rule-one.md"
 echo "code" > "$d/a.py"
 commit_all "$d" "decide and implement"
 expect 0 "a commit changing ADR text and code is listed" "$d" "1 commit mixing ADR text with other paths"
 expect 0 "the mixed commit names its ADR and its other path" "$d" \
-  "decide and implement: changes the text of docs/adr/0001-one.md together with a.py"
+  "decide and implement: changes the text of docs/adr/FIX-rule-one.md together with a.py"
 
 d="$(adr_repo adr-new)"
-printf '# ADR-0002: Two\n' > "$d/docs/adr/0002-two.md"
+printf '# FIX-rule-two: Two\n' > "$d/docs/adr/FIX-rule-two.md"
 echo "code" > "$d/a.py"
 commit_all "$d" "propose and implement"
-expect 0 "a new ADR in a commit with code is listed" "$d" "changes the text of docs/adr/0002-two.md"
+expect 0 "a new ADR in a commit with code is listed" "$d" "changes the text of docs/adr/FIX-rule-two.md"
 
 d="$(adr_repo adr-apart)"
-echo "More." >> "$d/docs/adr/0001-one.md"
+echo "More." >> "$d/docs/adr/FIX-rule-one.md"
 echo "| 0001 | proposed, revised |" > "$d/docs/adr/README.md"
 commit_all "$d" "revise the ADR"
 echo "code" > "$d/a.py"
@@ -384,7 +386,7 @@ commit_all "$d" "implement"
 reject "ADRs and their implementation in commits apart are not listed" "$d" "mixing ADR text"
 
 d="$(adr_repo adr-flip)"
-swap "$d/docs/adr/0001-one.md" 's/🟡 proposed/🟢 accepted/; s/2026-01-01/2026-02-01/'
+swap "$d/docs/adr/FIX-rule-one.md" 's/🟡 proposed/🟢 accepted/; s/2026-01-01/2026-02-01/'
 echo "| 0001 | accepted |" > "$d/docs/adr/README.md"
 echo "code" > "$d/a.py"
 commit_all "$d" "implement and accept"
@@ -392,26 +394,26 @@ reject "the flip to accepted, its date, and the index row landing with the imple
   "$d" "mixing ADR text"
 
 d="$(adr_repo adr-applies)"
-swap "$d/docs/adr/0001-one.md" 's/everything/src only/'
+swap "$d/docs/adr/FIX-rule-one.md" 's/everything/src only/'
 echo "code" > "$d/a.py"
 commit_all "$d" "narrow and implement"
 expect 0 "another header line changed with code is text" "$d" "narrow and implement: changes the text"
 
 d="$(adr_repo adr-decider)"
-swap "$d/docs/adr/0001-one.md" 's/maintainer/maintainer, project/'
+swap "$d/docs/adr/FIX-rule-one.md" 's/maintainer/maintainer, project/'
 echo "code" > "$d/a.py"
 commit_all "$d" "accept as our own"
 reject "a decider added with other paths is not listed" "$d" "mixing ADR text"
 
 d="$(adr_repo adr-many)"
-echo "More." >> "$d/docs/adr/0001-one.md"
+echo "More." >> "$d/docs/adr/FIX-rule-one.md"
 for f in a b c d e; do echo "code" > "$d/$f.py"; done
 commit_all "$d" "a wide change"
 expect 0 "a mixed commit names three other paths and counts the rest" "$d" "c.py and 2 more"
 
 d="$(adr_repo adr-merged)"
 g "$d" switch -q -c topic
-echo "More." >> "$d/docs/adr/0001-one.md"
+echo "More." >> "$d/docs/adr/FIX-rule-one.md"
 echo "code" > "$d/a.py"
 commit_all "$d" "mixed on the topic"
 merge "$d" topic "$(printf 'Merge topic\n\n- Reviewed at: %s\n' "$(g "$d" rev-parse topic)")"

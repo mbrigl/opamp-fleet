@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Self-test of the git hooks under .githooks/: every refusal and every passage the table under
-# CONTRIBUTING.md → "Git hooks" lists (AGENTS.md, sections 5 and 6).
+# "Git hooks" in CONTRIBUTING.md lists (NUC-main-only-via-pr §1, §4, §5, §6; NUC-checks-are-bash
+# §6).
 #
 # Each case builds a throwaway repository under a temporary directory with core.hooksPath pointing
 # at this repository's .githooks/, runs a real 'git commit' or 'git push' in it — the push goes to
@@ -9,7 +10,7 @@
 # A push case ships its own scripts/check-all.sh, green or red, so the test decides what the hook
 # finds.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-main-only-via-pr NUC-checks-are-bash
 # Inputs: .githooks/ scripts/lib/
 #
 # Usage:
@@ -87,9 +88,18 @@ d="$(repo red)"
 git -C "${d:?}" switch -q -c feature
 checks "$d" 1
 expect refuse "a push while the checks are red" "$d" "the checks are red" push -q origin feature
+expect refuse "the push refusal names the clause that runs the checks before a push" "$d" \
+  "pushed (NUC-checks-are-bash §6)" push -q origin feature
 expect refuse "the refusal shows the check output" "$d" "check output for the test" push -q origin feature
 expect refuse "the hook runs the checks with --changed" "$d" "args: --changed" push -q origin feature
 expect pass "a commit is not gated by the checks" "$d" "" commit -q --allow-empty -m x
+docs "$d" 1
+expect refuse "a commit on a branch while the documentation check is red, naming the clause" "$d" \
+  "pre-commit: refused — the documentation check is red, and the checks pass before a commit (NUC-checks-are-bash §6)" \
+  commit -q --allow-empty -m x
+expect refuse "the commit refusal shows the documentation check's output" "$d" "docs output for the test" \
+  commit -q --allow-empty -m x
+docs "$d" 0 && expect pass "a commit while the documentation check is green" "$d" "" commit -q --allow-empty -m x
 
 # A deletion sends nothing to check: it passes while the checks are red, and a push that sends a
 # branch besides is checked as any other.
@@ -106,18 +116,6 @@ d="$(repo green)"
 git -C "${d:?}" switch -q -c feature
 checks "$d" 0
 expect pass "a push while the checks are green" "$d" "" push -q origin feature
-out="$(g "$d" push -q origin feature 2>&1)"
-check "a push without a draft ADR says nothing of numbering" test -z "$(grep 'draft ADR' <<< "$out")"
-
-# A push that carries a draft ADR is told how many it carries and where they take their numbers;
-# the notice passes the push, and a file named like a draft that is no Markdown is no draft.
-mkdir -p "$d/docs/adr" && : > "$d/docs/adr/draft-x.md" && : > "$d/docs/adr/0001-y.md"
-: > "$d/docs/adr/draft-notes.txt"
-g "$d" add docs && g "$d" commit -q -m draft
-out="$(g "$d" push -q origin feature 2>&1)"; rc=$?
-check "a push that carries a draft ADR passes" test "$rc" -eq 0
-check "and counts the drafts and names the script that numbers them" \
-  grep -qF "feature carries 1 draft ADR(s); they take their numbers on the branch of the pull request into main, by scripts/ready-for-main.sh (CONTRIBUTING.md, Integration branches, step 7)." <<< "$out"
 
 # A tree the checks passed on passes again without them: the committed check script reads its
 # verdict from outside the tree, so the same tree can turn red. A rework that keeps the tree, an
@@ -158,10 +156,8 @@ git init -q "$work/worktree-fixture" && git -C "$work/worktree-fixture" config h
 EOF
 expect pass "a push from a linked worktree hands the checks no git environment" \
   "$work/worktree-linked" "" push -q origin feature
-if [[ -n "$(git -C "$d" config hooktest.leak)" ]]; then
-  failed=$((failed + 1))
-  echo "FAIL: a fixture the checks build in a linked worktree wrote into the pushed repository" >&2
-fi
+check "a fixture the checks build in a linked worktree writes nothing into the pushed repository" \
+  test -z "$(git -C "$d" config hooktest.leak)"
 
 # The shared library of the self-tests guards the same: a self-test that sources it inherits no
 # variable that binds git to a repository, and its fixture guard refuses any path but a fixture
@@ -169,14 +165,27 @@ fi
 lib="$ROOT/scripts/lib/selftest.sh"
 # shellcheck disable=SC2016 # expanded by the inner shell
 leaked="$(GIT_DIR="$ROOT/.git" GIT_WORK_TREE="$ROOT" bash -c 'source "$1"; echo "${GIT_DIR-}${GIT_WORK_TREE-}"' _ "$lib")"
-if [[ -z "$leaked" ]]; then passed=$((passed + 1)); else
-  failed=$((failed + 1)); echo "FAIL: a self-test sourcing the library keeps GIT_DIR or GIT_WORK_TREE" >&2; fi
+check "a self-test sourcing the library keeps neither GIT_DIR nor GIT_WORK_TREE" test -z "$leaked"
 # '$outside' is shaped like a fixture but lies outside $work: it decides the clause on $work
 # where '$ROOT' cannot, in a linked worktree, whose .git is a file.
 outside="$(mktemp -d)"
 # The library's trap removes $work only; this one removes $outside too, whatever ends the test.
 trap 'rm -rf "$work" "$outside"' EXIT
 mkdir -p "$outside/.git"
+# A host whose git sets core.autocrlf=true, as Git for Windows does, checks a fixture out as it
+# was written and warns of no line ending, and MSYS makes a fixture's 'ln -s' a native link.
+printf '[core]\n\tautocrlf = true\n' > "$outside/crlf.gitconfig"
+# shellcheck disable=SC2016 # expanded by the inner shell
+crlf="$(GIT_CONFIG_GLOBAL="$outside/crlf.gitconfig" MSYS='' bash -c 'source "$1"; f="$work/f"
+  git init -q "$f" && printf "a\n" > "$f/a" && git -C "$f" add a \
+    && git -C "$f" -c user.name=f -c user.email=f@x commit -q -m a && rm "$f/a" \
+    && git -C "$f" checkout -q -- a
+  if printf "a\n" | cmp -s - "$f/a"; then echo LF; else od -c "$f/a"; fi
+  echo "|$MSYS"' _ "$lib" 2>&1)"
+check "a fixture under core.autocrlf=true is checked out with LF and no warning" \
+  test "${crlf%%|*}" = $'LF\n'
+[[ "${crlf%%|*}" == $'LF\n' ]] || printf '    %s\n' "${crlf%%|*}" >&2
+check "a self-test asks MSYS for native symlinks, once" test "${crlf#*|}" = "winsymlinks:nativestrict"
 # shellcheck disable=SC2016 # expanded by the inner shell
 for target in '' '$ROOT' '$outside' '$work/plain' '$work/fixture'; do
   out="$(outside="$outside" bash -c 'source "$1"; mkdir -p "$work/plain" "$work/fixture/.git"; fixture "'"$target"'" && echo accepted' _ "$lib" 2>&1)"
@@ -212,13 +221,17 @@ merging() {
   git -C "${d:?}" switch -q -c feature
   echo feature > "$d/f"
   g "$d" add f
-  g "$d" commit -q -m feature
+  g "$d" commit -q --no-verify -m feature
   git -C "${d:?}" switch -q -c feat/x main
   echo "$d"
 }
 
 d="$(merging merge-red 1 0)"
 expect refuse "a merge into a branch while the documentation check is red" "$d" "the documentation check is red on the merge" merge -q -m m feature
+
+d="$(merging merge-red-clause 1 0)"
+expect refuse "the merge refusal names the clause that runs the checks before a merge" "$d" \
+  "takes up another (NUC-checks-are-bash §6)" merge -q -m m feature
 
 d="$(merging merge-red-output 1 0)"
 expect refuse "the refusal shows the documentation check's output" "$d" "docs output for the test" merge -q -m m feature
@@ -253,6 +266,10 @@ conflict() {
 
 d="$(conflict conflict-red 1 feat/x)"
 expect refuse "concluding a conflicted merge while the checks are red" "$d" "pre-commit: refused — the checks are red" commit -q --no-edit
+
+d="$(conflict conflict-red-clause 1 feat/x)"
+expect refuse "the refusal of a conflicted merge names the clause that runs the checks" "$d" \
+  "takes up another (NUC-checks-are-bash §6)" commit -q --no-edit
 
 d="$(conflict conflict-changed 1 feat/x)"
 expect refuse "concluding a conflicted merge runs the checks with --changed" "$d" "args: --changed" commit -q --no-edit
@@ -295,7 +312,7 @@ indexed() {
   edit_index "$index" "$2" "| [0002](0002-b.md) |" one
   g "$d" commit -q --no-verify -am row
   git -C "${d:?}" switch -q -C feat/x main
-  edit_index "$index" "$3" "| [draft-c](draft-c.md) |" "$4"
+  edit_index "$index" "$3" "| [0003](0003-c.md) |" "$4"
   g "$d" commit -q --no-verify -am row
   echo "$d"
 }
@@ -308,12 +325,12 @@ rows() {
 d="$(indexed index-rows one one one)"
 expect pass "the driver keeps the rows both sides appended to the index" "$d" "" merge -q -m m feature
 check "both rows stand in the index after the merge" \
-  test "$(rows "$d")" = "Rule: one. | [0001](0001-a.md) | | [draft-c](draft-c.md) | | [0002](0002-b.md) | After: one. "
+  test "$(rows "$d")" = "Rule: one. | [0001](0001-a.md) | | [0003](0003-c.md) | | [0002](0002-b.md) | After: one. "
 
 d="$(indexed index-prose-one two one one)"
 expect pass "the driver takes a rule one side changed" "$d" "" merge -q -m m feature
 check "the rule one side changed stands once" \
-  test "$(rows "$d")" = "Rule: two. | [0001](0001-a.md) | | [draft-c](draft-c.md) | | [0002](0002-b.md) | After: one. "
+  test "$(rows "$d")" = "Rule: two. | [0001](0001-a.md) | | [0003](0003-c.md) | | [0002](0002-b.md) | After: one. "
 
 d="$(indexed index-prose-both two three one)"
 expect refuse "the driver stops on a rule both sides changed" "$d" "CONFLICT (content): Merge conflict in docs/adr/README.md" merge -q -m m feature
@@ -345,10 +362,7 @@ expect refuse "a fast-forward of main to a local branch" "$d" "main moves only t
 g "$d" restore --source=HEAD --staged --worktree .
 expect pass "a refused fast-forward leaves main where it was" "$d" "" diff --quiet origin/main main
 expect pass "the documented restore takes the index and the working tree back" "$d" "" diff --quiet HEAD
-if [[ -e "$d/a" ]]; then
-  failed=$((failed + 1))
-  echo "FAIL: the documented restore leaves the file the refused fast-forward brought" >&2
-fi
+check "the documented restore removes the file the refused fast-forward brought" test ! -e "$d/a"
 expect refuse "a commit on main that skips pre-commit" "$d" "main moves only to what origin/main has" commit -q --no-verify --allow-empty -m x
 expect refuse "a cherry-pick onto main" "$d" "main moves only to what origin/main has" cherry-pick ahead
 g "$d" cherry-pick --abort >/dev/null 2>&1
@@ -375,10 +389,8 @@ expect refuse "main ahead still moves no further" "$d" "main moves only to what 
 expect refuse "the refusal says how to keep the commits of a main ahead" "$d" "git switch -c feat/<topic> main, then git branch -f main origin/main" commit -q --no-verify --allow-empty -m more
 expect pass "the commits of a main ahead move to a branch" "$d" "" switch -q -c feat/kept main
 expect pass "main is taken back to the remote's main" "$d" "" branch -f main origin/main
-if [[ "$(git -C "$d" log -1 --format=%s feat/kept)" != "unpushed" ]]; then
-  failed=$((failed + 1))
-  echo "FAIL: the branch does not keep the commit the main ahead had" >&2
-fi
+check "the branch keeps the commit the main ahead had" \
+  test "$(git -C "$d" log -1 --format=%s feat/kept)" = unpushed
 d="$(moves delete-main)"
 git -C "${d:?}" switch -q ahead
 expect pass "a deletion of the local main" "$d" "" branch -q -D main

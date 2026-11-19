@@ -4,7 +4,7 @@
 > a module may know, what a test asserts and never does, the shape of an error, how a thing is
 > named when the glossary has no word for it. Whoever settles a convention updates this file
 > inline, an agent included, in the same change as the review or code that settled it. The
-> reviewer always has it ([ADR-0001](adr/0001-agent-governance-model.md)).
+> reviewer always has it ([NUC-documents-are-fixed §6](adr/NUC-documents-are-fixed.md)).
 
 An entry says in a sentence or two what is done and why; the why tells a convention from a habit.
 A convention a check can decide is the check, not an entry. One that constrains future choices is

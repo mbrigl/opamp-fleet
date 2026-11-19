@@ -8,13 +8,13 @@
 # script under packaging/linux/ are read as git lists them, and a directory that is no repository
 # fails rather than passing empty. GNU sed's in-place flag fails and names the line, while a
 # temporary file and a comment pass. A pipe into grep with -q fails and names the line, while a
-# here-string, a comment, grep -c, and grep -q after '||' pass; the forms that read the input
-# whole report the match of a producer that writes on after it, where the pipe reads none. Where
-# ShellCheck is not on PATH the lint skips ShellCheck, and so does this test with the cases that
-# need it. A script under scripts/ committed with mode 100644 fails and is named, while one of
-# 100755 and a library under scripts/lib/ of 100644 pass.
+# here-string, a comment, grep -c, grep -q after '||', and a POSIX sh script without pipefail
+# pass; the forms that read the input whole report the match of a producer that writes on after
+# it, where the pipe reads none. Where ShellCheck is not on PATH the lint skips ShellCheck, and so
+# does this test with the cases that need it. A script under scripts/ committed with mode 100644
+# fails and is named, while one of 100755 and a library under scripts/lib/ of 100644 pass.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 # Inputs: scripts/check-shell.sh scripts/lib/
 #
 # Usage:
@@ -47,16 +47,17 @@ repo() {
   echo "$dir"
 }
 
-# expect <exit code> <name> <dir> — run the lint against the fixture.
+# expect <exit code> <name> <dir> [pattern] — run the lint against the fixture; the output matches
+# the glob pattern, when one is given.
 expect() {
   local want="$1" name="$2" dir="$3" out rc
   out="$(bash "$CHECK" "${dir:?}" 2>&1)"; rc=$?
-  if ((rc == want)); then
+  if ((rc == want)) && [[ "$out" == *${4:-}* ]]; then
     passed=$((passed + 1))
     return
   fi
   failed=$((failed + 1))
-  echo "FAIL: $name (expected exit $want, got exit $rc)" >&2
+  echo "FAIL: $name (expected exit $want${4:+ and output $4}, got exit $rc)" >&2
   while IFS= read -r l; do printf '    %s\n' "$l"; done <<< "$out" >&2
 }
 
@@ -100,15 +101,8 @@ d="$(repo sed-in-place)"
 # shellcheck disable=SC2016  # the fixture's "$1" is its own
 printf '#!/usr/bin/env bash\n%s %s "$1"\n' "$IN_PLACE" "'s/a/b/'" > "$d/edit.sh"
 git -C "${d:?}" add edit.sh
-expect 1 "a script that edits in place with sed fails" "$d"
-out="$(bash "$CHECK" "$d" 2>&1)"
-if [[ "$out" == *"edit.sh:2:"*"temporary file"* ]]; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1))
-  echo "FAIL: the finding names the file, the line, and a portable spelling" >&2
-  printf '    %s\n' "$out" >&2
-fi
+expect 1 "a script that edits in place with sed fails, named by line with a portable spelling" \
+  "$d" "edit.sh:2:*temporary file"
 
 d="$(repo sed-temporary-file)"
 # shellcheck disable=SC2016  # the fixture's "$1" is its own
@@ -127,15 +121,18 @@ PIPE_Q="$(printf '%s %s' '|' 'grep -qxF')"
 d="$(repo grep-quiet-pipe)"
 printf '#!/usr/bin/env bash\nset -o pipefail\nprintf "%%s\\n" a b %s a && echo found\n' "$PIPE_Q" > "$d/find.sh"
 git -C "${d:?}" add find.sh
-expect 1 "a script that pipes into grep -q fails" "$d"
-out="$(bash "$CHECK" "$d" 2>&1)"
-if [[ "$out" == *"find.sh:3:"*"read the input whole"* ]]; then
-  passed=$((passed + 1))
-else
-  failed=$((failed + 1))
-  echo "FAIL: the finding on grep -q names the file, the line, and the spelling that reads it whole" >&2
-  printf '    %s\n' "$out" >&2
-fi
+expect 1 "a script that pipes into grep -q fails, its finding names the line and a whole read" \
+  "$d" "find.sh:3:*read the input whole"
+
+d="$(repo grep-quiet-posix-sh)"
+printf '#!/bin/sh\nprintf "%%s\\n" a b %s a && echo found\n' "$PIPE_Q" > "$d/find.sh"
+git -C "${d:?}" add find.sh
+expect 0 "a POSIX sh script without pipefail pipes into grep -q: grep's status is the pipe's" "$d"
+for head in '#!/bin/sh\nset -o pipefail' '#!/usr/bin/env bash'; do  # either condition alone fails
+  d="$(repo "grep-quiet-${head//[^a-z]/}")"
+  printf '%b\nprintf "%%s\\n" a b %s a\n' "$head" "$PIPE_Q" > "$d/find.sh"
+  expect 1 "a pipe into grep -q fails under '$head'" "$d" "*read the input whole"
+done
 
 d="$(repo grep-quiet-whole)"
 # shellcheck disable=SC2016  # the fixture's "$(...)" is its own

@@ -35,6 +35,9 @@
 
 set -uo pipefail
 
+# shellcheck source-path=SCRIPTDIR source=lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
+
 require=""
 if [[ "${1:-}" == "--require" ]]; then
   require="${2:-}"

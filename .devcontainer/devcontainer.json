@@ -4,7 +4,8 @@
   // Pinned to a Debian *release*, not the floating `:debian` tag.
   "image": "mcr.microsoft.com/devcontainers/base:debian12",
   // No workspaceFolder or workspaceMount: the default, /workspaces/<directory name>, keeps each
-  // project under a path of its own, and an agent keys its memory by the path (ADR-0004).
+  // project under a path of its own, and an agent keys its memory by the path
+  // (NUC-container-hides-host-daemon §5).
 
   "remoteUser": "vscode",
   "containerEnv": {
@@ -28,12 +29,13 @@
   "initializeCommand": "mkdir \"${localEnv:HOME}${localEnv:USERPROFILE}/.claude\" || exit 0",
 
   // DevContainer Features layered on top of the base image. The container intentionally has NO
-  // access to the host Docker daemon (no socket mount) — see ADR-0004. Manage the host's containers
-  // from a host-side VS Code extension instead (CONTRIBUTING.md → "Dev Container").
+  // access to the host Docker daemon (no socket mount) — see NUC-container-hides-host-daemon §2.
+  // Manage the host's containers from a host-side VS Code extension instead (CONTRIBUTING.md →
+  // "Host container management").
   "features": {
     // GitHub CLI (`gh`) — used by the coding agent for GitHub operations and as the git
     // credential helper. A push and every gh action wait for a human instruction
-    // (AGENTS.md, section 6).
+    // (NUC-main-only-via-pr §2).
     "ghcr.io/devcontainers/features/github-cli:1": {},
     // Rust stable toolchain (rustup + cargo, with rustfmt & clippy) — the project's language
     // toolchain (DEV-six-crates-tokio-axum). The build chain needs no system protoc (API-protocol-pinned-interop-checked uses the
@@ -44,7 +46,7 @@
   // System packages the base image does not carry, installed once when the container is created.
   //
   // All four are *developer tooling* — nothing shipped depends on them, which is why the first
-  // three need no ADR (AGENTS.md §3.6); the fourth is SEC-admission-by-client-certificate's below — and each earns
+  // three need no ADR (NUC-decisions-are-proposed-then-accepted §2); the fourth is SEC-admission-by-client-certificate's below — and each earns
   // its place:
   //
   //   shellcheck  the shell lint, from the base image's signed Debian archive, so the pre-push

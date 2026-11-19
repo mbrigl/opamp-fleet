@@ -1,8 +1,8 @@
 <!-- The hand-off of a change: the description of its pull request, or the message of its merge
-     into a feat/ branch (AGENTS.md [§6](../AGENTS.md#6-project-rules)). Keep changes small and
-     reviewable. Write everything in English. State what a reviewer can
-     verify against the diff, a test, or an output; a claim nothing shows is one the reviewer has
-     to redo. -->
+     into a feat/ branch ([NUC-main-only-via-pr §5](../docs/adr/NUC-main-only-via-pr.md)). Keep
+     changes small and reviewable. Write everything in English. State what a reviewer can verify
+     against the diff, a test, or an output; a claim nothing shows is one the reviewer has to redo.
+     -->
 
 ## Summary
 
@@ -10,11 +10,14 @@
 
 ## Related
 
-- Ticket:  <!-- the file under docs/plan/ this deletes (ADR-0006), or the request it answers -->
-- Implements:  <!-- the ADR this implements or relates to, as ADR-NNNN or ADR-draft-<slug>,
+- Ticket:  <!-- the file under docs/plan/ this deletes (NUC-large-work-is-planned §5), or the
+            request it answers -->
+- Implements:  <!-- the ADR this implements or relates to, by its identifier,
      or none -->
 - ADRs reviewed at:  <!-- the commit of ADRs only the human reviewed before the implementation,
-     or none (AGENTS.md [§3](../AGENTS.md#3-adr-rules), rule 4) -->
+     or none
+     ([NUC-decisions-are-proposed-then-accepted §4](../docs/adr/NUC-decisions-are-proposed-then-accepted.md))
+     -->
 
 ## Proof
 
@@ -44,13 +47,15 @@
 ## Documents and decisions
 
 <!-- One statement each, verifiable against the diff. ADR: new, revised, or none, and why none
-     (AGENTS.md [§3](../AGENTS.md#3-adr-rules), rule 2); a new or revised `proposed` ADR ships in
-     commits of ADRs only (rule 3). ARCHITECTURE.md: updated, or unchanged because the
-     structure is unchanged ([§5](../AGENTS.md#5-quality-bar--definition-of-done)). CHANGELOG.md:
-     the entry this change adds, or none because no running deployment sees the change, which
-     scripts/sensor-changelog.sh asks of a fix or feat to the shipped code. Glossary: the
-     terms this change settled, or none. Specification: the accepted ADRs a change to it moves
-     ([§3](../AGENTS.md#3-adr-rules), rule 7), or untouched. -->
+     ([NUC-decisions-are-proposed-then-accepted §2](../docs/adr/NUC-decisions-are-proposed-then-accepted.md));
+     a new or revised `proposed` ADR ships in commits of ADRs only
+     ([NUC-decisions-are-proposed-then-accepted §3](../docs/adr/NUC-decisions-are-proposed-then-accepted.md)).
+     ARCHITECTURE.md: updated, or unchanged because the structure is unchanged
+     ([§5](../AGENTS.md#5-quality-bar--definition-of-done)). CHANGELOG.md: the entry this change
+     adds, or none because no running deployment sees the change, which scripts/sensor-changelog.sh
+     asks of a fix or feat to the shipped code. Glossary: the terms this change settled, or none.
+     Specification: the accepted ADRs a change to it moves
+     ([NUC-documents-are-fixed §2](../docs/adr/NUC-documents-are-fixed.md)), or untouched. -->
 
 - ADR:
 - ARCHITECTURE.md:

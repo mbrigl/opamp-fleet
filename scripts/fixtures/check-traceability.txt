@@ -1,0 +1,62 @@
+# Cases of scripts/check-traceability.sh for identifiers, read by
+# scripts/test-check-traceability.sh.
+#
+# One case per line, four fields separated by ' | ':
+#
+#   <pass or fail> | <what the output holds, or -> | <name> | <tree>
+#
+# A run exits 0 for pass and 1 for fail. The second field is '<key>', then ' @ <subject>' for each
+# datum the line names, such as an identifier. A line of the output ends in '[<key>]', the rule and
+# a reason word, and holds each subject, in that order and with no ASCII letter, digit, hyphen,
+# or underscore beside it; the rest of its wording is free.
+#
+# A line that starts with '#' is a comment, not a case. The subjects are looked for in the part of
+# the line before its key, so that none holds by the key alone. A field may start with '!': it then
+# holds where no line that ends in '[<key>]' holds the subjects in their order, so a field
+# '!<key> @ <a> @ <b>' is not broken by a line that names <b> before <a>.
+#
+# The tree is a list of steps separated by '; ', applied in order to a git repository with no
+# commit, an empty docs/adr/ and an empty tests/, and nothing else. Every file is staged before the
+# check runs.
+#
+#   spec <text>                 docs/SPECIFICATION.md, with the text as its one goal:
+#                                 # Specification
+#
+#                                 ## Goals / Success Criteria
+#
+#                                 - <text>
+#
+#                                 ## Quality Goals
+#
+#                                 - **Q-1** — fast enough.
+#
+#                                 ## Non-Goals
+#
+#                                 - none
+#   adr <id> <status>           docs/adr/<id>.md, with no exemption:
+#                                 # <id>: decision
+#
+#                                 - **Status:** <status>
+#
+#                                 ## Enforcement
+#
+#                                 Review only.
+#   mark <file> <ids>           the file, holding the one line 'Verifies: <ids>'
+#   file <file>                 the file, holding the one line 'text' and no marker
+#
+# A status reads '🟢 accepted', '🟡 proposed', or, for superseded:<id>, '⚪ superseded by <id>'. An id
+# is written as in scripts/fixtures/check-docs-record.txt, and so is the notation of that file's
+# header: a colon after two to five capital letters, not preceded by a letter, a digit, or '_', and
+# before a letter or a digit, reads as a hyphen.
+
+pass | - | a marker citing an ADR that exists | spec **G-1** — it works.; adr SEC:host-socket-closed accepted; mark tests/t.txt SEC:host-socket-closed, G-1
+fail | traceability/citations:missing @ SEC:gone-away | a marker citing an ADR that does not exist | spec **G-1** — it works.; mark tests/t.txt SEC:gone-away G-1
+fail | traceability/citations:malformed @ SEC:gone | a marker citing a slug of one word | spec **G-1** — it works.; mark tests/t.txt SEC:gone G-1
+fail | traceability/citations:malformed @ API:a-b-c-d-e-f | a marker citing a slug of six words, read whole | spec **G-1** — it works.; mark tests/t.txt API:a-b-c-d-e-f G-1
+fail | traceability/coverage:uncited @ SEC:host-socket-closed | an accepted ADR nobody cites | spec **G-1** — it works.; adr SEC:host-socket-closed accepted; mark tests/t.txt G-1
+fail | traceability/citations:inactive @ SEC:old-rule | a marker citing a superseded ADR | spec **G-1** — it works.; adr SEC:old-rule superseded:SEC:new-rule; adr SEC:new-rule accepted; mark tests/t.txt SEC:old-rule SEC:new-rule G-1
+fail | traceability/sensor-tests:absent @ scripts/sensor-x.sh @ scripts/test-sensor-x.sh | a sensor without its self-test | spec **G-1** — it works.; adr NUC:checks-are-bash proposed; file scripts/sensor-x.sh; mark tests/t.txt G-1
+fail | traceability/sensor-tests:uncited @ scripts/test-sensor-x.sh @ NUC:checks-are-bash | a self-test of a sensor that cites another ADR only | spec **G-1** — it works.; adr NUC:checks-are-bash proposed; adr SEC:host-socket-closed accepted; file scripts/sensor-x.sh; mark scripts/test-sensor-x.sh SEC:host-socket-closed G-1
+pass | - | a self-test of a sensor that cites the ADR on the checks and another | spec **G-1** — it works.; adr NUC:checks-are-bash proposed; adr SEC:host-socket-closed accepted; file scripts/sensor-x.sh; mark scripts/test-sensor-x.sh SEC:host-socket-closed NUC:checks-are-bash G-1
+pass | - | a self-test without its sensor is no concern of this rule | spec **G-1** — it works.; adr NUC:checks-are-bash proposed; mark scripts/test-sensor-x.sh G-1
+fail | traceability/sensor-tests:adr @ NUC:checks-are-bash | sensors in a tree without the ADR on the checks give one error | spec **G-1** — it works.; file scripts/sensor-x.sh; file scripts/sensor-y.sh; mark tests/t.txt G-1

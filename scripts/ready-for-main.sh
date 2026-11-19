@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
 # Prepares a branch for its pull request into main to be made ready: step 7 of
-# Integration branches in CONTRIBUTING.md, in the order the step needs.
+# Integration branches in CONTRIBUTING.md, in the order the step needs. Nobody rewrites what has
+# reached main, so a fixup is folded in before (NUC-main-only-via-pr §4).
 #
 #   1. Fetches origin and refuses while the branch carries a fixup the rework has not folded in
 #      (a subject starting 'fixup!', 'squash!', or 'amend!'), since main keeps what it merges.
 #   2. Takes up origin/main by a merge, unless the branch already contains it. A merge that stops
 #      on a conflict, or that the pre-merge-commit hook refuses, stops this script; once the merge
 #      is concluded, it runs again.
-#   3. Numbers the draft ADRs with scripts/number-adrs.sh (ADR-0002), which commits twice.
 #
 # It pushes nothing and touches no pull request: it ends by naming the push, with
 # --force-with-lease where the branch was reworked after its last push, and 'gh pr ready'. The
@@ -27,9 +27,11 @@
 
 set -uo pipefail
 
+# shellcheck source-path=SCRIPTDIR source=lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
+
 # shellcheck source-path=SCRIPTDIR source=lib/git.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/git.sh"
-numbering="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/number-adrs.sh"
 
 enter_root "ready-for-main" "${BASH_SOURCE[0]}" "$@"
 shift "$ROOT_TAKEN"
@@ -70,9 +72,6 @@ else
     || refuse "the merge of origin/main stopped; resolve and conclude it with git commit, or abort it, then run this again"
   echo "ready-for-main: $branch took up origin/main."
 fi
-
-# 3. The drafts, numbered.
-bash "$numbering" --root "$PWD" || exit 1
 
 if upstream="$(git rev-parse -q --verify '@{upstream}' 2> /dev/null)"; then
   if git merge-base --is-ancestor "$upstream" HEAD; then

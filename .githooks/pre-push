@@ -3,15 +3,14 @@
 # Git pre-push hook: nothing is pushed to the remote's main, and the checks pass before anything
 # else is pushed.
 #
-# Changes reach main through a pull request (AGENTS.md, section 6); a push to it would skip that,
-# and a ruleset that an administrator may bypass is no reason to try. AGENTS.md, section 5 requires
-# scripts/check-all.sh to pass before a push, and CI runs the same checks on every pull request.
+# Changes reach main through a pull request (NUC-main-only-via-pr §4); a push to it would skip that,
+# and a ruleset that an administrator may bypass is no reason to try. The git hooks run the checks
+# before a push (NUC-checks-are-bash §6), and CI runs the same checks on every pull request.
 # This hook runs them first, so a red push never leaves the machine, and it is where the merges a
 # feat/ branch took up since its last push are held to all of them; pre-merge-commit runs only the
 # documentation check on each. It runs them with --changed: the self-tests of what the branch left
 # untouched since main are skipped, since CI runs them, and every check itself still runs;
-# check-all.sh says which run. Enabled as
-# CONTRIBUTING.md → "Git hooks" says.
+# check-all.sh says which run. Enabled as the "Git hooks" of CONTRIBUTING.md says.
 #
 # A push whose every ref is a deletion, such as that of a merged branch, sends nothing to check
 # and proceeds without the checks; a deletion of the remote's main is still refused. A repository
@@ -22,15 +21,8 @@
 # tree counts only when the working tree is clean, nothing changed and nothing untracked, and is
 # then the tree of HEAD. The hook keeps the last 50 green trees in 'checks-green-trees' of the
 # repository's git directory, shared by its worktrees.
-# Bypassable with 'git push --no-verify', or by writing a tree into that file by hand; AGENTS.md,
-# section 6 says who may.
-#
-# A push that sends a draft ADR is told how many it carries and where they take their numbers: on
-# the branch of the pull request into main, by scripts/ready-for-main.sh, as step 7 of the
-# Integration branches of CONTRIBUTING.md says. The notice passes or refuses nothing and asks for
-# nothing: a branch under rework carries drafts on purpose, and check 16 of scripts/check-docs.sh
-# fails on a draft in a pull request into main that is ready for review. scripts/test-git-hooks.sh
-# exercises this hook.
+# Bypassable with 'git push --no-verify', or by writing a tree into that file by hand;
+# NUC-main-only-via-pr §6 says who may. scripts/test-git-hooks.sh exercises this hook.
 
 set -uo pipefail
 
@@ -41,18 +33,11 @@ refs=0
 sent=0
 while read -r _ local_object remote_ref _; do
   if [[ "$remote_ref" == "refs/heads/main" ]]; then
-    echo "pre-push: refused — changes reach main through a pull request, not a push (AGENTS.md, section 6). Push a branch of its own and open one: gh pr create --base main" >&2
+    echo "pre-push: refused — changes reach main through a pull request, not a push (NUC-main-only-via-pr §4). Push a branch of its own and open one: gh pr create --base main" >&2
     exit 1
   fi
   refs=$((refs + 1))
-  [[ "$local_object" =~ ^0+$ ]] && continue
-  sent=$((sent + 1))
-  # A draft ADR takes its number on the branch of its pull request into main (ADR-0002); the
-  # notice says so on every push that carries one, and decides nothing.
-  drafts="$(git ls-tree --name-only "$local_object" docs/adr/ 2>/dev/null | grep -c '^docs/adr/draft-.*\.md$')"
-  if ((drafts > 0)); then
-    echo "pre-push: ${remote_ref#refs/heads/} carries $drafts draft ADR(s); they take their numbers on the branch of the pull request into main, by scripts/ready-for-main.sh (CONTRIBUTING.md, Integration branches, step 7)." >&2
-  fi
+  [[ "$local_object" =~ ^0+$ ]] || sent=$((sent + 1))
 done
 
 # A push that only deletes sends nothing to check.
@@ -83,7 +68,7 @@ unset $(git rev-parse --local-env-vars)
 if [[ -n "$root" && -f "$root/scripts/check-all.sh" ]]; then
   if ! bash "$root/scripts/check-all.sh" --changed; then
     echo >&2
-    echo "pre-push: refused — the checks are red, and they pass before anything is pushed (AGENTS.md, section 5). Fix them, then push again." >&2
+    echo "pre-push: refused — the checks are red, and they pass before anything is pushed (NUC-checks-are-bash §6). Fix them, then push again." >&2
     exit 1
   fi
   if [[ -n "$tree" ]]; then

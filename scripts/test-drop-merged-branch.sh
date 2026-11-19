@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/drop-merged-branch.sh. Verifies: ADR-0002
+# Self-test of scripts/drop-merged-branch.sh.
+# Verifies: NUC-main-only-via-pr NUC-checks-are-bash
 #
 # Each case builds a throwaway repository under a temporary directory, with a bare repository as
 # its origin: a main pushed to origin, a branch feat/work pushed with one commit, and origin's

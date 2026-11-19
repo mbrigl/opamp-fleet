@@ -1,0 +1,275 @@
+# Cases of scripts/check-docs.sh, read by scripts/test-check-docs.sh: every case of its self-test
+# but the few it keeps inline and says why.
+#
+# One case per line, five fields separated by ' | ':
+#
+#   <check> | <pass or fail> | <what the output holds, or -> | <name> | <tree>
+#
+# The check is the number of the check in the header of check-docs.sh, or 'all' for a case of every
+# check. The tree is the rest of the line, so it may hold ' | ' itself.
+#
+# A run exits 0 for pass and 1 for fail. The third field is '<key>', then ' @ <subject>' for each
+# datum the line names, such as a file or an identifier. A line of the output ends in '[<key>]', the
+# rule and a reason word, and holds each subject, in that order and with no ASCII letter, digit,
+# hyphen, or underscore beside it; the rest of its wording is free. '<deleted>' stands for the
+# short hash of the commit of the last delete.
+#
+# A line that starts with '#' is a comment, not a case. The subjects are looked for in the part of
+# the line before its key, so that none holds by the key alone. A field may start with '!': it then
+# holds where no line that ends in '[<key>]' holds the subjects in their order, so a field
+# '!<key> @ <a> @ <b>' is not broken by a line that names <b> before <a>.
+#
+# The tree is a list of steps separated by '; ', or '-' for none, applied in order to a git
+# repository, with no commit and without TEMPLATE-SETUP.md, that passes every check, its setup
+# done. Every file is staged before the check runs. Its files, where 'exactly' gives the whole
+# content, each '\n' a line break:
+#
+#   AGENTS.md                     exactly '# Agent Guide\n\n## 1. Principles\n\nBe simple.\n\n
+#                                 ## 2. Rules\n\nFollow them.\n'
+#   README.md                     exactly '# Fixture\n\n## Template\n\n- **Template release:**
+#                                 unreleased\n'
+#   CONTRIBUTING.md               '# Contributing'; '## Project Layout' with a fenced block of one
+#                                 line per path, '<path>  # <what it is>', in this order: README.md,
+#                                 CONTRIBUTING.md, AGENTS.md, docs/adr/, scripts/, .github/,
+#                                 .agents/skills/, .claude/skills/; '## Repository settings' with
+#                                 the lines '<!-- required-checks begin -->', '`docs`', and
+#                                 '<!-- required-checks end -->'
+#   .github/workflows/checks.yml  exactly 'jobs:\n  docs:\n    steps:\n      - run: bash
+#                                 scripts/check-docs.sh\n'
+#   scripts/check-all.sh          the line 'run "Documentation consistency" scripts/check-docs.sh'
+#   docs/adr/template.md          '# <CAT>-<slug>: title', '- **Status:** 🟡 proposed', and
+#                                 '*Complete the header and delete this paragraph.*'
+#   docs/adr/OPS:fixture-<role>.md  for the roles harness and toolchain, the two required:
+#                                 '# OPS:fixture-<role>: decision', '- **Status:** 🟢 accepted',
+#                                 '- **Role:** <role>', '- **Applies to:** everything'
+#   docs/adr/README.md            '# ADRs'; '### Categories' with '- **NUC** — the template.';
+#                                 '### Binding' with a table of the two role ADRs; and
+#                                 '### Superseded and rejected' with an empty table. Each table has
+#                                 the header '| ADR | Title | Applies to | Status |' and its
+#                                 delimiter row '|-----|-------|------------|--------|', and a row reads
+#                                 '| [<id>](<id>.md) | Decision | everything | <status> |'
+#   .agents/skills/review/SKILL.md  exactly '---\nname: review\ndescription: Review a change.\n
+#                                 ---\n\n# Review\n'
+#   .claude/skills/review         a symlink to ../../.agents/skills/review
+#
+# The steps:
+#
+#   adr <id> <status>           the ADR file and its index row, in the table its status belongs to
+#   file <id> <status>          the ADR file alone, exactly: '# <id>: decision\n\n- **Status:**
+#                               <status>\n- **Applies to:** everything\n\n## Decision\n\nWe will.\n'
+#   row <table> <id> <status>   an index row alone, in 'binding' or 'archive'
+#   status <id> <status>        the status line of the file alone
+#   field <id> <name> <text>    a header field '- **<name>:** <text>' before Applies to, such as Role
+#   supersedes <id> <ids>       a Supersedes field before Applies to, linking each id of the
+#                               comma-separated list as [<id>](<id>.md); an id after '+' stands on
+#                               a continuation line
+#   heading <id> <text>         the first line of the file replaced by the text
+#   text <file> <text>          the text appended to the file as one more line, each '\n' in it a
+#                               line break; the file and its directories are made when absent
+#   write <file> <text>         the file written with exactly the text, each '\n' in it a line break
+#   edit <file> <old> => <new>  the first line of the file that starts with the old text replaced
+#                               by the new, the first ' => ' splitting the two; with nothing
+#                               after '=>', that line removed. No line that starts with the old
+#                               text stops the run, an error of the table
+#   rm <path>                   the file, directory, or symlink removed
+#   link <path> <target>        a symlink at the path to the target, its directories made
+#   layout <path>               the line '<path>  # added' in the Project Layout block, right
+#                               after the line of AGENTS.md
+#   category <key>              '- **<key>** — a category of the project.' in the category list
+#   blobs                       the blob list docs/adr/NUC.blobs written from the files: a line
+#                               '<git blob identifier> <file>' for each NUC- file and AGENTS.md
+#   release <text>              the README's Template release line reading '- **Template
+#                               release:** ' and the text
+#   setup                       TEMPLATE-SETUP.md present, as before the setup is done, and named
+#                               in the Project Layout
+#   commit                      every file committed
+#   delete <id>                 the file and its row deleted and committed
+#   branch <name>               a new branch, checked out
+#   back                        the branch checked out before
+#   merge <name>                the branch merged by a merge commit
+#   skill <text>                the SKILL.md of the fixture's skill 'review' replaced by the text,
+#                               each '\n' in it a line break
+#
+# The text of a step is all of it after the file and the one space that follows, leading spaces
+# kept. In the text of text and write, '<prose N>' stands for N characters of prose: 'word '
+# repeated, cut after the Nth character.
+#
+# An id is '<CAT>:<slug>', the file <CAT>-<slug>.md. A status is accepted (🟢 accepted), proposed
+# (🟡 proposed), rejected (🔴 rejected), or superseded:<id> (⚪ superseded by <id>). Everywhere in a
+# line, a colon after two to five capital letters, not preceded by a letter, a digit, or '_', and
+# before a letter or a digit reads as a hyphen: written so, an identifier cites no ADR of this
+# repository, and the map script of the normalize skill leaves it as it is. A row may name an ADR
+# of this repository, such as one a message of the check cites, by its identifier with a hyphen;
+# that cites the ADR, and the map script moves it with the rest of the tree.
+
+1 | fail | docs/adr-index:status @ SEC:decision-1.md @ 🟡 @ 🟢 | an index status that disagrees with the ADR | adr SEC:decision-1 proposed; status SEC:decision-1 accepted
+1 | fail | docs/adr-index:above | a rejected row in the binding table | file SEC:decision-1 rejected; row binding SEC:decision-1 rejected
+1 | fail | docs/adr-index:below | a proposed row in the archive table | file SEC:decision-1 proposed; row archive SEC:decision-1 proposed
+1 | fail | docs/adr-index:twice @ SEC:decision-1.md | a row both sides of a union merge kept | adr SEC:decision-1 proposed; row binding SEC:decision-1 proposed
+1 | pass | - | an ADR and its row | adr SEC:host-socket-closed proposed
+1 | fail | docs/adr-index:unlisted @ SEC:host-socket-closed.md | an ADR without its row | file SEC:host-socket-closed proposed
+1 | fail | docs/adr-index:missing @ OPS:gone-rule.md | a row without its file | row binding OPS:gone-rule proposed
+2 | fail | docs/adr-numbering:form @ SEC:Host_socket.md | a slug with capitals and an underscore | adr SEC:Host_socket proposed
+2 | fail | docs/adr-numbering:form @ API:one-two-three-four-five-six.md | a slug of six words | adr API:one-two-three-four-five-six proposed
+2 | fail | docs/adr-numbering:category @ XYZ:some-thing.md | a category nobody defined | adr XYZ:some-thing proposed
+2 | fail | docs/adr-numbering:form @ SEC:once.md | a slug of one word | adr SEC:once proposed
+2 | fail | docs/adr-numbering:form @ Sec-host-socket.md | a category key not in capitals, visible to the check | adr Sec-host-socket proposed
+2 | pass | - | a category of the project's list | category UX; adr UX:dark-mode proposed
+2 | fail | docs/adr-numbering:heading @ SEC:a-rule.md @ SEC:b-rule @ SEC:a-rule | a heading that names another identifier | adr SEC:a-rule proposed; heading SEC:a-rule # SEC:b-rule: decision
+2 | fail | docs/adr-numbering:taken @ OPS:old-rule.md @ <deleted> | an identifier a deleted ADR carried, the deleting commit named | adr OPS:old-rule proposed; commit; delete OPS:old-rule; adr OPS:old-rule proposed
+2 | pass | - | an ADR a merged side branch deleted and wrote anew, as a normalization does | adr OPS:kept-rule proposed; commit; branch side; delete OPS:kept-rule; adr OPS:kept-rule accepted; commit; back; merge side
+2 | fail | docs/adr-numbering:taken @ OPS:gone-rule.md | an ADR a merged side branch deleted, taken again | adr OPS:gone-rule proposed; commit; branch side; delete OPS:gone-rule; back; merge side; adr OPS:gone-rule proposed
+2 | pass | - | a deleted ADR whose identifier nobody takes again | adr OPS:old-rule proposed; commit; delete OPS:old-rule; adr OPS:new-rule proposed
+2 | fail | docs/adr-numbering:numbered @ 0001-old.md | a numbered ADR file left from before the migration | text docs/adr/0001-old.md # old decision
+4 | pass | - | a list of clauses after one identifier, in Markdown | adr SEC:x-rule proposed; text README.md See SEC:x-rule §4, §5, SEC:x-rule §4 and §5, SEC:x-rule §4, §5, and §6, and SEC:x-rule §2–§5.
+4 | pass | - | a list of clauses after one identifier, in a script | adr SEC:x-rule proposed; text scripts/lib/run.sh # SEC:x-rule §1, §9.
+4 | fail | docs/section-refs:unmatched @ §9 | a section after a list of clauses | adr SEC:x-rule proposed; text scripts/lib/run.sh # SEC:x-rule §1, §2, not AGENTS.md §9.
+5 | pass | - | a clause citation of an existing ADR | adr SEC:x-rule proposed; text README.md See [SEC:x-rule §3](docs/adr/SEC:x-rule.md) and SEC:x-rule §1.
+5 | fail | docs/adr-refs:unmatched @ SEC:y-rule | a clause citation of a missing ADR | adr SEC:x-rule proposed; text README.md See SEC:y-rule §3.
+5 | fail | docs/adr-refs:unmatched @ UX:dark-mode | a project category cited and missing | category UX; text README.md See UX:dark-mode.
+5 | pass | - | an identifier in a code span is no citation | text README.md An identifier such as `SEC:host-socket-closed`.
+5 | pass | - | a slug of one word is no citation | text README.md API:v2, OPS:team, NUC:based, and https://example.invalid/SEC:advisories/x.
+5 | pass | - | a slug of one word in a shell script is no citation | text scripts/lib/note.sh # An API:first design.
+5 | pass | - | a chain longer than an identifier is no citation, not one cut short | text README.md NUC:adrs-record-decisions-and-a-b.
+5 | pass | - | a hyphenated word of no category is no citation | text README.md UTF:8 and SHA:256 and CVE:2025-30066.
+6 | fail | docs/adr-link-targets:other @ README.md @ [SEC:x-rule](docs/adr/SEC:decision-1.md) @ SEC:x-rule @ SEC:decision-1.md | a link that cites one ADR and points at another | adr SEC:decision-1 accepted; adr SEC:x-rule proposed; text README.md See [SEC:x-rule](docs/adr/SEC:decision-1.md).
+6 | pass | - | a link that cites an ADR and points at its file | adr SEC:x-rule proposed; text README.md See [SEC:x-rule §2](docs/adr/SEC:x-rule.md#decision).
+6 | pass | - | a link that cites an ADR and points outside docs/adr/ is no claim | adr SEC:x-rule proposed; text docs/notes/threat-model.md # Threat model; text README.md See [SEC:x-rule](docs/notes/threat-model.md).
+8 | pass | - | one ADR superseding two, both flipped | adr SEC:decision-1 superseded:SEC:decision-3; adr SEC:decision-2 superseded:SEC:decision-3; adr SEC:decision-3 accepted; supersedes SEC:decision-3 SEC:decision-1,SEC:decision-2
+8 | fail | docs/adr-supersessions:unflipped @ SEC:decision-2.md: @ SEC:decision-3.md | one ADR superseding two, the second not flipped | adr SEC:decision-1 superseded:SEC:decision-3; adr SEC:decision-2 proposed; adr SEC:decision-3 accepted; supersedes SEC:decision-3 SEC:decision-1,SEC:decision-2
+8 | pass | - | a Supersedes field wrapped onto a second line, both flipped | adr SEC:decision-1 superseded:SEC:decision-3; adr SEC:decision-2 superseded:SEC:decision-3; adr SEC:decision-3 accepted; supersedes SEC:decision-3 SEC:decision-1,+SEC:decision-2
+8 | fail | docs/adr-supersessions:unflipped @ SEC:decision-2.md: @ SEC:decision-3.md | a wrapped Supersedes field, the name on the second line not flipped | adr SEC:decision-1 superseded:SEC:decision-3; adr SEC:decision-2 proposed; adr SEC:decision-3 accepted; supersedes SEC:decision-3 SEC:decision-1,+SEC:decision-2
+8 | pass | - | a proposed supersession, the old ADR still accepted | adr SEC:decision-1 accepted; adr SEC:decision-2 proposed; supersedes SEC:decision-2 SEC:decision-1
+8 | fail | docs/adr-supersessions:unaccepted @ SEC:decision-1.md: @ SEC:decision-2 | an old ADR flipped while its successor is only proposed | adr SEC:decision-1 superseded:SEC:decision-2; adr SEC:decision-2 proposed; supersedes SEC:decision-2 SEC:decision-1
+8 | pass | - | a chain of supersessions, the last successor accepted | adr SEC:decision-1 superseded:SEC:decision-2; adr SEC:decision-2 superseded:SEC:decision-3; adr SEC:decision-3 accepted; supersedes SEC:decision-2 SEC:decision-1; supersedes SEC:decision-3 SEC:decision-2
+8 | pass | - | an ADR superseding an old one, accepted and flipped | adr SEC:decision-1 superseded:SEC:new-rule; adr SEC:new-rule accepted; supersedes SEC:new-rule SEC:decision-1
+8 | fail | docs/adr-supersessions:unflipped @ SEC:decision-1.md: @ SEC:new-rule | an ADR accepted, the old one not flipped | adr SEC:decision-1 accepted; adr SEC:new-rule accepted; supersedes SEC:new-rule SEC:decision-1
+8 | fail | docs/adr-supersessions:unclaimed @ SEC:new-rule.md: @ SEC:decision-1 | an old ADR naming a successor that does not claim it | adr SEC:decision-1 superseded:SEC:new-rule; adr SEC:new-rule accepted
+12 | pass | - | a base and AGENTS.md unchanged since their blob list | file NUC:base-rule accepted; blobs
+12 | pass | - | a list written out with the git blob identifier of each file's content | file NUC:base-rule accepted; text docs/adr/NUC.blobs 2bb3f08bb1f9ab0e5ef83df15d5ec1f6ede8c83b NUC:base-rule.md; text docs/adr/NUC.blobs 0d50ef0267858460aa089fffce7f6923f2f62b0a AGENTS.md
+12 | fail | docs/base-blobs:unlisted @ AGENTS.md | a list that names the NUC- files only | file NUC:base-rule accepted; text docs/adr/NUC.blobs 2bb3f08bb1f9ab0e5ef83df15d5ec1f6ede8c83b NUC:base-rule.md
+12 | fail | docs/base-blobs:differs @ NUC:base-rule.md | a list written out with another identifier | file NUC:base-rule accepted; text docs/adr/NUC.blobs 2bb3f08bb1f9ab0e5ef83df15d5ec1f6ede8c83c NUC:base-rule.md
+12 | fail | docs/base-blobs:differs @ NUC:base-rule.md | a base file changed after its list was written | file NUC:base-rule accepted; blobs; text docs/adr/NUC:base-rule.md A clause of the project.
+12 | fail | docs/base-blobs:differs @ AGENTS.md | a derived project that edits AGENTS.md | file NUC:base-rule accepted; blobs; text AGENTS.md A rule of the project.
+12 | pass | - | the template rewrites the list in the change to AGENTS.md | file NUC:base-rule accepted; blobs; text AGENTS.md A rule of the template.; blobs
+12 | fail | docs/base-blobs:unlisted @ NUC:more-rules.md | a base file the list does not name | file NUC:base-rule accepted; blobs; file NUC:more-rules accepted
+12 | fail | docs/base-blobs:gone @ NUC:gone-rule.md | a line whose file is gone | file NUC:base-rule accepted; file NUC:gone-rule accepted; blobs; commit; delete NUC:gone-rule
+12 | fail | docs/base-blobs:absent | a base without a list and no fork named | file NUC:base-rule accepted
+12 | pass | - | a fork without a list, the README naming the release it forked | file NUC:base-rule accepted; text docs/adr/NUC:base-rule.md A clause the fork changed.; release v0.8.1, forked
+12 | fail | docs/base-blobs:absent | a fork that names no release | file NUC:base-rule accepted; release unreleased, forked
+12 | fail | docs/base-blobs:absent | a release line that says 'not forked' | file NUC:base-rule accepted; release v0.8.1, not forked
+1 | pass | - | a base ADR, which the index does not list | file NUC:base-rule accepted; blobs
+1 | fail | docs/adr-index:base @ NUC:base-rule | a base ADR listed in the index | adr NUC:base-rule accepted; blobs
+8 | fail | docs/adr-supersessions:base @ SEC:x-rule.md @ NUC:base-rule | a project ADR superseding a base ADR | file NUC:base-rule accepted; blobs; adr SEC:x-rule proposed; supersedes SEC:x-rule NUC:base-rule
+8 | pass | - | a narrowing of an existing base clause | file NUC:base-rule accepted; text docs/adr/NUC:base-rule.md 2. **Two.** A rule.; blobs; adr SEC:x-rule proposed; field SEC:x-rule Narrows [NUC:base-rule §2](NUC:base-rule.md)
+8 | fail | docs/adr-supersessions:clause @ SEC:x-rule.md @ Narrows @ NUC:base-rule @ §3 | a narrowing of a missing clause | file NUC:base-rule accepted; text docs/adr/NUC:base-rule.md 2. **Two.** A rule.; blobs; adr SEC:x-rule proposed; field SEC:x-rule Narrows NUC:base-rule §3
+8 | fail | docs/adr-supersessions:field @ SEC:x-rule.md @ Extends | an extension of a project ADR | adr SEC:y-rule proposed; adr SEC:x-rule proposed; field SEC:x-rule Extends SEC:y-rule §1
+13 | pass | - | a second harness ADR, only proposed, after the setup | adr SEC:x-rule proposed; field SEC:x-rule Role harness
+13 | fail | docs/template-identity:unfilled @ harness | after the setup, no harness ADR | commit; delete OPS:fixture-harness
+13 | fail | docs/template-identity:several @ 2 @ harness | after the setup, two accepted harness ADRs | adr SEC:x-rule accepted; field SEC:x-rule Role harness
+13 | pass | - | while the setup file exists, no role is required | setup; commit; delete OPS:fixture-harness
+11 | fail | docs/skill-pointers:frontmatter @ review/SKILL.md | the ticket-10 break: a description wrapped unindented and the fence ending its line | skill ---\nname: review\ndescription: Review a change,\nwrapped onto a second line. ---\n\n# Review\n
+11 | fail | docs/skill-pointers:frontmatter @ review/SKILL.md | a front matter never closed | skill ---\nname: review\ndescription: Review a change.\n\n# Review\n
+11 | fail | docs/skill-pointers:frontmatter @ review/SKILL.md | a first line that is not the opening fence | skill # Review\nname: review\ndescription: Review a change.\n---\n
+11 | fail | docs/skill-pointers:frontmatter @ review/SKILL.md | a name that is not the skill's directory | skill ---\nname: other\ndescription: Review a change.\n---\n
+11 | fail | docs/skill-pointers:frontmatter @ review/SKILL.md | no description | skill ---\nname: review\n---\n\n# Review\n
+11 | fail | docs/skill-pointers:frontmatter @ review/SKILL.md | an unindented line that starts no key, the fence closed | skill ---\nname: review\ndescription: Review a change,\nwrapped unindented.\n---\n
+11 | pass | - | quoted values | skill ---\nname: "review"\ndescription: 'Review: a change.'\n---\n
+11 | pass | - | a folded and a literal block scalar | skill ---\nname: review\ndescription: >\n  Review a change,\n  folded.\ncompatibility: |-\n  Any agent.\n---\n
+11 | pass | - | nested metadata | skill ---\nname: review\ndescription: Review a change.\nmetadata:\n  author: example\n  version: "1.0"\n---\n
+11 | pass | - | a description wrapped onto an indented line | skill ---\nname: review\ndescription: Review a change,\n  wrapped indented.\n---\n
+11 | fail | docs/skill-pointers:frontmatter @ review/SKILL.md | a description only nested under metadata | skill ---\nname: review\nmetadata:\n  description: Review a change.\n---\n
+11 | pass | - | a name in single quotes | skill ---\nname: 'review'\ndescription: Review a change.\n---\n
+11 | pass | - | an unindented block sequence | skill ---\nname: review\ndescription: Review a change.\nallowed-tools:\n- Read\n- Grep\n---\n
+11 | pass | - | fences with trailing spaces | skill ---  \nname: review\ndescription: Review a change.\n--- \n
+11 | pass | - | a comment and an empty line inside the fences | skill ---\n# the skill\nname: review\n\ndescription: Review a change.\n---\n
+all | pass | - | a consistent repository passes | -
+3 | fail | docs/links:broken @ README.md @ missing.md | a relative link to a file that does not exist | text README.md See [the missing file](missing.md).
+3 | fail | docs/links:anchor @ README.md @ AGENTS.md#3-rules @ 3-rules @ AGENTS.md | a link to an anchor no heading carries | text README.md See [the rules](AGENTS.md#3-rules).
+3 | pass | - | an anchor slugged the way GitHub does, closing hashes dropped | text AGENTS.md \n## Bar & Done ##; text README.md See [the bar](AGENTS.md#bar--done).
+3 | pass | - | a heading on a last line without a newline anchors | write AGENTS.md # Agent Guide\n\n## 1. Principles\n\nBe simple.\n\n## 2. Rules\n\nFollow them.\n\n## Last; text README.md See [the last section](AGENTS.md#last).
+4 | fail | docs/section-refs:unmatched | a section reference that names no section | text README.md Cited in [`AGENTS.md` §9](AGENTS.md#9-nowhere).
+4 | pass | - | a reference in words to a section that exists | text scripts/lib/run.sh # Required by AGENTS.md, section 2.
+4 | fail | docs/section-refs:unmatched @ .githooks/pre-commit:1 | a section reference in a git hook | text .githooks/pre-commit # See AGENTS.md §9.
+4 | pass | - | the section sign in JSON is an ordinary character | text messages.json { "de": "Siehe §9 BGB" }; layout messages.json
+7 | fail | docs/adr-header:field @ SEC:decision-1.md:3 | a header field that is no list item | adr SEC:decision-1 proposed; edit docs/adr/SEC:decision-1.md - **Status:** => **Status:** 🟡 proposed
+7 | pass | - | a header field quoted in the body of an ADR | adr SEC:decision-1 proposed; text docs/adr/SEC:decision-1.md A later ADR names this one in its `**Supersedes:**` field.
+9 | fail | docs/check-lists:extra @ scripts/check-all.sh @ scripts/check-extra.sh | a check the local runner has and CI does not | text scripts/check-all.sh run "Extra" scripts/check-extra.sh
+9 | fail | docs/check-lists:orphan @ scripts/check-new.sh @ scripts/check-all.sh | a script that neither list runs | text scripts/check-new.sh echo new
+9 | pass | - | a script the local runner names as run on instruction | text scripts/sensor-by-hand.sh echo by hand; text scripts/check-all.sh # On instruction: scripts/sensor-by-hand.sh
+9 | pass | - | another workflow that runs a script the local runner runs, its job not required | text .github/workflows/again.yml on: [pull_request]\njobs:\n  again:\n    steps:\n      - run: bash scripts/check-docs.sh --strict
+9 | fail | docs/check-lists:unreported @ CONTRIBUTING.md @ again @ .github/workflows/checks.yml | a required check that is a job of another workflow than checks.yml | text .github/workflows/again.yml on: [pull_request]\njobs:\n  again:\n    steps:\n      - run: bash scripts/check-docs.sh; edit CONTRIBUTING.md `docs` => `docs`, `again`
+9 | fail | docs/check-lists:inline @ .github/workflows/again.yml @ again | a job of another workflow that runs no script | text .github/workflows/again.yml on: [pull_request]\njobs:\n  again:\n    steps:\n      - run: echo inline
+9 | pass | - | a toolchain job that runs the build script after a setup step | text .github/workflows/checks.yml   build:\n    steps:\n      - uses: actions/setup-something@v1\n      - run: bash scripts/check-build.sh; text scripts/check-all.sh run "Build, test, lint" scripts/check-build.sh; edit CONTRIBUTING.md `docs` => `docs`, `build`
+9 | fail | docs/check-lists:inline @ .github/workflows/checks.yml @ build | a toolchain job with its commands inline and nothing in the local runner | text .github/workflows/checks.yml   build:\n    steps:\n      - uses: actions/setup-something@v1\n      - run: make test; edit CONTRIBUTING.md `docs` => `docs`, `build`
+9 | pass | - | a publishing workflow the local runner names as no gate, its steps inline | text .github/workflows/release.yml on: [push]\njobs:\n  publish:\n    steps:\n      - run: make dist; text scripts/check-all.sh # Not a gate: .github/workflows/release.yml
+9 | fail | docs/check-lists:inline @ .github/workflows/release.yml @ publish | a publishing workflow not named as no gate | text .github/workflows/release.yml on: [push]\njobs:\n  publish:\n    steps:\n      - run: make dist
+9 | fail | docs/check-lists:nonworkflow @ scripts/check-all.sh @ .github/workflows/gone.yml | a '# Not a gate:' line that names no workflow | text scripts/check-all.sh # Not a gate: .github/workflows/gone.yml
+9 | fail | docs/check-lists:nonworkflow @ scripts/check-all.sh @ README.md | a '# Not a gate:' line that names a file outside .github/workflows/ | text scripts/check-all.sh # Not a gate: README.md
+9 | fail | docs/check-lists:gate @ scripts/check-all.sh @ .github/workflows/checks.yml | a '# Not a gate:' line that names the required checks' workflow | text scripts/check-all.sh # Not a gate: .github/workflows/checks.yml
+9 | fail | docs/check-lists:unrun @ scripts/check-all.sh @ scripts/sign.sh | a script a workflow that is no gate runs, and the local runner does not | text scripts/sign.sh echo sign; text .github/workflows/release.yml on: [push]\njobs:\n  publish:\n    steps:\n      - run: make dist\n      - run: bash scripts/sign.sh; text scripts/check-all.sh # Not a gate: .github/workflows/release.yml
+9 | pass | - | a job with a matrix named by its check runs | text .github/workflows/checks.yml   build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n    steps:\n      - run: bash scripts/check-build.sh; text scripts/check-build.sh echo build; text scripts/check-all.sh run "Build, test, lint" scripts/check-build.sh; edit CONTRIBUTING.md `docs` => `docs`, `build (ubuntu-latest)`, `build (macos-latest)`
+9 | fail | docs/check-lists:matrix @ CONTRIBUTING.md @ build | a job with a matrix named by its bare name | text .github/workflows/checks.yml   build:\n    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n    steps:\n      - run: bash scripts/check-build.sh; text scripts/check-build.sh echo build; text scripts/check-all.sh run "Build, test, lint" scripts/check-build.sh; edit CONTRIBUTING.md `docs` => `docs`, `build`
+9 | pass | - | a strategy in flow style named by its check runs | text .github/workflows/checks.yml   build:\n    strategy: { fail-fast: false, matrix: { os: [ubuntu-latest, macos-latest] } }\n    steps:\n      - run: bash scripts/check-build.sh; text scripts/check-build.sh echo build; text scripts/check-all.sh run "Build, test, lint" scripts/check-build.sh; edit CONTRIBUTING.md `docs` => `docs`, `build (ubuntu-latest)`, `build (macos-latest)`
+9 | pass | - | a job that computes a matrix as an output, named by its name | text .github/workflows/checks.yml   build:\n    outputs:\n      matrix: ${{ steps.m.outputs.matrix }}\n    steps:\n      - run: bash scripts/check-build.sh; text scripts/check-build.sh echo build; text scripts/check-all.sh run "Build, test, lint" scripts/check-build.sh; edit CONTRIBUTING.md `docs` => `docs`, `build`
+9 | fail | docs/check-lists:nomatrix @ CONTRIBUTING.md @ build @ ubuntu-latest @ build | a check run named for a job without a matrix | text .github/workflows/checks.yml   build:\n    steps:\n      - uses: actions/setup-something@v1\n      - run: bash scripts/check-build.sh; text scripts/check-all.sh run "Build, test, lint" scripts/check-build.sh; edit CONTRIBUTING.md `docs` => `docs`, `build (ubuntu-latest)`
+10 | fail | docs/project-layout:notdir @ CONTRIBUTING.md @ docs/gone/ | a Project Layout entry that no longer exists | edit CONTRIBUTING.md docs/adr/ => docs/gone/             # decisions
+10 | fail | docs/project-layout:unnamed @ CONTRIBUTING.md @ NOTES.md | a top-level file the Project Layout does not name | text NOTES.md notes
+10 | fail | docs/project-layout:unmatched @ CONTRIBUTING.md @ scripts/sensor-*.sh | a Project Layout pattern that matches nothing | text scripts/check-one.sh echo; text scripts/check-all.sh run "One" scripts/check-one.sh; text .github/workflows/checks.yml       - run: bash scripts/check-one.sh; layout scripts/check-*.sh; layout scripts/sensor-*.sh
+10 | pass | - | docs/plan/ named while there is no open work | layout docs/plan/
+11 | fail | docs/skill-pointers:missing @ .claude/skills/review | a skill without its pointer | rm .claude/skills/review
+11 | fail | docs/skill-pointers:dangles @ .claude/skills/review | a pointer whose skill is gone | rm .agents/skills/review
+11 | fail | docs/skill-pointers:copy @ .claude/skills/review | a copy where a symlink belongs | rm .claude/skills/review; write .claude/skills/review/SKILL.md ---\nname: review\ndescription: Review a change.\n---\n\n# Review\n
+11 | fail | docs/skill-pointers:target @ .claude/skills/other @ .agents/skills/other | a pointer at a different skill | write .agents/skills/other/SKILL.md ---\nname: other\ndescription: Other.\n---\n; link .claude/skills/other ../../.agents/skills/review
+11 | fail | docs/skill-pointers:stray @ .claude/skills/local | a skill that lives only in the pointer directory | write .claude/skills/local/SKILL.md ---\nname: local\ndescription: Local.\n---\n
+11 | fail | docs/skill-pointers:stray @ .claude/skills/review | skills only in the pointer directory, none for the other agents | rm .agents; rm .claude/skills/review; write .claude/skills/review/SKILL.md ---\nname: review\ndescription: Review.\n---\n
+11 | pass | - | a repository without skills has nothing to check | rm .agents; rm .claude; edit CONTRIBUTING.md .agents/skills/ =>; edit CONTRIBUTING.md .claude/skills/ =>
+13 | pass | - | the template's title in the README while the setup file exists | edit README.md # Fixture => # NUC — an Agentic Fixture; setup
+13 | fail | docs/template-identity:title @ README.md | the template's title in the README after setup | edit README.md # Fixture => # NUC — an Agentic Fixture
+13 | fail | docs/template-identity:intro @ README.md | the template's intro in the README after setup | text README.md **NUC** is named after the small *nucleus colony*.
+13 | fail | docs/template-identity:overview @ README.md | the scaffold's Overview sentence after setup | text README.md Describe what this project does, who it is for, and its main goals.
+13 | fail | docs/template-identity:usage @ README.md | the Usage TODO after setup | text README.md TODO — show a minimal example of using the project.
+13 | fail | docs/template-identity:container @ .devcontainer/devcontainer.json | the template's Dev Container name after setup | text .devcontainer/devcontainer.json { "name": "NUC DevContainer" }
+13 | fail | docs/template-identity:badge @ README.md | the template's repository in the README badge after setup | text README.md [![Checks](https://github.com/hivevm/nuc/actions/workflows/checks.yml/badge.svg)](https://github.com/hivevm/nuc/actions/workflows/checks.yml)
+13 | fail | docs/template-identity:badge @ README.md | the template's repository in a shields.io badge after setup | text README.md [![License](https://img.shields.io/github/license/hivevm/nuc)](LICENSE)
+13 | fail | docs/template-identity:badge @ README.md | the template's repository in a legacy .svg badge after setup | text README.md [![Stars](https://img.shields.io/github/stars/hivevm/nuc.svg)](https://github.com/hivevm/nuc-tools)
+13 | pass | - | a badge of a derived repository whose name starts with the template's after setup | text README.md [![Checks](https://github.com/hivevm/nuc-tools/actions/workflows/checks.yml/badge.svg)](https://github.com/hivevm/nuc-tools/actions/workflows/checks.yml)
+13 | pass | - | a link to the template's repository outside the badge after setup | text README.md Created from [NUC](https://github.com/hivevm/nuc).
+13 | fail | docs/template-identity:copyright @ LICENSE | the placeholder copyright holder after setup | write LICENSE MIT License\n\nCopyright (c) 2026 Maintainer\n
+13 | fail | docs/template-identity:copyright @ LICENSE | the placeholder copyright holder under another license after setup | write LICENSE Apache License\nVersion 2.0, January 2004\n\nCopyright 2026 Maintainer\n
+13 | fail | docs/template-identity:security @ SECURITY.md | the placeholder security contact after setup | write SECURITY.md - email the maintainer: <!-- TODO: add a security contact address -->.\n
+13 | fail | docs/template-identity:conduct @ CODE_OF_CONDUCT.md | the placeholder reporting contact after setup | write CODE_OF_CONDUCT.md - Reporting contact: <!-- TODO: add a contact address (email or private channel) -->\n
+13 | fail | docs/template-identity:codeowners @ .github/CODEOWNERS | a CODEOWNERS with its rules still commented out after setup | write .github/CODEOWNERS # /docs/SPECIFICATION.md @owner\n# /docs/adr/ @owner\n
+13 | fail | docs/template-identity:instruction @ .github/CODEOWNERS | the code owner TODO still there after setup | write .github/CODEOWNERS # TODO: add a code owner and uncomment the rules.\n/docs/adr/ @someone\n
+13 | fail | docs/template-identity:projectname @ docs/SPECIFICATION.md | the scaffold's title in the specification after setup | write docs/SPECIFICATION.md # Specification — <Project Name>\n
+13 | fail | docs/template-identity:projectname @ docs/GLOSSARY.md | the scaffold's title in the glossary after setup | write docs/GLOSSARY.md # Glossary — <Project Name>\n
+13 | fail | docs/template-identity:criterion @ docs/SPECIFICATION.md | a goal still the scaffold's ellipsis after setup | write docs/SPECIFICATION.md # Specification — Fixture\n\n## Goals / Success Criteria\n\n1. **G-1** — …\n
+13 | fail | docs/template-identity:criterion @ docs/SPECIFICATION.md | a quality goal still the scaffold's placeholder after setup | write docs/SPECIFICATION.md # Specification — Fixture\n\n## Quality Goals\n\n- **Q-1** — <Quality, e.g. Performance>: why.\n
+13 | fail | docs/template-identity:part @ docs/ARCHITECTURE.md | the scaffold's <Part> entry after setup | write docs/ARCHITECTURE.md # Fixture\n\n- **<Part>** — what it is.\n
+13 | fail | docs/template-identity:term @ docs/GLOSSARY.md | the scaffold's <Term> entry after setup | write docs/GLOSSARY.md # Fixture\n\n- **<Term>** — what it is.\n
+13 | fail | docs/template-identity:convention @ docs/CONVENTIONS.md | the scaffold's <Convention> entry after setup | write docs/CONVENTIONS.md # Fixture\n\n- **<Convention>** — what it is.\n
+13 | fail | docs/template-identity:command @ README.md | a Build command still TODO after setup | text README.md - **Build:** TODO <!-- e.g. `make build` -->
+13 | fail | docs/template-identity:command @ README.md | a Lint command still TODO after setup | text README.md - **Lint:** TODO
+13 | pass | - | a Build command still TODO while the setup file exists | text README.md - **Build:** TODO; setup
+13 | pass | - | identity replaced after setup | write .github/CODEOWNERS # owners\n\n* @someone\n; write LICENSE MIT License\n\nCopyright (c) 2026 Someone\n; write docs/SPECIFICATION.md # Specification — Fixture\n\n## Goals / Success Criteria\n\n1. **G-1** — When asked, the system shall answer.\n; text README.md - **Build:** `make build`; layout LICENSE
+14 | fail | docs/template-release:absent @ README.md @ NUC-releases-are-semver-tags @ §4 | no README to carry the Template release line | rm README.md; edit CONTRIBUTING.md README.md =>
+14 | pass | - | a release tag followed by a sentence | release v1.4.0 of the template ([tags](https://example.invalid/tags)).
+14 | pass | - | the line without a list marker | edit README.md - **Template release:** => **Template release:** v0.2.0
+14 | pass | - | the tag as link text after a star marker | edit README.md - **Template release:** => * **Template release:** [v1.4.0](https://example.invalid/releases/tag/v1.4.0), taken up in full.
+14 | pass | - | the tag in backticks | release `v1.4.0`
+14 | fail | docs/template-release:version @ README.md @ NUC-releases-are-semver-tags @ §1 @ §4 | a leading zero, which SemVer forbids | release v01.4.0
+14 | fail | docs/template-release:line @ README.md @ NUC-releases-are-semver-tags @ §4 | no Template release line | edit README.md - **Template release:** => Created from the template.
+14 | fail | docs/template-release:version @ README.md | a version that is not a vX.Y.Z tag | release 1.4
+14 | fail | docs/template-release:version @ README.md | a pre-release suffix on the tag | release v1.4.0-rc1
+14 | fail | docs/template-release:version @ README.md | a word that is not 'unreleased' | release latest
+15 | fail | docs/prose-width:wide @ README.md:6 @ 101 | a prose line over 100 columns | text README.md <prose 101>
+15 | pass | - | a prose line of exactly 100 columns | text README.md <prose 100>
+15 | pass | - | an em dash counts as one column | text README.md <prose 48> — <prose 49>
+15 | pass | - | a character outside the BMP, such as an emoji, counts as one column | text README.md <prose 48> 🟢 <prose 49>
+15 | pass | - | a link that cannot break stands on a line of its own | text README.md   [a long link text](https://example.invalid/wordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordx)
+15 | pass | - | a table row, a heading, and a code block are exempt | text README.md | <prose 120> |\n\n## <prose 120>\n\n```\n<prose 120>\n```
+15 | pass | - | a fence inside a longer fence does not close it | text README.md ````\n```\n<prose 120>\n```\n````
+15 | pass | - | a file git marks as generated is not read | text CHANGELOG.md <prose 120>; text .gitattributes CHANGELOG.md linguist-generated; layout CHANGELOG.md; layout .gitattributes
+15 | fail | docs/prose-width:wide @ CHANGELOG.md:1 @ 120 | a file marked not generated is read | text CHANGELOG.md <prose 120>; text .gitattributes CHANGELOG.md -linguist-generated
+15 | fail | docs/prose-width:wide @ README.md:6 | prose after a long link can wrap | text README.md [a link](https://example.invalid/wordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordxwordx) and prose that could wrap
+15 | fail | docs/prose-width:wide @ README.md:6 | a bold label outside an ADR header is prose | text README.md - **Label:** <prose 110>

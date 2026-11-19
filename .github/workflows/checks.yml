@@ -9,11 +9,12 @@ name: Checks
 # each check after its self-test where it has one, and each script's header says what it checks
 # and which ADR it holds, or that the check is the rule.
 #
-# The sensors report for the reviewer and fail on nothing they count, except the action
-# references once a project runs that sensor with --require; their self-tests fail like any
-# check's. The sensors job checks out the full history because eight sensors read it. The review
-# binding sensor runs in review-binding.yml, the repository settings sensor on a human's
-# instruction (ADR-0002); this workflow runs the self-test of each.
+# The sensors report for the reviewer and fail on nothing they count, except the plain rules,
+# which this workflow runs with --require, and the action references once a project runs that
+# sensor with --require; their self-tests fail like any check's. The sensors job checks out the
+# full history because eight sensors read it. The review binding sensor runs in
+# review-binding.yml, the repository settings sensor on a human's instruction
+# (NUC-checks-are-bash §7); this workflow runs the self-test of each.
 #
 # The actions job holds the supply chain: every third-party action pinned to a commit SHA whose
 # release tag still points to it, every first-party action on its major tag, Dependabot raising
@@ -40,12 +41,10 @@ name: Checks
 
 on:
   pull_request:
-    # ready_for_review runs check 16 of check-docs.sh again on a draft pull request marked ready.
-    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
   # Started by hand on a pushed branch that has no pull request yet, such as a feat/ branch
-  # under rework (AGENTS.md, section 6): gh workflow run checks.yml --ref <branch>. GitHub offers
+  # under rework (NUC-main-only-via-pr §5): gh workflow run checks.yml --ref <branch>. GitHub offers
   # it only once this trigger is on the default branch.
   workflow_dispatch:
   # Once a week against main without a change: catches what moves without a commit, the runner
@@ -73,23 +72,20 @@ jobs:
       # Submodules are checked out because the link check resolves relative targets against the
       # working tree: a documentation link into a submodule would otherwise break in CI while
       # working locally. Their *contents* are never read — check-docs.sh enumerates via
-      # `git ls-files`, which lists a submodule as one gitlink entry, not as its files.
+      # `git ls-files`, which lists a submodule as one gitlink entry, not as its files. The whole
+      # history is fetched: check 2 reads the identifiers of deleted ADRs off it.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
           submodules: recursive
+          fetch-depth: 0
       # The check's own tests run first: a check that is wrong passes nothing worth trusting.
       - name: Self-test the documentation checks
         run: bash scripts/test-check-docs.sh
       - name: Self-test the Protocol Baseline check
         run: bash scripts/test-check-protocol-baseline.sh
-      # Check 16 reads the branch the change lands on from GitHub's own variables: a draft ADR
-      # fails on a pull request into main once it is ready for review, and on a push to main
-      # (ADR-0002). A draft pull request tests a feat/ branch still under rework, and passes.
       - name: Check documentation consistency
         run: bash scripts/check-docs.sh
-        env:
-          PULL_REQUEST_DRAFT: ${{ github.event.pull_request.draft }}
       # A newer upstream release is a warning, never a failure (API-protocol-pinned-interop-checked).
       - name: Check the Protocol Baseline
         run: bash scripts/check-protocol-baseline.sh
@@ -99,8 +95,6 @@ jobs:
         run: bash scripts/check-manual.sh
       - name: Self-test the map script of the normalize skill
         run: bash scripts/test-normalize-remap.sh
-      - name: Self-test the numbering script of the drafts
-        run: bash scripts/test-number-adrs.sh
       - name: Self-test the readiness script of the pull request into main
         run: bash scripts/test-ready-for-main.sh
       - name: Self-test the drop script of a merged branch
@@ -178,8 +172,8 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the plain rules sensor
         run: bash scripts/test-sensor-plain-rules.sh
-      - name: Report long sentences and soft modal verbs the change adds to the rules
-        run: bash scripts/sensor-plain-rules.sh "$BASE"
+      - name: Check the rules the change adds to a project ADR, and report the rest
+        run: bash scripts/sensor-plain-rules.sh --require "$BASE"
         env:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
       - name: Self-test the revision-due sensor
@@ -217,7 +211,8 @@ jobs:
         run: bash scripts/sensor-changelog.sh "$BASE"
         env:
           BASE: ${{ github.event.pull_request.base.sha || (!github.event.forced && github.event.before) || '' }}
-      # The repository settings sensor itself runs on a human's instruction (ADR-0002).
+      # The repository settings sensor itself runs on a human's instruction
+      # (NUC-checks-are-bash §7).
       - name: Self-test the repository settings sensor
         run: bash scripts/test-sensor-repo-settings.sh
 

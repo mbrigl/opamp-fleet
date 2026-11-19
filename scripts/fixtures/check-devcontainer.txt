@@ -1,0 +1,109 @@
+# Cases of scripts/check-devcontainer.sh, read by scripts/test-check-devcontainer.sh.
+#
+# One case per line, four fields separated by ' | ':
+#
+#   <pass or fail> | <what the output holds, or -> | <name> | <tree>
+#
+# A run exits 0 for pass and 1 for fail. The second field is '<key>', then ' @ <subject>' for each
+# datum the line names, such as the clause. A line of the output ends in '[<key>]', the rule and a
+# reason word, and holds each subject, in that order and with no ASCII letter, digit, hyphen,
+# or underscore beside it; the rest of its wording is free.
+#
+# A line that starts with '#' is a comment, not a case. The subjects are looked for in the part of
+# the line before its key, so that none holds by the key alone. A field may start with '!': it then
+# holds where no line that ends in '[<key>]' holds the subjects in their order, so a field
+# '!<key> @ <a> @ <b>' is not broken by a line that names <b> before <a>.
+#
+# The tree is a list of steps separated by '; ', or '-' for none, applied in order to a repository
+# that passes the check, not under git, of three files. .devcontainer/devcontainer.json:
+#
+#   {
+#     "name": "fixture",
+#     // A comment: the container has no socket mount.
+#     "image": "mcr.microsoft.com/devcontainers/base:debian",
+#     "postStartCommand": <post>,
+#     "features": {
+#       // The one Feature.
+#       "ghcr.io/devcontainers/features/github-cli:1": {}
+#     },
+#     "customizations": { "vscode": { "extensions": [] } }
+#   }
+#
+# where <post> is the one line
+#
+#   { "hooks": "git config core.hooksPath .githooks", "merge": "git config merge.ff false && git config pull.ff only", "index": "git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'" }
+#
+# .devcontainer/devcontainer-lock.json:
+#
+#   {
+#     "features": {
+#       "ghcr.io/devcontainers/features/github-cli:1": {
+#         "version": "1.0.0",
+#         "resolved": "example@sha256:0000",
+#         "integrity": "sha256:0000"
+#       },
+#     }
+#   }
+#
+# .vscode/settings.json:
+#
+#   {
+#     // Keep the container-management extension on the host side.
+#     "remote.extensionKind": { "ms-azuretools.vscode-containers": ["ui"] }
+#   }
+#
+# The steps:
+#
+#   rm <path>                   the file or directory removed
+#   extra <json>                the json as one more top-level line of devcontainer.json, before
+#                               the features block and after the lines of earlier extra steps
+#   post [json]                 the json as the value of postStartCommand, or no such line when
+#                               no json is given
+#   feature <id>                the id as the one Feature of devcontainer.json, in place of
+#                               ghcr.io/devcontainers/features/github-cli:1
+#   lock <id>...                devcontainer-lock.json written again, resolving each id of the
+#                               space-separated list in order, each as the base resolves its one
+#   settings <json>             .vscode/settings.json written again, the json as the value of
+#                               remote.extensionKind
+#   write <path> <text>         the file written with exactly the text, each '\n' in it a line break;
+#                               the text is all of the step after the path and the one space that
+#                               follows it, leading spaces kept
+#
+# Each extra, post, and feature step writes devcontainer.json again: the base with the change of
+# every such step of the case so far. In a step, '<pad N>' stands for N times the letter z.
+
+pass | devcontainer/check:unbound | a project without a Dev Container | rm .devcontainer
+pass | devcontainer/check:unbound | a project without a Dev Container or VS Code settings | rm .devcontainer; rm .vscode
+pass | devcontainer/check:passed | a Dev Container without VS Code, where the host-side clause binds nothing | rm .vscode
+fail | devcontainer/settings:absent | VS Code without its settings file | rm .vscode/settings.json
+fail | devcontainer/definition:absent @ §1 | a .devcontainer/ without devcontainer.json | rm .devcontainer/devcontainer.json
+fail | devcontainer/socket:mount @ §2 | a host socket mount | extra "mounts": ["source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"],
+fail | devcontainer/lock:absent @ §3 | no lock committed | rm .devcontainer/devcontainer-lock.json
+fail | devcontainer/settings:unpinned @ §4 | the container-management extension not pinned to the host | settings { "ms-azuretools.vscode-containers": ["workspace"] }
+fail | devcontainer/mount-path:folder @ §5 | a workspaceFolder every project shares | extra "workspaceFolder": "/workspace",
+fail | devcontainer/git-settings:absent @ core.hooksPath @ §6 | no postStartCommand at all | post
+pass | devcontainer/check:passed @ 1 | a container without a socket, pinned and locked, passes | -
+fail | devcontainer/socket:mount | a host socket passed as a run argument | extra "runArgs": ["-v", "/var/run/docker.sock:/var/run/docker.sock"],
+fail | devcontainer/socket:feature @ ghcr.io/devcontainers/features/docker-outside-of-docker:1 | a Feature that mounts the socket | feature ghcr.io/devcontainers/features/docker-outside-of-docker:1; lock ghcr.io/devcontainers/features/docker-outside-of-docker:1
+pass | devcontainer/check:passed @ 1 | an engine inside the container talks to no host engine and is the project's choice | feature ghcr.io/devcontainers/features/docker-in-docker:2; lock ghcr.io/devcontainers/features/docker-in-docker:2
+fail | devcontainer/lock:tag @ ghcr.io/devcontainers/features/github-cli:latest | a Feature on a mutable tag | feature ghcr.io/devcontainers/features/github-cli:latest; lock ghcr.io/devcontainers/features/github-cli:latest
+fail | devcontainer/lock:tag @ ghcr.io/devcontainers/features/github-cli | a Feature without a tag | feature ghcr.io/devcontainers/features/github-cli; lock ghcr.io/devcontainers/features/github-cli
+fail | devcontainer/lock:missing @ ghcr.io/devcontainers/features/node:1 | a Feature the lock does not resolve | feature ghcr.io/devcontainers/features/node:1
+fail | devcontainer/lock:stale @ ghcr.io/devcontainers/features/node:1 | a lock entry for a Feature no longer added | lock ghcr.io/devcontainers/features/github-cli:1 ghcr.io/devcontainers/features/node:1
+fail | devcontainer/lock:tag @ ghcr.io/devcontainers/features/github-cli:1.2.0 | a Feature on a full version instead of the major tag | feature ghcr.io/devcontainers/features/github-cli:1.2.0; lock ghcr.io/devcontainers/features/github-cli:1.2.0
+fail | devcontainer/socket:feature @ ghcr.io/devcontainers/features/docker-outside-of-docker:1 | a features block on one line, with a string-valued Feature, is read like any other | write .devcontainer/devcontainer.json { "image": "x", "features": { "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}, "ghcr.io/devcontainers/features/node:1": "lts" } }\n; lock ghcr.io/devcontainers/features/docker-outside-of-docker:1 ghcr.io/devcontainers/features/node:1
+fail | devcontainer/settings:unpinned | the pair under a key other than remote.extensionKind | write .vscode/settings.json {\n  "some.other.setting": { "ms-azuretools.vscode-containers": ["ui"] },\n  "remote.extensionKind": { "ms-azuretools.vscode-docker": ["ui"] }\n}\n
+pass | devcontainer/check:passed | the git settings in a postStartCommand string pass | post "git config core.hooksPath .githooks && git config merge.ff false && git config pull.ff only && git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'"
+pass | devcontainer/check:passed | a brace or bracket in an entry before the git settings | post { "cd": "cd ${containerWorkspaceFolder}", "list": ["a]b"], "hooks": "git config core.hooksPath .githooks", "merge": "git config merge.ff false && git config pull.ff only", "index": "git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'" }
+fail | devcontainer/git-settings:absent @ core.hooksPath | a postStartCommand without 'git config core.hooksPath .githooks' | post { "hooks": "", "merge": "git config merge.ff false && git config pull.ff only", "index": "git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'" }
+fail | devcontainer/git-settings:absent @ merge.ff | a postStartCommand without 'git config merge.ff false' | post { "hooks": "git config core.hooksPath .githooks", "merge": " && git config pull.ff only", "index": "git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'" }
+fail | devcontainer/git-settings:absent @ pull.ff | a postStartCommand without 'git config pull.ff only' | post { "hooks": "git config core.hooksPath .githooks", "merge": "git config merge.ff false && ", "index": "git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'" }
+fail | devcontainer/git-settings:absent @ merge.adr-index.driver | a postStartCommand without 'git config merge.adr-index.driver '.githooks/merge-adr-index %O %A %B %S %X %Y'' | post { "hooks": "git config core.hooksPath .githooks", "merge": "git config merge.ff false && git config pull.ff only", "index": "" }
+fail | devcontainer/git-settings:absent @ merge.adr-index.driver | the merge driver without the arguments git passes it | post { "hooks": "git config core.hooksPath .githooks", "merge": "git config merge.ff false && git config pull.ff only", "index": "git config merge.adr-index.driver '.githooks/merge-adr-index'" }
+pass | devcontainer/check:passed | a project mounted under a path of its own | extra "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",; extra "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/${localWorkspaceFolderBasename},type=bind",
+pass | devcontainer/check:passed | a mount whose target comes last, under another of its names | extra "workspaceMount": "source=${localWorkspaceFolder},type=bind,dst=/workspaces/${localWorkspaceFolderBasename}",
+fail | devcontainer/mount-path:mount @ /workspaces/${localWorkspaceFolderBasename} | a workspaceMount that targets a path every project shares | extra "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",; extra "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+fail | devcontainer/git-settings:absent @ core.hooksPath | the git settings in another command than postStartCommand | post "echo started"; extra "postCreateCommand": "git config core.hooksPath .githooks && git config merge.ff false && git config pull.ff only",
+# A config longer than a pipe holds, the socket before the rest: a grep that exits at the socket
+# before the config is written cuts the writer off, and the mount goes unreported.
+fail | devcontainer/socket:mount | a host socket mount in a config longer than a pipe holds | extra "mounts": ["source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"],; extra "remoteEnv": { "PAD": "<pad 200000>" },

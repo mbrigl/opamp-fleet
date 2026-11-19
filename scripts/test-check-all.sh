@@ -66,7 +66,7 @@ repo() {
   local dir="$work/$1" s
   mkdir -p "$dir/scripts" "$dir/src" "$dir/lib"
   cp "$RUNNER" "$dir/scripts/check-all.sh"
-  mkdir -p "$dir/scripts/lib" && cp "$ROOT/scripts/lib/git.sh" "$dir/scripts/lib/git.sh"
+  mkdir -p "$dir/scripts/lib" && cp "$ROOT/scripts/lib/git.sh" "$ROOT/scripts/lib/bash.sh" "$dir/scripts/lib/"
   for s in "${checks[@]}"; do stub "$dir" "$s" ""; done
   for s in "${tests[@]}"; do
     case "$s" in
@@ -126,27 +126,70 @@ expect_exit() {
 d="$(repo full)"
 expect "without --changed everything runs" "$d" "${scripts[*]}" ""
 
-# The bash floor (ADR-0002): below it the runner stops before any check and names both versions;
-# at it, the guard says nothing.
-# Verifies: ADR-0002
+# The bash floor (NUC-checks-are-bash §1): below it the runner stops before any check and names
+# both versions; at it, the guard says nothing.
+# Verifies: NUC-checks-are-bash
 d="$(repo old-bash)"
-out="$(CHECK_ALL_BASH_VERSION=3.2 bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
+out="$(BASH_GUARD_VERSION=3.2 bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
 if ((rc == 2)) && [[ "$out" == *"need bash 4.4 or later"* && "$out" == *"this is bash 3.2"* && "$out" != *"RAN "* ]]; then
   passed=$((passed + 1))
 else
   failed=$((failed + 1)); echo "FAIL: a bash below 4.4 stops the runner before any check (exit $rc)" >&2
 fi
-out="$(CHECK_ALL_BASH_VERSION=4.4 bash "$d/scripts/check-all.sh" 2>&1)"
+out="$(BASH_GUARD_VERSION=4.4 bash "$d/scripts/check-all.sh" 2>&1)"
 if [[ "$out" != *"need bash"* && "$out" == *"RAN "* ]]; then
   passed=$((passed + 1))
 else
   failed=$((failed + 1)); echo "FAIL: bash 4.4 passes the guard silently" >&2
 fi
+# Each script stops the same way when run alone, a self-test through its library: its own name
+# and the version it needs, before it does anything. Only a script with a line that sources the
+# guard is started: a project's own script without one may do anything when started.
+# guard_problem <script> — prints what is wrong with the script's guard, nothing if all is.
+guard_problem() {
+  local out rc
+  grep -qE '^source .*lib/(bash|selftest)\.sh"' "$1" || return 0
+  out="$(cd "$work" && BASH_GUARD_VERSION=3.2 bash "$1" 2>&1)"; rc=$?
+  ((rc == 2)) && [[ "$out" == "${1##*/}: the checks need bash 4.4 or later"*"this is bash 3.2"* ]] \
+    || echo "below bash 4.4 names no version (exit $rc): $out"
+}
+for s in "$ROOT"/scripts/*.sh "$ROOT"/.agents/skills/*/*.sh; do
+  problem="$(guard_problem "$s")"
+  if [[ -z "$problem" ]]; then
+    passed=$((passed + 1))
+  else
+    failed=$((failed + 1)); echo "FAIL: ${s#"$ROOT"/} $problem" >&2
+  fi
+done
+own="$work/own-project"
+mkdir -p "$own/scripts"
+printf 'touch "%s/ran"\n' "$own" > "$own/scripts/own.sh"
+if [[ -z "$(guard_problem "$own/scripts/own.sh")" && ! -e "$own/ran" ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: a project's own script without the guard is left alone" >&2
+fi
+# shellcheck disable=SC2016 # the fixture's line is its own
+printf '#     source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"\ntouch "%s/ran"\n' "$own" > "$own/scripts/own.sh"
+if [[ -z "$(guard_problem "$own/scripts/own.sh")" && ! -e "$own/ran" ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: a project's own script that only names the guard is left alone" >&2
+fi
+# A guard that does not stop the script: the source line alone gets it started, and it is reported.
+mkdir -p "$own/scripts/lib" && : > "$own/scripts/lib/bash.sh"
+# shellcheck disable=SC2016 # the fixture's line is its own
+printf 'source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"\ntouch "%s/ran"\n' "$own" > "$own/scripts/own.sh"
+if [[ -n "$(guard_problem "$own/scripts/own.sh")" && -e "$own/ran" ]]; then
+  passed=$((passed + 1))
+else
+  failed=$((failed + 1)); echo "FAIL: a script that sources the guard is started, and one it does not stop reported" >&2
+fi
 
 # A disk with less free space than FLEET_MIN_FREE_GB stops the runner before any check, naming
 # what is free and where; with enough space the guard says nothing, and a threshold that is no
 # number is refused.
-# Verifies: ADR-0002
+# Verifies: NUC-checks-are-bash
 d="$(repo short-disk)"
 out="$(FLEET_MIN_FREE_GB=20 CHECK_ALL_FREE_GB=7 CARGO_TARGET_DIR="$d/target" \
   bash "$d/scripts/check-all.sh" 2>&1)"; rc=$?
@@ -276,6 +319,9 @@ check "a sensor shows its headline and counts the rest" \
 check "a sensor hides the rest of its report" test "${out/RAN $sensor/}" = "$out"
 check "a passing check keeps a line that says it skipped something" \
   grep -qxF "    ShellCheck skipped" <<< "$out"
+required="$(grep -m1 -E '^run "[^"]*" scripts/sensor-[^ ]+ --require' "$RUNNER")"
+check "a sensor run with --require shows its line as a check does" \
+  grep -qxF "ok: $(cut -d'"' -f2 <<< "$required") — RAN $(grep -oE 'scripts/sensor-[^ ]+' <<< "$required")" <<< "$out"
 out="$(bash "$d/scripts/check-all.sh" --verbose 2>&1)"
 check "--verbose shows a sensor's report in full" grep -qF "RAN $sensor" <<< "$out"
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Self-test of scripts/check-traceability.sh. Verifies: ADR-0002
+# Self-test of scripts/check-traceability.sh.
+# Verifies: NUC-decisions-cite-tests NUC-checks-are-bash
 #
 # Each case builds a throwaway git repository under a temporary directory — a specification with
 # the two criteria sections, a few ADRs, and a file carrying markers — runs the check against it,
@@ -25,9 +26,9 @@ CHECK="$ROOT/scripts/check-traceability.sh"
 # mark <ids...> — the marker line for the given identifiers.
 mark() { printf 'Verifies: %s\n' "$*"; }
 
-# adr_id <n> — the identifier ADR-000n, assembled so that this file carries no literal one: a
-# normalization rewrites every literal one in the tree.
-adr_id() { printf "ADR-%04d" "$1"; }
+# adr_id <n> — the identifier SEC-decision-<n>, assembled so that this file carries no literal
+# one: a map rewrites every literal one in the tree.
+adr_id() { printf '%s-decision-%s' SEC "$((10#$1))"; }
 
 # repo <name> — create an empty fixture repository and print its path.
 repo() {
@@ -62,7 +63,7 @@ spec() {
 adr() {
   local dir="$1" n="$2" status="$3" enforcement="${4:-Review only.}"
   {
-    echo "# ADR-$n: decision $n"
+    echo "# $(adr_id "$n"): decision $n"
     echo
     echo "- **Status:** $status"
     echo
@@ -73,7 +74,7 @@ adr() {
     echo "## Enforcement"
     echo
     echo "$enforcement"
-  } > "$dir/docs/adr/$n-decision.md"
+  } > "$dir/docs/adr/$(adr_id "$n").md"
 }
 
 # expect <pass|fail> <name> <dir> [needle] — run the check; when a needle is given, its output must contain it.
@@ -82,8 +83,7 @@ expect() {
   local out rc
   git -C "${dir:?}" add -A
   out="$(bash "$CHECK" "$dir" 2>&1)"; rc=$?
-  if [[ "$want" == "pass" && $rc -eq 0 && ( -z "$needle" || "$out" == *"$needle"* ) ]] \
-     || [[ "$want" == "fail" && $rc -ne 0 && ( -z "$needle" || "$out" == *"$needle"* ) ]]; then
+  if output_holds "$out" "$needle" && [[ ( "$want" == "pass" && $rc -eq 0 ) || ( "$want" == "fail" && $rc -ne 0 ) ]]; then
     passed=$((passed + 1))
     return
   fi
@@ -110,7 +110,7 @@ d="$(repo uncited-adr)"
 spec "$d" "**G-1** — it works."
 adr "$d" 0001 "🟢 accepted"
 mark G-1 > "$d/tests/t.txt"
-expect fail "accepted ADR without a citing test" "$d" "$(adr_id 1) is accepted but no test cites it"
+expect fail "accepted ADR without a citing test" "$d" "[traceability/coverage:uncited] @ $(adr_id 1)"
 
 d="$(repo proposed-out-of-scope)"
 spec "$d" "**G-1** — it works."
@@ -167,20 +167,27 @@ adr "$d" 0001 "🟡 proposed"
 mark "G-1 G-9" > "$d/tests/t.txt"
 expect fail "marker citing a criterion that does not exist" "$d" "'G-9', which is not a criterion"
 
-# The number is assembled so that check-docs.sh does not read this fixture as a stale reference.
-unknown="ADR-$(printf '%04d' 42)"
+# Assembled so that check-docs.sh does not read this fixture as a stale reference.
+unknown="$(adr_id 42)"
 d="$(repo unknown-adr)"
 spec "$d" "**G-1** — it works."
 adr "$d" 0001 "🟡 proposed"
 mark "G-1 $unknown" > "$d/tests/t.txt"
-expect fail "marker citing an ADR that does not exist" "$d" "'$unknown', which does not exist"
+expect fail "marker citing an ADR that does not exist" "$d" "[traceability/citations:missing] @ $unknown"
+
+# The numbered form of the retired ADRs is no identifier any more.
+numbered="$(printf '%s-%04d' ADR 1)"
+d="$(repo numbered-form)"
+spec "$d" "**G-1** — it works."
+mark "G-1 $numbered" > "$d/tests/t.txt"
+expect fail "marker citing the numbered form" "$d" "[traceability/citations:malformed] @ $numbered"
 
 d="$(repo superseded-adr)"
 spec "$d" "**G-1** — it works."
 adr "$d" 0001 "⚪ superseded by $(adr_id 2)"
 adr "$d" 0002 "🟢 accepted"
 mark "G-1 $(adr_id 1) $(adr_id 2)" > "$d/tests/t.txt"
-expect fail "marker citing a superseded ADR" "$d" "'$(adr_id 1)', which is superseded or rejected"
+expect fail "marker citing a superseded ADR" "$d" "[traceability/citations:inactive] @ $(adr_id 1)"
 
 d="$(repo named-test)"
 spec "$d" "**G-1** — it works."
@@ -195,7 +202,8 @@ adr "$d" 0001 "🟢 accepted" "\`a_test_that_is_gone\` decides it."
 { mark "$(adr_id 1)"; mark G-1; echo "// fn a_test_that_is_gone() was renamed"; } > "$d/tests/t.rs"
 echo "# a_test_that_is_gone = 1" > "$d/tests/c.toml"
 echo "fn a_test_that_is_gone() {}" > "$d/tests/notes.md"
-expect fail "an Enforcement naming a test no file defines, a comment or Markdown naming it" "$d" "names 'a_test_that_is_gone', which no file defines"
+expect fail "an Enforcement naming a test no file defines, a comment or Markdown naming it" "$d" \
+  "[traceability/named-tests:undefined]"
 
 d="$(repo named-test-proposed)"
 spec "$d" "**G-1** — it works."
@@ -203,28 +211,49 @@ adr "$d" 0001 "🟡 proposed" "\`a_test_still_to_come\` will decide it."
 mark G-1 > "$d/tests/t.rs"
 expect pass "a proposed ADR may name a test still to come" "$d"
 
-# Verifies: ADR-0002
-# A draft is cited by its draft identifier, assembled for the same reason as adr_id.
-draft_id() { printf 'ADR-%s-%s' draft "$1"; }
+# --- cases: identifiers of the new form, read from the fixture table ----------------------
 
-d="$(repo draft-cited)"
-spec "$d" "**G-1** — it works."
-adr "$d" 0001 "🟢 accepted"
-printf '# %s: next\n\n- **Status:** 🟡 proposed\n' "$(draft_id next)" > "$d/docs/adr/draft-next.md"
-mark "$(adr_id 1) $(draft_id next) G-1" > "$d/tests/t.txt"
-expect pass "a marker citing a draft that exists" "$d"
-
-d="$(repo draft-unknown)"
-spec "$d" "**G-1** — it works."
-adr "$d" 0001 "🟢 accepted"
-mark "$(adr_id 1) $(draft_id gone) G-1" > "$d/tests/t.txt"
-expect fail "a marker citing a draft that does not exist" "$d" "'$(draft_id gone)', which does not exist"
+# Verifies: NUC-adrs-are-named-by-category
+# The table's format and its notation are those of scripts/fixtures/check-docs-record.txt, with
+# four fields, no check number, and the steps its header names.
+TABLE="$ROOT/scripts/fixtures/check-traceability.txt"
+# The table writes the ADR on the checks in its own notation, which no map moves; it stands for the
+# identifier the check names, which must be a file of this tree.
+checks_adr="$(sed -n 's/^CHECKS_ADR="\(.*\)"$/\1/p' "$CHECK")"
+check "the check names the ADR on the checks by a file of this tree" test -f "$ROOT/docs/adr/$checks_adr.md"
+n=0
+while IFS= read -r line; do
+  [[ "$line" =~ ^(pass|fail) ]] || continue
+  n=$((n + 1))
+  line="$(table_hyphens "${line//NUC:checks-are-bash/$checks_adr}")"
+  IFS=$'\x1f' read -r want needle name tree <<< "${line// | /$'\x1f'}"
+  d="$(repo "table-$n")"
+  while IFS= read -r s; do
+    read -r op id arg <<< "$s"
+    case "$op" in
+      spec) spec "$d" "${s#spec }" ;;
+      adr)
+        file="$id" status="🟢 accepted"
+        [[ "$arg" == superseded:* ]] && status="⚪ superseded by ${arg#superseded:}"
+        [[ "$arg" == proposed ]] && status="🟡 proposed"
+        printf '# %s: decision\n\n- **Status:** %s\n\n## Enforcement\n\nReview only.\n' "$id" "$status" \
+          > "$d/docs/adr/$file.md" ;;
+      mark) mkdir -p "$(dirname "$d/$id")"; mark "${s#mark "$id" }" > "$d/$id" ;;
+      file) mkdir -p "$(dirname "$d/$id")"; echo "text" > "$d/$id" ;;
+      *) echo "fixture table: unknown step '$op'" >&2; exit 1 ;;
+    esac
+  done <<< "${tree//; /$'\n'}"
+  git -C "${d:?}" add -A
+  out="$(bash "$CHECK" "$d" 2>&1)"
+  table_case "$name" "$want" "$needle" "$?" "$out"
+done < "$TABLE"
+((n > 0)) || { echo "FAIL: no case read from $TABLE" >&2; failed=$((failed + 1)); }
 
 d="$(repo markdown-not-counted)"
 spec "$d" "**G-1** — it works."
 adr "$d" 0001 "🟢 accepted"
 { mark "$(adr_id 1)"; mark G-1; } > "$d/tests/notes.md"
-expect fail "markers in Markdown do not count" "$d" "$(adr_id 1) is accepted but no test cites it"
+expect fail "markers in Markdown do not count" "$d" "[traceability/coverage:uncited] @ $(adr_id 1)"
 
 d="$(repo ignored-not-counted)"
 spec "$d" "**G-1** — it works."
@@ -232,16 +261,14 @@ adr "$d" 0001 "🟢 accepted"
 echo "build/" > "$d/.gitignore"
 mkdir -p "$d/build"
 { mark "$(adr_id 1)"; mark G-1; } > "$d/build/t.txt"
-expect fail "markers in gitignored files do not count" "$d" "$(adr_id 1) is accepted but no test cites it"
+expect fail "markers in gitignored files do not count" "$d" "[traceability/coverage:uncited] @ $(adr_id 1)"
 
 # --- the template's own promise ------------------------------------------------------------
 #
-# TEMPLATE-SETUP.md tells the maintainer of a derived project to accept the inherited ADRs. That
-# must not turn CI red, so while the setup file exists the tree with every inherited ADR accepted,
-# one the template still proposes included, has to pass: each ships with a citing test or an
-# exemption. Inherited means its Deciders name the NUC maintainer. The project's own ADRs, which
-# setup step 4 proposes while the file still exists, are left as they are; they await the tests
-# of the golden path, and a proposed one in the copy shows that they stay proposed.
+# The base ships each NUC- ADR with a citing test or an exemption, so a project whose base is
+# accepted, as the human accepts it in the template, stays green while the setup proposes the
+# project's own ADRs: those await the tests of the golden path, and a proposed one in the copy shows
+# that they stay proposed.
 
 if [[ -f "$ROOT/TEMPLATE-SETUP.md" ]]; then
   d="$work/template-accepted"
@@ -252,12 +279,11 @@ if [[ -f "$ROOT/TEMPLATE-SETUP.md" ]]; then
     cp "$ROOT/$rel" "$d/$rel"
   done < <(git -C "$ROOT" ls-files --cached --others --exclude-standard -z)
   git -C "${d:?}" init -q
-  # The number after the highest, assembled, so this file cites no ADR that does not exist here.
-  n="$(find "$d/docs/adr" -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' -exec basename {} \; \
-    | cut -c1-4 | sort -n | tail -n 1)"
-  n=$((10#$n))
-  cat > "$d/docs/adr/$(printf '%04d' "$((n + 1))")-a-founding-decision.md" <<ADR
-# $(printf 'ADR-%04d' "$((n + 1))"): A founding decision of the project, proposed in setup step 4
+  # Assembled, so this file cites no ADR that does not exist here.
+  category=OPS
+  founding="$category-a-founding-decision"
+  cat > "$d/docs/adr/$founding.md" <<ADR
+# $founding: A founding decision of the project, proposed in setup step 4
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-01-01
@@ -268,11 +294,10 @@ if [[ -f "$ROOT/TEMPLATE-SETUP.md" ]]; then
 
 The golden path's test will cite this ADR.
 ADR
-  for f in "$d"/docs/adr/[0-9]*.md; do
-    grep -q '^- \*\*Deciders:\*\*.*NUC maintainer' "$f" || continue
+  for f in "$d"/docs/adr/NUC-*.md; do
     sed 's/🟡 proposed/🟢 accepted/' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
   done
-  expect pass "the inherited ADRs, once accepted, pass — TEMPLATE-SETUP step 2 keeps CI green" "$d"
+  expect pass "the base, once accepted, passes while the setup proposes the project's ADRs" "$d"
 fi
 
 # --- summary -------------------------------------------------------------------------------

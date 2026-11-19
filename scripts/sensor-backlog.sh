@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Sensor: the backlog (ADR-0006).
+# Sensor: the backlog (NUC-large-work-is-planned §7).
 #
 # Lists the backlog entries, one file each under docs/backlog/: those on main, and those a local
 # branch adds that main does not have yet, with the branch, so that a session in a parallel
@@ -9,7 +9,8 @@
 # the entry back. Each line carries the entry's title, its first '# ' heading. Main is origin/main
 # when it exists, else main, else HEAD. A project whose backlog is the issue tracker of its host
 # has no docs/backlog/, and the sensor says there is nothing to report. An entry not yet committed
-# is not listed: ADR-0006 has each created in a commit of its own. It reports and never fails.
+# is not listed: NUC-large-work-is-planned §7 has each created in a commit of its own. It
+# reports and never fails.
 #
 # Pure bash + git. Usage:
 #     scripts/sensor-backlog.sh [repository root]
@@ -17,6 +18,9 @@
 # Exit code 0, except 2 on a root that is no git repository.
 
 set -uo pipefail
+
+# shellcheck source-path=SCRIPTDIR source=lib/bash.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bash.sh"
 
 ROOT="$(cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}" 2>/dev/null && pwd)"
 DIR="docs/backlog"

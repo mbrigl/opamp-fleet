@@ -9,7 +9,7 @@
 # holds; every other case is one setting that differs. What
 # the --jq expressions make of GitHub's JSON is not run here, since it needs gh; that is review.
 #
-# Verifies: ADR-0002
+# Verifies: NUC-main-only-via-pr NUC-checks-are-bash
 # Inputs: scripts/sensor-repo-settings.sh scripts/lib/
 #
 # Usage:

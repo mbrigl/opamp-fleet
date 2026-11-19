@@ -6,10 +6,18 @@ description: Plan work larger than one agent session under docs/plan/ as a featu
 # Plan a feature
 
 The rule is [`AGENTS.md` §4](../../../AGENTS.md#4-working-style); the artifacts and their
-lifecycle are decided in [ADR-0006](../../../docs/adr/0006-feature-layer.md). The shapes are the
-templates [`spec.md`](spec.md) and [`ticket.md`](ticket.md) next to this file. This skill is the
-order of work and states no rule of its own
-([NUC-procedures-are-skills](../../../docs/adr/NUC-procedures-are-skills.md)).
+lifecycle are decided in
+[NUC-large-work-is-planned](../../../docs/adr/NUC-large-work-is-planned.md). The shapes are the
+templates [`spec.md`](spec.md) and [`ticket.md`](ticket.md) next to this file; their sections are
+the parts a spec and a ticket carry
+([NUC-large-work-is-planned §3](../../../docs/adr/NUC-large-work-is-planned.md)). This skill is
+the order of work and states no rule of its own
+([NUC-procedures-are-skills §3](../../../docs/adr/NUC-procedures-are-skills.md)).
+
+A project that plans in its host's issues, as its harness ADR records
+([NUC-large-work-is-planned §9](../../../docs/adr/NUC-large-work-is-planned.md)), files the spec
+and each ticket as an issue with the sections of the templates, and names each blocker as an
+issue rather than a path. The steps below hold otherwise.
 
 ## 1. Decide the artifact
 

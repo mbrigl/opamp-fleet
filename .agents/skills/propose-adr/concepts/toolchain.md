@@ -3,12 +3,15 @@
 The language, its build, test, and lint commands, and the sensors that check what an agent
 wrote. Every project decides it at setup; the template ships none. The toolchain ADR is the one
 the review skill, the pull request template, and the shape entries of this catalogue name when
-they speak of "the sensors the toolchain ADR names".
+they speak of "the sensors the toolchain ADR names". It carries the header field
+`Role: toolchain`
+([NUC-base-is-fixed §3](../../../../docs/adr/NUC-base-is-fixed.md)).
 
 The sensors come in three kinds:
 
 - **Behaviour:** the tests, and the `Verifies:` markers that tie them to the decisions and
-  criteria they protect ([ADR-0002](../../../../docs/adr/0002-decisions-verified-by-tests.md)).
+  criteria they protect
+  ([NUC-decisions-cite-tests §2](../../../../docs/adr/NUC-decisions-cite-tests.md)).
 - **Maintainability:** what agents get wrong most: a module or function grown too large or too
   complex, logic written a second time, code nothing calls, a test removed or skipped, and a
   suite that passes without asserting much, which mutation testing measures.
