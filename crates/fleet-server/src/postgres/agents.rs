@@ -32,9 +32,9 @@ pub struct PgAgentStore {
     /// Every stored record's assignment, as committed.
     assignments: Mutex<Pins>,
     /// The creations of this instance under way, at most half the pool: the creations of every
-    /// instance wait for the count's row, which a Server of 0.8.0 holds across its whole creation,
-    /// and those past the bound wait here, each on its own thread, rather than on a connection of
-    /// the pool, which every other call needs.
+    /// instance wait for the count's row, which each creation holds until its commit, and those
+    /// past the bound wait here, each on its own thread, rather than on a connection of the pool,
+    /// which every other call needs.
     creating: Creating,
     /// Run between a read's rows and its taking them into [`Pins`], in tests.
     #[cfg(test)]
@@ -3642,8 +3642,8 @@ mod tests {
         let within = std::time::Duration::from_secs(10);
         assert_eq!(hearing.recv_timeout(within), Ok(Heard::Listening));
         test.sql(
-            "INSERT INTO hosts (host, gateway, instance_uids, subject) \
-             VALUES ('g', true, '{}', '{}'), ('h', false, '{}', '{}')",
+            "INSERT INTO hosts (host, gateway, subject) \
+             VALUES ('g', true, '{}'), ('h', false, '{}')",
         );
         let store = PgAgentStore::new(database.clone());
         let uid = InstanceUid([0x5a; 16]);

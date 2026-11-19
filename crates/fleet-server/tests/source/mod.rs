@@ -1,6 +1,6 @@
 //! The production code of a crate, read as a syntax tree: the reader this crate's structural tests
-//! share. The cut is a copy of the one in `crates/fleet-util/tests/who_shares.rs`: sharing it
-//! across crates would take a crate of its own (DEV-six-crates-tokio-axum).
+//! share, and which `crates/fleet-core/tests/dependency_direction.rs` includes by `#[path]`. The
+//! cut is a copy of the one in `crates/fleet-util/tests/who_shares.rs`.
 
 use std::path::{Path, PathBuf};
 

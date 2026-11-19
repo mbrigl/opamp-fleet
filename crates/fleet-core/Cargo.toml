@@ -47,3 +47,8 @@ pkcs11 = ["dep:cryptoki"]
 [dev-dependencies]
 # A CA's files written for the test that loads them.
 tempfile = "3"
+# The dependency direction reads the sources through the Server's reader of shipped code, a syntax
+# tree whose tokens keep their lines (DEV-ports-and-adapters).
+syn.workspace = true
+quote.workspace = true
+proc-macro2 = { workspace = true, features = ["span-locations"] }

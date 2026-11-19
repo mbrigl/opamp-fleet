@@ -32,6 +32,18 @@ carries a date once its tag exists.
   foreign Agent that reports `service.name` only as non-identifying receives no Configuration
   after the upgrade; report it as identifying, as the OpAMP specification asks.
 
+### Removed
+
+- **The contract pair is dropped**
+  ([SRV-state-stores-contract-pair §22](docs/adr/SRV-state-stores-contract-pair.md)).
+  On PostgreSQL, migration 20 drops the Deployments' `packages` and `configurations` columns and
+  the Hosts' `instance_uids` arrays, which no statement of 0.8.5 names. Each `ALTER TABLE` takes an
+  `ACCESS EXCLUSIVE` lock on `deployments` and `hosts` for the moment it changes the catalogue and
+  rewrites no row. The migration names 0.8.5 as the oldest Server, so an instance of 0.8.6 refuses
+  to start beside a live lease of 0.8.4 or older, naming both releases. **What to do:** update from
+  0.8.5 by a rolling update, at a quiet moment; from an older release, scale its instances to zero
+  first.
+
 ## [0.8.5] - 2026-11-19
 
 ### Fixed

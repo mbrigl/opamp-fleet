@@ -407,18 +407,17 @@ stays until a later sweep. Marks a sweep could not take away, as while the datab
 its instance tries again every `lease_renew_secs`. The marks of an instance whose lease is no longer
 live, or of a start that took none yet, go with the next sweep on any instance once they were last
 renewed more than 130 seconds before: the 15 seconds a renewal may take to answer, the 100 seconds
-the one call to the bucket after it may take, and 15 seconds to spare. Three cases are not covered,
+the one call to the bucket after it may take, and 15 seconds to spare. Two cases are not covered,
 and in each the next start fails naming an entry whose artifact a sweep deleted, which is then
 uploaded again. A sweep deletes nothing more once more than 15 seconds have passed since it renewed
 the mark of the artifact it deletes next, a suspend of its host included; but an instance suspended
 for longer than 130 seconds while a call to the bucket is in flight may still delete an artifact
 whose mark another instance took away meanwhile, since that call goes on once the host runs. A
 failover to a replica the marks had not reached, with asynchronous replication, leaves the new
-primary without them: across a failover the marks hold only with synchronous replication. And an
-instance of 0.8.0 beside this release neither marks nor reads a mark, so while both releases run a
-sweep through it can still delete an artifact an upload just stored. An upload waits for the lock up
-to 5 seconds, a sweep up to 60. Each sweep in progress holds the lock on a database session of its
-own, beside the pool's `pool_size`, which the database's `max_connections` must allow for. The lock
+primary without them: across a failover the marks hold only with synchronous replication. An
+upload waits for the lock up to 5 seconds, a sweep up to 60. Each sweep in progress holds the lock
+on a database session of its own, beside the pool's `pool_size`, which the database's
+`max_connections` must allow for. The lock
 is taken on PostgreSQL with the filesystem blob store too, where the instance is alone and it
 decides nothing. A start whose sweep cannot have the lock fails, naming the lock; a sweep after an
 act logs it, and what it would have deleted stays until the next start.
@@ -1272,8 +1271,15 @@ start.
   `hosts` for the moment it changes the catalogue, so every read and write of a Deployment or a
   Host waits for that moment; start it at a quiet moment. Its migration names 0.8.4 as the oldest
   Server, so an instance of 0.8.5 does not start beside a live lease of 0.8.3 or older: from such
-  a release, scale its instances to zero first, as for a skip. The release after 0.8.5 drops the
-  three columns.
+  a release, scale its instances to zero first, as for a skip. Release 0.8.6 drops the three
+  columns.
+- **From 0.8.5 to 0.8.6** is a rolling update. The first instance of 0.8.6 drops the Deployments'
+  `packages` and `configurations` columns and the Hosts' `instance_uids` arrays, which no
+  statement of 0.8.5 names. Each `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock on `deployments`
+  and `hosts` for the moment it changes the catalogue and rewrites no row; start it at a quiet
+  moment. Its migration names 0.8.5 as the oldest Server, so an instance of 0.8.6 does not start
+  beside a live lease of 0.8.4 or older: from such a release, scale its instances to zero first,
+  as for a skip.
 - **From 0.7.1** every Server stops first. An instance that shares the database starts, and
   migrates, only once nothing holds the database alone, as a Server of 0.7.1 does while it runs,
   and as `server migrate-to-postgres` and `server blobs-to-s3` do until they finish.

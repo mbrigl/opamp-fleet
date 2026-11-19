@@ -91,9 +91,10 @@ impl DeploymentBackend for PgDeploymentBackend {
     }
 
     /// One transaction: every Deployment that holds the member is held `FOR UPDATE`, in name
-    /// order, and loses it. The deletion of the member took it out of every Deployment already,
-    /// in its own transaction ([`drop_member_rows`]), so this finds one only where a Server of
-    /// 0.8.0 beside this one added it after.
+    /// order, and loses it, as the port's contract asks of every adapter. After the deletion of
+    /// the member this finds none: the deletion took it out of every Deployment in its own
+    /// transaction ([`drop_member_rows`]), and an add holds the member's row `FOR KEY SHARE` and
+    /// is refused once it is gone.
     fn drop_member(&self, member: &Member) -> Result<Vec<Deployment>, String> {
         let member = member.clone();
         self.database.run(move |pool| async move {
@@ -734,8 +735,8 @@ mod tests {
         let backend = PgDeploymentBackend::new(test.open());
         let gate = test.hold_reads(
             "deployment_packages",
-            "INSERT INTO deployments (name, selector, packages, configurations) \
-             VALUES ('late', '{\"channel\": \"late\"}', '[]', '{}'); \
+            "INSERT INTO deployments (name, selector) \
+             VALUES ('late', '{\"channel\": \"late\"}'); \
              INSERT INTO deployment_packages (deployment, agent_type, version) \
              VALUES ('late', 'otelcol', '1.2.3')",
         );
@@ -830,67 +831,6 @@ mod tests {
         );
     }
 
-    /// No release reads the Deployments' `packages` and `configurations` columns, which mirror
-    /// the member rows, and this release names them in no statement: a new Deployment's take
-    /// their defaults, what a release before wrote into them stays as it was through every change
-    /// of the members, and with the columns dropped, as the release after this one drops them,
-    /// every change and the load still succeed
-    /// (SRV-state-stores-contract-pair §22).
-    /// Verifies: SRV-state-stores-contract-pair
-    #[test]
-    fn the_mirror_columns_are_written_no_more() {
-        let Some(test) = TestDatabase::named() else {
-            return;
-        };
-        let store = PgDeploymentBackend::new(test.open());
-        store_members(&test);
-        let mirrors = || test.rows("SELECT packages::text, configurations::text FROM deployments");
-        put(
-            &store,
-            &deployment("canary", Some("1.2.3"), &["extra", "base"]),
-        );
-        assert_eq!(
-            mirrors(),
-            [[Some("[]".to_string()), Some("{}".to_string())]],
-            "a new Deployment's are empty"
-        );
-        // As a Server of 0.8.0 left them.
-        test.sql(
-            "UPDATE deployments SET packages = \
-             '[{\"agent_type\":\"otelcol\",\"version\":\"1.2.3\"}]', \
-             configurations = '{base,extra}'",
-        );
-        let written = mirrors();
-        store
-            .drop_member(&Member::Configuration("base".to_string()))
-            .expect("drop");
-        store
-            .amend("canary", &Change::RemovePackage(id("1.2.3")))
-            .expect("remove");
-        put(&store, &deployment("canary", Some("1.2.4"), &["other"]));
-        assert_eq!(mirrors(), written, "no change of the members writes them");
-        assert_eq!(
-            store.load().expect("load"),
-            [deployment("canary", Some("1.2.4"), &["extra", "other"])],
-            "the members are the rows'"
-        );
-
-        test.sql("ALTER TABLE deployments DROP COLUMN packages, DROP COLUMN configurations");
-        put(&store, &deployment("stable", Some("1.2.3"), &["base"]));
-        store
-            .drop_member(&Member::Configuration("extra".to_string()))
-            .expect("drop");
-        store
-            .amend("canary", &Change::RemovePackage(id("1.2.4")))
-            .expect("remove");
-        store.remove("canary").expect("remove the Deployment");
-        assert_eq!(
-            store.load().expect("load"),
-            [deployment("stable", Some("1.2.3"), &["base"])],
-            "with the columns dropped"
-        );
-    }
-
     /// Migration 5 moves the members out of the Deployments' columns into rows of their own, and
     /// the Deployments load as the release before left them.
     /// Verifies: SRV-instances-share-one-postgresql
@@ -902,6 +842,7 @@ mod tests {
         };
         let database = test.open();
         // The database as the release before the member rows left it.
+        test.with_the_contract_pair();
         test.sql(&format!(
             "DROP TABLE deployment_packages; DROP TABLE deployment_configurations; \
              DELETE FROM {SCHEMA_TABLE} WHERE version = 5; \
@@ -1047,8 +988,8 @@ mod tests {
         };
         let store = PgDeploymentBackend::new(test.open());
         test.sql(
-            "INSERT INTO deployments VALUES ('aimless', '{}', '[]', '{}'), \
-             ('odd', '{\"a\":\"b\"}', '[]', '{}'); \
+            "INSERT INTO deployments VALUES ('aimless', '{}'), \
+             ('odd', '{\"a\":\"b\"}'); \
              INSERT INTO deployment_packages VALUES ('odd', 'otelcol', '')",
         );
         let err = store.load().expect_err("an empty Selector");

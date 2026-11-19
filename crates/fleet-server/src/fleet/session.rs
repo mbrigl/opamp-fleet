@@ -2019,8 +2019,8 @@ mod tests {
         let database = test.open();
         // The Deployment its assignment names is stored, so the store's own count decides.
         test.sql(
-            "INSERT INTO deployments (name, selector, packages, configurations) \
-             VALUES ('stable', '{\"channel\": \"stable\"}', '[]', '{}')",
+            "INSERT INTO deployments (name, selector) \
+             VALUES ('stable', '{\"channel\": \"stable\"}')",
         );
         let uid = InstanceUid([0x84; 16]);
         crate::postgres::agents::PgAgentStore::new(database.clone())

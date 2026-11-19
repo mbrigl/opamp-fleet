@@ -1381,8 +1381,8 @@ fn store_stable(schema: &Schema) {
     // The first open applies the schema.
     drop(records(schema));
     schema.query(
-        "INSERT INTO deployments (name, selector, packages, configurations) \
-         VALUES ('stable', '{}', '{}', '{}') ON CONFLICT DO NOTHING",
+        "INSERT INTO deployments (name, selector) \
+         VALUES ('stable', '{}') ON CONFLICT DO NOTHING",
     );
 }
 
@@ -3238,8 +3238,8 @@ async fn a_binding_whose_notice_after_its_commit_is_lost_is_taken_up_at_the_next
     assert!(b.has_read(1).await, "B never listened");
     // Committed as an instance commits a first report's binding, its notice never sent.
     schema.sql(
-        "INSERT INTO hosts (host, gateway, instance_uids, subject, valid_until_ms) \
-         VALUES ('edge-missed', false, '{}', '{}', 9000000000000); \
+        "INSERT INTO hosts (host, gateway, subject, valid_until_ms) \
+         VALUES ('edge-missed', false, '{}', 9000000000000); \
          INSERT INTO host_bindings (instance_uid, host) VALUES ('0a', 'edge-missed')",
     );
     assert!(
@@ -6139,8 +6139,8 @@ fn two_releases_on() -> &'static [Migration] {
 /// The upgrade from 0.8.0 itself: on the schema 0.8.0 leaves, migrations 1 to 11, with a live lease
 /// as an instance of 0.8.0 takes one, writing no release, two instances of 0.8.1 that start at
 /// once apply migration 12 once beside it and both serve, and that lease reads 0.8.0. They apply
-/// the migrations up to 18, which name 0.8.0; migration 19 names 0.8.4
-/// (SRV-instances-share-one-postgresql §16).
+/// the migrations up to 18, which name 0.8.0; migration 19 names 0.8.4, and migration 20 names
+/// 0.8.5 (SRV-instances-share-one-postgresql §16).
 /// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
@@ -6193,12 +6193,12 @@ async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
 }
 
 /// The schema of the next patch release: this release's migrations and one more, which names
-/// 0.8.4, so the instances of 0.8.4 serve on what it leaves.
+/// 0.8.5, so the instances of 0.8.5 serve on what it leaves.
 fn the_next_patch_release() -> &'static [Migration] {
     let mut migrations = MIGRATIONS.to_vec();
     migrations.push(Migration {
         version: i32::try_from(migrations.len() + 1).expect("few"),
-        oldest_server: "0.8.4",
+        oldest_server: "0.8.5",
         sql: "CREATE TABLE fleet_test_next (n integer)",
     });
     Box::leak(migrations.into_boxed_slice())
@@ -6217,14 +6217,14 @@ async fn two_versions_serve_side_by_side_and_the_newer_migrates_once() {
     let pki = Pki::new();
     let config = || schema.config_on(schema.config.port);
     let next = the_next_patch_release();
-    let older = Instance::start_as(&pki, &schema, config(), "0.8.4", MIGRATIONS).await;
+    let older = Instance::start_as(&pki, &schema, config(), "0.8.5", MIGRATIONS).await;
     assert_eq!(
         schema.query("SELECT max(version)::text FROM fleet_schema"),
         [MIGRATIONS.len().to_string()]
     );
     let (newer, other) = tokio::join!(
-        Instance::start_as(&pki, &schema, config(), "0.8.5", next),
-        Instance::start_as(&pki, &schema, config(), "0.8.5", next),
+        Instance::start_as(&pki, &schema, config(), "0.8.6", next),
+        Instance::start_as(&pki, &schema, config(), "0.8.6", next),
     );
     assert_eq!(
         schema.query(&format!(
@@ -6241,7 +6241,7 @@ async fn two_versions_serve_side_by_side_and_the_newer_migrates_once() {
     releases.sort();
     assert_eq!(
         releases,
-        ["0.8.4", "0.8.5", "0.8.5"],
+        ["0.8.5", "0.8.6", "0.8.6"],
         "each lease names its release"
     );
 
@@ -6265,179 +6265,6 @@ async fn two_versions_serve_side_by_side_and_the_newer_migrates_once() {
             "read through the other version, the Agent names its carrier"
         );
     }
-}
-
-/// The statements by which a Server of 0.8.4 writes a Deployment, a Host and its binding, and
-/// loads the Hosts, as its source names them at `version/0.8.4`: in
-/// `crates/fleet-server/src/postgres/deployments.rs` the `INSERT` of `save`, in
-/// `crates/fleet-server/src/postgres/ledger.rs` those of `insert_host_row` and of a binding and
-/// the load's read of the Hosts. Its read of the Deployments names no column of the contract pair
-/// and is this release's.
-mod as_0_8_4 {
-    pub const DEPLOYMENT: &str =
-        "INSERT INTO deployments (name, selector, packages, configurations) \
-         VALUES ('written-by-0-8-4', '{\"site\":\"old\"}', '[]', '{}') \
-         ON CONFLICT (name) DO UPDATE SET selector = EXCLUDED.selector";
-    pub const HOST: &str =
-        "INSERT INTO hosts (host, gateway, instance_uids, subject, approved_ms, \
-         valid_until_ms) VALUES ('host-of-0-8-4', false, '{}', '{}', 5, 9000000000000) \
-         ON CONFLICT (host) DO NOTHING; \
-         INSERT INTO host_bindings (instance_uid, host) VALUES ('84', 'host-of-0-8-4') \
-         ON CONFLICT (instance_uid) DO NOTHING";
-    pub const HOSTS: &str =
-        "SELECT host, gateway, instance_uids, subject, approved_ms, valid_until_ms FROM hosts";
-}
-
-impl Schema {
-    /// Every Host as a Server of 0.8.4 loads it, [`as_0_8_4::HOSTS`], by its name with its array
-    /// decoded as that Server decodes it: a list, which fails on a `NULL`.
-    fn hosts_as_0_8_4_loads(&self) -> Vec<(String, Vec<String>)> {
-        let session = self.session();
-        let search_path = format!("SET search_path = {}", self.name);
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime")
-                .block_on(async move {
-                    let client = session.open().await;
-                    client
-                        .batch_execute(&search_path)
-                        .await
-                        .expect("search path");
-                    client
-                        .query(as_0_8_4::HOSTS, &[])
-                        .await
-                        .expect("the load of 0.8.4")
-                        .into_iter()
-                        .map(|row| (row.get(0), row.get::<_, Vec<String>>(2)))
-                        .collect()
-                })
-        })
-        .join()
-        .expect("the query's thread")
-    }
-}
-
-/// An instance of 0.8.4 beside one of 0.8.5: the instance of 0.8.5 applies its migrations beside
-/// the live lease of 0.8.4, each writes a Deployment and a Host, and each loads what the other
-/// wrote. A Server of 0.8.4 names the contract pair in its `INSERT`s and decodes each Host's array
-/// as a list; one of 0.8.5 names neither, and its rows hold the defaults
-/// (SRV-state-stores-contract-pair §22).
-/// Verifies: SRV-state-stores-contract-pair
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_instance_of_0_8_4_and_one_of_0_8_5_each_load_what_the_other_wrote() {
-    use fleet_server::revocation::{Host, HostAct};
-    let Some(schema) = Schema::named() else {
-        return;
-    };
-    let pki = Pki::new();
-    let config = || schema.config_on(schema.config.port);
-    let older = Instance::start_as(&pki, &schema, config(), "0.8.4", &MIGRATIONS[..17]).await;
-    let newer = Instance::start_as(&pki, &schema, config(), "0.8.5", MIGRATIONS).await;
-    for instance in [&older, &newer] {
-        assert!(instance.both_planes().0, "both serve");
-    }
-    let mut releases = schema.query("SELECT release FROM leases WHERE expires_at > now()");
-    releases.sort();
-    assert_eq!(releases, ["0.8.4", "0.8.5"]);
-
-    // Each writes a Deployment and a Host.
-    schema.sql(as_0_8_4::DEPLOYMENT);
-    schema.sql(as_0_8_4::HOST);
-    let on_newer = Records::Postgres(newer.database.clone());
-    tokio::task::spawn_blocking(move || {
-        on_newer
-            .deployments()
-            .expect("deployments")
-            .save(
-                "written-by-0-8-5",
-                &std::collections::BTreeMap::from([("site".to_string(), "new".to_string())]),
-            )
-            .expect("0.8.5 writes a Deployment");
-        let ledger = on_newer.ledger().expect("ledger");
-        assert_eq!(
-            ledger.bind_seen(
-                "85",
-                "host-of-0-8-5",
-                &Host {
-                    approved_ms: Some(5),
-                    valid_until_ms: Some(9_000_000_000_000),
-                    ..Host::default()
-                },
-            ),
-            Ok(fleet_server::revocation::Bound::Bound),
-            "0.8.5 writes a Host and binds it"
-        );
-        assert_eq!(
-            ledger.write_host_act(&HostAct::Seen {
-                host: "another-of-0-8-5".to_string(),
-                entry: Host::default(),
-            }),
-            Ok(true),
-            "0.8.5 writes a Host"
-        );
-    })
-    .await
-    .expect("0.8.5 writes");
-
-    // Each loads what the other wrote.
-    let names = |deployments: Vec<fleet_server::deployments::Deployment>| {
-        deployments
-            .into_iter()
-            .map(|deployment| deployment.name)
-            .collect::<Vec<_>>()
-    };
-    for instance in [&older, &newer] {
-        let records = Records::Postgres(instance.database.clone());
-        let (deployments, hosts) = tokio::task::spawn_blocking(move || {
-            (
-                records
-                    .deployments()
-                    .expect("deployments")
-                    .load()
-                    .expect("load"),
-                records
-                    .ledger()
-                    .expect("ledger")
-                    .load()
-                    .expect("load")
-                    .hosts,
-            )
-        })
-        .await
-        .expect("load");
-        assert_eq!(names(deployments), ["written-by-0-8-4", "written-by-0-8-5"]);
-        assert!(
-            hosts["host-of-0-8-4"].instance_uids.contains("84"),
-            "{hosts:?}"
-        );
-        assert!(
-            hosts["host-of-0-8-5"].instance_uids.contains("85"),
-            "{hosts:?}"
-        );
-        assert!(hosts.contains_key("another-of-0-8-5"), "{hosts:?}");
-    }
-    assert_eq!(
-        schema
-            .hosts_as_0_8_4_loads()
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>(),
-        std::collections::BTreeMap::from([
-            ("another-of-0-8-5".to_string(), Vec::new()),
-            ("host-of-0-8-4".to_string(), Vec::new()),
-            ("host-of-0-8-5".to_string(), Vec::new()),
-        ]),
-        "0.8.4 decodes every array, the defaults of 0.8.5 among them"
-    );
-    assert_eq!(
-        schema.query(
-            "SELECT name || ' ' || packages::text || ' ' || configurations::text \
-             FROM deployments ORDER BY name"
-        ),
-        ["written-by-0-8-4 [] {}", "written-by-0-8-5 [] {}"],
-        "0.8.5's row holds the defaults"
-    );
 }
 
 /// An instance whose lease lapsed while a Server two releases on migrated checks the schema as
@@ -6464,7 +6291,7 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
             &config,
             Opening {
                 schema: Some(&name),
-                release: "0.8.4",
+                release: "0.8.5",
                 migrations: Some(MIGRATIONS),
                 ..Opening::default()
             },
@@ -6472,7 +6299,7 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
     })
     .await
     .expect("open")
-    .expect("0.8.4 opens");
+    .expect("0.8.5 opens");
     let lease = {
         let older = older.clone();
         tokio::task::spawn_blocking(move || {
@@ -6519,7 +6346,7 @@ async fn an_instance_whose_lease_lapsed_while_a_newer_server_migrated_stops_at_i
     assert!(ended.is_ok(), "the instance did not stop");
     assert!(held.borrow().is_none(), "it holds no lease");
     let refusal = older.outdated().expect("the refusal is kept");
-    for named in ["needs Server 0.9.0", "this Server is 0.8.4"] {
+    for named in ["needs Server 0.9.0", "this Server is 0.8.5"] {
         assert!(refusal.contains(named), "{named}: {refusal}");
     }
     assert!(

@@ -1411,6 +1411,17 @@ pub(crate) mod testing {
             self.admin(&format!("SET search_path = {};\n{statements}", self.schema));
         }
 
+        /// Adds back the columns of the contract pair, which migration 20 dropped, as every
+        /// release before it left them: a test of a migration that moved them out starts from
+        /// such a database.
+        pub(crate) fn with_the_contract_pair(&self) {
+            self.sql(
+                "ALTER TABLE deployments ADD COLUMN packages json NOT NULL DEFAULT '[]', \
+                 ADD COLUMN configurations text[] NOT NULL DEFAULT '{}'; \
+                 ALTER TABLE hosts ADD COLUMN instance_uids text[] NOT NULL DEFAULT '{}'",
+            );
+        }
+
         /// What [`sql`](Self::sql) runs, as a function another thread or a store's hook may own.
         pub(crate) fn sql_runner(&self) -> impl Fn(&str) + Send + Sync + 'static {
             let (pg, tls) = self.admin_connection();
@@ -1509,8 +1520,8 @@ pub(crate) mod testing {
         pub(crate) fn store_deployments(&self, names: &[&str]) {
             for name in names {
                 self.sql(&format!(
-                    "INSERT INTO deployments (name, selector, packages, configurations) \
-                     VALUES ('{name}', '{{}}', '{{}}', '{{}}') ON CONFLICT DO NOTHING"
+                    "INSERT INTO deployments (name, selector) \
+                     VALUES ('{name}', '{{}}') ON CONFLICT DO NOTHING"
                 ));
             }
         }
@@ -2596,7 +2607,8 @@ mod tests {
                 );
             } else {
                 // The newest oldest Server the applied migrations name: 0.8.0 up to migration
-                // 18, 0.8.4 once migration 19 gave the contract pair its defaults.
+                // 18, 0.8.4 once migration 19 gave the contract pair its defaults, 0.8.5 once
+                // migration 20 dropped it.
                 let needs = migrations.last().expect("applied").oldest_server;
                 let err = answer.expect_err("0.7.1 refuses the schema of 0.8.0 and later");
                 assert!(
@@ -2723,24 +2735,24 @@ mod tests {
             )
         };
 
-        // An instance of 0.8.4 holds a lease on this release's schema.
+        // An instance of 0.8.5 holds a lease on this release's schema.
         let older = Database::open(
             &test.config(),
             Opening {
                 schema: Some(&test.schema),
-                release: "0.8.4",
+                release: "0.8.5",
                 migrations: Some(schema::MIGRATIONS),
                 ..Opening::default()
             },
         )
-        .expect("0.8.4 migrates");
+        .expect("0.8.5 migrates");
         let held = older
             // timed: a lease term, not a wait
             .take_lease("host-older", Duration::from_secs(3600), &Terms::default())
             .expect("a lease");
         let before = schema_rows();
-        let err = open_ahead().map(|_| ()).expect_err("a live lease of 0.8.4");
-        for named in ["0.8.4", "0.9.0", "0.10.0", held.instance_id.as_str()] {
+        let err = open_ahead().map(|_| ()).expect_err("a live lease of 0.8.5");
+        for named in ["0.8.5", "0.9.0", "0.10.0", held.instance_id.as_str()] {
             assert!(err.contains(named), "{named}: {err}");
         }
         assert!(
@@ -2801,7 +2813,7 @@ mod tests {
     }
 
     /// An instance whose migrations name the oldest Server a live lease's release is, or older,
-    /// serves beside it: a newer patch release of 0.8 beside a lease of 0.8.4, which the newest
+    /// serves beside it: a newer patch release of 0.8 beside a lease of 0.8.5, which the newest
     /// migration names.
     /// Verifies: SRV-instances-share-one-postgresql
     #[test]
@@ -2810,12 +2822,12 @@ mod tests {
             return;
         };
         drop(test.shared());
-        lease_of(&test, "0.8.4");
+        lease_of(&test, "0.8.5");
         let patch = Database::open(
             &test.config(),
             Opening {
                 schema: Some(&test.schema),
-                release: "0.8.5",
+                release: "0.8.6",
                 migrations: Some(schema::MIGRATIONS),
                 ..Opening::default()
             },
@@ -2829,19 +2841,19 @@ mod tests {
         releases.dedup();
         assert_eq!(
             releases,
-            [[Some("0.8.4".to_string())], [Some("0.8.5".to_string())]]
+            [[Some("0.8.5".to_string())], [Some("0.8.6".to_string())]]
         );
     }
 
-    /// An instance of 0.8.5 refuses to start beside a live lease of a release older than 0.8.4,
-    /// which its migration of the contract pair's defaults names: the refusal names the lease's
-    /// release, 0.8.4 and its own, and the schema 0.8.4 left is left as it was. Beside a lease
-    /// of 0.8.4 it migrates and serves
+    /// An instance of 0.8.6 refuses to start beside a live lease of a release older than 0.8.5,
+    /// which its migration that drops the contract pair names: the refusal names the lease's
+    /// release, 0.8.5 and its own, and the schema 0.8.5 left is left as it was. Beside a lease
+    /// of 0.8.5 it migrates and serves
     /// (SRV-state-stores-contract-pair §22,
     /// SRV-instances-share-one-postgresql §16).
     /// Verifies: SRV-state-stores-contract-pair
     #[test]
-    fn an_instance_of_0_8_5_refuses_to_start_beside_a_live_lease_older_than_0_8_4() {
+    fn an_instance_of_0_8_6_refuses_to_start_beside_a_live_lease_older_than_0_8_5() {
         let Some(test) = TestDatabase::named() else {
             return;
         };
@@ -2856,29 +2868,29 @@ mod tests {
                 },
             )
         };
-        // The schema of 0.8.4, and a live lease of 0.8.3 on it.
-        let older = open_as("0.8.3", &schema::MIGRATIONS[..17]).expect("0.8.3 migrates");
+        // The schema of 0.8.5, and a live lease of 0.8.4 on it.
+        let older = open_as("0.8.4", &schema::MIGRATIONS[..19]).expect("0.8.4 migrates");
         let held = older
             // timed: a lease term, not a wait
-            .take_lease("host-0.8.3", Duration::from_secs(3600), &Terms::default())
-            .expect("a lease of 0.8.3");
+            .take_lease("host-0.8.4", Duration::from_secs(3600), &Terms::default())
+            .expect("a lease of 0.8.4");
         let schema_rows =
             || test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
         let before = schema_rows();
-        let err = open_as("0.8.5", schema::MIGRATIONS)
+        let err = open_as("0.8.6", schema::MIGRATIONS)
             .map(|_| ())
-            .expect_err("a live lease of 0.8.3");
-        for named in ["0.8.3", "0.8.4", "0.8.5", held.instance_id.as_str()] {
+            .expect_err("a live lease of 0.8.4");
+        for named in ["0.8.4", "0.8.5", "0.8.6", held.instance_id.as_str()] {
             assert!(err.contains(named), "{named}: {err}");
         }
         assert_eq!(schema_rows(), before, "nothing migrated");
 
         older.release_lease(&held.instance_id).expect("released");
-        lease_of(&test, "0.8.4");
-        let newer = open_as("0.8.5", schema::MIGRATIONS).expect("beside 0.8.4");
+        lease_of(&test, "0.8.5");
+        let newer = open_as("0.8.6", schema::MIGRATIONS).expect("beside 0.8.5");
         newer
             // timed: a lease term, not a wait
-            .take_lease("host-0.8.5", Duration::from_secs(3600), &Terms::default())
+            .take_lease("host-0.8.6", Duration::from_secs(3600), &Terms::default())
             .expect("serves");
         assert_eq!(schema_rows().len(), schema::MIGRATIONS.len(), "migrated");
     }
@@ -2905,12 +2917,12 @@ mod tests {
             &test.config(),
             Opening {
                 schema: Some(&test.schema),
-                release: "0.8.4",
+                release: "0.8.5",
                 migrations: Some(schema::MIGRATIONS),
                 ..Opening::default()
             },
         )
-        .expect("0.8.4 migrates");
+        .expect("0.8.5 migrates");
         let waits_for_the_migrations = |waiting: usize| {
             let deadline = std::time::Instant::now() + Duration::from_secs(30);
             while test
@@ -2964,7 +2976,7 @@ mod tests {
                 .expect("taking")
                 .map(|_| ())
                 .expect_err("refused");
-            for named in ["needs Server 0.9.0", "this Server is 0.8.4"] {
+            for named in ["needs Server 0.9.0", "this Server is 0.8.5"] {
                 assert!(err.contains(named), "{named}: {err}");
             }
             assert_eq!(older.outdated(), Some(err), "the refusal is kept");
