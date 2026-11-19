@@ -1019,10 +1019,15 @@ mod tests {
     /// Of the `ALTER COLUMN`s in `sql`, upper case, how many give the column a default and how
     /// many do anything else.
     fn altered_columns(sql: &str) -> (usize, usize) {
+        let words: Vec<&str> = sql.split_whitespace().collect();
         let mut counts = (0, 0);
-        for altered in sql.split("ALTER COLUMN").skip(1) {
-            let words: Vec<&str> = altered.split_whitespace().take(3).collect();
-            if words.get(1..) == Some(&["SET", "DEFAULT"][..]) {
+        for (at, word) in words.iter().enumerate() {
+            // Every `ALTER` but `ALTER TABLE` alters a column, with `COLUMN` or without it.
+            if *word != "ALTER" || words.get(at + 1) == Some(&"TABLE") {
+                continue;
+            }
+            let column = at + 1 + usize::from(words.get(at + 1) == Some(&"COLUMN"));
+            if words.get(column + 1..column + 3) == Some(&["SET", "DEFAULT"][..]) {
                 counts.0 += 1;
             } else {
                 counts.1 += 1;
@@ -1044,6 +1049,8 @@ mod tests {
             "ALTER TABLE HOSTS ALTER COLUMN INSTANCE_UIDS DROP NOT NULL;",
             "ALTER TABLE HOSTS ALTER COLUMN INSTANCE_UIDS SET NOT NULL;",
             "ALTER TABLE HOSTS ALTER COLUMN INSTANCE_UIDS TYPE JSON;",
+            "ALTER TABLE HOSTS ALTER INSTANCE_UIDS TYPE JSON;",
+            "ALTER TABLE HOSTS ALTER INSTANCE_UIDS DROP NOT NULL;",
             "ALTER TABLE HOSTS ALTER COLUMN INSTANCE_UIDS SET DATA TYPE JSON;",
             "ALTER TABLE HOSTS ALTER COLUMN INSTANCE_UIDS DROP DEFAULT;",
             "ALTER TABLE HOSTS ALTER COLUMN INSTANCE_UIDS SET DEFAULT '{}', \

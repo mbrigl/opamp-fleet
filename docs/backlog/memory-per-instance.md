@@ -3,7 +3,7 @@
 **Kind:** performance, measurement.
 
 **Observed.** Both changes this entry asked for have landed in 0.8.5, unmeasured. Each WebSocket
-reads into a 4 KiB buffer instead of `tungstenite`'s 128 KiB (`crates/opamp/src/frame.rs`,
+reads into a 4 KiB buffer instead of `tungstenite`'s 128 KiB (`crates/opamp/src/websocket.rs`,
 `websocket_config`). A presence batch is written in pieces of 1 000 Agents (`PRESENCE_PIECE` in
 `crates/fleet-server/src/postgres/agents.rs`), so a pool connection's buffers no longer grow to the
 largest batch. The figures they replace were measured by the G-20 tests: about 160 to 200 KiB for
