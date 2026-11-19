@@ -5,8 +5,9 @@
 
 **Who reads this.** Whoever changes how Telegraf is packed, and whoever changes what the `telegraf`
 kind knows. It is the one place both sides state the same facts, so a release that moves something
-can be answered on both at once ([ADR-0018](../adr/0018-supervisor-mode-and-its-kinds.md) clause 20,
-[ADR-draft-telegraf](../adr/draft-telegraf.md)).
+can be answered on both at once
+([CLT-supervisor-mode-and-kinds §20](../adr/CLT-supervisor-mode-and-kinds.md),
+[CLT-telegraf-kind](../adr/CLT-telegraf-kind.md)).
 
 It is a thin artifact document, because the artifact is installed exactly as InfluxData
 published it: there is no repack to keep in step, and no tree whose internal layout
@@ -25,9 +26,9 @@ Versions come from the GitHub tags of **`influxdata/telegraf`**, spelled `v<majo
 of the list an operator picks from.
 
 A Package version is SemVer
-([ADR-0034](../adr/0034-package-versions-high-water-mark-and-floor.md) clause 6), and such a tag
-already is one behind its `v`: release `v1.39.3` is fetched under that tag and uploaded as Package
-`telegraf` `1.39.3`. The mapping is the identity, and no Telegraf release needs the `.0`
+([PKG-versions-high-water-mark-floor §6](../adr/PKG-versions-high-water-mark-floor.md)), and such a
+tag already is one behind its `v`: release `v1.39.3` is fetched under that tag and uploaded as
+Package `telegraf` `1.39.3`. The mapping is the identity, and no Telegraf release needs the `.0`
 completion or the leading-zero rule.
 
 The **binaries do not live there**. They are served from
@@ -37,8 +38,9 @@ list cannot be read from anywhere and is this tool's own (`TELEGRAF_PLATFORMS`).
 ## 2. Assets per platform
 
 `telegraf-<version>_<os>_<arch>.tar.gz`, and `.zip` for Windows. Upstream spells 32-bit `i386`
-where this fleet says `386` ([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)); the
-mapping is the third and fourth column of `TELEGRAF_PLATFORMS`:
+where this fleet says `386`
+([PKG-signed-packages-and-delivery](../adr/PKG-signed-packages-and-delivery.md)); the mapping is the
+third and fourth column of `TELEGRAF_PLATFORMS`:
 
 | This fleet | Upstream |
 |---|---|
@@ -52,7 +54,7 @@ list nobody publishes.
 ## 3. Integrity
 
 Two origins state each artifact's SHA-256, and the artifact comes from only one of them
-([ADR-draft-telegraf](../adr/draft-telegraf.md) clause 8):
+([CLT-telegraf-kind §8](../adr/CLT-telegraf-kind.md)):
 
 - **The release notes on GitHub** (`https://github.com/influxdata/telegraf/releases/tag/v<version>`,
   read through the API as the release's `body`) carry a table of
@@ -92,22 +94,23 @@ unpacked, gathered or rewritten.
 
 ## 5. Shape in the delivered tree
 
-A **single-file package** ([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)). The
-archive wraps everything in a version-named directory. On Windows the program is `telegraf.exe`
-directly inside it, beside `telegraf.conf`. On Unix it is `usr/bin/telegraf`, and it is not the
-only entry of that name: the tarball also holds the logrotate rule `etc/logrotate.d/telegraf` and
-the directories `etc/telegraf/`, `usr/lib/telegraf/` and `var/log/telegraf/`.
+A **single-file package**
+([PKG-signed-packages-and-delivery](../adr/PKG-signed-packages-and-delivery.md)). The archive wraps
+everything in a version-named directory. On Windows the program is `telegraf.exe` directly inside
+it, beside `telegraf.conf`. On Unix it is `usr/bin/telegraf`, and it is not the only entry of that
+name: the tarball also holds the logrotate rule `etc/logrotate.d/telegraf` and the directories
+`etc/telegraf/`, `usr/lib/telegraf/` and `var/log/telegraf/`.
 
 So the file name does not say which member is the program, and the kind names the member by its
 place below the version-named directory: `usr/bin/telegraf` on Unix, `telegraf.exe` on Windows
-(`MEMBER` in the kind, [ADR-draft-telegraf](../adr/draft-telegraf.md) clause 8). The Client
+(`MEMBER` in the kind, [CLT-telegraf-kind §8](../adr/CLT-telegraf-kind.md)). The Client
 takes the one file whose trailing path components are that place, wherever the archive keeps it in
 its order, and refuses an archive in which it matches more than one
-([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)
-clause 55). Only the program is unpacked, so the kind still has no `program_path`.
+([PKG-signed-packages-and-delivery §55](../adr/PKG-signed-packages-and-delivery.md)).
+Only the program is unpacked, so the kind still has no `program_path`.
 
 The installed program therefore lands in this Supervisor's own `program/` directory, which is also
-where the process starts ([ADR-0018](../adr/0018-supervisor-mode-and-its-kinds.md)).
+where the process starts ([CLT-supervisor-mode-and-kinds](../adr/CLT-supervisor-mode-and-kinds.md)).
 
 ## 6. What the Client derives
 
@@ -131,19 +134,20 @@ block.
 
 What the kind's Supervisor reports of Telegraf is the version alone: the probe yields
 `service.version`, which is the one key a Managed Process contributes here
-([ADR-0017](../adr/0017-what-an-agent-reports-about-itself.md)). Telegraf speaks no OpAMP, so
+([CLT-what-an-agent-reports](../adr/CLT-what-an-agent-reports.md)). Telegraf speaks no OpAMP, so
 it states nothing else; the host, the platform and the type are the Supervisor's.
 
 The **version arguments serve twice**: as the probe that gives the Agent its `service.version`, and
 as the preflight run against a *staged* program before the running one is stopped
-([ADR-0018](../adr/0018-supervisor-mode-and-its-kinds.md) clause 54). What makes them a version
-probe is what makes them a safe check — cheap, and touching no state.
+([CLT-supervisor-mode-and-kinds §54](../adr/CLT-supervisor-mode-and-kinds.md)). What makes them a
+version probe is what makes them a safe check — cheap, and touching no state.
 
 ### The account it runs under
 
 Telegraf runs as a Managed Process of the Client, so it runs under the Client's account and inside
-the Client's systemd unit ([ADR-0021](../adr/0021-the-accounts-the-service-runs-under.md)). A Linux
-package installs the Client under an account of its own, not root.
+the Client's systemd unit
+([CLT-accounts-service-runs-under](../adr/CLT-accounts-service-runs-under.md)). A Linux package
+installs the Client under an account of its own, not root.
 
 - **Inputs that read only what any account may read** — `internal`, `cpu`, `mem`, `disk`, `net`,
   `system`, the network listeners above port 1024 — work as they are.
@@ -157,9 +161,9 @@ package installs the Client under an account of its own, not root.
   root `use_sudo` is not needed. Nothing in the fleet makes that choice for a host, and the kind
   has no key for it.
 - **Where a process account is registered**
-  ([ADR-0021](../adr/0021-the-accounts-the-service-runs-under.md) clause 18), Telegraf runs under
-  that account instead, started by the second service, and that account is never root, whatever
-  the Client runs as. Its unit sets no `NoNewPrivileges=` either, so the
+  ([CLT-accounts-service-runs-under §18](../adr/CLT-accounts-service-runs-under.md)), Telegraf runs
+  under that account instead, started by the second service, and that account is never root,
+  whatever the Client runs as. Its unit sets no `NoNewPrivileges=` either, so the
   `sudoers` rule for `use_sudo` names the process account; an input that needs root and has no
   such rule fails there even on a host whose Client runs as root.
 
@@ -170,8 +174,8 @@ first registration runs the service, and with it Telegraf, as its own virtual ac
 `LocalSystem` included.
 
 Telegraf does not write the cgroup tree, so the `ProtectControlGroups=yes` every system unit carries
-(ADR-0021 clause 8) takes nothing from it: its `cgroup` input reads the files under
-`/sys/fs/cgroup` and writes none ([ADR-draft-telegraf](../adr/draft-telegraf.md) clause 12).
+(CLT-accounts-service-runs-under §8) takes nothing from it: its `cgroup` input reads the files under
+`/sys/fs/cgroup` and writes none ([CLT-telegraf-kind §12](../adr/CLT-telegraf-kind.md)).
 
 ## 7. Configurations
 

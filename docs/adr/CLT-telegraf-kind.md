@@ -1,17 +1,17 @@
-# ADR-draft-telegraf: The bundled UI colours an Agent's effective configuration with Shiki, and Telegraf gets a kind of its own that reloads it the platform's way, delivered as upstream's single-file archive
+# CLT-telegraf-kind: The bundled UI colours an Agent's effective configuration with Shiki, and Telegraf gets a kind of its own that reloads it the platform's way, delivered as upstream's single-file archive
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
 - **Applies to:** the effective-configuration cell and dialog of the Agents tab in `crates/fleet-server/static/index.html`, the vendored `crates/fleet-server/static/shiki.js` and the route that serves it in `crates/fleet-server/src/api.rs`, the token colours in `crates/fleet-server/static/ui.css`, `ui-carbon.css` and `ui-quiet.css`, the script that builds the vendored file under `scripts/`, `NOTICE`, `crates/fleet-agent/src/supervisor/telegraf.rs`, its tests in `crates/fleet-agent/tests/telegraf_supervisor.rs`, the `telegraf` feature of `crates/fleet-agent/Cargo.toml`, the refusal of a `program_path` a wrapped kind derives in `crates/fleet-agent/src/supervisor/block.rs`, `telegraf_plans`, `TELEGRAF_PLATFORMS`, the release-notes checksum and the `.asc` check of opamp-fleetctl package fetch in `crates/fleet-tools/src/fetch.rs`, `crates/fleet-tools/trust/influxdata-archive.gpg`, `config/examples/telegraf-conf.toml`, and `docs/artifacts/telegraf.md`
-- **Supersedes:** [ADR-0035](0035-the-ui-colours-configurations-with-shiki.md)
+- **Supersedes:** [SRV-ui-colours-with-shiki](SRV-ui-colours-with-shiki.md)
 
 ## Context
 
-This ADR carries every clause of [ADR-0035](0035-the-ui-colours-configurations-with-shiki.md) and
+This ADR carries every clause of [SRV-ui-colours-with-shiki](SRV-ui-colours-with-shiki.md) and
 changes one: the grammar map of clause 3 gains `telegraf` → TOML. It adds the `telegraf` kind as
-clauses 6 to 12, after ADR-0035's, so every clause of ADR-0035 keeps its number. ADR-0035's own
-Context follows, then the kind's.
+clauses 6 to 12, after SRV-ui-colours-with-shiki's, so every clause of SRV-ui-colours-with-shiki
+keeps its number. SRV-ui-colours-with-shiki's own Context follows, then the kind's.
 
 This draft first stood alone, with the kind's clauses numbered from 1. Its clause map, from that
 draft (commit 4ec63bdbb) to this one:
@@ -36,10 +36,10 @@ the effective configuration is coloured; the Configuration editor is not.
 
 Forces:
 
-- The bundled UI is static assets embedded in the Server binary, plain HTML, CSS and JS, with **no
-  frontend toolchain**, neither in the Dev Container nor in CI
-  ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)). Redoc is
-  vendored as one pre-built file and named in `NOTICE`; that is the precedent.
+- The bundled UI is static assets embedded in the Server binary, plain HTML, CSS and JS, with
+  **no frontend toolchain**, neither in the Dev Container nor in CI
+  ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). Redoc is vendored as one pre-built
+  file and named in `NOTICE`; that is the precedent.
 - The Operator plane's CSP is `script-src 'self'` plus the hashes of the inline scripts, and no
   `'wasm-unsafe-eval'`. TextMate grammars are written for the Oniguruma regex engine, which
   usually runs as WebAssembly. Allowing WebAssembly would weaken the policy (Q-1).
@@ -60,8 +60,9 @@ Forces:
 The fleet manages InfluxData's Telegraf beyond the Collector. It should be an ordinary Managed
 Process: a package the Client installs into its own Supervisor directory, updates with a health
 gate and rolls back, a Configuration rolled out from the Server, a restart issued from it. A kind
-knows its own agent ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)): what follows from the
-artifact and the platform is compiled in, and a block holds only what an operator decides.
+knows its own agent ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)): what
+follows from the artifact and the platform is compiled in, and a block holds only what an operator
+decides.
 
 Telegraf is a single-file program. Its whole invocation is Telegraf's own: the program name,
 `--config`, `--version`, and `SIGHUP` to re-read its configuration. The reload is the sharpest case
@@ -83,8 +84,7 @@ the way its platform allows, and deliver it as upstream's own archives, installe
      their versions and the script that built it.
    - `scripts/vendor-shiki.sh` rebuilds it. It runs only when the version is to change, on a
      developer's machine. CI and the Dev Container do not need node; the bundled UI keeps no
-     frontend toolchain
-     ([ADR-0008](0008-five-crates-on-tokio-and-axum.md)).
+     frontend toolchain ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
    - The Server embeds the file and serves it from its own origin as `/shiki.js`, like the
      stylesheets. The CSP does not change: `script-src 'self'` covers it, and nothing needs
      WebAssembly or `eval`.
@@ -131,7 +131,7 @@ the way its platform allows, and deliver it as upstream's own archives, installe
    `type = "telegraf"` and `name`; a block carrying `args`, `version_args`, `reload_signal`, `env`
    or `working_dir` fails at startup naming what supplies the value, and so does one restating a
    value the kind derives, its program key `command` or `program_path`
-   ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 13).
+   ([CLT-supervisor-mode-and-kinds §13](CLT-supervisor-mode-and-kinds.md)).
 
 7. **Telegraf's reload is the kind's, platform-correct by construction:** `SIGHUP` on Unix, the
    Runner's restart on Windows. Neither is written in a block, so one Supervisor set serves a mixed
@@ -139,14 +139,14 @@ the way its platform allows, and deliver it as upstream's own archives, installe
 
 8. **Telegraf is a single-file package, installed as published.** Assets are
    `telegraf-<version>_<os>_<arch>.tar.gz` (`.zip` for Windows, opened as
-   [ADR-0033](0033-packages-signatures-and-delivery.md) clause 62 decides) from
+   [PKG-signed-packages-and-delivery §62](PKG-signed-packages-and-delivery.md) decides) from
    `https://dl.influxdata.com/telegraf/releases/`. Versions are the `v<major>.<minor>.<patch>`
    tags of `influxdata/telegraf`. The CDN has no listing, so the platform list is the tool's own
    (`TELEGRAF_PLATFORMS`: linux amd64/arm64/386, darwin amd64/arm64, windows amd64/arm64;
    upstream spells `386` as `i386`). It holds the builds whose Platform is beyond doubt.
    `linux_armhf` and `linux_armel` stay out: upstream does not state the ARM level they are built
-   for, and [ADR-0033](0033-packages-signatures-and-delivery.md) clause 6 keeps `armv6` apart
-   from `arm32`, so an `arm32` entry might be offered to a host it does not run on.
+   for, and [PKG-signed-packages-and-delivery §6](PKG-signed-packages-and-delivery.md) keeps `armv6`
+   apart from `arm32`, so an `arm32` entry might be offered to a host it does not run on.
    - **Each asset is verified against two origins.** The SHA-256 is the one the GitHub release
      notes of the tag publish in their table, the row found by the asset's exact name. It is
      required: an asset the notes name nowhere is refused, because only the host that serves it
@@ -156,8 +156,7 @@ the way its platform allows, and deliver it as upstream's own archives, installe
      switch the cross-check off by deleting the file. Before 1.39.0 it exists for a few assets of
      a few releases from 1.36.4 on, and a `404` is its absence.
    - **Each asset carries InfluxData's signature.** The `.asc` beside the asset is verified as
-     clause 29 of
-     [ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
+     [OPS-operator-program-fleetctl §29](OPS-operator-program-fleetctl.md)
      verifies an upstream's OpenPGP signature, against InfluxData's package-signing key, which the
      tool carries (`crates/fleet-tools/trust/influxdata-archive.gpg`), with the primary key
      `24C9 75CB A61A 024E E1B6 3178 7C3D 5715 9FC2 F927` pinned. The SHA-256 checks stay. From
@@ -165,11 +164,11 @@ the way its platform allows, and deliver it as upstream's own archives, installe
      asset. Before 1.34.4 a `404` is the signature's absence, as for `.DIGESTS`, and the digests
      decide. Where an `.asc` is published it must verify, at any version.
    - **The kind names where the archive holds the program:** `usr/bin/telegraf` on Unix and
-     `telegraf.exe` on Windows, below the version-named directory, as the `member` that clause 55
-     of [ADR-0033](0033-packages-signatures-and-delivery.md)
-     lets a kind name. The file name alone does not decide it: the Unix tarballs also hold
-     `etc/logrotate.d/telegraf` and directories named `telegraf`. Only the program is unpacked, so
-     the kind has no `program_path`.
+     `telegraf.exe` on Windows, below the version-named directory, as the `member` that
+     [PKG-signed-packages-and-delivery §55](PKG-signed-packages-and-delivery.md) lets a kind name.
+     The file name alone does not decide it: the Unix tarballs also hold `etc/logrotate.d/telegraf`
+     and directories named `telegraf`. Only the program is unpacked, so the kind has no
+     `program_path`.
 
 9. **Telegraf does not speak OpAMP to the Client.** The kind refuses an `endpoint_port`; its
    Endpoint is bound and nothing connects.
@@ -181,28 +180,28 @@ the way its platform allows, and deliver it as upstream's own archives, installe
     reading a file that does not exist.
 
 11. **The kind has an artifact document held by two tests.** `docs/artifacts/telegraf.md` states
-    the eight sections of [ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 20: source,
-    assets, integrity, treatment, shape in the delivered tree, what the Client derives, the
+    the eight sections of [CLT-supervisor-mode-and-kinds §20](CLT-supervisor-mode-and-kinds.md):
+    source, assets, integrity, treatment, shape in the delivered tree, what the Client derives, the
     Configurations, and what goes red when upstream moves something — one test on the packing
     side, one on the client side, `cfg`-gated per platform where the facts differ.
 
 12. **Telegraf does not write the cgroup tree.** Every system unit carries
-    `ProtectControlGroups=yes` ([ADR-0021](0021-the-accounts-the-service-runs-under.md) clause 8),
-    which makes `/sys/fs/cgroup` read-only, and a kind of its own states of its agent whether that
-    takes anything from it. It takes nothing from Telegraf: its `cgroup` input, the one made for
-    the cgroup tree, reads the files under `/sys/fs/cgroup` that its `paths` select and writes
-    none.
+    `ProtectControlGroups=yes`
+    ([CLT-accounts-service-runs-under §8](CLT-accounts-service-runs-under.md)), which makes
+    `/sys/fs/cgroup` read-only, and a kind of its own states of its agent whether that takes
+    anything from it. It takes nothing from Telegraf: its `cgroup` input, the one made for the
+    cgroup tree, reads the files under `/sys/fs/cgroup` that its `paths` select and writes none.
 
 **Out of scope:** colouring or editing the Configuration body; a code editor; a grammar per
 Configuration chosen by the operator; formatting (re-indenting) any configuration; WebAssembly in
 the browser.
 
 **Out of scope for the `telegraf` kind:** following InfluxData's key at run time and a revocation
-its carried keyring does not state, which clause 29 of
-[ADR-0036](0036-the-operator-program-opamp-fleetctl.md) leaves out; an account for Telegraf other
-than the one [ADR-0021](0021-the-accounts-the-service-runs-under.md) gives the Client or its second
-service, for which the kind has no key; and what Telegraf collects and where it sends it, which is
-the operator's `telegraf-conf`.
+its carried keyring does not state, which
+[OPS-operator-program-fleetctl §29](OPS-operator-program-fleetctl.md) leaves out; an account for
+Telegraf other than the one [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)
+gives the Client or its second service, for which the kind has no key; and what Telegraf collects
+and where it sends it, which is the operator's `telegraf-conf`.
 
 ## Alternatives considered
 
@@ -215,7 +214,7 @@ the operator's `telegraf-conf`.
 - **Loading Shiki from a CDN.** It needs no vendoring. It breaks the UI on a host without
   internet, hands the page to a third party, and would need the CSP opened to that origin.
 - **A node toolchain in CI that builds the file on every build.** It keeps the file reproducible at
-  all times. [ADR-0008](0008-five-crates-on-tokio-and-axum.md) rejects
+  all times. [DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md) rejects
   this cost for a rudimentary UI, and the pinned hash (clause 2) catches an unreviewed change.
 - **Colouring on the Server.** Shiki could run there through a JavaScript runtime or a Rust port
   of TextMate (`syntect`). It adds a dependency to the Server binary for a display concern, and
@@ -238,7 +237,7 @@ the operator's `telegraf-conf`.
   `@shikijs/engine-javascript` and `@shikijs/langs`; the CSS-variables theme comes from Shiki's
   core, so `@shikijs/themes` is not bundled.
 - Shiki documentation: the JavaScript regex engine and the CSS-variables theme.
-- [ADR-0008](0008-five-crates-on-tokio-and-axum.md) on the bundled UI
+- [DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md) on the bundled UI
   without a frontend toolchain, and its alternative "A frontend framework and bundler for the UI";
   `NOTICE` (Redoc vendored as a pre-built file); the Operator plane's CSP in
   `crates/fleet-server/src/api.rs`.
@@ -301,22 +300,23 @@ the operator's `telegraf-conf`.
   the tool carries the new key. A fetch of 1.34.4 or later needs `gpgv` on the host that runs it,
   which Debian and Ubuntu install with `apt` and macOS does not install by default.
 - Negative / trade-offs: Telegraf runs under the Client's account
-  ([ADR-0021](0021-the-accounts-the-service-runs-under.md)), which a Linux package makes non-root,
-  so an input that needs root fails there. The unit sets nothing that implies `no_new_privs`
-  (ADR-0021 clause 8), so `use_sudo` with a `sudoers` rule for the account works; `--run-as root`
-  is the other way. Where a process account is registered (ADR-0021 clause 18), Telegraf runs
-  under that account, which is never root, and the rule names it. On Windows a first registration
-  runs the service as its own virtual account `NT SERVICE\<PRODUCT_NAME>`, and a re-registration
-  keeps the account the SCM holds, `LocalSystem` included (ADR-0021 clause 1); Telegraf runs under
-  that account, and `--run-as` chooses another. The kind has no key for either.
+  ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)), which a Linux package
+  makes non-root, so an input that needs root fails there. The unit sets nothing that implies
+  `no_new_privs` (CLT-accounts-service-runs-under §8), so `use_sudo` with a `sudoers` rule for the
+  account works; `--run-as root` is the other way. Where a process account is registered
+  (CLT-accounts-service-runs-under §18), Telegraf runs under that account, which is never root, and
+  the rule names it. On Windows a first registration runs the service as its own virtual account
+  `NT SERVICE\<PRODUCT_NAME>`, and a re-registration keeps the account the SCM holds, `LocalSystem`
+  included (CLT-accounts-service-runs-under §1); Telegraf runs under that account, and `--run-as`
+  chooses another. The kind has no key for either.
 - Follow-ups:
   - Colouring the Configuration body while it is edited.
   - A supply-chain check that covers vendored JavaScript as well as Rust crates.
 
 ## Enforcement
 
-Clauses 1 to 5, by the tests that carry `Verifies: ADR-0035` until this ADR is accepted, in
-[`crates/fleet-server/tests/rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs):
+Clauses 1 to 5, by the tests that carry `Verifies: SRV-ui-colours-with-shiki` until this ADR is
+accepted, in [`crates/fleet-server/tests/rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs):
 
 - `the_ui_serves_the_pinned_shiki_bundle`: the embedded `shiki.js` has the pinned SHA-256, and
   `GET /shiki.js` answers the file with a JavaScript content type, under the unchanged CSP.
@@ -325,14 +325,14 @@ Clauses 1 to 5, by the tests that carry `Verifies: ADR-0035` until this ADR is a
   3), and each of the three stylesheets defines the CSS-variables theme's colours for light and
   dark.
 
-Clauses 6 to 12, by the tests that carry `Verifies: ADR-draft-telegraf`:
+Clauses 6 to 12, by the tests that carry `Verifies: CLT-telegraf-kind`:
 
 - `crates/fleet-agent/src/supervisor/telegraf.rs`: `the_block_has_no_settings`,
   `the_recipes_keys_are_refused_by_name`, `the_invocation_points_at_the_delivered_configuration`,
   `the_defaults_are_the_artifacts` (the client side of clause 11),
   `restating_a_derived_value_is_refused` (clause 6: the program key `command` and
   `program_path`, which the core refuses for every wrapped kind, as
-  [ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 13 asks), and
+  [CLT-supervisor-mode-and-kinds §13](CLT-supervisor-mode-and-kinds.md) asks), and
   `the_program_is_taken_from_its_place_in_upstreams_archive` (clause 8: the archive's layout, with
   the further entries named `telegraf` ahead of the program).
 - `crates/fleet-agent/tests/telegraf_supervisor.rs`:
@@ -346,8 +346,8 @@ Clauses 6 to 12, by the tests that carry `Verifies: ADR-draft-telegraf`:
   `an_artifact_is_held_to_its_release_notes_and_to_the_digests_beside_it`,
   `digests_that_are_not_published_leave_the_release_notes_to_decide`,
   `the_carried_key_verifies_influxdatas_own_signature` (the carried key and the pinned primary,
-  and not the subkey that signed; the verification itself is tested with clause 29 of
-  [ADR-0036](0036-the-operator-program-opamp-fleetctl.md)),
+  and not the subkey that signed; the verification itself is tested with
+  [OPS-operator-program-fleetctl §29](OPS-operator-program-fleetctl.md)),
   `a_missing_signature_refuses_only_a_release_that_signs_every_asset` and
   `a_published_signature_that_does_not_verify_refuses_the_artifact_at_any_version` (clause 8),
   `a_published_checksum_is_read_from_either_shape`,

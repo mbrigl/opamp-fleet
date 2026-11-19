@@ -1359,7 +1359,7 @@ async fn the_ui_serves_the_pinned_shiki_bundle() {
 /// CSS-variables theme's colours in its light and its dark theme. The project's TOML and INI token
 /// rules in the bundle name only those colours, so no look needs a variable of its own for them.
 /// Verifies: SRV-ui-colours-with-shiki
-/// Verifies: ADR-draft-telegraf
+/// Verifies: CLT-telegraf-kind
 #[tokio::test]
 async fn the_ui_colours_an_effective_configuration_by_the_agents_type() {
     let server = spawn().await;

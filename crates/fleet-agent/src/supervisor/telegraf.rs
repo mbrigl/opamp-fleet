@@ -1,4 +1,4 @@
-//! The `telegraf` plugin (ADR-draft-telegraf): Telegraf, delivered as a package and run out of this
+//! The `telegraf` plugin (CLT-telegraf-kind): Telegraf, delivered as a package and run out of this
 //! Supervisor's own directory.
 //!
 //! There is nothing to decide about how Telegraf is invoked. It is a single-file program, it takes
@@ -17,37 +17,37 @@ use crate::supervisor::ports::{
 };
 use crate::supervisor::process::{sighup, Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
 
-/// The program's file name in this Supervisor's `program/` directory (ADR-0018).
+/// The program's file name in this Supervisor's `program/` directory (CLT-supervisor-mode-and-kinds).
 #[cfg(windows)]
 const PROGRAM: &str = "telegraf.exe";
 #[cfg(not(windows))]
 const PROGRAM: &str = "telegraf";
 
 /// Where InfluxData's archive holds the program, below the version-named directory that wraps it
-/// (ADR-draft-telegraf clause 8). The Unix tarballs carry further entries named `telegraf` — the
+/// (CLT-telegraf-kind §8). The Unix tarballs carry further entries named `telegraf` — the
 /// logrotate rule `etc/logrotate.d/telegraf`, and the directories `etc/telegraf/`,
 /// `usr/lib/telegraf/` and `var/log/telegraf/` — so the file name alone does not say which member
 /// is the program; the path does, and the installer refuses an archive in which it matches more
-/// than one (ADR-0033 clause 55).
+/// than one (PKG-signed-packages-and-delivery §55).
 #[cfg(windows)]
 const MEMBER: &str = "telegraf.exe";
 #[cfg(not(windows))]
 const MEMBER: &str = "usr/bin/telegraf";
 
-/// The Agent type every Telegraf Configuration is aimed at (ADR-0017), and the name
+/// The Agent type every Telegraf Configuration is aimed at (CLT-what-an-agent-reports), and the name
 /// `opamp-fleetctl package fetch` uploads its default Configuration under. The second is the first
 /// plus `-conf`, and both are properties of the packing side rather than of a host.
 const SERVICE_NAME: &str = "telegraf";
 const CONFIG_ENTRY: &str = "telegraf-conf";
 
 /// How Telegraf is asked for its version — and, run against a *staged* program before the running
-/// one is stopped, this kind's preflight (ADR-0018 clause 54). The same arguments serve both,
+/// one is stopped, this kind's preflight (CLT-supervisor-mode-and-kinds §54). The same arguments serve both,
 /// because what makes them a version probe is what makes them a safe check: cheap, and touching no
 /// state.
 const VERSION_ARGS: &[&str] = &["--version"];
 
 /// The keys a `command` recipe for Telegraf carries and this kind supplies itself
-/// (ADR-draft-telegraf), each with what answers it — refused by name rather than met with serde's
+/// (CLT-telegraf-kind), each with what answers it — refused by name rather than met with serde's
 /// "unknown field", so an operator rewriting a `command` block is told where each value went.
 const RETIRED: &[(&str, &str)] = &[
     ("args", "the kind points Telegraf at its delivered configuration"),
@@ -82,7 +82,7 @@ fn daemon_args(ctx: &SupervisorContext) -> Vec<String> {
     ]
 }
 
-/// The `telegraf` kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0021).
+/// The `telegraf` kind. Its [`Spawner`] is the one the registry hands every plugin (CLT-accounts-service-runs-under).
 #[derive(Default)]
 pub struct TelegrafPlugin {
     pub spawner: Spawner,
@@ -98,7 +98,7 @@ impl Plugin for TelegrafPlugin {
     }
 
     /// A single file, so there is no tree and no `program_path`: the installer takes the member at
-    /// [`MEMBER`] out of the archive as InfluxData published it (ADR-draft-telegraf).
+    /// [`MEMBER`] out of the archive as InfluxData published it (CLT-telegraf-kind).
     fn defaults(&self) -> KindDefaults {
         KindDefaults {
             program: Some(PROGRAM),
@@ -108,7 +108,7 @@ impl Plugin for TelegrafPlugin {
             tree_links: &[],
             service_name: Some(SERVICE_NAME),
             // Wrapped, with nothing to correct: the fleet's `[supervisors]`/`[updates]` policy
-            // stands, and the block says nothing about it (ADR-0018).
+            // stands, and the block says nothing about it (CLT-supervisor-mode-and-kinds).
             timing: Some(KindTiming::default()),
             // Telegraf speaks no OpAMP to us; its Endpoint is bound and nothing connects to it.
             endpoint_port: false,
@@ -116,7 +116,7 @@ impl Plugin for TelegrafPlugin {
     }
 
     fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
-        // Strictly empty: a kind that knows its agent has no escape hatch (ADR-0018), so anything
+        // Strictly empty: a kind that knows its agent has no escape hatch (CLT-supervisor-mode-and-kinds), so anything
         // left here is a key nobody supplies.
         let _: TelegrafSettings = parse_settings(
             &ctx.name,
@@ -156,7 +156,7 @@ impl Plugin for TelegrafPlugin {
             // kind rather than a key: the one block then serves both platforms.
             reload_signal: sighup(),
             // The Client itself, or the second service where a process account is registered
-            // (ADR-0021 clause 18): the registry says which.
+            // (CLT-accounts-service-runs-under §18): the registry says which.
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
             supervisor_dir: ctx.supervisor_dir.clone(),
@@ -169,7 +169,7 @@ impl Plugin for TelegrafPlugin {
                     program: program.clone(),
                     args: args.clone(),
                     env: Vec::new(),
-                    // Its own program's directory (ADR-0018).
+                    // Its own program's directory (CLT-supervisor-mode-and-kinds).
                     working_dir: None,
                     // One process, no worker of its own.
                     own_process_group: false,
@@ -188,7 +188,7 @@ impl Plugin for TelegrafPlugin {
 }
 
 /// This kind has no settings at all — the strict parse accepts an empty table and refuses every key
-/// (ADR-draft-telegraf). Written as a type rather than a length check so the refusal reads the same
+/// (CLT-telegraf-kind). Written as a type rather than a length check so the refusal reads the same
 /// as every other plugin's.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -199,7 +199,7 @@ mod tests {
     use super::*;
 
     /// The whole block is `type` and `name`, so anything else is a key nobody supplies.
-    /// Verifies: ADR-draft-telegraf
+    /// Verifies: CLT-telegraf-kind
     #[test]
     fn the_block_has_no_settings() {
         let empty: toml::Table = toml::Table::new();
@@ -216,8 +216,8 @@ mod tests {
 
     /// Each key a `command` recipe carries is refused by name with what supplies it — including
     /// through `check`, so a Supervisor set the Server offers is refused before any running process
-    /// is touched (ADR-0018).
-    /// Verifies: ADR-draft-telegraf
+    /// is touched (CLT-supervisor-mode-and-kinds).
+    /// Verifies: CLT-telegraf-kind
     #[test]
     fn the_recipes_keys_are_refused_by_name() {
         for (key, line) in [
@@ -236,10 +236,10 @@ mod tests {
         }
     }
 
-    /// A value the kind derives is refused where a block restates it (ADR-0018 clause 13), through
+    /// A value the kind derives is refused where a block restates it (CLT-supervisor-mode-and-kinds §13), through
     /// the check an offered Supervisor set passes: the program key `command`, and `program_path`,
     /// which says nothing for a single-file package.
-    /// Verifies: ADR-draft-telegraf
+    /// Verifies: CLT-telegraf-kind
     #[test]
     fn restating_a_derived_value_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -267,7 +267,7 @@ mod tests {
 
     /// The whole invocation: Telegraf is pointed at the one Configuration the fleet delivers for
     /// it, in this Supervisor's own `config/` directory.
-    /// Verifies: ADR-draft-telegraf
+    /// Verifies: CLT-telegraf-kind
     #[test]
     fn the_invocation_points_at_the_delivered_configuration() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -308,7 +308,7 @@ mod tests {
     /// half of `docs/artifacts/telegraf.md`, whose packing half is
     /// `telegraf_urls_carry_upstreams_spelling_and_the_platform_this_fleet_names`. An upstream that
     /// renames the program turns this red rather than a rollout.
-    /// Verifies: ADR-draft-telegraf
+    /// Verifies: CLT-telegraf-kind
     #[test]
     fn the_defaults_are_the_artifacts() {
         let defaults = TelegrafPlugin::default().defaults();
@@ -338,7 +338,7 @@ mod tests {
     /// whatever order the archive keeps. The Unix fixture puts the logrotate rule and the
     /// directories named `telegraf` *ahead* of the program, the order in which a selection by file
     /// name installed the logrotate rule as the program.
-    /// Verifies: ADR-draft-telegraf
+    /// Verifies: CLT-telegraf-kind
     #[test]
     fn the_program_is_taken_from_its_place_in_upstreams_archive() {
         let dir = tempfile::tempdir().expect("tempdir");

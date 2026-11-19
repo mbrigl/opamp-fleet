@@ -139,7 +139,7 @@ pub fn take_program(
 /// Where the program sits inside a package tree (PKG-signed-packages-and-delivery): the block's answer, or the one the kind
 /// knows (CLT-supervisor-mode-and-kinds). A wrapped kind, one that names its program, refuses a block that states it,
 /// for the reason [`take_program`] refuses a program name — also where its package is a single
-/// file and the answer is that there is no tree (ADR-0018 clause 13).
+/// file and the answer is that there is no tree (CLT-supervisor-mode-and-kinds §13).
 ///
 /// # Errors
 /// Returns an error when a block states a `program_path` its kind already supplies.

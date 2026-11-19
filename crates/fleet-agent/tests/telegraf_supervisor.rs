@@ -1,5 +1,5 @@
-//! The `telegraf` kind, whose whole block is `type` and `name` (ADR-0018), driven through
-//! `Plugin::start` the way the core drives it ([`telegraf`](ADR-draft-telegraf)): the derived
+//! The `telegraf` kind, whose whole block is `type` and `name` (CLT-supervisor-mode-and-kinds), driven through
+//! `Plugin::start` the way the core drives it ([`telegraf`](CLT-telegraf-kind)): the derived
 //! program is where the install puts it, the version probe reaches it, a delivered Configuration
 //! lands where the kind points `--config`, and the kind applies it the way its platform allows — by
 //! signal where there are signals, by restart where there are none.
@@ -10,7 +10,7 @@ mod wrapped;
 /// Telegraf's whole block: `type` and `name`. The program is a single file under its own name,
 /// the version comes from the kind's own `--version` as the only thing the kind reports of its
 /// process, and the Configuration the fleet delivers is the one the kind points `--config` at.
-/// Verifies: G-7, ADR-draft-telegraf, ADR-0017
+/// Verifies: G-7, CLT-telegraf-kind, CLT-what-an-agent-reports
 #[tokio::test]
 async fn a_two_line_telegraf_block_runs_reports_and_applies() {
     let mut harness = wrapped::start(
@@ -32,9 +32,9 @@ async fn a_two_line_telegraf_block_runs_reports_and_applies() {
 }
 
 /// On Unix the kind applies a Configuration with `SIGHUP`, Telegraf's own way of re-reading it
-/// (ADR-draft-telegraf clause 7): the signal reaches the running process, the apply is
+/// (CLT-telegraf-kind §7): the signal reaches the running process, the apply is
 /// acknowledged, and nothing is spawned — the process that was running is still the one running.
-/// Verifies: ADR-draft-telegraf
+/// Verifies: CLT-telegraf-kind
 #[cfg(unix)]
 #[tokio::test]
 async fn telegraf_applies_a_configuration_by_sighup_in_place() {
@@ -72,9 +72,9 @@ async fn telegraf_applies_a_configuration_by_sighup_in_place() {
 }
 
 /// On Windows there is no signal, and the kind applies a Configuration by the Runner's restart
-/// (ADR-draft-telegraf clause 7): the apply is acknowledged from a fresh process, with the same
+/// (CLT-telegraf-kind §7): the apply is acknowledged from a fresh process, with the same
 /// block.
-/// Verifies: ADR-draft-telegraf
+/// Verifies: CLT-telegraf-kind
 #[cfg(windows)]
 #[tokio::test]
 async fn telegraf_applies_a_configuration_by_restarting_on_windows() {
