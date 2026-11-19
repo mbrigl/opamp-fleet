@@ -88,7 +88,8 @@ Six crates in one workspace
   headers, and HTTP/2's bounds on streams and pings — and `server::pace`, the floor every body
   and WebSocket message it serves is held to. The server side takes a WebSocket over through
   hyper's upgrade and reads its frames with `tokio-tungstenite`, the library the client side
-  uses too.
+  uses too. Both sides take their WebSocket configuration from `websocket`: the receive limit
+  and a read buffer of 4 KiB, sized to an Agent's messages.
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the

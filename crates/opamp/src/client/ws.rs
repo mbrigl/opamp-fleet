@@ -272,7 +272,9 @@ async fn open_each(
             client_async_tls_with_config(
                 request,
                 stream,
-                Some(crate::frame::websocket_config(settings.max_message_size)),
+                Some(crate::websocket::websocket_config(
+                    settings.max_message_size,
+                )),
                 settings.connector.clone(),
             )
             .await
@@ -373,7 +375,7 @@ pub async fn connect_from(
     local: Option<IpAddr>,
 ) -> Result<Socket, Connect> {
     let (request, host, port) = target(endpoint, headers)?;
-    let config = crate::frame::websocket_config(max_message_size);
+    let config = crate::websocket::websocket_config(max_message_size);
     let Some(local) = local else {
         return connect_async_tls_with_config(request, Some(config), false, connector)
             .await

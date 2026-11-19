@@ -44,6 +44,8 @@ pub mod server;
 #[cfg_attr(docsrs, doc(cfg(any(feature = "client", feature = "server"))))]
 pub mod tls;
 pub mod uid;
+#[cfg(any(feature = "client", feature = "server"))]
+mod websocket;
 
 /// The opamp-spec release these types are generated from, e.g. `v0.20.0`.
 pub const BASELINE: &str = env!("OPAMP_BASELINE");

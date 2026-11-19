@@ -345,7 +345,7 @@ async fn upgrade<H: Handler>(
             let stream = pace::FrameMeter::new(hyper_util::rt::TokioIo::new(upgraded));
             // The transport's own guard, so an oversized frame is refused before it is buffered whole;
             // the loop still checks, because that is what turns the refusal into the 1009 close.
-            let config = crate::frame::websocket_config(limit);
+            let config = crate::websocket::websocket_config(limit);
             let socket = WebSocketStream::from_raw_socket(stream, Role::Server, Some(config)).await;
             let messages = floor.map(pace::Messages::new);
             serve_socket(socket, endpoint, connection, outbound, messages, sessions).await;
