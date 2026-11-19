@@ -197,6 +197,8 @@ alone() {
 run "Documentation self-test" scripts/test-check-docs.sh
 run "Protocol Baseline self-test" scripts/test-check-protocol-baseline.sh
 run "Documentation consistency" scripts/check-docs.sh
+run "Project documentation self-test" scripts/test-check-project-docs.sh
+run "Project documentation" scripts/check-project-docs.sh
 # It reads the network, and says so and skips without one.
 run "Protocol Baseline" scripts/check-protocol-baseline.sh
 run "Manual check self-test" scripts/test-check-manual.sh
