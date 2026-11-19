@@ -83,8 +83,8 @@ the way its platform allows, and deliver it as upstream's own archives, installe
      It exposes one function on `window`. The file starts with a header naming the packages,
      their versions and the script that built it.
    - `scripts/vendor-shiki.sh` rebuilds it. It runs only when the version is to change, on a
-     developer's machine. CI and the Dev Container do not need node; the bundled UI keeps no
-     frontend toolchain ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
+     developer's machine. CI and the Dev Container do not need a JavaScript runtime; the bundled UI
+     keeps no frontend toolchain ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
    - The Server embeds the file and serves it from its own origin as `/shiki.js`, like the
      stylesheets. The CSP does not change: `script-src 'self'` covers it, and nothing needs
      WebAssembly or `eval`.
@@ -146,23 +146,23 @@ the way its platform allows, and deliver it as upstream's own archives, installe
    upstream spells `386` as `i386`). It holds the builds whose Platform is beyond doubt.
    `linux_armhf` and `linux_armel` stay out: upstream does not state the ARM level they are built
    for, and [PKG-signed-packages-and-delivery §6](PKG-signed-packages-and-delivery.md) keeps `armv6`
-   apart from `arm32`, so an `arm32` entry might be offered to a host it does not run on.
-   - **Each asset is verified against two origins.** The SHA-256 is the one the GitHub release
-     notes of the tag publish in their table, the row found by the asset's exact name. It is
-     required: an asset the notes name nowhere is refused, because only the host that serves it
-     would then vouch for it. The `.DIGESTS` file beside the asset on the CDN, its line looked up
-     by name, must agree where it is published. From 1.39.0 on InfluxData publishes one beside
-     every asset, and there a `404` refuses the asset, so that whoever serves the CDN cannot
-     switch the cross-check off by deleting the file. Before 1.39.0 it exists for a few assets of
-     a few releases from 1.36.4 on, and a `404` is its absence.
-   - **Each asset carries InfluxData's signature.** The `.asc` beside the asset is verified as
-     [OPS-operator-program-fleetctl §29](OPS-operator-program-fleetctl.md)
+   apart from `arm32`, so an `arm32` entry would be offered to a host it does not run on.
+   - **Each release file is verified against two origins.** The SHA-256 is the one the GitHub
+     release notes of the tag list in their table, the row found by the release file's exact name.
+     It is required: an release file the notes name nowhere is refused, because only the host that
+     serves it would then vouch for it. The `.DIGESTS` file beside the release file on the CDN, its
+     line looked up by name, must agree where it exists. From 1.39.0 on InfluxData puts one beside
+     every release file, and there a `404` refuses the release file, so that whoever serves the CDN
+     cannot switch the cross-check off by deleting the file. Before 1.39.0 it exists for a few
+     release files of a few releases from 1.36.4 on, and a `404` is its absence.
+   - **Each release file carries InfluxData's signature.** The `.asc` beside the release file is
+     verified as [OPS-operator-program-fleetctl §29](OPS-operator-program-fleetctl.md)
      verifies an upstream's OpenPGP signature, against InfluxData's package-signing key, which the
      tool carries (`crates/fleet-tools/trust/influxdata-archive.gpg`), with the primary key
      `24C9 75CB A61A 024E E1B6 3178 7C3D 5715 9FC2 F927` pinned. The SHA-256 checks stay. From
-     1.34.4 on InfluxData publishes an `.asc` beside every asset, and there a `404` refuses the
-     asset. Before 1.34.4 a `404` is the signature's absence, as for `.DIGESTS`, and the digests
-     decide. Where an `.asc` is published it must verify, at any version.
+     1.34.4 on InfluxData puts an `.asc` beside every release file, and there a `404` refuses the
+     release file. Before 1.34.4 a `404` is the signature's absence, as for `.DIGESTS`, and the
+     digests decide. Where an `.asc` exists it must verify, at any version.
    - **The kind names where the archive holds the program:** `usr/bin/telegraf` on Unix and
      `telegraf.exe` on Windows, below the version-named directory, as the `member` that
      [PKG-signed-packages-and-delivery §55](PKG-signed-packages-and-delivery.md) lets a kind name.
