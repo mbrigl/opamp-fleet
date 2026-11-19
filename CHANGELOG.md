@@ -55,7 +55,7 @@ once its tag exists.
   `instance_uid`, so the buffers no longer follow the Agents an instance holds. What that saves an
   instance's memory was not measured. **What to do:** nothing.
 - **The contract pair has defaults, and the Server names it no more**
-  ([ADR-draft-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it](docs/adr/draft-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
+  ([ADR-0039](docs/adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
   clause 22). On PostgreSQL, migration 19 gives the Deployments' `packages` and `configurations`
   columns and the Hosts' `instance_uids` arrays a default, which changes no stored row, and no
   statement 0.8.5 runs while serving names them: a Host's array no longer loses an Agent that is
