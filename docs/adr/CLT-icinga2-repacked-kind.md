@@ -1,4 +1,4 @@
-# ADR-draft-icinga-2: Icinga 2 runs as the `icinga2` kind from a repacked vendor tree, enrols with its Icinga master, and reaches the hosts whose glibc is at least its Debian suite's
+# CLT-icinga2-repacked-kind: Icinga 2 runs as the `icinga2` kind from a repacked vendor tree, enrols with its Icinga master, and reaches the hosts whose glibc is at least its Debian suite's
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-10-10
@@ -10,10 +10,11 @@
 Icinga 2 should reach a host the way every other Managed Process does: a package the Server
 offers and the Client unpacks, updates and rolls back, never a distribution package installed
 beside the fleet. The target is the Icinga **Agent** role, which needs a certificate signed by an
-Icinga master. A kind knows its own agent ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)), and
-Icinga 2 is the agent where a kind is not merely shorter than a recipe but required. A spike against
-Icinga 2.14.6 measured why. A repacked tree runs from any directory — `strace` showed no compiled-in
-path touched — but only under conditions no block can carry:
+Icinga master. A kind knows its own agent
+([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)), and Icinga 2 is the agent where
+a kind is not merely shorter than a recipe but required. A spike against Icinga 2.14.6 measured why.
+A repacked tree runs from any directory — `strace` showed no compiled-in path touched — but only
+under conditions no block can carry:
 
 - **Every invocation must name its account.** Without `-D RunAsUser=`/`-D RunAsGroup=` every
   subcommand — `daemon`, `pki`, a validation — refuses (*"Please re-run this command as a privileged
@@ -73,23 +74,24 @@ after the CA was written; the parent files the request under the presented certi
 fingerprint and hands the signed certificate to the next request that presents the same one.
 
 **What a delivered block can reach.** The Server delivers the `[[supervisor]]` blocks
-([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 26), and the enrolment keys are block
-keys. The kind sends the content of `ticket_file` to the parent the block names, so a block free to
-name any path would send `/etc/shadow` to a parent an attacker runs
+([CLT-supervisor-mode-and-kinds §26](CLT-supervisor-mode-and-kinds.md)), and the enrolment keys are
+block keys. The kind sends the content of `ticket_file` to the parent the block names, so a block
+free to name any path would send `/etc/shadow` to a parent an attacker runs
 ([`HARDENING.md`](../HARDENING.md)). For a Supervisor whose
-remote configuration the operator switched off ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)
-clauses 45 to 52), a delivered block may point `trusted_cert_file` at a file inside its own
-`config_dir` ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 36), but no remote
-configuration writes that file, so it does not exist. A missing pin that fell back to
-`pki save-cert`, trust on first use, would let a delivered block that changes the parent and points
-the pin at such a file enrol the operator's agent with a parent the Server chose, trusting whatever
-certificate it presents.
+remote configuration the operator switched off
+([CLT-supervisor-mode-and-kinds §45–§52](CLT-supervisor-mode-and-kinds.md)), a delivered block may
+point `trusted_cert_file` at a file inside its own `config_dir`
+([CLT-supervisor-mode-and-kinds §36](CLT-supervisor-mode-and-kinds.md)), but no remote configuration
+writes that file, so it does not exist. A missing pin that fell back to `pki save-cert`, trust on
+first use, would let a delivered block that changes the parent and points the pin at such a file
+enrol the operator's agent with a parent the Server chose, trusting whatever certificate it
+presents.
 
 **What reaches one Agent.** A Configuration has no Selector, a Deployment aims its
 Configurations, and a rollout skips an Agent that two Deployments claim
-([ADR-0032](0032-deployments-and-rollouts.md) clauses 2, 3, 5 and 9). A Configuration meant for
-one host alone therefore reaches it only through a Deployment that claims that host alone, and that
-Deployment then carries everything the host runs.
+([SRV-deployments-and-pinned-rollouts §2, §3, §5 and §9](SRV-deployments-and-pinned-rollouts.md)). A
+Configuration meant for one host alone therefore reaches it only through a Deployment that claims
+that host alone, and that Deployment then carries everything the host runs.
 
 ## Decision
 
@@ -106,8 +108,8 @@ the artifact's reach.
    the **Agent role, never a master**, and runs the delivered tree only: program `icinga2` plus
    `EXE_SUFFIX` at `program_path` `sbin/icinga2[.exe]`, `service_name = "icinga2"`. It refuses an
    `endpoint_port`: Icinga speaks its cluster protocol to its parent, not OpAMP to us. For the same
-   reason it declares that the daemon gets no Supervisor Endpoint token, as clause 28 of
-   [ADR-0016](0016-client-modes-and-the-gateway.md) lets a kind
+   reason it declares that the daemon gets no Supervisor Endpoint token, as
+   [CLT-modes-and-gateway §28](CLT-modes-and-gateway.md) lets a kind
    whose program never connects to its Supervisor Endpoint: the token would serve no connection
    and would reach every check plugin the daemon runs.
 
@@ -120,10 +122,10 @@ the artifact's reach.
    | `ticket_file` | the file holding the ticket it presents when asking for a certificate |
    | `trusted_cert_file` | the parent's own certificate, pinned instead of trusted on sight |
 
-   No `parent_host` means a standalone node: no enrolment, local checks only. All four are
-   rollable: the `[[supervisor]]` blocks are the fleet-managed half of the Client's configuration
-   ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)), and the two files travel as
-   Configurations (clause 11).
+   No `parent_host` means a standalone Icinga instance: no enrolment, local checks only. All four
+   are rollable: the `[[supervisor]]` blocks are the fleet-managed half of the Client's
+   configuration ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)), and the two
+   files travel as Configurations (clause 11).
 
 3. **`node_name` defaults to the host's FQDN.** Resolved with `getaddrinfo` and `AI_CANONNAME` (the
    route `hostname --fqdn` takes), accepted only if it is a DNS host name — labels of letters,
@@ -151,28 +153,29 @@ the artifact's reach.
    - The state directories are `${supervisor_dir}/data`, `log`, `cache`, `spool` and `run`.
    - On Unix every invocation runs with `LD_LIBRARY_PATH=<tree>/lib` — the daemon, each
      subcommand of clauses 9, 12 and 13, and the version probe of clause 16, handed the start's
-     environment as clause 57 of
-     [ADR-0018](0018-supervisor-mode-and-its-kinds.md) lets a kind
+     environment as [CLT-supervisor-mode-and-kinds §57](CLT-supervisor-mode-and-kinds.md)
+     lets a kind
      hand it — and the preflight of clause 15 with the staged tree's; one rule derives all of
      them. Windows needs no environment.
    - Foreground: no `-d`, no `--close-stdio`; stdout and stderr go into the Client's logging.
 
 6. **The kind prepares Icinga's directories.** Before every spawn and before enrolment it creates
-   `data/`, `data/certs/`, `log/`, `cache/`, `spool/` and `run/` owner-only, so one removed under a
-   running fleet comes back. It runs no `prepare-dirs`, creates no users, and drives no service
-   manager. State lives **beside** the tree — `data/` (with the certificates), the enrolment marker
-   `icinga2-enrolment.json` and the pinned `trusted-parent.crt` are siblings of `program/` and
-   `config/` — so a package swap never touches the identity, and purging the Supervisor's directory
-   takes all of it.
+   `data/`, `data/certs/`, `log/`, `cache/`, `spool/` and `run/` as private directories, so one
+   removed under a running fleet comes back. It runs no `prepare-dirs`, creates no users, and drives
+   no service manager. State lives **beside** the tree — `data/` (with the certificates), the
+   enrolment marker `icinga2-enrolment.json` and the pinned `trusted-parent.crt` are siblings of
+   `program/` and `config/` — so a package swap never touches the identity, and purging the
+   Supervisor's directory takes all of it.
 
 7. **The root Configuration is marked by `role = "main"`.** The daemon is pointed at one file, from
    which it `include`s the rest, and that root cannot be derived from unroled entries. The Baseline
    makes `AgentConfigFile.role` Agent-type-specific (*"The values and their semantics are Agent
    type-specific"*), so `main` is the `icinga2` kind's own value, read by no other kind (to a
    Collector any non-empty role means "written, never passed as `--config`",
-   [ADR-0031](0031-configurations-and-the-rest-api.md)). Where no entry carries it, the entry named
-   `icinga2-conf` — the one `opamp-fleetctl package fetch` uploads — is the root. Two entries
-   carrying it are a reason not to start, naming both. The root is resolved on every spawn.
+   [SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)). Where no entry
+   carries it, the entry named `icinga2-conf` — the one `opamp-fleetctl package fetch` uploads — is
+   the root. Two entries carrying it are a reason not to start, naming both. The root is resolved on
+   every spawn.
 
 8. **No process until it can do its job.** The kind's `build()` yields no process while the root
    Configuration is missing or — with a parent configured — while `<NodeName>.crt` and `ca.crt` are
@@ -190,13 +193,13 @@ the artifact's reach.
    drain makes `stop_timeout` 60 s and `apply_grace` 30 s the kind's timing.
 
 10. **The daemon is stopped as a group.** The kind leads its own process group
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)
-    clause 53), so the Runner's stop signals the umbrella and its worker together and the
+    ([CLT-supervisor-mode-and-kinds §53](CLT-supervisor-mode-and-kinds.md)),
+    so the Runner's stop signals the umbrella and its worker together and the
     escalation to `SIGKILL` cannot leave the worker behind.
 
 11. **The Icinga master is the only CA; the fleet transports, never signs.** The fleet Server holds
     no `TicketSalt`, signs nothing, and never sees a private key; the OpAMP PKI of
-    [ADR-0026](0026-admission-by-client-certificate-and-revocation-with-the-ca-keys-in-a-file-or-on-a-token.md)
+    [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)
     and Icinga's never touch. It
     carries two artefacts that are not keys, each a Configuration with `role = "supplementary"`
     that lands as a file the Supervisor reads and the daemon is never pointed at: the **ticket**
@@ -204,9 +207,9 @@ the artifact's reach.
     - **The ticket travels in a Deployment per host.** Its Selector matches that one Agent, and
       while the Agent enrols that Deployment holds everything it runs — the Package, the root and
       its included Configurations and the parent's certificate besides the ticket
-      ([ADR-0032](0032-deployments-and-rollouts.md)). Once enrolled, the Agent may move to a
-      Deployment the fleet shares; its rollout leaves the ticket behind, and the certificate on
-      disk is what counts from then on (clause 13).
+      ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). Once
+      enrolled, the Agent may move to a Deployment the fleet shares; its rollout leaves the ticket
+      behind, and the certificate on disk is what counts from then on (clause 13).
     - **The parent's certificate travels wherever the Agent is deployed**, for as long as the
       block names it: a renewal pins the parent again (clause 12).
 
@@ -251,18 +254,20 @@ the artifact's reach.
     `icinga2 ca remove` there is the operator's.
 
 15. **Icinga's preflight is `--version` with `LD_LIBRARY_PATH=${staged}/lib`.** A package is proved
-    to run before it is installed ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 54); the
-    staged tree is checked against the libraries it carries, so a tree built against a newer glibc
-    than the host's is refused with the dynamic linker's message before the running daemon is
-    stopped. `${staged}` resolves to the staged tree's root, and neither the preflight nor the
-    version probe names a working directory, since the daemon's start names none
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 57).
+    to run before it is installed
+    ([CLT-supervisor-mode-and-kinds §54](CLT-supervisor-mode-and-kinds.md)); the staged tree is
+    checked against the libraries it carries, so a tree built against a newer glibc than the host's
+    is refused with the dynamic linker's message before the running daemon is stopped. `${staged}`
+    resolves to the staged tree's root, and neither the preflight nor the version probe names a
+    working directory, since the daemon's start names none
+    ([CLT-supervisor-mode-and-kinds §57](CLT-supervisor-mode-and-kinds.md)).
 
 16. **Icinga's version parser reads `r2.14.6-1` as `2.14.6`.** The kind's version probe brings it
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md)
-    clause 55), since the strict SemVer default reads no version out of Icinga's banner. The number
+    ([CLT-supervisor-mode-and-kinds §55](CLT-supervisor-mode-and-kinds.md)),
+    since the strict SemVer default reads no version out of Icinga's banner. The number
     it finds is written as SemVer by the rule the Package is named by
-    ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 6), so the two agree.
+    ([PKG-versions-high-water-mark-floor §6](PKG-versions-high-water-mark-floor.md)), so the two
+    agree.
 
 17. **The artifact is the vendor's packages, repacked into one normalised, link-free tree.**
     `opamp-fleetctl package fetch --agent icinga2` builds, under the wrapper `icinga2-<version>`:
@@ -283,10 +288,10 @@ the artifact's reach.
     daemon is taken from `usr/lib`, not the `/usr/sbin` shell wrapper. The container is
     **`.tar.gz`**, which carries the executable bit. Packing is
     the deterministic repack of
-    [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clause 27, with its normalized file
+    [OPS-operator-program-fleetctl §27](OPS-operator-program-fleetctl.md), with its normalized file
     modes. The artifact is uploaded as
     the Package of Agent type `icinga2` at the Icinga version written as SemVer
-    ([ADR-0034](0034-package-versions-high-water-mark-and-floor.md) clause 6), one entry per
+    ([PKG-versions-high-water-mark-floor §6](PKG-versions-high-water-mark-floor.md)), one entry per
     platform; a later repack of the same version is numbered by clause 27.
 
 18. **Linux: every file comes from a signed archive, and nothing from the host.** The sources are
@@ -297,8 +302,7 @@ the artifact's reach.
     the suite, its `-updates` and its `-security` together, the newest across them winning, as an
     `apt` with Debian's default sources installs them.
     - **The index.** A suite's `Packages` index is read only once its clear-signed `InRelease`
-      verified as clause 29 of
-      [ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
+      verified as [OPS-operator-program-fleetctl §29](OPS-operator-program-fleetctl.md)
       verifies an upstream's OpenPGP signature, and only the text the signature covers is read:
       against Icinga's archive key (`crates/fleet-tools/trust/icinga-archive.gpg`, fingerprint in
       Context) for Icinga's suites, and Debian's automatic signing keys of Debian 11, 12 and 13
@@ -343,7 +347,7 @@ the artifact's reach.
       resolved inside the directory they were unpacked into together, so a link in one package
       may name a file of another, as `libstdc++6`'s documentation names `gcc-12-base`'s; a link
       that leads out of that directory fails the repack naming it
-      ([ADR-0036](0036-the-operator-program-opamp-fleetctl.md)).
+      ([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)).
 
     The tool prints the library packages and the highest `libc6` floor any package of the tree
     states before any package is downloaded: that floor is the artifact's reach.
@@ -382,38 +386,39 @@ the artifact's reach.
 
 25. **A delivered block reads files only from its configuration directory, and pins the parent it
     names.** The kind states `ticket_file` and `trusted_cert_file` as the settings that name a file
-    the Supervisor reads ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 36); in a
-    delivered block each must be `${config_dir}/` followed by a relative path with no `..`, `.` or
+    the Supervisor reads ([CLT-supervisor-mode-and-kinds §36](CLT-supervisor-mode-and-kinds.md)); in
+    a delivered block each must be `${config_dir}/` followed by a relative path with no `..`, `.` or
     root component, unless it equals the running block's value and the block still names the same
-    parent and node. Its `node_name`, which names the host's certificate and key files, is a plain
-    name with no separator in every block. A delivered `icinga2` block that names a `parent_host`
-    must name `trusted_cert_file`: trust on first use is for a parent an operator chose, not one the
-    Server names. Clauses 2 and 12 stand otherwise for an operator-written block.
+    parent and `node_name`. Its `node_name`, which names the host's certificate and key files, is a
+    plain name with no separator in every block. A delivered `icinga2` block that names a
+    `parent_host` must name `trusted_cert_file`: trust on first use is for a parent an operator
+    chose, not one the Server names. Clauses 2 and 12 stand otherwise for an operator-written block.
 
 26. **A listed `icinga2` keeps the parent and the pin the operator wrote.** For a Supervisor named
     in `remote_config_disabled`, a delivered block equals the running one whole
-    ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clause 51), `node_name`, `parent_host`,
-    `ticket_file` and `trusted_cert_file` among it. An added listed `icinga2` carries `type` and
-    `name` alone and is thus a standalone node until the operator writes its parent into the host's
-    `supervisor.toml`, and from then on the running block is the one a delivered block must equal.
+    ([CLT-supervisor-mode-and-kinds §51](CLT-supervisor-mode-and-kinds.md)), `node_name`,
+    `parent_host`, `ticket_file` and `trusted_cert_file` among it. An added listed `icinga2` carries
+    `type` and `name` alone and is thus a standalone Icinga instance until the operator writes its
+    parent into the host's `supervisor.toml`, and from then on the running block is the one a
+    delivered block must equal.
 
 27. **A later repack of one Icinga version is numbered as the operator program numbers one.** The
     first repack of Icinga `<major>.<minor>.<patch>` is Package `<major>.<minor>.<patch>` (clause
     17). A later one of the same version — newer library packages, check plugins or packaging
-    revision — is named by `opamp-fleetctl package fetch --repack <n>` and numbered as clause 28 of
-    [ADR-0036](0036-the-operator-program-opamp-fleetctl.md)
-    numbers it: the second repack of 2.14.3 is `2.14.4-0.r.2`, offered to a host on any earlier
-    repack, since its Supervisor reports the version of the Package it installed and not the
-    `2.14.3` the daemon prints
-    ([ADR-0032](0032-deployments-and-rollouts.md) clauses 14 and 25),
-    and replaced by Icinga's next release `2.14.4`.
+    revision — is named by `opamp-fleetctl package fetch --repack <n>` and numbered as
+    [OPS-operator-program-fleetctl §28](OPS-operator-program-fleetctl.md) numbers it: the second
+    repack of 2.14.3 is `2.14.4-0.r.2`, offered to a host on any earlier repack, since its
+    Supervisor reports the version of the Package it installed and not the `2.14.3` the daemon
+    prints
+    ([SRV-deployments-and-pinned-rollouts §14 and §25](SRV-deployments-and-pinned-rollouts.md)), and
+    replaced by Icinga's next release `2.14.4`.
 
 **Out of scope:** the RPM repack (needed only for a deployment that must run the vendor's own Red
 Hat binary, and it brings subscription credentials); running on Windows (clauses 22 and 23); an
 explicit renewal schedule beyond the start-time net;
 holding the enrolment values as fleet concepts rather than block keys; running on a host where a
 process account is registered
-([ADR-0021](0021-the-accounts-the-service-runs-under.md)): the
+([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)): the
 daemon and every subcommand drop to the account `-D RunAsUser` names, which a program the second
 service starts under the process account cannot do, and the kind runs its subcommands itself, so a
 block there is refused when it is checked and when it starts, naming `--no-process-account`.
@@ -459,9 +464,9 @@ block there is refused when it is checked and when it starts, naming `--no-proce
 - **Repack the newest suite.** Quietly excludes the hosts most likely to run an old agent.
 - **Copy the libraries the build host resolves (`ldd`).** Rejected: the tree's content would be
   whatever that host has installed, from wherever it came, which
-  [ADR-0036](0036-the-operator-program-opamp-fleetctl.md) clause 27 rules out for a repack; `ldd`
-  runs the host's loader on the program; and the build host's distribution would become the reach,
-  so a repack for another suite would need a container of that suite with the right libraries
+  [OPS-operator-program-fleetctl §27](OPS-operator-program-fleetctl.md) rules out for a repack;
+  `ldd` runs the host's loader on the program; and the build host's distribution would become the
+  reach, so a repack for another suite would need a container of that suite with the right libraries
   installed.
 - **Trust the build host's `debian-archive-keyring`.** Rejected for the same reason: the host
   would decide which keys vouch for the tree. The carried keyring rotates with a tool release,
@@ -544,7 +549,7 @@ block there is refused when it is checked and when it starts, naming `--no-proce
   depends on its exit codes and output, bounded by a timeout.
 - Negative: the daemon runs under the Client's account, so checks needing elevated capabilities
   (`check_icmp`) fail unless that account is root, which `service install --run-as root` chooses
-  ([ADR-0021](0021-the-accounts-the-service-runs-under.md)). Documented, not
+  ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). Documented, not
   worked around.
 - Negative: a host awaiting on-demand signing looks unhealthy until someone signs; the manual's
   troubleshooting table says so.
@@ -608,7 +613,7 @@ block there is refused when it is checked and when it starts, naming `--no-proce
   `icinga2` block for a listed name that changes `parent_host` or `node_name`, or points
   `trusted_cert_file` at a missing file in `${config_dir}`, fails the offer naming the key).
 - `crates/fleet-agent/src/supervisor/mod.rs`, with this kind standing for every wrapped kind
-  ([ADR-0018](0018-supervisor-mode-and-its-kinds.md) clauses 13 and 17):
+  ([CLT-supervisor-mode-and-kinds §13 and §17](CLT-supervisor-mode-and-kinds.md)):
   `a_wrapped_block_needs_neither_a_program_nor_a_type`,
   `a_wrapped_block_that_restates_a_derived_value_is_refused`,
   `a_wrapped_kind_corrects_the_fleets_timing_and_the_block_says_nothing` (clause 9's timing).
@@ -640,5 +645,6 @@ block there is refused when it is checked and when it starts, naming `--no-proce
 **Not mechanically decidable:** the Dev Container pin (clause 20) is a reviewed line in
 `.devcontainer/devcontainer.json`; whether a repacked tree runs on Windows (clause 22) needs a
 Windows host; and that the ticket reaches one Agent through a Deployment of its own (clause 11) is
-the Selector behaviour of [ADR-0032](0032-deployments-and-rollouts.md) and the procedure
+the Selector behaviour of
+[SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md) and the procedure
 `docs/manual/icinga2.md` gives, which no test of this kind holds. Review holds these.
