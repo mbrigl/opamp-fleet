@@ -19,6 +19,41 @@ carries a date once its tag exists.
 
 ## [0.8.6] - 2026-11-19
 
+### Added
+
+- **The GLPI Agent is managed by the fleet again** — the Supervisor kind `glpi` that 0.5.3 removed
+  is back, compiled into the Client by default as the `glpi` feature
+  ([CLT-glpi-agent-kind](docs/adr/CLT-glpi-agent-kind.md)). A block is
+  `type = "glpi"` and `name`, the same on Linux and Windows; the kind derives the command line and
+  keeps the agent's state in `${supervisor_dir}/agent-state`, outside the tree an update replaces,
+  which the Client makes before every spawn. The agent reports the version of its banner without
+  the package revision, written as SemVer (`GLPI Agent (1.19-1)` reports `1.19.0`), also after a
+  later repack of that release, and nothing else about itself. The recipe is
+  [docs/manual/glpi-agent.md](docs/manual/glpi-agent.md). **What to do:** nothing, unless you run
+  the GLPI Agent. Its inventory and Deploy tasks need root on Linux and an administrator on
+  Windows. On Linux, where the packages run the Client under its own account, choose root for
+  such a host with `sudo opamp-fleet service install --run-as root` and restart the service. On
+  Windows, where a first registration runs the Client as the virtual account
+  `NT SERVICE\opamp-fleet`, choose `LocalSystem` with
+  `opamp-fleet service install --run-as LocalSystem`. A re-registration keeps the account. A
+  host with a process account runs the agent under that account, which is never root or
+  `LocalSystem` ([CLT-accounts-service-runs-under](docs/adr/CLT-accounts-service-runs-under.md)), so
+  a GLPI Agent that needs either runs on a host without one. Its log is
+  `${supervisor_dir}/agent-log/glpi-agent.log`, beside `agent-state`; both are the kind's data
+  directories, which the process account may write.
+  - **`opamp-fleetctl package fetch --agent glpi-agent`** takes the official portable Windows zip
+    as published and builds the Linux artifact deterministically from the official AppImage,
+    whose file system it extracts once with `unsquashfs` (squashfs-tools 4.5.1 or later, checked
+    before use; older versions write outside their destination), without running the
+    AppImage, so no fleet host needs FUSE; a host with glibc newer than 2.27 runs the agent on its
+    own C library, through the one link the tree keeps, to `/lib64/ld-linux-x86-64.so.2`, and an
+    older host on the glibc 2.27 the AppImage bundles; both are amd64, and Linux arm64 is not
+    supported because upstream publishes no AppImage for it. The agent menu names the platforms,
+    and the version question still shows the last three releases, since the GLPI Agent versions
+    in two parts (`1.15`). The release is fetched under upstream's tag and uploaded as the SemVer
+    Package version (`1.19` becomes `1.19.0`). The upload also stores the default configuration
+    `glpi-agent-conf` from `config/examples/`, left untouched where the Server already holds it.
+
 ### Fixed
 
 - **A Configuration fits an Agent by the type the list shows**
@@ -117,41 +152,6 @@ carries a date once its tag exists.
   no shipped binary contains it. `chrono` and `humantime`, flagged as unmaintained on the same day
   (RUSTSEC-2026-0543, RUSTSEC-2026-0542), come only through `object_store`, which has no release
   without them, and are recorded as reviewed in `deny.toml`. **What to do:** nothing.
-
-### Added
-
-- **The GLPI Agent is managed by the fleet again** — the Supervisor kind `glpi` that 0.5.3 removed
-  is back, compiled into the Client by default as the `glpi` feature
-  ([ADR-draft-glpi-agent](docs/adr/draft-glpi-agent.md)). A block is
-  `type = "glpi"` and `name`, the same on Linux and Windows; the kind derives the command line and
-  keeps the agent's state in `${supervisor_dir}/agent-state`, outside the tree an update replaces,
-  which the Client makes before every spawn. The agent reports the version of its banner without
-  the package revision, written as SemVer (`GLPI Agent (1.19-1)` reports `1.19.0`), also after a
-  later repack of that release, and nothing else about itself. The recipe is
-  [docs/manual/glpi-agent.md](docs/manual/glpi-agent.md). **What to do:** nothing, unless you run
-  the GLPI Agent. Its inventory and Deploy tasks need root on Linux and an administrator on
-  Windows. On Linux, where the packages run the Client under its own account, choose root for
-  such a host with `sudo opamp-fleet service install --run-as root` and restart the service. On
-  Windows, where a first registration runs the Client as the virtual account
-  `NT SERVICE\opamp-fleet`, choose `LocalSystem` with
-  `opamp-fleet service install --run-as LocalSystem`. A re-registration keeps the account. A
-  host with a process account runs the agent under that account, which is never root or
-  `LocalSystem` ([ADR-0021](docs/adr/0021-the-accounts-the-service-runs-under.md)), so a GLPI
-  Agent that needs either runs on a host without one. Its log is
-  `${supervisor_dir}/agent-log/glpi-agent.log`, beside `agent-state`; both are the kind's data
-  directories, which the process account may write.
-  - **`opamp-fleetctl package fetch --agent glpi-agent`** takes the official portable Windows zip
-    as published and builds the Linux artifact deterministically from the official AppImage,
-    whose file system it extracts once with `unsquashfs` (squashfs-tools 4.5.1 or later, checked
-    before use; older versions write outside their destination), without running the
-    AppImage, so no fleet host needs FUSE; a host with glibc newer than 2.27 runs the agent on its
-    own C library, through the one link the tree keeps, to `/lib64/ld-linux-x86-64.so.2`, and an
-    older host on the glibc 2.27 the AppImage bundles; both are amd64, and Linux arm64 is not
-    supported because upstream publishes no AppImage for it. The agent menu names the platforms,
-    and the version question still shows the last three releases, since the GLPI Agent versions
-    in two parts (`1.15`). The release is fetched under upstream's tag and uploaded as the SemVer
-    Package version (`1.19` becomes `1.19.0`). The upload also stores the default configuration
-    `glpi-agent-conf` from `config/examples/`, left untouched where the Server already holds it.
 
 ## [0.8.3] - 2026-11-15
 

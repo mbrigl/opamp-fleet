@@ -18,7 +18,7 @@
 //! - **Repacked only where it must be.** An agent whose upstream publishes no archive a Client can
 //!   install is repacked deterministically, from its own tree alone (OPS-operator-program-fleetctl): the GLPI Agent,
 //!   whose `.tar.gz` is source, has its AppImage's file system extracted, never run, and repacked
-//!   (ADR-draft-glpi-agent clause 6). That is the one place the bytes change, and the tool says so.
+//!   (CLT-glpi-agent-kind §6). That is the one place the bytes change, and the tool says so.
 //!
 //! Interactive by default; every prompt has a flag, so the same tool serves a pipeline:
 //!   opamp-fleetctl package fetch                          # asks for everything
@@ -182,7 +182,7 @@ impl AgentKind {
     /// (OPS-operator-program-fleetctl §28).
     fn repacked(self) -> bool {
         match self {
-            // The Linux artifact is the AppImage's tree, repacked (ADR-draft-glpi-agent clause 7).
+            // The Linux artifact is the AppImage's tree, repacked (CLT-glpi-agent-kind §7).
             AgentKind::GlpiAgent => true,
             AgentKind::Otelcol | AgentKind::OtelcolContrib | AgentKind::Supervisor => false,
         }
@@ -395,7 +395,7 @@ enum Action {
     /// Nothing. The artifact is uploaded exactly as upstream published it, so the hash the fleet
     /// verifies is the hash on the release page (PKG-signed-packages-and-delivery).
     AsPublished,
-    /// Extract the AppImage and repack the tree deterministically (ADR-draft-glpi-agent clause 6):
+    /// Extract the AppImage and repack the tree deterministically (CLT-glpi-agent-kind §6):
     /// upstream publishes no archive a Client can install for Linux.
     RepackAppImage { wrapper: String },
 }
@@ -929,19 +929,19 @@ fn collector_checksum(asset: &str, dist: &str, assets: &[(String, String)]) -> C
     ChecksumSource::Sums { urls }
 }
 
-/// The platform of GLPI's portable Windows zip, as published (ADR-draft-glpi-agent clause 7).
+/// The platform of GLPI's portable Windows zip, as published (CLT-glpi-agent-kind §7).
 const GLPI_WINDOWS: (&str, &str) = ("windows", "amd64");
 
-/// The platform of the tree repacked from GLPI's x86_64 AppImage (ADR-draft-glpi-agent clause 7).
+/// The platform of the tree repacked from GLPI's x86_64 AppImage (CLT-glpi-agent-kind §7).
 const GLPI_LINUX: (&str, &str) = ("linux", "amd64");
 
 /// GLPI publishes two self-contained builds: a portable zip for Windows, which travels as
-/// published, and an AppImage for Linux, which is repacked (ADR-draft-glpi-agent clauses 5 and 6).
+/// published, and an AppImage for Linux, which is repacked (CLT-glpi-agent-kind §5 and §6).
 /// Everything else in the release is an installer for a machine to run, not an artifact a fleet
 /// installs.
 ///
 /// The assets are named by upstream's `tag`. The repacked Linux artifact is this tool's own, so it
-/// is named by the Package version it is uploaded as (ADR-0034 clause 6), which is also what the
+/// is named by the Package version it is uploaded as (PKG-versions-high-water-mark-floor §6), which is also what the
 /// Packages tab reads out of a file name.
 fn glpi_plans(tag: &str, package_version: &str, assets: &[(String, String)]) -> Vec<Plan> {
     let sums: Option<String> = assets
@@ -1105,13 +1105,12 @@ fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
 /// The program that extracts the AppImage's file system: `unsquashfs`, of squashfs-tools.
 const UNSQUASHFS: &str = "unsquashfs";
 
-/// The oldest `unsquashfs` the repack runs (ADR-draft-glpi-agent clause 6). Older squashfs-tools
+/// The oldest `unsquashfs` the repack runs (CLT-glpi-agent-kind §6). Older squashfs-tools
 /// write outside the destination for a crafted file system: CVE-2021-40153, fixed in 4.5, and
 /// CVE-2021-41072, the incomplete fix of it, fixed in 4.5.1.
 const UNSQUASHFS_MINIMUM: (u32, u32, u32) = (4, 5, 1);
 
-/// Extracts the AppImage's file system and packs the tree it holds (ADR-draft-glpi-agent
-/// clause 6).
+/// Extracts the AppImage's file system and packs the tree it holds (CLT-glpi-agent-kind §6).
 ///
 /// The AppImage is upstream's only self-contained Linux build, and extracting it here is what
 /// spares every fleet host the FUSE dependency — or the re-extraction on every start that avoiding
@@ -1155,9 +1154,10 @@ fn repack_appimage_with(
 }
 
 /// The one absolute link the repacked GLPI tree keeps, the host loader's of upstream's default
-/// runtime, by the path and target the `glpi` kind names (ADR-draft-glpi-agent clause 6). It is
-/// stated here, not taken from the kind: the tool uses only the Client items ADR-0008 clause 22
-/// names. Two tests hold both sides to the same link (ADR-0018 clause 20):
+/// runtime, by the path and target the `glpi` kind names (CLT-glpi-agent-kind §6). It is
+/// stated here, not taken from the kind: the kind is the Client's, and the tool depends on neither
+/// end (DEV-six-crates-tokio-axum §22). Two tests hold both sides to the same link
+/// (CLT-supervisor-mode-and-kinds §20):
 /// `the_glpi_tree_keeps_the_link_the_kind_names` here, `the_defaults_are_the_artifacts` in the kind.
 const GLPI_TREE_LINKS: &[KeptLink] = &[KeptLink {
     path: "runtime/default/lib64/ld-linux-x86-64.so.2",
@@ -1165,7 +1165,7 @@ const GLPI_TREE_LINKS: &[KeptLink] = &[KeptLink {
 }];
 
 /// Packs the tree extracted from the AppImage as upstream built it, without its desktop icon, and
-/// refuses one without the entry point the kind runs (ADR-draft-glpi-agent clause 6). The one
+/// refuses one without the entry point the kind runs (CLT-glpi-agent-kind §6). The one
 /// absolute link the tree keeps is [`GLPI_TREE_LINKS`]; every other link leading out fails the
 /// pack.
 ///
@@ -2077,8 +2077,8 @@ mod tests {
 
     /// A later repack of one GLPI version is numbered as the core numbers any repack, from the
     /// Package version upstream's tag is written as: the second of `1.19` is `1.19.1-0.r.2`
-    /// (ADR-draft-glpi-agent clause 7).
-    /// Verifies: ADR-draft-glpi-agent
+    /// (CLT-glpi-agent-kind §7).
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn a_later_glpi_repack_is_numbered_as_the_core_numbers_one() {
         assert!(AgentKind::GlpiAgent.repacked());
@@ -2095,7 +2095,7 @@ mod tests {
 
     /// The tag patterns are what keep a version list from offering things that are not releases of
     /// the agent being fetched — the Collector repository tags its builder alongside.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn a_tag_is_a_version_only_when_it_is_this_agents_release() {
         assert_eq!(
@@ -2426,7 +2426,7 @@ mod tests {
     /// `crates/fleet-agent/src/supervisor/glpi.rs`. An upstream that renames an asset or its
     /// checksum file should turn this red rather than produce a run that quietly packs one
     /// platform.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn glpi_finds_both_zip_spellings_and_repacks_only_linux() {
         for zip in ["GLPI-Agent-1.19-x64.zip", "glpi-agent-1.19-x64.zip"] {
@@ -3190,7 +3190,7 @@ mod tests {
 
     /// The AppImage's file system is found where its ELF program ends, as its header says, and
     /// only a file that is a type-2 AppImage with a squashfs file system there is taken for one.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn an_appimages_file_system_is_found_where_its_program_ends() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3230,7 +3230,7 @@ mod tests {
     /// The repack never runs what it downloaded: a file that is a program but no AppImage is
     /// refused before anything executes it — under `--appimage-extract`, this one would have left
     /// its mark.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[cfg(unix)]
     #[test]
     fn the_repack_runs_nothing_it_downloaded() {
@@ -3257,7 +3257,7 @@ mod tests {
 
     /// A host without `unsquashfs` is told which program the repack needs, rather than meeting a
     /// bare "No such file or directory".
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn a_repack_without_unsquashfs_names_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3335,7 +3335,7 @@ mod tests {
     /// The whole repack past the download: the version check, the extraction from where the ELF
     /// program ends, and the pack of what was extracted, with `.DirIcon` dropped, under the
     /// wrapper directory — and no staging left behind.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[cfg(unix)]
     #[test]
     fn a_repack_extracts_with_unsquashfs_and_packs_the_tree() {
@@ -3394,7 +3394,7 @@ mod tests {
 
     /// An `unsquashfs` older than 4.5.1 is refused before it is handed the download, and so is
     /// one whose version cannot be read.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[cfg(unix)]
     #[test]
     fn unsquashfs_older_than_4_5_1_is_refused() {
@@ -3451,7 +3451,7 @@ mod tests {
 
     /// The version is read from the first line `unsquashfs -version` prints, and only from a
     /// number of two or three numeric parts; the minimum is 4.5.1.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_unsquashfs_version_is_read_from_its_banner() {
         for (banner, version) in [
@@ -3489,7 +3489,7 @@ mod tests {
     }
 
     /// The extracted tree is packed without its desktop icon, which no agent reads.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[cfg(unix)]
     #[test]
     fn an_extracted_tree_is_packed_without_its_desktop_icon() {
@@ -3568,7 +3568,7 @@ mod tests {
     /// with its one absolute link, to the host's program loader, which the kind names and the
     /// Client creates, the compat runtime as built, and `AppRun.env` byte for byte. A link that
     /// names nothing in the tree, the compat runtime's `libcrypt.so.1` among them, is dropped.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[cfg(unix)]
     #[test]
     fn an_extracted_tree_keeps_upstreams_runtimes_as_built() {
@@ -3582,13 +3582,8 @@ mod tests {
 
         let dest = dir.path().join("unpacked");
         std::fs::create_dir_all(&dest).expect("create");
-        fleet_agent::archive::extract_tree_tar_gz(
-            &out,
-            Path::new("AppRun"),
-            GLPI_TREE_LINKS,
-            &dest,
-        )
-        .expect("the packed tree is one a Client installs");
+        fleet_util::archive::extract_tree(&out, Path::new("AppRun"), GLPI_TREE_LINKS, &dest, None)
+            .expect("the packed tree is one a Client installs");
         assert_eq!(
             std::fs::read_link(dest.join("runtime/default/lib64/ld-linux-x86-64.so.2"))
                 .expect("the host loader's link"),
@@ -3616,7 +3611,7 @@ mod tests {
     /// tree is removed as the link, its target untouched; an `AppRun` that is a link, and a tree
     /// root that is one, are refused with nothing packed; and an absolute link the kind does not
     /// name, beside the one it keeps, still fails the pack.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[cfg(unix)]
     #[test]
     fn the_repack_follows_no_link_of_the_download() {
@@ -3687,7 +3682,7 @@ mod tests {
 
     /// A tree without `AppRun` has nothing the kind could start, so it is refused before anything
     /// is packed.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn an_extracted_tree_without_apprun_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3706,7 +3701,7 @@ mod tests {
     /// name contract, whose client half is
     /// `the_agent_reads_the_configuration_by_its_contracted_name`. Renamed on one side only, the
     /// agent would start against a file that does not exist.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_glpi_configuration_is_the_file_the_kind_points_its_agent_at() {
         let configurations = AgentKind::GlpiAgent.default_configurations();
@@ -3722,7 +3717,7 @@ mod tests {
     /// The repack keeps exactly the link the `glpi` kind names, by its path and target: the
     /// packing half of the kept-link contract, whose client half is `the_defaults_are_the_artifacts`
     /// in the kind. Changed on one side only, the Client would refuse the tree the tool packed.
-    /// Verifies: ADR-draft-glpi-agent, ADR-0018
+    /// Verifies: CLT-glpi-agent-kind, CLT-supervisor-mode-and-kinds
     #[test]
     fn the_glpi_tree_keeps_the_link_the_kind_names() {
         assert_eq!(

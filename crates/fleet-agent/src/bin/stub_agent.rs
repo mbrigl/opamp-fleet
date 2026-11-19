@@ -22,7 +22,7 @@
 //! cannot pass the stub a flag. It writes them, one per line, into `<program>.args` beside the
 //! copy of the stub it installed, and the stub adds them to its own.
 //!
-//! Installed under the name the `glpi` kind runs (ADR-draft-glpi-agent clause 2), the stub answers
+//! Installed under the name the `glpi` kind runs (CLT-glpi-agent-kind §2), the stub answers
 //! as that program does, so a test can tell the agent from what merely shares its file:
 //! - as `AppRun`, the AppImage's entry point, it is the GLPI Agent only after
 //!   `--script=glpi-agent`; without it, it is the AppImage's installer, whose `--version` names

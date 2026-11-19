@@ -1,4 +1,4 @@
-//! The `glpi` kind, whose whole block is `type` and `name` (ADR-draft-glpi-agent clause 1), driven
+//! The `glpi` kind, whose whole block is `type` and `name` (CLT-glpi-agent-kind §1), driven
 //! through `Plugin::start` the way the core drives it: the derived
 //! program path is where the install puts the program, the version probe reaches it, a delivered
 //! Configuration lands where the kind points its agent, and the directories the agent writes into
@@ -16,7 +16,7 @@ use fleet_agent::supervisor::ports::Plugin as _;
 /// entry point on Linux. Both answer `--version` with a banner of their own unless they are made
 /// the agent as the daemon is, so the version reported here is the agent's only if the probe
 /// starts it that way — and the daemon itself would exit at once if it were started otherwise.
-/// Verifies: G-7, ADR-draft-glpi-agent
+/// Verifies: G-7, CLT-glpi-agent-kind
 #[tokio::test]
 async fn a_two_line_glpi_block_runs_reports_and_applies() {
     let plugin = fleet_agent::supervisor::glpi::GlpiPlugin::default();

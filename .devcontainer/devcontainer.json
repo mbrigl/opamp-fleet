@@ -48,8 +48,8 @@
   // The first three are *developer tooling* — nothing shipped depends on them, which is why they
   // need no ADR (NUC-decisions-are-proposed-then-accepted §2). The fourth is
   // SEC-admission-by-client-certificate's below. The fifth is a runtime helper of
-  // `opamp-fleetctl`, installed so this container can run the GLPI repack; ADR-draft-glpi-agent
-  // clause 6 decides that dependency and its minimum version. Each earns its place:
+  // `opamp-fleetctl`, installed so this container can run the GLPI repack; CLT-glpi-agent-kind §6
+  // decides that dependency and its minimum version. Each earns its place:
   //
   //   shellcheck  the shell lint, from the base image's signed Debian archive, so the pre-push
   //             hook runs the lint CI runs; without it the lint skips itself locally.

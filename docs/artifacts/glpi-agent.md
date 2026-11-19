@@ -5,13 +5,13 @@
 
 **Who reads this.** Whoever changes how the GLPI Agent is packed, and whoever changes what the
 `glpi` kind knows. It is the one place both sides state the same facts
-([ADR-0018](../adr/0018-supervisor-mode-and-its-kinds.md) clause 20,
-[ADR-draft-glpi-agent](../adr/draft-glpi-agent.md)).
+([CLT-supervisor-mode-and-kinds §20](../adr/CLT-supervisor-mode-and-kinds.md),
+[CLT-glpi-agent-kind](../adr/CLT-glpi-agent-kind.md)).
 
 This is the artifact where the document earns most, because it is the one this project **repacks**
 rather than ships as published: on Linux the tree's internal layout is ours, so an upstream that
 moves something inside it is a change both sides have to answer
-([ADR-draft-glpi-agent](../adr/draft-glpi-agent.md)).
+([CLT-glpi-agent-kind](../adr/CLT-glpi-agent-kind.md)).
 
 | | |
 |---|---|
@@ -25,11 +25,11 @@ The GitHub releases of **`glpi-project/glpi-agent`**. Its tags carry **no `v`** 
 three numeric parts — `1.19`, `1.7.1` — which is what separates a release from `1.0-beta1`.
 
 A release is fetched under its tag and uploaded as the Package version written as SemVer
-([ADR-0034](../adr/0034-package-versions-high-water-mark-and-floor.md)
-clause 6): tag `1.19` is Package `1.19.0`, tag `1.7.1` is Package `1.7.1`. A later repack of one
+([PKG-versions-high-water-mark-floor §6](../adr/PKG-versions-high-water-mark-floor.md)):
+tag `1.19` is Package `1.19.0`, tag `1.7.1` is Package `1.7.1`. A later repack of one
 release is numbered by `--repack <n>` as every repack is
-([ADR-0036](../adr/0036-the-operator-program-opamp-fleetctl.md)
-clause 28): `--repack 2` of `1.19` is Package `1.19.1-0.r.2`. Below, `<tag>` is upstream's
+([OPS-operator-program-fleetctl §28](../adr/OPS-operator-program-fleetctl.md)):
+`--repack 2` of `1.19` is Package `1.19.1-0.r.2`. Below, `<tag>` is upstream's
 spelling and `<version>` the Package version.
 
 ## 2. Assets per platform
@@ -79,8 +79,8 @@ fails the repack. `the_glpi_tree_keeps_the_link_the_kind_names` (packing side) a
 `the_defaults_are_the_artifacts` (client side) hold both sides to it. The compat runtime's
 `libcrypt.so.1` names a file that runtime does not hold and is dropped like every such link.
 The rest is the core's repack
-([ADR-0036](../adr/0036-the-operator-program-opamp-fleetctl.md)
-clause 27): links inside the tree dereferenced, a link that names nothing dropped, and every file
+([OPS-operator-program-fleetctl §27](../adr/OPS-operator-program-fleetctl.md)):
+links inside the tree dereferenced, a link that names nothing dropped, and every file
 stored `0o755` if any execute bit is set on it and `0o644` otherwise.
 
 One subtlety the repack has a regression test for: a directory reached **through a link** is packed
@@ -90,8 +90,9 @@ tree whose agent could not find its own modules.
 
 ## 5. Form in the delivered tree
 
-A **tree package** ([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)), unpacked to
-`<supervisor_dir>/program/tree/`, and the two platforms differ in nearly everything below it:
+A **tree package** ([PKG-signed-packages-and-delivery](../adr/PKG-signed-packages-and-delivery.md)),
+unpacked to `<supervisor_dir>/program/tree/`, and the two platforms differ in nearly everything
+below it:
 
 | | Linux | Windows |
 |---|---|---|
@@ -130,11 +131,11 @@ Four of those are not preferences:
 - **`--no-fork`.** Without it the agent detaches, leaving the Supervisor holding a pid that ends
   immediately while the real process runs on unsupervised.
 - **`--vardir` outside `program/`.** A package swap replaces that directory whole
-  ([ADR-0033](../adr/0033-packages-signatures-and-delivery.md)); state kept inside it would be
-  thrown away with every update, taking the inventory history along. The agent does not create
-  it and exits if it is missing, so the kind names it among the directories the spawn guarantees
-  — an installation that failed for want of a directory would be this Client's failure, not the
-  host's.
+  ([PKG-signed-packages-and-delivery](../adr/PKG-signed-packages-and-delivery.md)); state kept
+  inside it would be thrown away with every update, taking the inventory history along. The agent
+  does not create it and exits if it is missing, so the kind names it among the directories the
+  spawn guarantees — an installation that failed for want of a directory would be this Client's
+  failure, not the host's.
 - **The file logging.** A daemon with no console has nowhere else to write.
 
 The version probe and the preflight start the agent **exactly as the daemon is started**, first
@@ -144,11 +145,11 @@ on Windows `glpi-agent.exe` is Perl, which answers a bare `--version` with its o
 with a version line of its own. Read off either, the reported `service.version` would be wrong, and
 a preflight would prove only that the interpreter starts.
 
-The **working directory** is the one place this kind overrides ADR-0018's general rule (start in
-the directory the program lives in). On Linux the program *is* the tree root's `AppRun`, so the
-rule is already right. On Windows the program sits at `perl/bin/`, and the bundled Perl expects the
-tree root — which is exactly what upstream's own portable `.bat` launcher sets before invoking the
-agent.
+The **working directory** is the one place this kind overrides CLT-supervisor-mode-and-kinds's
+general rule (start in the directory the program lives in). On Linux the program *is* the tree
+root's `AppRun`, so the rule is already right. On Windows the program sits at `perl/bin/`, and the
+bundled Perl expects the tree root — which is exactly what upstream's own portable `.bat` launcher
+sets before invoking the agent.
 
 ## 7. Configurations
 

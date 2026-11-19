@@ -1,11 +1,11 @@
-//! The `glpi` plugin (ADR-draft-glpi-agent clauses 1 to 4): the GLPI Agent, delivered as a
+//! The `glpi` plugin (CLT-glpi-agent-kind §1–§4): the GLPI Agent, delivered as a
 //! package tree and run out of this Supervisor's own directory.
 //!
 //! This is the agent that shows most plainly why a kind beats a recipe. Its two platform
 //! invocations differ in nearly everything — the program's name and where it sits in the tree, the
 //! working directory, and on Windows four Perl `-I` paths and the script named by path — and not
 //! one of those differences is a decision anybody makes. They follow from `EXE_SUFFIX` and from
-//! where the AppImage this project repacks puts its interpreter (ADR-draft-glpi-agent clause 2),
+//! where the AppImage this project repacks puts its interpreter (CLT-glpi-agent-kind §2),
 //! so they belong to the side that packs the artifact, not to every host's file.
 //!
 //! Two flags are supervision requirements rather than preferences, and are therefore not the
@@ -22,8 +22,8 @@ use crate::supervisor::ports::{
 };
 use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe, STAGED};
 
-/// What this project's own packaging puts in the tree, per platform (ADR-draft-glpi-agent
-/// clause 2, `docs/artifacts/glpi-agent.md`). On Linux the repacked AppImage's entry point is
+/// What this project's own packaging puts in the tree, per platform (CLT-glpi-agent-kind §2,
+/// `docs/artifacts/glpi-agent.md`). On Linux the repacked AppImage's entry point is
 /// `AppRun` at the tree root — it bundles several programs, and `--script=glpi-agent` picks this
 /// one. On Windows upstream's zip is installed as published, with the program deep inside the
 /// bundled Perl.
@@ -35,27 +35,27 @@ const PROGRAM: &str = "glpi-agent.exe";
 #[cfg(windows)]
 const PROGRAM_PATH: &str = "perl/bin/glpi-agent.exe";
 // macOS takes the Linux shape too, which is harmless: GLPI ships no darwin package
-// (ADR-draft-glpi-agent clause 7), so no macOS host is handed a tree to run.
+// (CLT-glpi-agent-kind §7), so no macOS host is handed a tree to run.
 #[cfg(not(windows))]
 const PROGRAM: &str = "AppRun";
 #[cfg(not(windows))]
 const PROGRAM_PATH: &str = "AppRun";
 
-/// The one absolute link the repacked Linux tree keeps (ADR-draft-glpi-agent clause 6): upstream's
+/// The one absolute link the repacked Linux tree keeps (CLT-glpi-agent-kind §6): upstream's
 /// default runtime reaches the host's own program loader through it, which is how `AppRun` runs
 /// the agent on the host's C library. The Client creates exactly this one; the packing side states
 /// the same link, and a test on each side holds it to this path and target.
-const LINUX_TREE_LINKS: &[fleet_core::tree::KeptLink] = &[fleet_core::tree::KeptLink {
+const LINUX_TREE_LINKS: &[fleet_util::tree::KeptLink] = &[fleet_util::tree::KeptLink {
     path: "runtime/default/lib64/ld-linux-x86-64.so.2",
     target: "/lib64/ld-linux-x86-64.so.2",
 }];
 
-/// The Agent type every GLPI Configuration is aimed at (ADR-0017) — a property of the packing
+/// The Agent type every GLPI Configuration is aimed at (CLT-what-an-agent-reports) — a property of the packing
 /// side, which no host's block states.
 const SERVICE_NAME: &str = "glpi-agent";
 
 /// The Configuration `--conf-file` reads, by its name: the one `opamp-fleetctl package fetch`
-/// uploads beside the package (ADR-draft-glpi-agent clause 10). A test on each side holds it to
+/// uploads beside the package (CLT-glpi-agent-kind §10). A test on each side holds it to
 /// this name — renamed on one side only, the agent would start against a file that does not exist.
 const CONFIG_ENTRY: &str = "glpi-agent-conf";
 
@@ -67,13 +67,13 @@ const STATE_DIR: &str = "agent-state";
 /// else to write, which is why this is not optional. It lies in a directory of its own beside
 /// `program/`, which the kind names among the directories made before every spawn: where a process
 /// account runs the agent, that is a directory it may write, and the Supervisor's own is not
-/// (ADR-0021 clause 21).
+/// (CLT-accounts-service-runs-under §21).
 const LOG_DIR: &str = "agent-log";
 const LOG_FILE: &str = "glpi-agent.log";
 const LOG_MAX_SIZE: &str = "16";
 
 /// How the GLPI Agent is asked for its version — and, run against a *staged* program before the
-/// running one is stopped, this kind's preflight (ADR-0018 clause 54). It answers the question a
+/// running one is stopped, this kind's preflight (CLT-supervisor-mode-and-kinds §54). It answers the question a
 /// repacked tree raises: does this host satisfy the interpreter we shipped it?
 ///
 /// It is asked of the agent started exactly as the daemon is, after the same [`Lead`]: on Windows
@@ -84,23 +84,23 @@ const LOG_MAX_SIZE: &str = "16";
 const VERSION_ARGS: &[&str] = &["--version"];
 
 /// The version the GLPI Agent's banner names, written as SemVer by the rule a Package version is
-/// written by (ADR-draft-glpi-agent clause 4, ADR-0034 clause 6). The banner's first line is
+/// written by (CLT-glpi-agent-kind §4, PKG-versions-high-water-mark-floor §6). The banner's first line is
 /// `GLPI Agent (1.19-1)` from the 1.19 AppImage: the number sits in parentheses, mostly has two
 /// components, and may carry the package revision of upstream's build, so the strict SemVer read
 /// of the version probe would find nothing in it. It is the upstream version, which a later
 /// repack of the same release does not change; the Server decides by the
 /// `supervisor.package.version` the Supervisor reports
-/// (ADR-0032 clauses 14 and 25).
+/// (SRV-deployments-and-pinned-rollouts §14 and §25).
 ///
 /// The read is strict in its own way. The first line has to be exactly that shape, and the number
-/// has to be what a release tag is (ADR-draft-glpi-agent clause 7), two or three numeric parts,
+/// has to be what a release tag is (CLT-glpi-agent-kind §7), two or three numeric parts,
 /// followed at most by one package revision `-<digits>`, which is dropped: `1.19` and `1.19-1`
 /// both read as `1.19.0`. Kept, the revision would be a SemVer pre-release and rank the build
 /// *below* the release it was built from. Anything else reports none rather than a guess — a
 /// development build's `1.22-dev`, a `1.19-1-gabcdef` or `1.19-1.2`, whose meaning upstream does
 /// not document, and the banner of a program that is not the agent at all. The
 /// `supervisor.package.version` then tracks the install alone. This is the one attribute the kind
-/// reads from its agent, and a `service.*` key, which the description admits (ADR-0017 clause 8).
+/// reads from its agent, and a `service.*` key, which the description admits (CLT-what-an-agent-reports §8).
 fn version_of_banner(text: &str) -> Option<String> {
     let line = text.trim_start().lines().next()?.trim_end();
     let number = line.strip_prefix("GLPI Agent (")?.strip_suffix(')')?;
@@ -115,7 +115,7 @@ fn version_of_banner(text: &str) -> Option<String> {
         .flatten()
 }
 
-/// The keys a `command` recipe carries and this kind supplies (ADR-draft-glpi-agent clause 1), each
+/// The keys a `command` recipe carries and this kind supplies (CLT-glpi-agent-kind §1), each
 /// with what answers it — refused by name, so an operator rewriting a `command` block is told where
 /// each value went rather than meeting serde's "unknown field".
 const RETIRED: &[(&str, &str)] = &[
@@ -143,7 +143,7 @@ const RETIRED: &[(&str, &str)] = &[
 ];
 
 /// The root of the delivered tree — `program/tree` under this Supervisor's own directory
-/// (ADR-0033 clause 56).
+/// (PKG-signed-packages-and-delivery §56).
 fn tree_root(ctx: &SupervisorContext) -> PathBuf {
     ctx.supervisor_dir
         .join(crate::config::PROGRAM_DIR)
@@ -163,7 +163,7 @@ struct Lead {
 ///
 /// On Linux the AppImage bundles several programs behind one entry point, and `--script` selects
 /// the agent. It starts nowhere in particular: the program *is* the tree root's `AppRun`, so the
-/// general derivation (ADR-0018 clause 14) already lands there.
+/// general derivation (CLT-supervisor-mode-and-kinds §14) already lands there.
 ///
 /// On Windows the bundled Perl finds nothing on its own: four library roots, then the script named
 /// by path rather than by `--script`. The program sits at `perl/bin/`, below what the bundled Perl
@@ -216,7 +216,7 @@ fn version_probe(program: PathBuf, tree: &Path, windows: bool) -> VersionProbe {
 
 /// The same question asked of a staged package: the [`Lead`] of the staged tree, whose root is
 /// known only once it is staged and is therefore written as [`STAGED`]
-/// (ADR-0018 clause 57).
+/// (CLT-supervisor-mode-and-kinds §57).
 fn preflight(windows: bool) -> Preflight {
     let Lead {
         mut args,
@@ -258,8 +258,7 @@ fn agent_args(ctx: &SupervisorContext) -> Vec<String> {
     args
 }
 
-/// The `glpi` kind. Its [`Spawner`] is the one the registry hands every plugin (ADR-0021
-/// clause 18).
+/// The `glpi` kind. Its [`Spawner`] is the one the registry hands every plugin (CLT-accounts-service-runs-under §18).
 #[derive(Default)]
 pub struct GlpiPlugin {
     pub spawner: Spawner,
@@ -275,7 +274,7 @@ impl Plugin for GlpiPlugin {
     }
 
     /// What `opamp-fleetctl package fetch --agent glpi-agent` packs decides, per platform
-    /// (ADR-draft-glpi-agent clauses 2 and 4): the program's file name, where it sits inside the
+    /// (CLT-glpi-agent-kind §2 and §4): the program's file name, where it sits inside the
     /// tree, and the Agent type it presents.
     fn defaults(&self) -> KindDefaults {
         KindDefaults {
@@ -287,7 +286,7 @@ impl Plugin for GlpiPlugin {
             tree_links: if cfg!(windows) { &[] } else { LINUX_TREE_LINKS },
             service_name: Some(SERVICE_NAME),
             // Wrapped, with nothing to correct: the fleet's `[supervisors]`/`[updates]` policy
-            // stands, and the block says nothing about it (ADR-0018 clause 17).
+            // stands, and the block says nothing about it (CLT-supervisor-mode-and-kinds §17).
             timing: Some(KindTiming::default()),
             // The GLPI Agent speaks no OpAMP to us; its Endpoint is bound and nothing connects.
             endpoint_port: false,
@@ -320,7 +319,7 @@ impl GlpiPlugin {
         String,
     > {
         // Strictly empty: a wrapper that needed an escape hatch would be a wrapper that does not
-        // know its agent (ADR-0018 clause 13).
+        // know its agent (CLT-supervisor-mode-and-kinds §13).
         let _: GlpiSettings = parse_settings(
             &ctx.name,
             self.kind(),
@@ -337,9 +336,9 @@ impl GlpiPlugin {
         let runner = Runner {
             // None. The GLPI Agent speaks no OpAMP and never connects to the Supervisor Endpoint,
             // so the token that admits a connection there would only sit in the environment of a
-            // program whose Deploy task runs what the GLPI server sends it (ADR-draft-glpi-agent
-            // clause 12). An empty token is one the Runner does not set
-            // (ADR-0016 clause 28).
+            // program whose Deploy task runs what the GLPI server sends it (CLT-glpi-agent-kind §12).
+            // An empty token is one the Runner does not set
+            // (CLT-modes-and-gateway §28).
             endpoint_token: zeroize::Zeroizing::default(),
             name: ctx.name,
             stop_timeout: ctx.stop_timeout,
@@ -350,10 +349,10 @@ impl GlpiPlugin {
             version_probe: Some(version_probe),
             preflight: Some(preflight(cfg!(windows))),
             // The GLPI Agent has no reload signal of its own, so a configuration applies by the
-            // restart ADR-0018 clause 9 defines.
+            // restart CLT-supervisor-mode-and-kinds §9 defines.
             reload_signal: None,
             // The Client itself, or the second service where a process account is registered
-            // (ADR-0021 clause 18): the registry says which.
+            // (CLT-accounts-service-runs-under §18): the registry says which.
             spawner: self.spawner.clone(),
             process_account_group: ctx.process_account_group,
             supervisor_dir: ctx.supervisor_dir.clone(),
@@ -378,7 +377,7 @@ impl GlpiPlugin {
     }
 }
 
-/// This kind has no settings at all (ADR-draft-glpi-agent clause 1): the block is `type` and
+/// This kind has no settings at all (CLT-glpi-agent-kind §1): the block is `type` and
 /// `name`.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -415,7 +414,7 @@ mod tests {
     }
 
     /// The block is two lines, so anything in it is a key nobody supplies.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_block_has_no_settings() {
         GlpiPlugin::default()
@@ -430,7 +429,7 @@ mod tests {
 
     /// Every key of a `command` recipe is refused by name with what supplies it — through `check`
     /// too, so an offered Supervisor set is refused before a running process is touched.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_recipes_keys_are_refused_by_name() {
         for (key, line) in [
@@ -451,7 +450,7 @@ mod tests {
     /// `docs/artifacts/glpi-agent.md`, whose packing half is
     /// `glpi_finds_both_zip_spellings_and_repacks_only_linux`. An upstream release that moves the
     /// program should turn one of the two red rather than a rollout.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_defaults_are_the_artifacts() {
         let defaults = GlpiPlugin::default().defaults();
@@ -465,7 +464,7 @@ mod tests {
         #[cfg(not(windows))]
         assert_eq!(
             defaults.tree_links,
-            [fleet_core::tree::KeptLink {
+            [fleet_util::tree::KeptLink {
                 path: "runtime/default/lib64/ld-linux-x86-64.so.2",
                 target: "/lib64/ld-linux-x86-64.so.2",
             }]
@@ -477,7 +476,7 @@ mod tests {
     /// The two flags that are supervision requirements, the configuration the fleet delivers, and
     /// the state directory outside `program/` — the parts of the invocation whose loss would be a
     /// bug rather than a difference of taste.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_invocation_carries_what_supervision_requires() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -505,8 +504,8 @@ mod tests {
 
     /// The agent logs to a file of its own, in `agent-log/` beside `program/`, and both that
     /// directory and the state directory are made before every spawn, so a process account may
-    /// write them and the agent never meets them missing (ADR-0021 clause 21).
-    /// Verifies: ADR-draft-glpi-agent
+    /// write them and the agent never meets them missing (CLT-accounts-service-runs-under §21).
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_agent_logs_to_a_file_in_a_directory_made_for_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -538,7 +537,7 @@ mod tests {
     /// `--conf-file` reads the Configuration by the name `opamp-fleetctl package fetch` uploads
     /// it under; the packing side's half of this is
     /// `the_glpi_configuration_is_the_file_the_kind_points_its_agent_at`.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_agent_reads_the_configuration_by_its_contracted_name() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -558,7 +557,7 @@ mod tests {
     /// lead arguments and in the same working directory, the preflight's for the staged tree — on
     /// both platforms, so what they read is the agent's answer and not its interpreter's: a bare
     /// `--version` reaches Perl's own banner on Windows and the AppImage installer's on Linux.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_version_is_asked_of_the_agent_the_daemon_runs() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -599,7 +598,7 @@ mod tests {
 
     /// The agent is handed no Supervisor Endpoint token: it never connects to the Endpoint, and a
     /// token in its environment would reach whatever its Deploy task runs.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn the_agent_is_handed_no_endpoint_token() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -614,7 +613,7 @@ mod tests {
     /// it is reported as the upstream version without the revision, written as SemVer, which is
     /// the Package version of the release's first repack. A later repack keeps the banner, so
     /// after one the two differ, and the Server decides by `supervisor.package.version`.
-    /// Verifies: ADR-draft-glpi-agent, ADR-0034
+    /// Verifies: CLT-glpi-agent-kind, PKG-versions-high-water-mark-floor
     #[test]
     fn the_version_banner_reads_as_the_package_version() {
         assert_eq!(
@@ -649,7 +648,7 @@ mod tests {
     /// most a numeric package revision, reports a version: a later token is never read in its
     /// place, and no other suffix is guessed at — taken for a pre-release, it would rank below the
     /// release and hold every update back.
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[test]
     fn a_banner_that_is_not_a_release_reports_no_version() {
         for none in [
@@ -683,7 +682,7 @@ mod tests {
     /// The Linux invocation: the AppImage's entry point picks the agent by `--script`, and the
     /// program is the tree root itself, so the general working-directory derivation is right and
     /// the kind names none (`docs/artifacts/glpi-agent.md`).
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[cfg(not(windows))]
     #[test]
     fn linux_runs_the_apprun_entry_point() {
@@ -705,7 +704,7 @@ mod tests {
     /// Perl and the four library roots plus the script path are what the portable launcher sets —
     /// including the working directory, which the general derivation cannot supply here because the
     /// program is not at the tree root (`docs/artifacts/glpi-agent.md`).
-    /// Verifies: ADR-draft-glpi-agent
+    /// Verifies: CLT-glpi-agent-kind
     #[cfg(windows)]
     #[test]
     fn windows_runs_the_bundled_perl() {
