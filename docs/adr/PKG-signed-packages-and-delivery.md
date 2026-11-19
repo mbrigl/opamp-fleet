@@ -817,7 +817,7 @@ what a certificate speaks for ([SRV-fleet-record-agents-hosts](SRV-fleet-record-
 what a host behind a Gateway receives from it ([CLT-modes-and-gateway](CLT-modes-and-gateway.md));
 verifying upstream sigstore/cosign signatures; a retention policy for superseded Packages;
 inequality in Selectors; refusing an overlapping Selector at write time; a new name
-for `[self_update] package`, whose value is an Agent type; addons, and installing
+for `[self_update] package`, since its value is an Agent type; addons, and installing
 them, until a Client can install one; a bound finer than the host; roles, permissions and tenancy on
 the Operator plane; keeping the Gateway's cache and the offers it serves across a restart of the
 Gateway, and the Gateway's own Supervisors fetching through the cache; resuming an interrupted

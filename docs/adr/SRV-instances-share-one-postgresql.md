@@ -107,7 +107,7 @@ every change that concerns a live session by one `NOTIFY`.
    `lease_renew_secs` later, finds its lease lapsed. An instance that cannot renew before its own
    lease lapses ends every session it carries and closes both listeners. Once the database answers
    again it takes a new lease, under a new instance id, and opens them again. It never serves on a
-   lease it cannot prove, because on such a lease it learns of no revocation. A closed listener is
+   lease it cannot prove, because it cannot learn of a revocation. A closed listener is
    what a load balancer's or an orchestrator's probe sees: the image's probe is a TCP connection
    to `4320` for liveness and readiness
    ([OPS-releases-attestations-server-image §17](OPS-releases-attestations-server-image.md)), and an

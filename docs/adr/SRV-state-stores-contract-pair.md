@@ -8,8 +8,10 @@
 ## Context
 
 Clause 22, the Server's schema, was restated on 2026-11-19. Until then an earlier ADR carried
-every clause of this one under the same number. That ADR was superseded by this one and deleted
-by the normalization of 2026-11-19. Clause 22 changes in three places:
+every clause of this one under the same number. That ADR was superseded by this one and deleted by
+the normalization of 2026-11-19. The first text of this ADR left out the last three bullets of
+clause 22 by mistake; the normalization restored them word for word. Clause 22 changes in three
+places:
 
 - A default given to a column that has none counts as a migration that only adds. Such a
   default changes no stored row; PostgreSQL applies it only to later inserts and updates.
@@ -676,6 +678,19 @@ that decides its request, and move an old layout by an offline command.
         decisions.
       - The release after 0.8.5 drops the columns by a migration that names 0.8.5 as the oldest
         Server.
+    - A Server checks its schema only at its own start, and a Server of 0.7.1 holds the exclusive
+      lock of clause 23, under the same key, for its whole run. So an instance that shares the
+      database tries that lock, shared and without waiting, in the transaction that migrates the
+      schema, and holds it until that transaction ends. While another Server holds the lock, the
+      instance applies no migration and fails startup, saying that another Server holds the
+      database alone and is to be stopped first. An instance that must be alone holds the lock
+      already, and does not try it again.
+    - The migrations run under an advisory lock. An instance that finds it held waits for it, then
+      reads the schema table again and applies only what is still missing, so instances of a new
+      version started together apply each migration once.
+    - The Server creates tables, indexes, its schema table, and the trigger that keeps the count
+      of the Agents' records with its function, and nothing else. The database, the role, its
+      rights and its extensions are the operator's.
 
 23. **Every Server on a database schema is an instance with a lease.** The Server works in the
     schema that is the role's default; Servers in different schemas of one database share nothing,
