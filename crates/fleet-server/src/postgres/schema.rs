@@ -1,4 +1,4 @@
-//! The Server's schema (ADR-0023 clause 22): embedded as numbered migrations, applied by the Server
+//! The Server's schema (ADR-0039 clause 22): embedded as numbered migrations, applied by the Server
 //! itself at startup, each recorded in `fleet_schema` with the oldest Server version that
 //! understands the schema it leaves.
 //!
@@ -78,7 +78,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // a database, and name it. A Server of 0.7.1 holds no lease, keeps its audit record in files
     // and leaves the revocation list's version where it was, so it refuses the schema they leave
     // rather than serve beside the instances of 0.8.0
-    // (ADR-0023 clause 22).
+    // (ADR-0039 clause 22).
     //
     // A table only added.
     Migration {
@@ -151,7 +151,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A table only added. A Server of 0.8.0 reads and writes none of it, so its sweeps and uploads
     // are as before, beside the instances that mark
-    // (ADR-0023 clause 14).
+    // (ADR-0039 clause 14).
     Migration {
         version: 13,
         oldest_server: "0.8.0",
@@ -159,7 +159,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A table, its row and the triggers that keep it only added. A Server of 0.8.0 reads none of
     // it, and what it adds and removes is counted all the same
-    // (ADR-0023 clause 22).
+    // (ADR-0039 clause 22).
     Migration {
         version: 14,
         oldest_server: "0.8.0",
@@ -203,7 +203,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // Three defaults only added, which change no stored row. A Server of 0.8.4 still names the
     // contract pair in its `INSERT`s and reads each Host's array only to discard it, so it serves
     // on what this leaves; a release before it does not serve beside this one
-    // (ADR-0023 clause 22,
+    // (ADR-0039 clause 22,
     // ADR-0025
     // clause 16).
     Migration {
@@ -217,7 +217,7 @@ pub const MIGRATIONS: &[Migration] = &[
 /// `configurations` and the Hosts' `instance_uids` arrays — so that a row inserted without naming
 /// them holds the empty value a Server of 0.8.4 writes there itself. Each statement takes an
 /// `ACCESS EXCLUSIVE` lock on its table for the moment it changes the catalogue. The release
-/// after the one that adds them drops the columns (ADR-0023 clause 22).
+/// after the one that adds them drops the columns (ADR-0039 clause 22).
 const CONTRACT_PAIR_DEFAULTS: &str = "
 ALTER TABLE deployments ALTER COLUMN packages SET DEFAULT '[]';
 ALTER TABLE deployments ALTER COLUMN configurations SET DEFAULT '{}';
@@ -272,7 +272,7 @@ CREATE TABLE enrolment_rejected (
 );
 ";
 
-/// The count of the Agents' records (ADR-0023 clause 22): one row, raised and lowered by the
+/// The count of the Agents' records (ADR-0039 clause 22): one row, raised and lowered by the
 /// triggers on `agents` in the statement that adds or removes rows, so the Agent-record ceiling is
 /// decided from it and not from a count of every row. The triggers exist before the row is
 /// filled, and creating them locks `agents` against every addition and removal until the
@@ -318,7 +318,7 @@ CREATE TRIGGER agents_removed AFTER DELETE ON agents
 INSERT INTO agent_count (agents) SELECT count(*) FROM agents;
 ";
 
-/// The blobs a sweep marked before it deletes them (ADR-0023 clause 14): written on the session
+/// The blobs a sweep marked before it deletes them (ADR-0039 clause 14): written on the session
 /// that holds the blob store's lock, read by every upload in the transaction that checks its blob,
 /// and taken away by the sweep that wrote them, `sweep`, or by any sweep once their `lease` is
 /// not live.
@@ -344,7 +344,7 @@ ALTER TABLE leases ADD COLUMN release text NOT NULL DEFAULT '0.8.0';
 pub const RELEASE_BEFORE_THE_RECORD: &str = "0.8.0";
 
 /// The first schema: one table per kind of record, the parts of a record that are many in tables of
-/// their own (ADR-0023 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
+/// their own (ADR-0039 clauses 4 to 6, 9 to 11 and 21). Unsigned integers are kept as `bigint` with
 /// their bits unchanged, so every value round-trips.
 ///
 /// PostgreSQL's `text` and `jsonb` refuse a NUL character, which a file keeps. Text an Agent or a
@@ -572,7 +572,7 @@ INSERT INTO deployment_configurations (deployment, configuration)
 ";
 
 /// The revocation list's one version
-/// (ADR-0023 clause 10): a counter in one row that the
+/// (ADR-0039 clause 10): a counter in one row that the
 /// transaction of every revocation added or widened and every lift increments. It is the `ETag`
 /// of the Gateways' list on every instance, and what each lease renewal compares.
 const REVOCATION_LIST_VERSION: &str = r"
@@ -631,7 +631,7 @@ ALTER TABLE agents ADD COLUMN holder_changes timestamptz[] NOT NULL DEFAULT '{}'
 ";
 
 /// When each audit entry was stored, by the database's clock: what its age is reckoned from when the
-/// record is pruned (ADR-0023 clause 12). Entries stored before
+/// record is pruned (ADR-0039 clause 12). Entries stored before
 /// take the time their line carries, read as text so that a line that is no entry keeps the time of
 /// the migration rather than stopping it.
 const AUDIT_RECORDED_AT: &str = r#"
@@ -933,7 +933,7 @@ mod tests {
     /// The migrations are numbered from 1 without a gap, and none names a Server newer than this
     /// one — a build that refused its own schema would never start. Migrations 11 to 18 name
     /// 0.8.0, and migration 19, the contract pair's defaults, names 0.8.4.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     /// Verifies: ADR-0025
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
@@ -967,7 +967,7 @@ mod tests {
             );
         }
         // The contract pair's defaults name 0.8.4, the release before the one that adds them
-        // (ADR-0023 clause 22).
+        // (ADR-0039 clause 22).
         assert_eq!(MIGRATIONS[18].oldest_server, "0.8.4", "migration 19");
         assert_eq!(
             MIGRATIONS.len(),
@@ -984,10 +984,10 @@ mod tests {
         assert_eq!(compare("not-a-version", "99.0.0"), Ordering::Greater);
     }
 
-    /// A migration only adds (ADR-0023 clause 22): nothing in the embedded schema drops, renames or
+    /// A migration only adds (ADR-0039 clause 22): nothing in the embedded schema drops, renames or
     /// alters a column away, an `ALTER COLUMN` only gives a column a default (`SET DEFAULT`), and
     /// every table it creates is one [`TABLES`] knows.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_migration_only_adds() {
         for migration in MIGRATIONS {
@@ -1038,7 +1038,7 @@ mod tests {
 
     /// The check of [`a_migration_only_adds`] admits a default and refuses every other change of
     /// a column: its type, its `NOT NULL` dropped or set, its default dropped.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn only_a_default_passes_for_an_altered_column() {
         assert_eq!(
@@ -1063,7 +1063,7 @@ mod tests {
     /// Migration 19 gives each column of the contract pair its default, and names 0.8.4 as the
     /// oldest Server: on a migrated database the catalogue holds the three defaults, and
     /// `fleet_schema` records 0.8.4 for it.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_contract_pair_has_its_defaults_and_names_0_8_4() {
         assert_eq!(
@@ -1220,8 +1220,8 @@ mod tests {
     /// No statement the Server runs while serving names a column of the contract pair: no string
     /// literal of its source outside the migrations of this file and outside what is compiled only
     /// into the tests, so the release after this one can drop the columns beside it
-    /// (ADR-0023 clause 22).
-    /// Verifies: ADR-0023
+    /// (ADR-0039 clause 22).
+    /// Verifies: ADR-0039
     #[test]
     fn no_statement_names_a_column_of_the_contract_pair() {
         let mut found = Vec::new();
@@ -1270,7 +1270,7 @@ mod tests {
     /// Each count of the Agents that pin a Package, a Deployment or a Configuration is served by
     /// its own index: with sequential scans priced out, its plan names that index, not a whole
     /// read of the primary key.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_pin_is_counted_by_index() {
         let Some(test) = super::super::testing::TestDatabase::named() else {

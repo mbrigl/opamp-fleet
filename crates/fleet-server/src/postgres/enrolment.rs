@@ -1,4 +1,4 @@
-//! The enrolment window and its queue in PostgreSQL (ADR-0023 clause 8): the PostgreSQL adapter
+//! The enrolment window and its queue in PostgreSQL (ADR-0039 clause 8): the PostgreSQL adapter
 //! behind [`EnrolmentStore`](crate::enrolment::EnrolmentStore) — the window's end in one row, each
 //! request in a row of its own. Each act is one transaction on the rows it names, written before
 //! it is answered; taking a request in holds the queue against every other taker while it counts,
@@ -333,7 +333,7 @@ impl EnrolmentStore for PgEnrolmentStore {
     /// looked up in the list once the row is held; the register's write looks again, under its hold
     /// of the list. The register entry and the Host the signature prepared are written in the same
     /// transaction as the decision, and handed to `registrar` once it committed
-    /// (ADR-0023 clause 9): a commit that fails leaves neither, and a refusal of the register rolls
+    /// (ADR-0039 clause 9): a commit that fails leaves neither, and a refusal of the register rolls
     /// the decision back.
     fn approve(
         &self,
@@ -502,7 +502,7 @@ impl EnrolmentStore for PgEnrolmentStore {
 
     /// Read under a share lock on the request's row, so it waits until a transaction that holds
     /// the row, the approval whose outcome is not known among them, has ended, and answers what
-    /// it left (ADR-0023 clause 9). A wait past the session's `lock_timeout` is an error.
+    /// it left (ADR-0039 clause 9). A wait past the session's `lock_timeout` is an error.
     fn read_back(&self, id: &str) -> Result<Option<PersistedRequest>, String> {
         let id = id.to_string();
         self.database.run(move |pool| async move {
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(open().load().expect("load"), Some(Persisted::default()));
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_enrolment_acts_hold_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1081,14 +1081,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_enrolment_approvals_hold_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         approvals(&|| Box::new(FsEnrolmentStore::open(dir.path())));
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_enrolment_approvals_hold_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1491,7 +1491,7 @@ mod tests {
 
     /// Closing or ending the window is one transaction: a deletion of its requests that fails
     /// leaves the window open and its requests as they were.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn closing_or_ending_the_window_leaves_nothing_of_itself_when_it_fails() {
         let Some(test) = TestDatabase::named() else {
@@ -1528,7 +1528,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), before);
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn an_enrolment_take_that_fails_leaves_nothing_of_itself_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1540,7 +1540,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn an_enrolment_take_that_fails_leaves_nothing_of_itself_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1553,14 +1553,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_enrolment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsEnrolmentStore::open(dir.path())));
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_enrolment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1583,7 +1583,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), Some(before));
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn an_enrolment_save_that_fails_part_way_leaves_nothing_of_itself_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1595,7 +1595,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn an_enrolment_save_that_fails_part_way_leaves_nothing_of_itself_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -2065,8 +2065,8 @@ mod tests {
     /// its register entry nor its Host, in the database or in memory, and its signature is
     /// recorded as rolled back; approved again, the request is signed once more, and one
     /// certificate for its key is in the register beside one Host, the list's version moved by
-    /// its entry alone and held by the approving instance (ADR-0023 clauses 9 and 10).
-    /// Verifies: ADR-0023
+    /// its entry alone and held by the approving instance (ADR-0039 clauses 9 and 10).
+    /// Verifies: ADR-0039
     #[test]
     fn an_approval_whose_commit_fails_records_nothing_and_a_second_records_one_certificate() {
         use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
@@ -2139,8 +2139,8 @@ mod tests {
 
     /// Two instances approve one request, and the first one's commit fails: the second, which
     /// waited for the request's row, signs it once when the first rolls back, and the request ends
-    /// decided once, with one certificate in the register (ADR-0023 clause 9, ADR-0025 clause 19).
-    /// Verifies: ADR-0023
+    /// decided once, with one certificate in the register (ADR-0039 clause 9, ADR-0025 clause 19).
+    /// Verifies: ADR-0039
     #[test]
     fn two_instances_approving_one_request_whose_first_commit_fails_sign_it_once_more() {
         use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
@@ -2256,9 +2256,9 @@ mod tests {
     /// A register entry that its write refuses in the transaction that decides the request, here
     /// because another instance revoked the bootstrap certificate while the request was signed,
     /// rolls the decision back with it: nothing is registered or decided, the request is
-    /// withdrawn, and the signature is recorded as rolled back (ADR-0023 clause 9, ADR-0026
+    /// withdrawn, and the signature is recorded as rolled back (ADR-0039 clause 9, ADR-0026
     /// clause 28).
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn an_approval_whose_register_entry_is_refused_rolls_its_decision_back() {
         use crate::enrolment::tests::{request as submitted, requester, Counting, Registering};
@@ -2338,8 +2338,8 @@ mod tests {
     }
 
     /// A commit the database server itself refuses is answered as a refusal, not as an outcome
-    /// the instance would have to read back (ADR-0023 clause 9).
-    /// Verifies: ADR-0023
+    /// the instance would have to read back (ADR-0039 clause 9).
+    /// Verifies: ADR-0039
     #[test]
     fn a_commit_the_database_refuses_is_answered_as_a_refusal() {
         let Some(test) = TestDatabase::named() else {
@@ -2368,8 +2368,8 @@ mod tests {
 
     /// The read back of an approval whose outcome is not known waits for the transaction that
     /// holds the request to end, and answers what it committed, not what was committed before
-    /// (ADR-0023 clause 9).
-    /// Verifies: ADR-0023
+    /// (ADR-0039 clause 9).
+    /// Verifies: ADR-0039
     #[test]
     fn a_read_back_waits_for_the_transaction_that_holds_the_request() {
         let Some(test) = TestDatabase::named() else {
@@ -2438,10 +2438,10 @@ mod tests {
 
     /// Only an `ERROR` the server answers at the commit is a certain rollback: a `FATAL` or a
     /// `PANIC` there, and an error the server did not answer, are read back; at the UPDATE any
-    /// answer of the server is certain (ADR-0023 clause 9). A real `FATAL` after a commit durable
+    /// answer of the server is certain (ADR-0039 clause 9). A real `FATAL` after a commit durable
     /// on its own, as a terminate during the wait for a synchronous standby gives, needs a
     /// replica, so the classification is decided here from the severity alone.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn only_an_error_at_the_commit_is_a_certain_rollback() {
         assert!(rolled_back_for_certain(

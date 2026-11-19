@@ -1,5 +1,5 @@
 //! The filesystem adapters of the Server's stores (ADR-0009), the one data directory they share
-//! (ADR-0023), and the moves every one of them makes: a directory only its owner can enter, a file
+//! (ADR-0039), and the moves every one of them makes: a directory only its owner can enter, a file
 //! only its owner can read, replaced in one step, so a crash mid-write leaves the old document
 //! rather than half a new one.
 //!
@@ -76,9 +76,9 @@ pub const DIRECTORIES: [&str; 9] = [
     AUDIT,
 ];
 
-/// Opens the data directory (ADR-0023): creates it and every directory of the layout owner-only —
+/// Opens the data directory (ADR-0039): creates it and every directory of the layout owner-only —
 /// `blobs/` only with the filesystem blob store, `filesystem_blobs`: beside a bucket it is the
-/// place artifacts are copied from, never written to (ADR-0023 clause 19) — and refuses one that
+/// place artifacts are copied from, never written to (ADR-0039 clause 19) — and refuses one that
 /// holds anything the layout does not name. What lies inside each directory is its store's to
 /// check, when the store opens.
 ///
@@ -116,7 +116,7 @@ pub fn check_layout(root: &Path) -> Result<(), String> {
 }
 
 /// Opens the data directory of a Server whose records live in PostgreSQL and whose blobs are files
-/// (ADR-0023 clause 1): it holds `blobs/`, and nothing else
+/// (ADR-0039 clause 1): it holds `blobs/`, and nothing else
 /// but `audit/`, the record of files kept before the record moved into the database, which stays
 /// as its archive and is not created. A path of the filesystem layout fails naming it and
 /// `server migrate-to-postgres` — those records would otherwise be silently left behind.
@@ -152,7 +152,7 @@ thread_local! {
 /// missing directory is read as empty rather than created, no mode is set, a temporary file a crash
 /// left is passed over rather than removed, and every write fails. What `server
 /// migrate-to-postgres` reads the old `data_dir` with, so that nothing in it changes and no record
-/// is copied elsewhere to be read (ADR-0023 clause 27).
+/// is copied elsewhere to be read (ADR-0039 clause 27).
 pub(crate) fn reading_only<T>(read: impl FnOnce() -> T) -> T {
     struct Restore(bool);
     impl Drop for Restore {
@@ -278,7 +278,7 @@ pub fn create_private_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Replaces `path` with `bytes` by writing `<path>.tmp` beside it, owner-only (`0600`) on Unix, and
-/// renaming it into place (ADR-0023 clause 1). The mode is set in the open call rather than after
+/// renaming it into place (ADR-0039 clause 1). The mode is set in the open call rather than after
 /// the write, so the content is never briefly readable by another local user, and the rename
 /// carries the mode with it.
 pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -289,7 +289,7 @@ pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// [`replace`], and durable: the content reaches the disk before the rename makes it the document,
 /// and on Unix the rename reaches it before this returns, so a power loss leaves the old document
 /// or the new one, never an empty file or a revocation lost after it was answered. For a record
-/// that answers a security decision (ADR-0023 clause 1).
+/// that answers a security decision (ADR-0039 clause 1).
 pub fn replace_owner_only(path: &Path, bytes: &[u8]) -> Result<(), String> {
     write_temp(path, bytes, true)?;
     rename_into_place(&temp_of(path), path)?;
@@ -382,8 +382,8 @@ mod tests {
     /// Read in place, a data directory changes in no way: a missing directory is read as empty
     /// and not created, a leftover temporary file stays, and a write fails naming its path;
     /// outside, the same calls repair and write as before
-    /// (ADR-0023 clause 27).
-    /// Verifies: ADR-0023
+    /// (ADR-0039 clause 27).
+    /// Verifies: ADR-0039
     #[test]
     fn a_data_directory_read_in_place_is_not_written() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -411,7 +411,7 @@ mod tests {
     /// A Server on an empty `data_dir` lays out every directory of ADR-0034 clause 23, each
     /// owner-only; a file or directory the layout does not name fails the open naming its path,
     /// and a temporary file a crash left beside a document is removed instead.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_data_directory_has_one_layout_and_no_other() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -481,7 +481,7 @@ mod tests {
     /// `audit/` only where an older Server left it as the archive; a record of the filesystem
     /// store found there fails the open naming it and `server migrate-to-postgres`, and anything
     /// else fails as a stray entry.
-    /// Verifies: ADR-0023, ADR-0034
+    /// Verifies: ADR-0039, ADR-0034
     #[test]
     fn a_data_dir_beside_the_database_holds_the_blobs_alone() {
         let dir = tempfile::tempdir().expect("tempdir");

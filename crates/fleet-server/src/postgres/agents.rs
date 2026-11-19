@@ -1,4 +1,4 @@
-//! Agent records in PostgreSQL (ADR-0023 clauses 4 and 21): the PostgreSQL adapter behind
+//! Agent records in PostgreSQL (ADR-0039 clauses 4 and 21): the PostgreSQL adapter behind
 //! [`AgentStore`](crate::agent_store::AgentStore) — one row per Agent, its scalars as columns, the
 //! wire-typed fields as their protobuf bytes, its labels, and its assignment's Configurations in
 //! rows of their own. A rollout's revisions and assignments commit together or not at all. Each
@@ -122,7 +122,7 @@ impl PgAgentStore {
 
     /// The adapter on `database`, holding what the stored assignments pin, read alone: what a
     /// deletion and a collection ask of the pins is answered from them, and no record is loaded
-    /// (ADR-0023 clause 3).
+    /// (ADR-0039 clause 3).
     ///
     /// # Errors
     /// Returns an error when the assignments cannot be read, or one names a Package that does not
@@ -556,9 +556,9 @@ impl AgentStore for PgAgentStore {
     /// One statement that locks the row the triggers on `agents` keep the count in and inserts
     /// only while the count is below `max_records`, so creations on every instance count each
     /// other's rows one after another, the ceiling is decided without reading every row, and no
-    /// creation waits for a client round trip of another (ADR-0023 clause 22). Its transaction
+    /// creation waits for a client round trip of another (ADR-0039 clause 22). Its transaction
     /// commits without waiting for the flush, so neither does any for a flush of another
-    /// (ADR-0023 clause 21). A report's write of a record that exists waits for none of it.
+    /// (ADR-0039 clause 21). A report's write of a record that exists waits for none of it.
     fn create_within(
         &self,
         uid: &InstanceUid,
@@ -570,11 +570,11 @@ impl AgentStore for PgAgentStore {
         let max = i64::try_from(max_records).unwrap_or(i64::MAX);
         let creating = self.creating.enter();
         let creation = self.database.run(move |pool| async move {
-            // A creation waits for a connection up to its call's bound (ADR-0023 clause 24).
+            // A creation waits for a connection up to its call's bound (ADR-0039 clause 24).
             let mut client = creating_client(&pool).await?;
             let key = uid.to_string();
             // One transaction that commits without waiting for its flush, so the count's row is
-            // let go at once (ADR-0023 clause 21); the record's Configurations, where it names
+            // let go at once (ADR-0039 clause 21); the record's Configurations, where it names
             // any, are written in it.
             let transaction = client.transaction().await.map_err(sql)?;
             transaction
@@ -963,7 +963,7 @@ impl AgentStore for PgAgentStore {
     }
 
     /// One transaction: the revisions and the assignments that pin them commit together or not at
-    /// all (ADR-0023 clause 21). Each record's assignment is written alone, in the order of the
+    /// all (ADR-0039 clause 21). Each record's assignment is written alone, in the order of the
     /// `instance_uid`, so two releases over the same Agents lock their rows in one order; a record
     /// forgotten meanwhile is written nothing. The row of each Package an assignment pins is held
     /// `FOR KEY SHARE` until the commit, as each pinned Configuration's is, so a write to the
@@ -1087,11 +1087,11 @@ async fn hold_released_through(client: &impl GenericClient, name: &str) -> Resul
 const PRESENCE_PIECE: usize = 1_000;
 
 /// What a creation's transaction runs first: its commit does not wait for the database to flush
-/// it, and no other transaction on the connection is affected (ADR-0023 clause 21).
+/// it, and no other transaction on the connection is affected (ADR-0039 clause 21).
 const ASYNCHRONOUS_COMMIT: &str = "SET LOCAL synchronous_commit = off";
 
 /// A count of the creations under way, bounded by half the pool, so the other half serves every
-/// other call while creations wait for the count's row (ADR-0023 clause 24).
+/// other call while creations wait for the count's row (ADR-0039 clause 24).
 struct Creating {
     at_most: usize,
     under_way: Mutex<usize>,
@@ -1153,7 +1153,7 @@ const CONFIGURATIONS: &str = "(SELECT json_object_agg(c.configuration, c.revisio
      FROM agent_assignment_configurations AS c WHERE c.instance_uid = agents.instance_uid)";
 
 /// A wire-typed field as its protobuf bytes, the encoding whose compatibility rules the Baseline
-/// already governs (ADR-0023 clause 4).
+/// already governs (ADR-0039 clause 4).
 fn encode<M: Message>(message: Option<&M>) -> Option<Vec<u8>> {
     message.map(Message::encode_to_vec)
 }
@@ -1170,7 +1170,7 @@ pub(super) fn decode<M: Message + Default>(
 }
 
 /// Every Agent record. A row that does not decode fails, naming its `instance_uid`
-/// (ADR-0023 clause 4).
+/// (ADR-0039 clause 4).
 pub(crate) async fn read_all(
     client: &impl GenericClient,
 ) -> Result<HashMap<InstanceUid, PersistedAgent>, String> {
@@ -1591,7 +1591,7 @@ const INSERTED_TYPES: [&str; 28] = [
 /// [`insert`], or with `within` the creation of a record only while the count of the records,
 /// kept by the triggers of migration 14, is below `within`: one statement that locks the count's
 /// row, so creations of every instance are counted one after another and none waits for a round
-/// trip of another (ADR-0023 clause 22).
+/// trip of another (ADR-0039 clause 22).
 async fn insert_as(
     client: &impl GenericClient,
     uid: &InstanceUid,
@@ -2115,7 +2115,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023, ADR-0030
+    /// Verifies: ADR-0039, ADR-0030
     #[test]
     fn the_agent_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2130,7 +2130,7 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023, ADR-0030
+    /// Verifies: ADR-0039, ADR-0030
     #[test]
     fn the_agent_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -2204,7 +2204,7 @@ mod tests {
         }
     }
 
-    /// Verifies: ADR-0023, ADR-0032
+    /// Verifies: ADR-0039, ADR-0032
     #[test]
     fn stored_assignments_are_held_to_the_write_rules_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2227,7 +2227,7 @@ mod tests {
 
     /// Opening the adapter reads the assignments alone, and the load reads every record: both
     /// are refused.
-    /// Verifies: ADR-0023, ADR-0032
+    /// Verifies: ADR-0039, ADR-0032
     #[test]
     fn stored_assignments_are_held_to_the_write_rules_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -2257,7 +2257,7 @@ mod tests {
     /// The count of the Agents' records follows every row added and removed, whichever call adds
     /// or removes it, and the ceiling is decided from it and not from the rows: a count that says
     /// full refuses a new Agent though fewer rows are stored.
-    /// Verifies: ADR-0023, ADR-0029
+    /// Verifies: ADR-0039, ADR-0029
     #[test]
     fn the_count_of_agents_follows_every_addition_and_removal_and_decides_the_ceiling() {
         let Some(test) = TestDatabase::named() else {
@@ -2314,7 +2314,7 @@ mod tests {
     /// session that writes them: the triggers' functions are pinned to the schema the migration
     /// ran in, not to the search path it ran under. Here that path starts with `"$user"` and names
     /// a schema created only afterwards, which a function keeping the path would count in.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_count_is_kept_in_its_own_schema_whatever_the_writing_session_names_first() {
         let Some(test) = TestDatabase::named() else {
@@ -2360,7 +2360,7 @@ mod tests {
     /// A creation commits without waiting for its flush, and the calls made after it on the same
     /// connections commit synchronously again: a take, a report's write and a binding after it
     /// wait for the flush, of the creation's too.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_creation_commits_without_its_flush_and_no_other_call_does() {
         let Some(test) = TestDatabase::named() else {
@@ -2410,7 +2410,7 @@ mod tests {
 
     /// The pool holds the connections `[database] pool_size` names, and the store creates half of
     /// them at once.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_pool_holds_what_pool_size_names_and_half_of_it_creates() {
         let Some(test) = TestDatabase::named() else {
@@ -2439,8 +2439,8 @@ mod tests {
     /// While every pooled connection is busy for longer than the five seconds any other call waits
     /// for one, a creation waits on and creates the record once a connection is free, and a read
     /// fails after its five seconds: a new Agent is not answered `Unavailable` while a connecting
-    /// fleet holds the pool for a few seconds (ADR-0023 clause 24).
-    /// Verifies: ADR-0023
+    /// fleet holds the pool for a few seconds (ADR-0039 clause 24).
+    /// Verifies: ADR-0039
     #[test]
     fn a_creation_waits_for_a_pooled_connection_longer_than_any_other_call() {
         let Some(test) = TestDatabase::named() else {
@@ -2510,7 +2510,7 @@ mod tests {
 
     /// Creations that wait for the count's row, which a creation elsewhere holds, hold no
     /// connection of the pool meanwhile, so the other calls of the instance are answered.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn creations_waiting_for_their_lock_leave_the_pool_to_the_other_calls() {
         let Some(test) = TestDatabase::named() else {
@@ -2547,7 +2547,7 @@ mod tests {
     /// assignment over it: the release pins what it pins after the query and the read of the
     /// records that began before it, so a deletion it pins stays refused. A read that began after
     /// it takes up what another instance committed.
-    /// Verifies: ADR-0032, ADR-0023
+    /// Verifies: ADR-0032, ADR-0039
     #[test]
     fn a_read_that_began_before_a_release_does_not_undo_what_it_pins() {
         let Some(test) = TestDatabase::named() else {
@@ -2610,7 +2610,7 @@ mod tests {
 
     /// What the adapter keeps of its commits for the reads in flight does not grow with an Agent's
     /// re-keys or releases while no read is in flight, and leaves with the last read in flight.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_commits_kept_for_reads_in_flight_do_not_grow_without_one() {
         let Some(test) = TestDatabase::named() else {
@@ -2649,7 +2649,7 @@ mod tests {
     /// Of two reads in flight, the one that ends first leaves what the other is decided by: a
     /// release committed while both were in flight is still noted when the older read takes up its
     /// snapshot, so it does not take the older assignment over the release.
-    /// Verifies: ADR-0032, ADR-0023
+    /// Verifies: ADR-0032, ADR-0039
     #[test]
     fn a_read_that_ends_first_leaves_what_an_older_read_in_flight_is_decided_by() {
         let Some(test) = TestDatabase::named() else {
@@ -2689,7 +2689,7 @@ mod tests {
 
     /// Under reads that always overlap, what is kept of the commits is only what the oldest read
     /// in flight can be decided by: an Agent that re-keys on every report does not grow it.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn under_overlapping_reads_the_commits_kept_follow_the_oldest_read_in_flight() {
         let Some(test) = TestDatabase::named() else {
@@ -2720,7 +2720,7 @@ mod tests {
     /// The query reads each record with its stored presence: connected only while the instance
     /// its presence names holds a live lease. Opening the adapter reads the stored assignments
     /// alone, so what pins what is answered without a record loaded.
-    /// Verifies: ADR-0029, ADR-0023
+    /// Verifies: ADR-0029, ADR-0039
     #[test]
     fn the_query_reads_the_stored_presence_and_opening_reads_the_assignments_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -3088,7 +3088,7 @@ mod tests {
     }
 
     /// A rollout whose last record cannot be written leaves none of its assignments behind, on
-    /// either store, and what the store answers about pins stays as it was (ADR-0023 clause 21):
+    /// either store, and what the store answers about pins stays as it was (ADR-0039 clause 21):
     /// the records already written are put back, or never committed. `refuse(uid)` makes the
     /// write of that Agent's record fail; `mend` takes that away. Answers the retained revisions
     /// the store holds afterwards, which the caller judges: none with PostgreSQL, at most one
@@ -3141,7 +3141,7 @@ mod tests {
             .collect()
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_rollout_that_fails_leaves_no_assignment_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3161,7 +3161,7 @@ mod tests {
     }
 
     /// With PostgreSQL the revisions and the assignments commit together or not at all.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_rollout_that_fails_leaves_neither_revisions_nor_assignments_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -4033,8 +4033,8 @@ mod tests {
 
     /// A row that does not decode fails the read that meets it, naming its `instance_uid`: the
     /// load, the query, the query of it and the read of it. Opening the adapter, which reads the
-    /// assignments alone, does not meet it (ADR-0023 clause 4).
-    /// Verifies: ADR-0023
+    /// assignments alone, does not meet it (ADR-0039 clause 4).
+    /// Verifies: ADR-0039
     #[test]
     fn an_agent_row_that_does_not_decode_fails_the_read_that_meets_it_naming_it() {
         let Some(test) = TestDatabase::named() else {
@@ -4068,7 +4068,7 @@ mod tests {
     /// ceiling, are both in flight when the first commits: each waits for the row the count is
     /// kept in, the database lets one through, and the other counts the record the first created
     /// and is refused.
-    /// Verifies: ADR-0025, ADR-0023
+    /// Verifies: ADR-0025, ADR-0039
     #[test]
     fn two_creations_at_once_with_one_place_left_create_one_record() {
         let Some(test) = TestDatabase::named() else {
@@ -4270,7 +4270,7 @@ mod tests {
     /// the rows and their taking them up: neither takes the count of what pins the Deployment
     /// below the release's, the one that answers first included, whose end must not drop what
     /// the other is still decided by.
-    /// Verifies: ADR-0032, ADR-0023
+    /// Verifies: ADR-0032, ADR-0039
     #[test]
     fn two_reads_on_their_own_threads_under_a_commit_keep_what_it_pins() {
         let Some(test) = TestDatabase::named() else {

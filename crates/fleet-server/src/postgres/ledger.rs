@@ -1,4 +1,4 @@
-//! The register, the revocation list and the Hosts in PostgreSQL (ADR-0023 clauses 9 and 10): the
+//! The register, the revocation list and the Hosts in PostgreSQL (ADR-0039 clauses 9 and 10): the
 //! PostgreSQL adapter behind [`LedgerStore`](crate::revocation::LedgerStore) — one row per
 //! certificate the Server signed, one per revocation, one per Host. Every call is one transaction,
 //! committed before the decision it answers is.
@@ -48,7 +48,7 @@ impl PgLedgerStore {
 }
 
 /// Moves the list's version on, inside the caller's transaction, and answers the new one
-/// (ADR-0023 clause 10). A revocation added or widened and a lift move it, the prune's removal of
+/// (ADR-0039 clause 10). A revocation added or widened and a lift move it, the prune's removal of
 /// a revocation among them, and so does every change to the register: what ADR-0026 clause 28
 /// revokes depends on the register too, so an instance that missed an entry's notification finds
 /// the version moved, and never takes its own next write of the list as naming a register it does
@@ -609,7 +609,7 @@ impl LedgerStore for PgLedgerStore {
 /// `None` when it was bound to none. The Hosts' arrays keep it where a release before them
 /// listed it: this release names them in no statement, and a Server of 0.8.4 beside it reads each
 /// array only to discard it. The release after this one removes the arrays
-/// (ADR-0023
+/// (ADR-0039
 /// clause 22).
 async fn unbind_in(
     client: &impl GenericClient,
@@ -913,10 +913,10 @@ async fn decide_renewal(
 /// Registers `issued`, deciding from what is stored, with the Host an approval mints, `mint`,
 /// written when the store has no row of it and else its valid until moved forward, inside the
 /// caller's transaction, which commits it or not: the register's own transaction, or the one that
-/// decides an approval's request (ADR-0023 clause 9). The table is held against every other
+/// decides an approval's request (ADR-0039 clause 9). The table is held against every other
 /// adder while the bounds are counted, and an approval's bootstrap certificate, `bootstrap`, is
 /// looked up in the list the transaction holds, so a revocation another instance committed first
-/// refuses it. An entry written moves the list's version (ADR-0023 clause 10), which the caller
+/// refuses it. An entry written moves the list's version (ADR-0039 clause 10), which the caller
 /// reads in the transaction to take up. Anything but [`Registered::Registered`] leaves the
 /// transaction to be rolled back.
 ///
@@ -1236,14 +1236,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_ledger_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsLedgerStore::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_ledger_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -1989,8 +1989,8 @@ mod tests {
     /// register entry, in their transactions, and with nothing else; an instance holds the
     /// version its own write left only when no other instance wrote between, and none until it
     /// reads the list again otherwise, so the version it serves never names a list it does not
-    /// hold (ADR-0023 clause 10).
-    /// Verifies: ADR-0023
+    /// hold (ADR-0039 clause 10).
+    /// Verifies: ADR-0039
     #[test]
     fn the_list_version_moves_with_each_revocation_and_lift_and_names_only_the_list_held() {
         let Some(test) = TestDatabase::named() else {
@@ -2080,8 +2080,8 @@ mod tests {
     /// renewal. A holds the same version before it reads the ledger again and after, and its
     /// `ETag`s still differ by the body's hash, so a Gateway that fetched the first is answered in
     /// full by either instance once both hold the renewal
-    /// (ADR-0026 clauses 28 and 34, ADR-0023 clause 10).
-    /// Verifies: ADR-0026, ADR-0023
+    /// (ADR-0026 clauses 28 and 34, ADR-0039 clause 10).
+    /// Verifies: ADR-0026, ADR-0039
     #[test]
     fn one_list_version_never_names_two_gateway_bodies() {
         let Some(test) = TestDatabase::named() else {
@@ -2171,8 +2171,8 @@ mod tests {
 
     /// Every change to the register moves the list's version in its own transaction: an entry
     /// written, and one removed; a removal the store refuses moves nothing. The adapter holds the
-    /// version its own write left (ADR-0023 clause 10).
-    /// Verifies: ADR-0023
+    /// version its own write left (ADR-0039 clause 10).
+    /// Verifies: ADR-0039
     #[test]
     fn a_register_change_moves_the_list_version() {
         let Some(test) = TestDatabase::named() else {
@@ -2225,8 +2225,8 @@ mod tests {
     /// version. A prunes X once it expired, X' expired too and X'' still valid, and X stays, so a
     /// revocation of X still revokes X'', and A holds no version until it reads the ledger again.
     /// Once X'' has expired too, all three go, and A holds the version its removals left
-    /// (ADR-0023 clause 10, ADR-0026 clause 28).
-    /// Verifies: ADR-0023, ADR-0026
+    /// (ADR-0039 clause 10, ADR-0026 clause 28).
+    /// Verifies: ADR-0039, ADR-0026
     #[test]
     fn the_prune_keeps_an_entry_a_valid_renewal_in_the_database_descends_from() {
         let Some(test) = TestDatabase::named() else {
@@ -2660,7 +2660,7 @@ mod tests {
 
     /// A save of the Hosts that fails part-way leaves them as they were, and the next save still
     /// writes what changed: the adapter's memory follows only what committed.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_save_that_fails_part_way_leaves_nothing_of_itself() {
         let Some(test) = TestDatabase::named() else {
@@ -2685,9 +2685,9 @@ mod tests {
 
     /// The load reads no Host's `instance_uids` array, so a column let be `NULL` leaves the load
     /// of this one standing
-    /// (ADR-0023
+    /// (ADR-0039
     /// clause 22).
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_load_reads_no_hosts_array() {
         let Some(test) = TestDatabase::named() else {
@@ -2714,9 +2714,9 @@ mod tests {
     /// save and Gateway mark, and a new Host's array takes its default. A Server of 0.8.4 beside
     /// it reads each array only to discard it. With the column dropped, as the release after this
     /// one drops it, every one of these writes and the load still succeed
-    /// (ADR-0023
+    /// (ADR-0039
     /// clause 22).
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_hosts_arrays_are_named_no_more() {
         let Some(test) = TestDatabase::named() else {

@@ -123,7 +123,7 @@ impl AppState {
         })
     }
 
-    /// Writes releases (ADR-0032 clause 6, ADR-0023 clause 2): each Configuration's saved revision
+    /// Writes releases (ADR-0032 clause 6, ADR-0039 clause 2): each Configuration's saved revision
     /// is pinned — copied into the store's retained revisions, its hash the one the assignment
     /// keeps — and the revisions and the records carrying the new assignments go to the store as
     /// one operation. Only once it succeeded are they the fleet's. A failure leaves the fleet's
@@ -197,7 +197,7 @@ impl AppState {
     }
 
     /// Collects every retained revision of `names` no stored assignment references any more — a
-    /// question the store answers (ADR-0023 clause 2).
+    /// question the store answers (ADR-0039 clause 2).
     pub(super) fn collect_revisions(&self, names: impl IntoIterator<Item = String>) {
         for name in names.into_iter().collect::<BTreeSet<_>>() {
             let referenced = self.agent_store.referenced_revisions(&name);
@@ -633,7 +633,7 @@ impl AppState {
     ///
     /// The fleet lock is held across the check and the delete, so a rollout of this Server cannot
     /// pin it in between. A store that other Servers write too counts the stored assignments again
-    /// in the act that deletes (ADR-0023 clause 2), so a pin
+    /// in the act that deletes (ADR-0039 clause 2), so a pin
     /// written through another instance refuses it as well, and takes it out of every Deployment
     /// in that act too.
     pub fn delete_configuration(&self, name: &str) -> Result<bool, DeleteError> {
@@ -1064,7 +1064,7 @@ mod tests {
     /// first is put back as it was, the fleet keeps its assignments, the revision those still pin
     /// stays, and the one nothing pins is collected. The next press, once the store writes again,
     /// releases to both.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_rollout_that_fails_part_way_leaves_disk_and_memory_as_they_were() {
         let dir = tempfile::tempdir().expect("tempdir");

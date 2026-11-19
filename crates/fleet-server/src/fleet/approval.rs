@@ -1,4 +1,4 @@
-//! Enrolment and certificates (ADR-0023 clause 9, ADR-0026, ADR-0027): the approval of an
+//! Enrolment and certificates (ADR-0039 clause 9, ADR-0026, ADR-0027): the approval of an
 //! enrolment and its take-back, the answer an enrolling Agent is given, the issuing and renewal of
 //! a host certificate on the connection the request arrived over, the records of what was issued
 //! and signed, each written with its decision, and the mark of a host as a Gateway (ADR-0027
@@ -20,7 +20,7 @@ use super::session::{
 use super::{AppState, CertificateSigner, TelemetryOffer, UseCase};
 
 impl AppState {
-    /// Records a certificate the client CA signed on a renewal, before it is offered (ADR-0023
+    /// Records a certificate the client CA signed on a renewal, before it is offered (ADR-0039
     /// clause 9, ADR-0028 clause 1). An approval records through [`Approving`].
     fn record_issued(
         &self,
@@ -175,7 +175,7 @@ impl AppState {
             .find(|pending| pending.id == id)
             .and_then(|pending| pending.requester.gateway);
         let serial = enrolment.approve(id, signer, &host, &Approving(self), &revoked)?;
-        // Recorded before the approval is answered (ADR-0023 clause 9). The decision is written
+        // Recorded before the approval is answered (ADR-0039 clause 9). The decision is written
         // already, so a record that cannot take it refuses nothing: the register answers for it.
         if let Err(e) = self.audited(
             Entry::new("enrolment.approved", "approved")
@@ -191,7 +191,7 @@ impl AppState {
     /// Takes back every approved request whose certificate the register does not hold, so it
     /// waits again, and records each signature as undecided: what a start does with a store that
     /// writes the decision before the register entry, after a write between the two failed
-    /// (ADR-0023 clause 9). `read` reads what a certificate, PEM, says about itself. Answers how
+    /// (ADR-0039 clause 9). `read` reads what a certificate, PEM, says about itself. Answers how
     /// many it took back.
     ///
     /// # Errors
@@ -356,7 +356,7 @@ impl AppState {
     }
 }
 
-/// What an approval keeps of what it signed (ADR-0023 clause 9): the signature in the audit
+/// What an approval keeps of what it signed (ADR-0039 clause 9): the signature in the audit
 /// record before its decision is written, and its register entry and Host, prepared here, written
 /// with the decision and taken up once it is.
 struct Approving<'a>(&'a AppState);
@@ -433,7 +433,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    // ---- An approval records its certificate with its decision (ADR-0023 clause 9) ----
+    // ---- An approval records its certificate with its decision (ADR-0039 clause 9) ----
 
     /// A fleet on files in `dir` that enrols: its register, its window and queue, its audit record
     /// in `dir/audit`, and a client CA kept in `dir` across a reopen.
@@ -535,8 +535,8 @@ mod tests {
     /// On files the decision is written before the register entry: a decision that cannot be
     /// written registers nothing, and an entry that cannot be written takes the decision back, so
     /// the request waits again with nothing registered, each signature is recorded as rolled back,
-    /// and approved again it is signed anew (ADR-0023 clause 9).
-    /// Verifies: ADR-0023
+    /// and approved again it is signed anew (ADR-0039 clause 9).
+    /// Verifies: ADR-0039
     #[cfg(unix)]
     #[test]
     fn an_approval_on_files_whose_register_entry_fails_takes_its_decision_back() {
@@ -616,8 +616,8 @@ mod tests {
 
     /// The audit record of an approval whose decision was not written still verifies, and names
     /// that signature as undecided by its serial and request, beside the signature of the approval
-    /// that was (ADR-0023 clause 9).
-    /// Verifies: ADR-0023
+    /// that was (ADR-0039 clause 9).
+    /// Verifies: ADR-0039
     #[cfg(unix)]
     #[test]
     fn the_audit_record_of_an_approval_that_did_not_commit_verifies_and_names_it_undecided() {
@@ -650,8 +650,8 @@ mod tests {
     /// A decision found at startup whose certificate the register does not hold, as after a crash
     /// between the two writes, is taken back: the request waits again and its signature is
     /// recorded as undecided, while an approval whose certificate is registered stays decided
-    /// (ADR-0023 clause 9).
-    /// Verifies: ADR-0023
+    /// (ADR-0039 clause 9).
+    /// Verifies: ADR-0039
     #[test]
     fn a_decision_found_at_startup_without_its_register_entry_waits_again() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -1,5 +1,5 @@
 //! How long the audit record on PostgreSQL goes back
-//! (ADR-0023 clause 12): once a day each instance removes from
+//! (ADR-0039 clause 12): once a day each instance removes from
 //! its own chain, and the one that holds the prune lock from every closed chain, the longest run of
 //! entries from the chain's start that are all older than `[audit] retain_days`, by the database's
 //! time when each was stored.
@@ -151,7 +151,7 @@ fn predecessor_named(value: &Value, chain_key: &str) -> Option<Predecessor> {
 }
 
 /// How often an instance prunes the record: at its start and once a day after
-/// (ADR-0023 clause 12).
+/// (ADR-0039 clause 12).
 const PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Prunes the record on `database` to `retain_days` at once and then once a day, for the chain
@@ -783,7 +783,7 @@ mod tests {
     /// Entries stored more than `retain_days` ago go, the longest run of them from the chain's
     /// start and no younger one; `audit.pruned` records the last removed entry's `seq` and hash
     /// before they go, and `audit-verify` links what is left to it.
-    /// Verifies: ADR-0023, ADR-0028
+    /// Verifies: ADR-0039, ADR-0028
     #[test]
     fn entries_older_than_retain_days_are_removed_and_what_is_left_still_verifies() {
         let Some(test) = TestDatabase::named() else {
@@ -826,7 +826,7 @@ mod tests {
     /// instance at a time, the one holding the prune lock: while it is held elsewhere an instance
     /// prunes its own chain alone; two that prune at once record each chain once, in
     /// `audit.pruned` entries naming both; a closed chain with no entries left keeps its record.
-    /// Verifies: ADR-0023, ADR-0028
+    /// Verifies: ADR-0039, ADR-0028
     #[test]
     fn closed_chains_are_pruned_by_one_instance_at_a_time() {
         let Some(test) = TestDatabase::named() else {
@@ -1072,7 +1072,7 @@ mod tests {
     /// pruned, the links still needed — of a closed chain with no entries left, and of one that
     /// still begins after the entry recorded — and the archive's predecessor are recorded again,
     /// and `audit-verify` still holds.
-    /// Verifies: ADR-0023, ADR-0028
+    /// Verifies: ADR-0039, ADR-0028
     #[test]
     fn the_links_a_pruned_audit_pruned_recorded_are_carried_on() {
         let Some(test) = TestDatabase::named() else {
@@ -1134,7 +1134,7 @@ mod tests {
     /// prunes further sits in its own chain, which it prunes first, so a delete of its own chain
     /// that stood alone would leave the other chain linked by nothing, and an honest record would
     /// fail `audit-verify`.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_prune_that_stops_between_two_chains_deletes_nothing() {
         let Some(test) = TestDatabase::named() else {
@@ -1175,7 +1175,7 @@ mod tests {
     /// deleted in batches inside the one transaction: the prune ends, and the chain still verifies.
     /// The database slows each deleted row of the long chain by half a millisecond, so one
     /// statement over all of them would outlast the ten-second timeout and roll the prune back.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_run_too_long_for_one_statement_is_deleted_in_batches() {
         let Some(test) = TestDatabase::named() else {
@@ -1222,7 +1222,7 @@ mod tests {
     /// A backlog larger than one round drains across rounds within one prune: each round removes
     /// at most its share of entries and leaves a record that verifies, and the next follows right
     /// away until nothing old is left. Rounds of 1000 here stand for [`ROUND_ENTRIES`].
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_backlog_larger_than_one_round_drains_in_rounds() {
         let Some(test) = TestDatabase::named() else {
@@ -1291,7 +1291,7 @@ mod tests {
     /// find the lock still held, leave the closed chains as if another instance pruned them, and
     /// end the prune with their old entries left. The round's connection is kept open here past
     /// the round, as a session that has not ended yet.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_round_lets_go_of_the_prune_lock_before_it_answers() {
         let Some(test) = TestDatabase::named() else {
@@ -1336,7 +1336,7 @@ mod tests {
     /// is gone before it deletes, and deletes nothing: another instance may prune the closed
     /// chains by then. The session is ended while the round waits for its `audit.pruned` entries,
     /// which a gate holds.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_round_whose_session_ends_while_it_holds_the_prune_lock_prunes_nothing_and_says_so() {
         let Some(test) = TestDatabase::named() else {
@@ -1385,7 +1385,7 @@ mod tests {
 
     /// A chain with an entry missing where a round's budget cuts it is left as it is, and the run
     /// of rounds ends rather than repeating a round that prunes nothing.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_round_that_prunes_no_chain_ends_the_prune() {
         let Some(test) = TestDatabase::named() else {
@@ -1449,7 +1449,7 @@ mod tests {
     }
 
     /// When its `audit.pruned` entries cannot be written, the prune deletes nothing.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn nothing_is_pruned_before_its_audit_pruned_is_written() {
         let Some(test) = TestDatabase::named() else {
@@ -1474,7 +1474,7 @@ mod tests {
 
     /// Entries stored before the migration that adds `recorded_at` take the time their line
     /// carries, so a record of a release before is pruned by its own age.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn entries_stored_before_the_migration_take_their_lines_time() {
         let Some(test) = TestDatabase::named() else {
@@ -1565,7 +1565,7 @@ mod tests {
     /// where the kept entry has become older than that. A day of the calendar instead would cut
     /// at 23 hours across the change forward, removing the entry exactly a day old, and at 25
     /// hours across the change back, keeping the one a microsecond older.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_scheduled_prune_cuts_at_retain_days_of_24_hours_across_a_change_of_daylight_saving_time()
     {

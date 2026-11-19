@@ -30,7 +30,7 @@ once its tag exists.
 ### Changed
 
 - **A delete counts what pins it by index**
-  ([ADR-0023](docs/adr/0023-the-servers-state-and-its-stores-and-an-approval-records-its-certificate-with-its-decision.md)
+  ([ADR-0039](docs/adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md)
   clause 22). On PostgreSQL, every delete of a Package, a Deployment or a Configuration counts,
   under the row lock of what it deletes, the Agents that pin it, or for a Configuration their
   assignments, and the count read the whole table. Migration 18 adds an index for each of the three

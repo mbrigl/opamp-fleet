@@ -187,7 +187,7 @@ pub struct Assignment {
 
 impl Assignment {
     /// Whether a stored assignment keeps the rules its write met, which both stores ask on load
-    /// (ADR-0023 clause 4): the Deployment's and each Configuration's name keep the name grammar
+    /// (ADR-0039 clause 4): the Deployment's and each Configuration's name keep the name grammar
     /// of [`validate_name`](crate::configs::validate_name), and each pinned revision is named by
     /// a content hash, the form [`revision_hash`](crate::configs::revision_hash) gives. Whether
     /// the revision is still retained is not asked. Each store names the record before the
@@ -435,7 +435,7 @@ pub trait Clock: Send + Sync {
 
 /// The port of the time that has passed, as a lease and a sweep measure it
 /// (ADR-0025
-/// clause 3, ADR-0023 clause 14): a clock that counts the time the host was suspended, which the
+/// clause 3, ADR-0039 clause 14): a clock that counts the time the host was suspended, which the
 /// binary hands the lease and the package store (on Linux `CLOCK_BOOTTIME`). A reading is the time since an origin of the
 /// clock's own: two readings of one clock compare, readings of two clocks do not. The adapters'
 /// constructors are in [`crate::clock`].
@@ -664,7 +664,7 @@ impl AppState {
         if !fleet.is_empty() {
             info!(agents = fleet.len(), "restored the fleet");
         }
-        // A rollout cut short leaves at most a revision no assignment references (ADR-0023
+        // A rollout cut short leaves at most a revision no assignment references (ADR-0039
         // clause 2); it is collected here, before anything is offered.
         for config in configs.list() {
             configs.retain_only(
@@ -885,7 +885,7 @@ impl AppState {
     }
 
     /// The fleet as the Operator plane reads it
-    /// (ADR-0023 clause 3): on a shared store every record as
+    /// (ADR-0039 clause 3): on a shared store every record as
     /// stored, connected as its stored presence says, placed among the others, and nothing of what
     /// this instance holds in memory; on a store this Server alone writes, what it holds.
     ///

@@ -16,10 +16,10 @@ use tokio::sync::watch;
 
 use crate::fleet::Clock;
 
-/// The revocations one list holds at most (ADR-0023 clause 10).
+/// The revocations one list holds at most (ADR-0039 clause 10).
 pub const MAX_REVOCATIONS: usize = 100_000;
 
-/// The certificates the register holds at most (ADR-0023 clause 9).
+/// The certificates the register holds at most (ADR-0039 clause 9).
 pub const MAX_ISSUED: usize = 100_000;
 
 /// The reads of a reload swapped in no more, as an act of this instance's own committed while
@@ -29,11 +29,11 @@ pub const RELOAD_SWAPS_REFUSED: usize = 3;
 
 /// The certificates the register holds at most in one chain — below one root, the first
 /// certificate a chain renews from: enough for a Gateway's downstream Agents, few enough that one
-/// member cannot fill the register (ADR-0023 clause 9).
+/// member cannot fill the register (ADR-0039 clause 9).
 pub const MAX_DESCENDANTS_PER_ROOT: usize = 10_000;
 
 /// The room the register keeps for enrolments: a renewal is refused once fewer are left, so
-/// renewals alone cannot shut out a new host (ADR-0023 clause 9).
+/// renewals alone cannot shut out a new host (ADR-0039 clause 9).
 pub const ENROLMENT_RESERVE: usize = 1_000;
 
 /// A certificate by its issuer and serial: the issuer as the SHA-256 of its DER-encoded name, hex,
@@ -215,7 +215,7 @@ pub struct Signed {
 
 /// The register entry of a certificate an approval signed and the Host it mints, prepared and not
 /// yet written: written with the decision on its request, and taken up in memory once that decision
-/// is written (ADR-0023 clause 9).
+/// is written (ADR-0039 clause 9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Approved {
     pub(crate) issued: Issued,
@@ -249,7 +249,7 @@ pub(crate) fn refusal(registered: Registered) -> Result<(), String> {
     }
 }
 
-/// One certificate the Server signed (ADR-0023 clause 9).
+/// One certificate the Server signed (ADR-0039 clause 9).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
     #[serde(flatten)]
@@ -290,7 +290,7 @@ pub struct Ledger {
     pub revocations: Vec<Revocation>,
     pub hosts: BTreeMap<String, Host>,
     /// The list's one version, as the store holds it, where the store keeps one: PostgreSQL does
-    /// (ADR-0023 clause 10), the filesystem does not.
+    /// (ADR-0039 clause 10), the filesystem does not.
     pub version: Option<u64>,
 }
 
@@ -313,7 +313,7 @@ pub trait LedgerStore: Send + Sync {
     /// it, and answers whether it removed it. A store other instances share removes it only while
     /// it holds no certificate renewed from it that is valid at `now_ms`, whatever the instance
     /// that prunes holds, so a renewal it never took up keeps its chain
-    /// (ADR-0023 clause 10).
+    /// (ADR-0039 clause 10).
     ///
     /// # Errors
     /// Returns an error when it cannot be removed.
@@ -515,7 +515,7 @@ pub fn bound_elsewhere(instance_uid: &str, host: &str) -> String {
     format!("the Agent {instance_uid} is bound to the host {host}")
 }
 
-/// The bounds a register write counts (ADR-0023 clause 9).
+/// The bounds a register write counts (ADR-0039 clause 9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegisterBounds {
     /// The entries the register may hold before this one: [`MAX_ISSUED`], and for a renewal
@@ -1018,7 +1018,7 @@ impl Revocations {
             .cloned()
     }
 
-    /// Records a certificate the client CA signed, before it is handed out (ADR-0023 clause 9).
+    /// Records a certificate the client CA signed, before it is handed out (ADR-0039 clause 9).
     ///
     /// # Errors
     /// Returns an error when the register is full — for a renewal, [`ENROLMENT_RESERVE`] short of
@@ -1037,7 +1037,7 @@ impl Revocations {
     /// without writing either: they are written with the decision on its request
     /// ([`register_approved`](Self::register_approved), or the enrolment store's own transaction
     /// and then [`took_up_approved`](Self::took_up_approved)), so a decision that is not written
-    /// leaves neither (ADR-0023 clause 9). The bounds are checked against what this instance
+    /// leaves neither (ADR-0039 clause 9). The bounds are checked against what this instance
     /// holds; the write counts them again. The bootstrap certificate the request came with,
     /// `bootstrap`, is checked against the list: a revoked one is refused with
     /// [`BOOTSTRAP_REVOKED`], here and in the write (ADR-0026 clause 28).
@@ -1087,7 +1087,7 @@ impl Revocations {
 
     /// Writes what [`prepare_approved`](Self::prepare_approved) prepared through this register's
     /// own store, and takes it up: what an approval does once its decision is written to a store
-    /// that does not write the register in the decision's own transaction (ADR-0023 clause 9).
+    /// that does not write the register in the decision's own transaction (ADR-0039 clause 9).
     ///
     /// # Errors
     /// Returns an error when the write refuses it, as [`record`](Self::record) does and with
@@ -1110,9 +1110,9 @@ impl Revocations {
     }
 
     /// Takes up what an enrolment store wrote of `approved` in the transaction that decided its
-    /// request, once that transaction committed (ADR-0023 clause 9): the register entry and the
+    /// request, once that transaction committed (ADR-0039 clause 9): the register entry and the
     /// Host, which the store wrote by act, in memory alone, and the list's version that
-    /// transaction left, `written`, where it is known (ADR-0023 clause 10). An approval whose
+    /// transaction left, `written`, where it is known (ADR-0039 clause 10). An approval whose
     /// commit was read back names none, and the list is then read again before a version is held.
     pub fn took_up_approved(&self, approved: &Approved, written: Option<u64>) {
         let mut state = self.state.lock().expect("revocation lock");
@@ -2021,7 +2021,7 @@ impl Revocations {
     }
 
     /// Drops the register entries that have expired and from which no valid certificate descends,
-    /// and the revocations of certificates those entries held (ADR-0023 clause 10). A revoked
+    /// and the revocations of certificates those entries held (ADR-0039 clause 10). A revoked
     /// ancestor of a valid renewal stays, so the renewal stays revoked.
     ///
     /// A Host not marked as a Gateway whose valid until has passed is forgotten, and every

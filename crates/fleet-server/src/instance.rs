@@ -242,7 +242,7 @@ impl Lease {
 
     /// Changes each time this instance removes a lease that lapsed, its own lost one included,
     /// after it took its first: when the staging objects of that lease's uploads are deleted
-    /// (ADR-0023 clause 16).
+    /// (ADR-0039 clause 16).
     #[must_use]
     pub fn takeovers(&self) -> watch::Receiver<u64> {
         self.takeovers.clone()
@@ -250,7 +250,7 @@ impl Lease {
 
     /// Runs `cleanup` each time [`takeovers`](Self::takeovers) changes, off the async threads, as a
     /// cleanup's calls block: on the bucket, the deletion of the staging objects the removed
-    /// leases left (ADR-0023 clause 16). A cleanup that fails is logged; the next takeover, or the
+    /// leases left (ADR-0039 clause 16). A cleanup that fails is logged; the next takeover, or the
     /// next start, tries again.
     pub fn on_each_takeover(
         &self,
@@ -758,7 +758,7 @@ pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> P
 
 /// Every `interval`, the lease renewal interval, tries again to take away the marks of the sweeps
 /// of this instance that could not take them away when they were done: they refuse uploads of
-/// their blobs on every instance until they are gone (ADR-0023 clause 14). Runs until the runtime
+/// their blobs on every instance until they are gone (ADR-0039 clause 14). Runs until the runtime
 /// ends.
 pub fn retry_unmarks(state: Arc<AppState>, interval: Duration) {
     tokio::spawn(async move {

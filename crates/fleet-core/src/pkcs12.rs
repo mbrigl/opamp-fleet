@@ -13,7 +13,7 @@
 pub mod file;
 
 /// The name of the file, wherever it lies: in the Server's download and beside the Client's
-/// program (ADR-0023 clause 11 and ADR-0027 clause 14).
+/// program (ADR-0039 clause 11 and ADR-0027 clause 14).
 pub const FILE_NAME: &str = "bootstrap.p12";
 
 /// The largest file the Client reads (ADR-0027 clause 15). A bootstrap certificate and its P-256

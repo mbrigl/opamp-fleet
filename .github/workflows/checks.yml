@@ -290,7 +290,7 @@ jobs:
       - name: Clippy and test
         run: bash scripts/check-client-platform.sh
 
-  # ADR-0023 clause 20: the S3 store's tests, which a plain `cargo test` skips, run here against a
+  # ADR-0039 clause 20: the S3 store's tests, which a plain `cargo test` skips, run here against a
   # rustfs service, its image pinned by digest. The key pair is the throwaway one of this job's
   # own container, not a secret. The tests make a prefix of their own and leave the bucket empty.
   s3-store:
@@ -312,7 +312,7 @@ jobs:
         run: bash scripts/test-check-store.sh
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Create the bucket
-        # The Server creates none (ADR-0023 clause 16). curl signs the request itself; the service
+        # The Server creates none (ADR-0039 clause 16). curl signs the request itself; the service
         # may still be starting, so the first attempts are allowed to fail.
         run: |
           empty="$(printf '' | sha256sum | cut -d' ' -f1)"
@@ -340,7 +340,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # A bucket beside the database, for the test of a Server on PostgreSQL and S3, which keeps
-    # nothing on its disk (ADR-0023 clause 1).
+    # nothing on its disk (ADR-0039 clause 1).
     services:
       rustfs:
         image: rustfs/rustfs:1.0.3@sha256:9ca9559533b537d10482fe923288b676ad08f92a7069d9a17327fbae3cab688b
@@ -361,7 +361,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends softhsm2
       - name: Start PostgreSQL with TLS
         # The connection the Server makes: TLS 1.3, the database's certificate verified against
-        # the CA made here and its name checked (ADR-0023 clause 24). Started by `docker run`
+        # the CA made here and its name checked (ADR-0039 clause 24). Started by `docker run`
         # rather than as a service, so that it starts after its certificate is made.
         run: |
           set -euo pipefail
@@ -409,7 +409,7 @@ jobs:
       - name: Write the secret key file
         run: (umask 077 && printf '%s' fleet-ci-secret > "$RUNNER_TEMP/s3-secret")
       # The image of packaging/container/Containerfile, around the binary of the tests' own
-      # profile, for the test that runs it read-only and with no volume (ADR-0023 clause 1). Its
+      # profile, for the test that runs it read-only and with no volume (ADR-0039 clause 1). Its
       # debug information is stripped, so the image stays small. It stays in the runner's Docker;
       # nothing is pushed.
       - name: Build the Server's image
@@ -422,7 +422,7 @@ jobs:
             "$RUNNER_TEMP/image"
       - name: Test against PostgreSQL
         # Over TLS against the CA above; each test works in a schema of its own
-        # (ADR-0023 clause 25). Skipped is not passed: the database is named, so every PostgreSQL
+        # (ADR-0039 clause 25). Skipped is not passed: the database is named, so every PostgreSQL
         # test must reach it.
         env:
           FLEET_TEST_POSTGRES_HOST: 127.0.0.1

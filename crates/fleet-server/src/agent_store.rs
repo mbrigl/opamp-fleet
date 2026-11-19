@@ -3,7 +3,7 @@
 //! The fleet is loaded whole at startup and held in memory; at runtime the store receives writes
 //! and deletions for single Agents — `load`, `get`, `put`, `set_labels`, `set_restart_pending`,
 //! `remove`, `rekey` — and one operation for a rollout, which writes the revisions it pins and the
-//! assignments that pin them together (ADR-0023 clause 2). A report, a label change, a restart
+//! assignments that pin them together (ADR-0039 clause 2). A report, a label change, a restart
 //! request and a rollout each write their own part of a record, so on a store other Servers share
 //! the write of one never undoes another's
 //! (ADR-0029 clause 2). The integrity questions a deletion
@@ -327,7 +327,7 @@ pub enum Silenced {
     Reporting,
 }
 
-/// The storage port (ADR-0029, ADR-0023): the only thing the fleet logic knows about persistence. A
+/// The storage port (ADR-0029, ADR-0039): the only thing the fleet logic knows about persistence. A
 /// database or an external store is a new implementation of these operations plus one wiring
 /// line — the rest of the Server is, by construction, unaffected.
 pub trait AgentStore: Send + Sync {
@@ -369,7 +369,7 @@ pub trait AgentStore: Send + Sync {
 
     /// Every stored record with its presence, or those of `only` where it names some, in the order
     /// of their `instance_uid`: what the Operator plane reads where the fleet is not in memory
-    /// (ADR-0023 clause 3). The default reads every record
+    /// (ADR-0039 clause 3). The default reads every record
     /// through [`load`](Self::load), each disconnected, as a store that keeps no presence may; a
     /// shared store, and a wrapper of one, overrides it.
     ///
@@ -490,7 +490,7 @@ pub trait AgentStore: Send + Sync {
 
     /// Whether other Servers write this store too, so the fleet reads an Agent it does not hold
     /// from it rather than from what it loaded, and decides an act on an Agent from what it stores
-    /// (ADR-0023 clause 3). A store that is its one Server's alone
+    /// (ADR-0039 clause 3). A store that is its one Server's alone
     /// says no.
     fn is_shared(&self) -> bool {
         false
@@ -727,7 +727,7 @@ pub trait AgentStore: Send + Sync {
         Ok(self.get(new)?.is_some() && self.get(old)?.is_none())
     }
 
-    /// A rollout (ADR-0023 clause 2): the revisions it pins, each added to its Configuration's
+    /// A rollout (ADR-0039 clause 2): the revisions it pins, each added to its Configuration's
     /// retained revisions by its hash and no other revision touched, and the records carrying the
     /// assignments that pin them, as one operation. A database adapter holds each pinned
     /// Configuration's row against a collection until it commits, so no other instance collects a

@@ -10,7 +10,7 @@ array with `array_remove`, empties an array on the mark of a Gateway and filters
 
 **Idea.** Release X+1, the release after 0.8.5, drops the columns by a migration, together with the
 comments that keep them. The migration names 0.8.5 as the oldest Server (clause 22 of the draft
-that supersedes ADR-0023,
+that supersedes ADR-0039,
 `docs/adr/0039-the-servers-state-and-its-stores-and-the-contract-pair-leaves-over-0-8-5-and-the-release-after-it.md`).
 It cannot come earlier, since a Server of 0.8.4 beside it still names the columns. The test SQL that
 names them to simulate an older release goes or changes with them, and the tests that drop the

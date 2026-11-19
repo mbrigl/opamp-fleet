@@ -1,11 +1,11 @@
-//! Enrolment: how a host gets its first client certificate (ADR-0026 clause 17, ADR-0023 clause 8
+//! Enrolment: how a host gets its first client certificate (ADR-0026 clause 17, ADR-0039 clause 8
 //! and ADR-0027 clauses 9 and 10).
 //!
 //! A host enrols with a bootstrap certificate from a CA of its own. Such a connection is admitted
 //! only while an operator holds an **enrolment window** open, and the certificate signing request
 //! it sends waits in a **pending queue** until an operator approves or rejects it. The window's end
 //! and the queue — an approved request with its certificate included — are persisted through the
-//! [`EnrolmentStore`] port before the act that changes them is answered (ADR-0023 clause 8), so a
+//! [`EnrolmentStore`] port before the act that changes them is answered (ADR-0039 clause 8), so a
 //! restart keeps an open window open until its end and keeps its requests; a window whose end has
 //! passed is closed when it is loaded. When the window closes, every pending request expires.
 //!
@@ -48,7 +48,7 @@ pub struct Request {
     /// The SHA-256 fingerprint of the requested public key, hex — the key of the queue, and what the
     /// Client logs so an operator can match a request to a host.
     pub key_fingerprint: String,
-    /// The `instance_uid` of the message that carried it, for the register (ADR-0023 clause 9).
+    /// The `instance_uid` of the message that carried it, for the register (ADR-0039 clause 9).
     pub instance_uid: Vec<u8>,
 }
 
@@ -85,7 +85,7 @@ pub struct Pending {
 }
 
 /// Writes the register entry and the Host an approval prepared, and takes them up, for the
-/// enrolment store that writes them with the decision on its request (ADR-0023 clause 9).
+/// enrolment store that writes them with the decision on its request (ADR-0039 clause 9).
 pub trait Registrar {
     /// Writes `approved` through the register's own store and takes it up: what a store calls
     /// once it has written the decision, when it cannot write the register in the same write. A
@@ -97,11 +97,11 @@ pub trait Registrar {
 
     /// Takes up `approved` once the store wrote it in the transaction that decided its request,
     /// and that transaction committed, with the revocation list's version the transaction left,
-    /// `written`: `None` where it is not known, as for a commit read back (ADR-0023 clause 10).
+    /// `written`: `None` where it is not known, as for a commit read back (ADR-0039 clause 10).
     fn committed(&self, approved: &Approved, written: Option<u64>);
 }
 
-/// What an approval keeps of what it signed (ADR-0023 clause 9): it records the signature in the
+/// What an approval keeps of what it signed (ADR-0039 clause 9): it records the signature in the
 /// audit record and prepares the register entry, before the decision is written, and records a
 /// signature whose decision was not written.
 pub trait Recorder: Registrar {
@@ -233,7 +233,7 @@ pub enum DecisionError {
     Subject(String),
     /// The CA could not sign the request.
     Sign(String),
-    /// The decision could not be persisted (ADR-0023 clause 8); the request still waits.
+    /// The decision could not be persisted (ADR-0039 clause 8); the request still waits.
     Store(String),
     /// Another instance is deciding the request at this moment — a `409`. Nothing was decided
     /// here; asked again, the request is found decided, or still waiting.
@@ -245,7 +245,7 @@ pub enum DecisionError {
 pub enum WindowError {
     /// The duration is outside 1 to [`MAX_WINDOW_SECS`] seconds — a `400`.
     Invalid(String),
-    /// The window could not be persisted (ADR-0023 clause 8); it is as it was.
+    /// The window could not be persisted (ADR-0039 clause 8); it is as it was.
     Store(String),
 }
 
@@ -258,7 +258,7 @@ pub enum Decision {
     Rejected,
 }
 
-/// The window and its requests as they persist (ADR-0023 clause 8): what an [`EnrolmentStore`]
+/// The window and its requests as they persist (ADR-0039 clause 8): what an [`EnrolmentStore`]
 /// keeps, and all it keeps.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -316,7 +316,7 @@ pub enum Took {
     Rejected,
 }
 
-/// The enrolment's port (ADR-0009, ADR-0023): where the window and its queue persist. The
+/// The enrolment's port (ADR-0009, ADR-0039): where the window and its queue persist. The
 /// filesystem adapter ([`FsEnrolmentStore`](crate::fs::FsEnrolmentStore)) keeps them in
 /// `enrolment.json`. Each act is one write that decides from what is stored, so the queue's bounds
 /// hold for every instance on one database
@@ -409,7 +409,7 @@ pub trait EnrolmentStore: Send + Sync {
 
     /// Approves the waiting request `id`: `sign` signs it while the request is held, and its
     /// answer is written as the request's decision, with the register entry and the Host it
-    /// prepared (ADR-0023 clause 9). A request the store holds no longer waiting, or whose key it
+    /// prepared (ADR-0039 clause 9). A request the store holds no longer waiting, or whose key it
     /// holds rejected, is answered [`Approval::NotWaiting`] before anything is signed, so of two
     /// instances approving one request one signs and records it and the other nothing
     /// (ADR-0025
@@ -495,7 +495,7 @@ pub trait EnrolmentStore: Send + Sync {
 
     /// Takes the decision on the request `id` back, so it waits again: what an approval whose
     /// certificate could not be registered does, and what a start does for a decided request
-    /// whose certificate the register does not hold (ADR-0023 clause 9). A request the store does
+    /// whose certificate the register does not hold (ADR-0039 clause 9). A request the store does
     /// not hold is left.
     ///
     /// # Errors
@@ -717,7 +717,7 @@ impl Enrolment {
         }
     }
 
-    /// Restores the window and its queue from `store` (ADR-0023 clause 8), and persists through it
+    /// Restores the window and its queue from `store` (ADR-0039 clause 8), and persists through it
     /// from here on. A window whose end has passed while the Server was down is closed, and its
     /// requests expire with it.
     ///
@@ -930,7 +930,7 @@ impl Enrolment {
     /// not be written; the request then still waits.
     ///
     /// `recorder` records the signature and prepares its register entry and Host, which are
-    /// written with the decision (ADR-0023 clause 9): a decision that is not written leaves
+    /// written with the decision (ADR-0039 clause 9): a decision that is not written leaves
     /// neither, and `recorder` records the signature as undecided. When a store that writes the
     /// register with its decision cannot tell whether its commit landed, the request is read
     /// back: decided with the certificate signed here, the approval stands.
@@ -985,7 +985,7 @@ impl Enrolment {
             Ok((decision, approved))
         };
         // Persisted before it is answered, the certificate included, so a restart before the host
-        // collects it hands it over all the same (ADR-0023 clause 8). The store signs only a
+        // collects it hands it over all the same (ADR-0039 clause 8). The store signs only a
         // request that still waits there, and holds it meanwhile: one another instance decided or
         // withdrew is gone, and nothing is signed for it.
         let approval = match &self.store {
@@ -1093,7 +1093,7 @@ impl Enrolment {
     }
 
     /// Whether the store writes an approval's register entry with its decision, in one
-    /// transaction; a start then has nothing to take back (ADR-0023 clause 9).
+    /// transaction; a start then has nothing to take back (ADR-0039 clause 9).
     pub fn registers_with_its_decision(&self) -> bool {
         self.store
             .as_ref()
@@ -1114,7 +1114,7 @@ impl Enrolment {
     }
 
     /// Takes the decision on the request `id` back, so it waits again: what a start does for an
-    /// approved request whose certificate the register does not hold (ADR-0023 clause 9).
+    /// approved request whose certificate the register does not hold (ADR-0039 clause 9).
     ///
     /// # Errors
     /// Returns an error when the store cannot be written; the request is then left decided.
@@ -1664,7 +1664,7 @@ pub(crate) mod tests {
 
     /// An approved enrolment survives a restart: the window stays open until its end, a waiting
     /// request still waits, and the approved one hands its host the certificate it was issued.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn an_approved_enrolment_survives_a_restart() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1708,7 +1708,7 @@ pub(crate) mod tests {
 
     /// A window whose end passed while the Server was down is closed when it is loaded, and its
     /// requests — an approved one included — expire with it.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_window_whose_end_passed_while_down_is_closed_on_load() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1741,7 +1741,7 @@ pub(crate) mod tests {
 
     /// An act whose result cannot be persisted is not taken: the window stays as it was, and a
     /// decision leaves the request waiting.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn an_act_that_cannot_be_persisted_changes_nothing() {
         // It holds what it wrote, as every store does: an act decides from what is stored.
@@ -2226,8 +2226,8 @@ pub(crate) mod tests {
 
     /// An approval whose commit landed but whose answer was lost is read back: decided with the
     /// certificate signed here, it stands, its register entry is taken up, and nothing is recorded
-    /// as undecided (ADR-0023 clause 9).
-    /// Verifies: ADR-0023
+    /// as undecided (ADR-0039 clause 9).
+    /// Verifies: ADR-0039
     #[test]
     fn a_commit_that_landed_and_whose_answer_was_lost_is_read_back_as_approved() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2250,8 +2250,8 @@ pub(crate) mod tests {
     /// A signature whose decision was not written is recorded as undecided: rolled back when the
     /// store refused the register's write or the request is read back waiting, unknown when it
     /// cannot be read back. The request still waits, and nothing is taken up. A signature the
-    /// audit record did not take is not recorded as undecided either (ADR-0023 clause 9).
-    /// Verifies: ADR-0023
+    /// audit record did not take is not recorded as undecided either (ADR-0039 clause 9).
+    /// Verifies: ADR-0039
     #[test]
     fn a_signature_whose_decision_was_not_written_is_recorded_undecided() {
         for (commit, outcome, error) in [
@@ -2304,8 +2304,8 @@ pub(crate) mod tests {
 
     /// An approval whose answer was lost while another instance decided the request with a
     /// certificate of its own is not taken for its own: the read back finds another certificate,
-    /// so the signature is rolled back and nothing is taken up (ADR-0023 clause 9).
-    /// Verifies: ADR-0023
+    /// so the signature is rolled back and nothing is taken up (ADR-0039 clause 9).
+    /// Verifies: ADR-0039
     #[test]
     fn a_read_back_that_finds_another_certificate_rolls_the_signature_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2327,8 +2327,8 @@ pub(crate) mod tests {
     }
 
     /// A commit the database server itself refused is rolled back as it stands: no read back is
-    /// asked, so one that would fail cannot leave it unknown (ADR-0023 clause 9).
-    /// Verifies: ADR-0023
+    /// asked, so one that would fail cannot leave it unknown (ADR-0039 clause 9).
+    /// Verifies: ADR-0039
     #[test]
     fn a_refusal_the_database_answers_is_rolled_back_without_a_read_back() {
         let dir = tempfile::tempdir().expect("tempdir");

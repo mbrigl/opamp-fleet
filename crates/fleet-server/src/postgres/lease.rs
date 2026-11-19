@@ -276,7 +276,7 @@ impl Database {
             refusal
         })?;
         // From now on this instance's sweeps mark under the lease, so that a sweep of another
-        // instance leaves their marks while it lives (ADR-0023 clause 14).
+        // instance leaves their marks while it lives (ADR-0039 clause 14).
         self.sweep_under(&id);
         Ok(Taken {
             instance_id: id,
@@ -371,7 +371,7 @@ impl Database {
     }
 
     /// The instance ids of the leases that are live: what the cleanup of the staging objects in
-    /// the bucket keeps (ADR-0023 clause 16).
+    /// the bucket keeps (ADR-0039 clause 16).
     ///
     /// # Errors
     /// Returns an error naming the database when it cannot be reached.
@@ -534,7 +534,7 @@ mod tests {
 
     /// The leases that are live are those not lapsed and not released: what the cleanup of the
     /// staging objects keeps.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_live_leases_are_those_neither_lapsed_nor_released() {
         let Some(test) = TestDatabase::named() else {

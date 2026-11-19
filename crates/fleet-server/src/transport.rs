@@ -493,10 +493,10 @@ async fn gateway_revocations(State(state): State<Arc<AppState>>, request: Reques
 
 /// The Gateways' list as its body and its `ETag`. The `ETag` is the SHA-256 of the body, and where
 /// the store keeps the list's one version, as PostgreSQL does, `list-<version>-` before it
-/// (ADR-0023 clause 10). Every instance that holds the same list
+/// (ADR-0039 clause 10). Every instance that holds the same list
 /// at the same version answers the same `ETag`; the hash keeps one version from naming two bodies,
 /// as it would when a Server of 0.8.0 beside this one registered a renewal, which moves no version
-/// (ADR-0023 clause 10). Either way it changes with the list and survives a restart.
+/// (ADR-0039 clause 10). Either way it changes with the list and survives a restart.
 #[must_use]
 pub(crate) fn gateway_list(
     certificates: &[serde_json::Value],
@@ -762,7 +762,7 @@ struct Carrier {
     /// (ADR-0016), so all of them are marked unreachable when it goes.
     seen: Vec<InstanceUid>,
     /// What admitted the connection: re-checked before a CSR is signed, and the presented
-    /// certificate is the predecessor of one it renews (ADR-0023 clause 9 and ADR-0026 clause 28).
+    /// certificate is the predecessor of one it renews (ADR-0039 clause 9 and ADR-0026 clause 28).
     proofs: Proofs,
     /// Where the connection comes from.
     peer: Option<IpAddr>,

@@ -1737,7 +1737,7 @@ async fn delete_package_set(
         Err(e) => return error(StatusCode::BAD_REQUEST, e),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-0023 clause 14).
+    // (ADR-0039 clause 14).
     let deleted = tokio::task::spawn_blocking({
         let id = id.clone();
         move || state.delete_package_set(&id)
@@ -1890,7 +1890,7 @@ async fn delete_package_entry(
         Err((status, why)) => return error(status, why),
     };
     // Off the async threads: the deletion's sweep may wait up to a minute for the blob store's lock
-    // (ADR-0023 clause 14).
+    // (ADR-0039 clause 14).
     let deleted = tokio::task::spawn_blocking({
         let (id, platform) = (id.clone(), platform.clone());
         move || state.delete_package_entry(&id, &platform)
@@ -2308,7 +2308,7 @@ enum Chunk {
     End,
 }
 
-/// The upload as the blob store reads it (ADR-0023 clause 13): the request's chunks, handed over a
+/// The upload as the blob store reads it (ADR-0039 clause 13): the request's chunks, handed over a
 /// channel to the thread the store reads on. A channel that closes before [`Chunk::End`] is a
 /// failed stream — a refused, cut-off or cancelled upload — so the store keeps nothing of it.
 struct ChunkReader {
@@ -2880,7 +2880,7 @@ fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
     Json(DeploymentView::of(deployment, reach)).into_response()
 }
 
-/// The enrolment window as the API answers with it (ADR-0023 clause 8).
+/// The enrolment window as the API answers with it (ADR-0039 clause 8).
 #[derive(Serialize, ToSchema)]
 struct EnrolmentWindow {
     /// Whether a host with a bootstrap certificate may enrol now.
@@ -2988,7 +2988,7 @@ struct IssuedBootstrap {
     certificate_pem: String,
 }
 
-/// A bootstrap certificate on record (ADR-0023 clause 11).
+/// A bootstrap certificate on record (ADR-0039 clause 11).
 #[derive(Serialize, ToSchema)]
 struct BootstrapView {
     serial: String,
@@ -2998,7 +2998,7 @@ struct BootstrapView {
     issued_ms: u64,
     not_after_ms: u64,
     revoked: bool,
-    /// Whether its PKCS#12 file can be downloaded (ADR-0023 clause 11).
+    /// Whether its PKCS#12 file can be downloaded (ADR-0039 clause 11).
     p12: bool,
 }
 
@@ -3147,7 +3147,7 @@ async fn issue_bootstrap_certificate(
 }
 
 /// The PKCS#12 file of a bootstrap certificate, as often as it is asked,
-/// until the certificate ends or is revoked (ADR-0023 clause 11). Each download is on the record.
+/// until the certificate ends or is revoked (ADR-0039 clause 11). Each download is on the record.
 #[utoipa::path(
     get,
     path = "/api/v1/bootstrap-certificates/{serial}/p12",
@@ -3308,7 +3308,7 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// Opens the enrolment window for a bounded time, or moves its end. It is closed by default, and
-/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0023).
+/// persisted before this answers, so a Server restart keeps it open until its end (ADR-0039).
 #[utoipa::path(
     post,
     path = "/api/v1/enrolment/window",
@@ -3559,7 +3559,7 @@ async fn reject_enrolment(
     }
 }
 
-/// One certificate the client CA signed (ADR-0023 clause 9).
+/// One certificate the client CA signed (ADR-0039 clause 9).
 #[derive(Serialize, ToSchema)]
 struct CertificateView {
     /// `client` — the CA that signed it, as a revocation names it.
@@ -4115,7 +4115,7 @@ async fn revoke(
     match outcome {
         Ok(entry) => {
             info!(revocation = %entry.id, "revoked");
-            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0023
+            // A revoked bootstrap certificate's PKCS#12 file goes before the answer (ADR-0039
             // clause 11); the download refuses it either way.
             let crate::revocation::Revoked::Certificate {
                 authority,

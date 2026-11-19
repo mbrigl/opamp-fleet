@@ -1,4 +1,4 @@
-//! Deployments in PostgreSQL (ADR-0023 clause 6): the PostgreSQL adapter behind
+//! Deployments in PostgreSQL (ADR-0039 clause 6): the PostgreSQL adapter behind
 //! [`DeploymentBackend`](crate::deployments::DeploymentBackend) — one row per Deployment and one
 //! per member, each call one transaction on the rows it names
 //! (ADR-0025
@@ -54,7 +54,7 @@ impl DeploymentBackend for PgDeploymentBackend {
             let transaction = client.transaction().await.map_err(sql)?;
             // `packages` and `configurations` mirrored the member rows; no release reads them,
             // so a new row takes their defaults and nothing names them after
-            // (ADR-0023
+            // (ADR-0039
             // clause 22).
             transaction
                 .execute(
@@ -632,14 +632,14 @@ mod tests {
         );
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_deployment_port_contract_holds_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
         contract(&|| Box::new(FsDeploymentBackend::open(dir.path()).expect("open")));
     }
 
-    /// Verifies: ADR-0023, ADR-0025
+    /// Verifies: ADR-0039, ADR-0025
     #[test]
     fn the_deployment_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -650,11 +650,11 @@ mod tests {
         contract(&|| Box::new(PgDeploymentBackend::new(database.clone())));
     }
 
-    /// A stored Deployment is loaded by the rules it was written by (ADR-0023 clause 6). A
+    /// A stored Deployment is loaded by the rules it was written by (ADR-0039 clause 6). A
     /// Package reference with a field no write puts there is refused. A second Package of one
     /// Agent type is refused in the words the write refuses it with, rather than loaded with the
     /// last one kept. Each refusal names the file.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_stored_deployment_is_held_to_the_write_rules_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -697,7 +697,7 @@ mod tests {
     /// The database cannot hold what the filesystem test plants: a Package of a Deployment is a
     /// row of two columns keyed by its Agent type, so a second of one type is refused by the
     /// database itself, and no field beside the two has a place.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_second_package_of_one_agent_type_cannot_be_stored_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(store.load().expect("load"), [before]);
     }
 
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_the_filesystem() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -804,7 +804,7 @@ mod tests {
 
     /// Each write of `canary`'s row and of its member rows is refused: a replacing Package
     /// removes the old row before its insert is refused, and the whole change is refused with it.
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn a_write_that_fails_leaves_the_deployment_as_it_was_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -837,9 +837,9 @@ mod tests {
     /// their defaults, what a release before wrote into them stays as it was through every change
     /// of the members, and with the columns dropped, as the release after this one drops them,
     /// every change and the load still succeed
-    /// (ADR-0023
+    /// (ADR-0039
     /// clause 22).
-    /// Verifies: ADR-0023
+    /// Verifies: ADR-0039
     #[test]
     fn the_mirror_columns_are_written_no_more() {
         let Some(test) = TestDatabase::named() else {
@@ -1041,8 +1041,8 @@ mod tests {
         );
     }
 
-    /// A row that does not decode fails the load naming it (ADR-0023 clause 6).
-    /// Verifies: ADR-0023
+    /// A row that does not decode fails the load naming it (ADR-0039 clause 6).
+    /// Verifies: ADR-0039
     #[test]
     fn a_deployment_row_that_does_not_decode_fails_the_load_naming_it() {
         let Some(test) = TestDatabase::named() else {
