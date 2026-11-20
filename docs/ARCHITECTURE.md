@@ -535,7 +535,7 @@ entry there — `packages` checks the signature against `[packages] verification
 Server holds one, and only reports — then puts the Package into a Deployment with a Selector and
 releases it, together with the Configurations the Deployment holds. The Agent is offered the package
 with its entry's signature; the Client downloads it
-from its own Server's origin and nowhere else, and `api` serves it only when `fleet` finds it
+from its own Server's origin and nowhere else, and `transport` serves it only when `fleet` finds it
 offered to an Agent the certificate's host speaks for, by the test `packages` shares with the
 offer
 ([PKG-signed-packages-and-delivery](adr/PKG-signed-packages-and-delivery.md));

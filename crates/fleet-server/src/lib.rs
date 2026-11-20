@@ -32,6 +32,7 @@ pub mod labels;
 pub mod listen;
 pub mod listing;
 pub mod migrate;
+pub mod operator_cases;
 pub mod packages;
 pub mod pkcs11;
 pub mod pki;
@@ -442,6 +443,7 @@ pub fn agent_app(state: Arc<AppState>, admission: agent_cases::Admission) -> Rou
 /// The **Operator plane** (SEC-tls13-two-planes-bounded-input): the REST API, its OpenAPI document and docs page, and the
 /// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
 /// (SEC-admission-by-client-certificate). Without it the plane is open, which is what its loopback default is for.
-pub fn operator_app(state: Arc<AppState>, auth: Option<api::OperatorAuth>) -> Router {
-    api::router(state, auth)
+pub fn operator_app(state: Arc<AppState>, auth: Option<operator_cases::OperatorAuth>) -> Router {
+    // The plane reaches state through its use cases alone (SRV-two-use-case-layers §5).
+    api::router(Arc::new(operator_cases::OperatorCases::new(state, auth)))
 }

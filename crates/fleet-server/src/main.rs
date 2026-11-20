@@ -1126,7 +1126,7 @@ async fn serve() {
         .rest
         .auth
         .as_ref()
-        .map(fleet_server::api::OperatorAuth::from_config)
+        .map(fleet_server::operator_cases::OperatorAuth::from_config)
         .transpose()
     {
         Ok(auth) => auth.map(|auth| {

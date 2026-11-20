@@ -117,6 +117,10 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // CSRs through `ca` and `tls` and waits on timers, as the code it took from `transport`
             // did, so it is no core module; the plane-reach test gives the use-case layer its own.
             ("agent_cases", Adapter),
+            // The Operator plane's use cases (SRV-two-use-case-layers §1). It checks the plane's
+            // credential through `credentials` and reads the request's headers, as the guard it took
+            // from `api` did, so it is no core module either.
+            ("operator_cases", Adapter),
             ("agent_rate", Core),
             ("agent_store", Core),
             ("audit", Core),

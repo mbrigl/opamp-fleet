@@ -4,9 +4,9 @@
 mod support;
 
 use base64::Engine as _;
-use fleet_server::api::OperatorAuth;
 use fleet_server::config::RestAuthConfig;
 use fleet_server::fleet::{AppState, PackageOffering};
+use fleet_server::operator_cases::OperatorAuth;
 use fleet_server::packages::PackageStore;
 use opamp::uid::InstanceUid;
 use prost::Message as _;
