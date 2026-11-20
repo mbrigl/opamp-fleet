@@ -159,9 +159,8 @@ We will pin one released `opamp-spec` version as the Protocol Baseline, and test
 
 15. **It runs like the service smoke test.**
     - An `#[ignore]`d Rust test drives the scenarios.
-    - A dedicated workflow runs it on a schedule and on demand, never on a
-      commit's arrival or a pull request. So do
-      `crates/fleet-agent/tests/service_smoke.rs` and
+    - A dedicated workflow runs it on a schedule and on demand, never on a commit's arrival or a
+      pull request. So do `crates/fleet-agent/tests/service_smoke.rs` and
       [`service-smoke.yml`](../../.github/workflows/service-smoke.yml).
     - `cargo test --workspace` stays self-contained.
 

@@ -68,12 +68,11 @@ never on a managed host. It shares four items with the Client rather than restat
 - `read_password_file`, which reads a password file as the Client's own setup does;
 - the PKCS#12 reader, which opens a bootstrap PKCS#12 file as the Client's install does.
 
-Taken by depending on the Client, those items would link the whole Client into the tool. Measured
-on 2026-11-15, that added 56 distinct crates only `fleet-agent` brings, among them the OpenTelemetry
-stack,
-`service-manager`, `sysinfo`, `toml_edit`, `tracing-subscriber` and `tracing-appender`. Each would
-sit in the tool's supply chain (Q-3), every change to the Client would recompile the tool, and the
-tool would be built on one of the two ends it serves. `tree`, the links a tree package keeps, is
+Taken by depending on the Client, those items would link the whole Client into the tool. Measured on
+2026-11-15, that added 56 distinct crates only `fleet-agent` brings, among them the OpenTelemetry
+stack, `service-manager`, `sysinfo`, `toml_edit`, `tracing-subscriber` and `tracing-appender`. Each
+would sit in the tool's supply chain (Q-3), every change to the Client would recompile the tool, and
+the tool would be built on one of the two ends it serves. `tree`, the links a tree package keeps, is
 shared the same way: the Client and the tool use it, the Server never does.
 
 **How does a test reach the Client?** Cargo hands a test a helper binary's path

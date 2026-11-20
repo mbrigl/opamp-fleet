@@ -86,8 +86,8 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
 6. **On the Client every entry is written, and only unroled entries configure.**
    - Each entry lands in the Supervisor's configuration directory under its name, so a
      `${file:...}` reference resolves. Only the Client's account writes it. No other account reads
-     it, except the process account's group where a process account runs the Supervisor
-     ([CLT-accounts-service-runs-under §21](CLT-accounts-service-runs-under.md)).
+     it, except the process account where one runs the Supervisor's Managed Process, as
+     [CLT-accounts-service-runs-under §21](CLT-accounts-service-runs-under.md) grants it.
    - The Client records the role of every roled entry beside them in `.supplementary`, one
      `<name> <role>` per line. It writes that file only while some entry has a role.
    - A plugin that configures its process from the entries must leave every roled one out. The

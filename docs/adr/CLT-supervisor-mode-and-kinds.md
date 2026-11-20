@@ -243,8 +243,9 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
    - Plugins are not loaded dynamically.
    - A build's kinds are what its Client Agent reports (clause 18).
    - A build that leaves a kind out carries the same Agent type, and so the same package name, as
-     the full build (clause 24). Its hosts withdraw the consent and are updated through their own
-     channel ([CLT-self-update-signed-package §2](CLT-self-update-signed-package.md)). A
+     the full build (clause 24). An operator may withdraw the consent on its hosts and update them
+     through their own channel
+     ([CLT-self-update-signed-package §2](CLT-self-update-signed-package.md)). A
      self-update into a build that lacks a kind a block on the host names fails its start. It is
      rolled back like any failed attempt
      ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
