@@ -593,9 +593,9 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`. A host name is never
 - **Per-Agent or per-group credentials.** Rejected: identity management that brushes against the
   authorization and tenancy non-goal, beside a certificate that is already per host, short-lived
   and renewed without an operator.
-- **Asking for a fleet credential at install, as optional, for a Server that requires it.**
-  Rejected: the Agent plane reads no credential, and the Server is upgraded first, so the question
-  would teach a setting nothing reads.
+- **Keeping the question for the fleet credential at install, as optional, for an older Server
+  that still requires it.** Rejected: the Agent plane reads no credential, and the Server is
+  upgraded first, so a question kept for older Servers would teach a setting nothing reads.
 - **Removing a leftover `[auth]` section at install, or refusing the file there.** Rejected:
   `install` never rewrites a file that exists
   ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), and refusing the section

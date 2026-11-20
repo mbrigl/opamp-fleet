@@ -396,7 +396,8 @@ service manager perform the restart.
   [`tests/service_smoke.rs`](../../crates/fleet-agent/tests/service_smoke.rs). It runs weekly on
   Windows via [`service-smoke.yml`](../../.github/workflows/service-smoke.yml).
 
-**Not mechanically decidable:** these rest on a timing window or a log line no test reaches.
+**Not mechanically decidable:** these rest on a timing window, a log line or a terminal no test
+reaches.
 
 - No test can hit the window of the non-atomic Windows pointer switch on purpose.
 - The Client names the missing `[packages] verification_key` at startup (clause 2). That is a log

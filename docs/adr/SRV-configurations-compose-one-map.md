@@ -84,8 +84,10 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
    guesses at it. A kind may give a value a meaning of its own, which that kind's ADR decides.
 
 6. **On the Client every entry is written, and only unroled entries configure.**
-   - Each entry lands in the Supervisor's configuration directory under its name, readable and
-     writable by the Client's account alone, so a `${file:...}` reference resolves.
+   - Each entry lands in the Supervisor's configuration directory under its name, so a
+     `${file:...}` reference resolves. Only the Client's account writes it. No other account reads
+     it, except the process account's group where a process account runs the Supervisor
+     ([CLT-accounts-service-runs-under §21](CLT-accounts-service-runs-under.md)).
    - The Client records the role of every roled entry beside them in `.supplementary`, one
      `<name> <role>` per line. It writes that file only while some entry has a role.
    - A plugin that configures its process from the entries must leave every roled one out. The

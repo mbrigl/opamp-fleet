@@ -97,8 +97,8 @@ until it is dropped. A secret here is any of these:
   [DEV-six-crates-tokio-axum §3](DEV-six-crates-tokio-axum.md), supersedes that ADR, and is its own
   decision.
 - Locking secret pages against swap (`mlock`), and excluding them from core dumps.
-- The ciphertext the Server keeps of a bootstrap certificate, which lies on disk under `data_dir`
-  anyway.
+- The ciphertext the Server keeps of a bootstrap certificate, which lies at rest in the Server's
+  store anyway: under `data_dir` with the filesystem store, in the database with PostgreSQL.
 
 ## Alternatives considered
 

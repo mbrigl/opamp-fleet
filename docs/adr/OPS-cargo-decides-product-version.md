@@ -110,8 +110,8 @@ We will take the version number from `Cargo.toml`. The build script of the inter
 7. **A spent number and a disagreement are refused, never resolved.**
    - Before anything is built, the run fails if the tag `version/<version>` or a release of that
      name already exists. It asks for both, because either can exist without the other.
-   - The one exception is a run that a tag made by hand started. That tag does not count as
-     spent.
+   - The one exception is the tag that started a run, made by hand: that tag alone does not count
+     as spent. A release of that name still fails the run.
    - The guard runs on a dry run too. Whether a version can still be released is a property of the
      version.
    - A run that a human-made `version/*` tag started fails unless the tag and `Cargo.toml` agree.

@@ -248,8 +248,8 @@ exception is `gpgv`, for an upstream that signs with OpenPGP.
        half in `[packages] verification_key`. It names `bootstrap.pem` and `bootstrap-key.pem`
        under `--host-path` in `cert_file` and `key_file`, where a host puts the pair the Server
        issues it.
-   - `init` must never write a key of the server CA or a package signing key to `--server-dir` or
-     to a token.
+   - A command of the tool must never write a key of the server CA or a package signing key to
+     `--server-dir` or to a token.
    - Each fragment names its files by the directory they are meant to live in. That is
      `--server-path`, by default the absolute path of `--server-dir`. It is `--host-path`, by
      default the absolute path of `--offline-dir`.
@@ -314,8 +314,8 @@ exception is `gpgv`, for an upstream that signs with OpenPGP.
       label in `bootstrap_ca_key_label`.
     - The command never overwrites a file or a token object.
     - The operator restarts the Server.
-    - Bootstrap certificates from the old CA stop passing the handshake. The Server issues those
-      not yet used again.
+    - Bootstrap certificates from the old CA stop passing the handshake. The operator has those
+      not yet used issued again.
 
 13. **Lifetimes have defaults, each may be overridden, and none runs past the CA.**
     - The server CA and the client CA live 3650 days, the bootstrap CA 365 days, and a server
@@ -532,7 +532,8 @@ exception is `gpgv`, for an upstream that signs with OpenPGP.
       the host.
     - **A home of its own.**
       - The tool writes the keyring and the signature to a directory of the process's own, under
-        the system's temporary directory. Only the process's user may read it. It is `gpgv`'s home.
+        the system's temporary directory, with mode `0700`: no other user may read or write it. It
+        is `gpgv`'s home.
       - The tool names every file to `gpgv` by its absolute path, so `gpgv` reads no keyring and no
         option of the user's.
       - The tool removes the directory after the run.

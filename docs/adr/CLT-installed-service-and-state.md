@@ -326,7 +326,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
       does not inspect them. Whether a root may itself be a link is a question of its own, which
       this clause leaves open.
     - The check holds for a state directory from any source that lies beneath one of the roots. The
-      service's account holds what is under them.
+      service's account owns what is under them.
     - The install refuses a state directory from the file that fails the check. The refusal names
       the directory, why, and `--state-dir`. It comes before the install writes anything.
 
@@ -438,7 +438,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 
 25. **The written file is treated as holding a secret.**
     - On Unix its mode is `0600`.
-    - On Windows it inherits the data root's ACL; at system scope, the administrators hold it.
+    - On Windows it inherits the data root's ACL; at system scope, the administrators own it.
     - It holds no credential.
     - It may name where a client identity's private key lies.
     - It may hold `[packages] archive_key`, the fleet's archive decryption secret. An operator adds

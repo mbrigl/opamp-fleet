@@ -451,7 +451,7 @@ that decides its request, and move an old layout by an offline command.
       deleting that blob once its mark may be taken away, and no entry is written that names a blob
       a sweep may still be deleting once its session ended and its lock is gone. A mark not yet
       renewed for its deletion may be taken away meanwhile, and its sweep then passes over its blob.
-    - Three cases are outside this.
+    - Two cases are outside this.
       - A process may be suspended for longer than 130 seconds while its call to the blob store is
         in flight. It may then delete a blob whose mark another sweep has taken away meanwhile. A
         request sent before the suspend is sent on, or tried again, once the host runs. Nothing in
@@ -619,9 +619,10 @@ that decides its request, and move an old layout by an offline command.
     - The schema is embedded in the binary as numbered migrations. At startup the Server applies,
       in one transaction, every migration the database has not yet seen. It records each in a
       table of its own.
-    - A migration adds tables, columns with defaults, indexes, and a default for a column that has
-      none (`ALTER COLUMN … SET DEFAULT`), which changes no stored row. A migration removes a column
-      or a table only in a release after the one that stopped naming it. Naming counts in every
+    - A migration only adds: tables, columns with defaults, indexes, and a default for a column
+      that has none (`ALTER COLUMN … SET DEFAULT`), which changes no stored row. It changes nothing
+      else, except that a migration removes a column or a table, and only in a release after the
+      one that stopped naming it. Naming counts in every
       statement that release runs while serving.
     - Each migration names the oldest Server version that understands the schema it leaves, and
       the schema table records it. A database whose schema names a version newer than a Server
@@ -986,7 +987,7 @@ monitors a production store or database.
   with no secret on disk.
 - Positive: the ports, the core and the REST API are the same with every store, and the
   filesystem store remains the simplest installation. Several instances share the same adapters
-  and a schema that is migrated additively.
+  and a schema that is migrated in two-release steps.
 - Negative / trade-offs: every installation of the old layout runs `server migrate` once, and
   changes `server.toml` to `data_dir`; the migration cannot place the old Configurations, and the
   operator does it from the list.
@@ -1241,4 +1242,5 @@ Tests that carry `Verifies: SRV-state-stores-contract-pair`:
     finds none of the three columns. It finds migrations 19 and 20 naming 0.8.4 and 0.8.5.
   - `an_instance_of_0_8_6_refuses_to_start_beside_a_live_lease_older_than_0_8_5` in
     [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs): the refusal leaves the
-    schema of 0.8.5 as it was. Beside a lease of 0.8.5 the instance migrates and serves.
+    schema of 0.8.5 as it was, and its message names the lease's release, 0.8.5 and its own.
+    Beside a lease of 0.8.5 the instance migrates and serves.

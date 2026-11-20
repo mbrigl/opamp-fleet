@@ -306,7 +306,7 @@ every change that concerns a live session by one `NOTIFY`.
      sent it, and nothing else.
    - The kinds:
      - an assignment changed;
-     - a Package or Deployment changed;
+     - a Configuration, Package or Deployment changed;
      - a restart requested;
      - a revocation added or lifted;
      - a certificate registered or removed;
@@ -380,7 +380,6 @@ every change that concerns a live session by one `NOTIFY`.
         that lands after that read is taken up by the instance at its next report of the Agent,
         which the database answers. Every instance takes it up at its next lease renewal, except
         for the placement it asks for (clause 9).
-      - A version that does not know the call a notification names reads past it.
     - **A re-key reads back where the row is before it answers.**
       - It reads under a share lock on the old row, which waits for the transaction that moves it,
         and then the new one. Moved, the re-key stands.
@@ -561,6 +560,8 @@ every change that concerns a live session by one `NOTIFY`.
       or a Package takes it out of every Deployment that holds it, in the transaction that deletes
       it.
       - So no Deployment names a member that another instance deleted, and no crash leaves one.
+      - A member that an earlier release left in a Deployment after its deletion stays until it is
+        taken out of the Deployment.
 
 20. **A fleet that loses an instance comes back spread out.** The Agents of a lost instance
     reconnect as [SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md)

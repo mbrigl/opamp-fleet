@@ -1122,7 +1122,7 @@ documented; a reproducible tree mode for `opamp-fleetctl package pack`.
 - OpenTelemetry semantic conventions, attribute registry, `host.arch`
   (<https://opentelemetry.io/docs/specs/semconv/registry/attributes/host/>, read 2026-11-15): the
   well-known values `amd64`, `arm32`, `arm64`, `ia64`, `ppc32`, `ppc64`, `s390x`, `x86`.
-- `open-telemetry/opentelemetry-collector-releases` v0.165.0: the assets
+- `open-telemetry/opentelemetry-collector-releases` v0.165.0: the release files
   `otelcol_0.165.0_linux_armv7.tar.gz` beside `linux_arm64` and `linux_386`.
 - [OpAMP specification § Packages
   (`v0.19.0`)](https://github.com/open-telemetry/opamp-spec/blob/v0.19.0/specification.md),
@@ -1453,8 +1453,11 @@ marker citing this decision ([NUC-decisions-cite-tests §2](NUC-decisions-cite-t
   - The `…/source` route and the Deployment signature routes answer `404`
     (`the_source_route_and_the_deployment_signature_routes_are_gone` in
     [`tests/packages.rs`](../../crates/fleet-server/tests/packages.rs)).
-  - The offered `download_url` is always a path, and a `server.toml` naming `advertised_url` fails
-    startup naming the key (`a_leftover_advertised_url_fails_startup_naming_it` in
+  - The offered `download_url` is always a path
+    (`the_offer_carries_a_download_url_naming_the_identity` in
+    [`packages.rs`](../../crates/fleet-server/src/packages.rs)), and a `server.toml` naming
+    `advertised_url` fails startup naming the key
+    (`a_leftover_advertised_url_fails_startup_naming_it` in
     [`config.rs`](../../crates/fleet-server/src/config.rs)).
   - The Client refuses an absolute `download_url` on another origin without fetching
     (`an_absolute_url_on_another_origin_is_refused_without_a_fetch` in

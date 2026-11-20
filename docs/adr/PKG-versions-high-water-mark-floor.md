@@ -303,10 +303,10 @@ highest floor the operator signed for that type.
     `<serial>` is the serial in the register's lowercase hex form. A file or directory the layout
     does not name, a file that does not parse, or a file whose name disagrees with its content
     fails startup, naming the path. A path of the filesystem layout found under a `data_dir` used
-    with `"postgres"` fails startup naming it and `server migrate-to-postgres`. The one exception
-    is a temporary file the Server's own write left behind, a regular file whose name ends in
-    `.tmp`, whose rename never happened: it is removed at startup, since the record beside it is
-    the one before the write.
+    with `"postgres"` fails startup naming it and `server migrate-to-postgres`, except `blobs/` and
+    `audit/` as the paragraph above admits them. The one other exception is a temporary file the
+    Server's own write left behind, a regular file whose name ends in `.tmp`, whose rename never
+    happened: it is removed at startup, since the record beside it is the one before the write.
 
 **Out of scope:** a deliberate downgrade driven by the Server, which
 [SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md) leaves undecided; a
@@ -442,7 +442,7 @@ Client's signature check decides the rest
     `100.0.0`, it refuses everything below that until an operator lowers the mark on that host
     (clause 12). The way back without host access is a Package under a version above the mistake.
     A floor set too high cannot be taken back from the Server either: each host is
-    lowered by hand, or the operator publishes the old content as a new, greater version.
+    lowered by hand, or the operator releases the old content as a new, greater version.
   - **Two Supervisors of one type share a floor.** On one Client, a new Supervisor of a type cannot
     be started on an older version than another Supervisor of that type has had.
   - **The mark and the floors outlive a reinstall.** `service uninstall` keeps `state_dir`
@@ -518,7 +518,8 @@ Tests that carry `Verifies:` for this decision:
   `the_openapi_document_describes_the_contract` in
   [`tests/rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs).
 - **Server layout:** a `data_dir` holding `agents/`, or `package-floors.json`, used with
-  `store = "postgres"` fails startup naming `server migrate-to-postgres` (clause 23):
+  `store = "postgres"` fails startup naming `server migrate-to-postgres`, while an old `audit/` is
+  kept as the archive and the Server creates none (clause 23):
   `a_data_dir_beside_the_database_holds_the_blobs_alone` in
   [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs).
 - **opamp-fleetctl:** `package sign --version 1.19`, and a signing file with an entry at `1.19`,

@@ -242,7 +242,9 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
    - An unknown `type`, one this build does not carry, fails startup naming the known ones.
    - Plugins are not loaded dynamically.
    - A build's kinds are what its Client Agent reports (clause 18).
-   - A build that leaves a kind out is released under a package name of its own (clause 24). A
+   - A build that leaves a kind out carries the same Agent type, and so the same package name, as
+     the full build (clause 24). Its hosts withdraw the consent and are updated through their own
+     channel ([CLT-self-update-signed-package §2](CLT-self-update-signed-package.md)). A
      self-update into a build that lacks a kind a block on the host names fails its start. It is
      rolled back like any failed attempt
      ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
@@ -963,8 +965,9 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
 - **A feature for `collector` and `command` too.** A build without either has no way left to run
   a Collector or an unwrapped agent; the two are the core's own paths, not a vendor's.
 - **A self-update package derived from the build's kinds.** It names a package per combination of
-  features and decides at build time what the operator decides in `[packages] self_update`; the
-  probation already rolls back a build that cannot read the host's blocks.
+  features, while the package name is the Client's Agent type in every build
+  ([CLT-self-update-signed-package §2](CLT-self-update-signed-package.md)); the probation already
+  rolls back a build that cannot read the host's blocks.
 - **A denylist of dangerous variables alone.** `LD_PRELOAD` is one of many; `PYTHONPATH`,
   `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `BASH_ENV` and every program's own plugin variable reach as
   far, and the list never ends. An allow-list the operator writes ends it; the loader variables are
@@ -1227,8 +1230,8 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
   covers it from the first exchange on. One attribute per kind reads worse than a list.
 - Negative / trade-offs: every combination of features is a build that must keep compiling; the
   gate lints each wrapped kind alone and the build with none beside the default, on Linux. A build
-  with fewer kinds needs its own package name, or its hosts take the full build at the next
-  self-update.
+  with fewer kinds cannot be kept apart by package name: its hosts withdraw the consent
+  (`self_update = false`), or they take the full build at the next self-update.
 - Negative / trade-offs: a kind is coupled to one artifact's shape; "bring your own tree" is a
   packaging question, not a configuration one. The documents' prose has no test behind it.
 - Negative / trade-offs: a program installed by the machine cannot be supervised; adopting a host

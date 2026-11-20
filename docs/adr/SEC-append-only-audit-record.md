@@ -42,9 +42,10 @@ Two forces bound the design:
 - A refused admission is the cheapest thing a remote peer can cause. A record per refusal must not
   let a flood fill the disk.
 - The record must not leak what it records: no secret, no key, no CSR body. The Agent plane reads
-  no `Authorization` header, but a Client may still send one unasked. Beyond the loopback a request
-  on the Operator plane carries the operator's credential, which the specification's *Threats &
-  Forbidden Actions* name for protection. Neither may reach the record.
+  no `Authorization` header, but a Client may still send one unasked. A request on the Operator
+  plane carries the operator's credential beyond the loopback, and on it too where `[rest.auth]` is
+  set. The specification's *Threats & Forbidden Actions* name that credential for protection.
+  Neither may reach the record.
 
 Where the record is kept, in files or in PostgreSQL, its permissions, how it is written and how
 long it goes back are part of the Server's state and its stores

@@ -206,7 +206,8 @@ repository. It fails when the commented tag does not exist or does not peel to t
   - an uppercase SHA.
 - `actions/checkout` on a SHA fails, and `github/codeql-action/init@v3` fails as third-party
   (clauses 1, 2).
-- A reusable workflow under `.github/workflows/w.yml`, pinned by SHA with `# v1.2.3`, passes.
+- A third-party reusable workflow, `<account>/<repo>/.github/workflows/w.yml@<sha> # v1.2.3`,
+  passes.
 - Under `--resolve`, with a stub `git` on `PATH`:
   - a lightweight tag that matches passes;
   - an annotated tag whose peeled commit matches passes;

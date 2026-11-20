@@ -655,8 +655,8 @@ release nothing that does not verify. The run ships:
   [`config.rs`](../../crates/fleet-server/src/config.rs). The test of the Containerfile above
   allows no `FLEET_SERVER__DATA_DIR`.
 
-**Not mechanically decidable:** these hold only against a real release on GitHub, which no
-test makes.
+**Not mechanically decidable:** these hold only against a real release on GitHub, or only in
+the judgement of a review, which no test makes.
 
 - That a real release's files and the image's digest verify on GitHub. Clause 12's step in
   `publish` holds it at release time: it fails the release and leaves the image untagged.

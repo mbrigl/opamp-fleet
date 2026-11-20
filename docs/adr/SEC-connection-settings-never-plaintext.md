@@ -186,8 +186,8 @@ message would be an error.
 9. **The Client persists what is in force as `connection-settings.pb`, and the file outranks
    `supervisor.toml`.**
    - The file in `state_dir` is the Baseline's own `ConnectionSettingsOffers`. It holds the merged
-     settings in force and the hash that reports them `APPLIED`. The Client writes it readable by no
-     account but its own.
+     settings in force and the hash that reports them `APPLIED`. The Client writes it with no access
+     for any other account: mode `0600` on Unix.
    - OpAMP fields fold: an offer that omits a field leaves the one in force.
    - The file carries an `opamp` block only when an offer, or the state it folds into, had one.
    - How the telemetry destinations fold is
