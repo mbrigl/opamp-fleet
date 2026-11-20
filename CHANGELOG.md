@@ -17,8 +17,6 @@ carries a date once its tag exists.
 
 ## [0.8.7]
 
-## [0.8.6] - 2026-11-19
-
 ### Added
 
 - **Icinga 2 is managed by the fleet, end to end** — a new Supervisor kind `icinga2`, compiled into
@@ -80,6 +78,8 @@ carries a date once its tag exists.
   - **A repack follows no link out of the unpacked packages**
     ([OPS-operator-program-fleetctl §27](docs/adr/OPS-operator-program-fleetctl.md)): one that leads
     out fails it, naming the link.
+
+## [0.8.6] - 2026-11-19
 
 ### Fixed
 
