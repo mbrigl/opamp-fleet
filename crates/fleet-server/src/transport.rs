@@ -9,11 +9,10 @@
 //! every decoded report to [`AgentCases`], so transport is carriage, never semantics. Every route
 //! of the plane reaches state through [`AgentCases`] alone (SRV-two-use-case-layers §2).
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path, Query, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -29,6 +28,7 @@ use crate::agent_cases::{
     AgentCases, ArtifactRefused, Connection, DownloadRefused, Proofs, Push, Refused, Session,
     FORGOTTEN,
 };
+use crate::answers::{busy, peer_ip, throttled};
 use crate::packages::{PackageId, Platform};
 use crate::tls::Peer;
 
@@ -268,25 +268,6 @@ async fn package_floors(State(cases): State<Arc<AgentCases>>, request: Request) 
     }
 }
 
-/// The peer's address, as the listener put it into the request.
-pub fn peer_ip(request: &Request) -> Option<std::net::IpAddr> {
-    request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip())
-}
-
-/// The answer while the Server cannot take a decision now — too many password hashes under way on
-/// the Operator plane, or the audit record unavailable: `503`, try again in a second.
-pub fn busy() -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        [(header::RETRY_AFTER, "1".to_string())],
-        "the Server cannot take this now — retry in a moment",
-    )
-        .into_response()
-}
-
 /// The answer to a download past the sender's rate (SEC-tls13-two-planes-bounded-input §26): `429`, retry in 30 s.
 fn over_rate() -> Response {
     (
@@ -296,16 +277,6 @@ fn over_rate() -> Response {
             crate::fleet::RETRY_AFTER.as_secs().to_string(),
         )],
         "too many requests from this sender — retry later",
-    )
-        .into_response()
-}
-
-/// The answer to a peer in back-off: `429` with the seconds it still has to wait.
-pub fn throttled(retry_after: u64) -> Response {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        [(header::RETRY_AFTER, retry_after.to_string())],
-        "too many failed attempts from this address — retry later",
     )
         .into_response()
 }

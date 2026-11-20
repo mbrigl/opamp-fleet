@@ -77,7 +77,7 @@ async fn record_act(
     ) {
         return next.run(request).await;
     }
-    let peer = crate::transport::peer_ip(&request);
+    let peer = crate::answers::peer_ip(&request);
     let operator = basic_user(request.headers());
     let path = request.uri().path().to_string();
     let entry = |event: &str, outcome: &str| {
@@ -89,7 +89,7 @@ async fn record_act(
             .with("path", path.clone())
     };
     if cases.record(entry("operator.act", "requested")).is_err() {
-        return crate::transport::busy();
+        return crate::answers::busy();
     }
     let response = next.run(request).await;
     cases.note(entry("operator.act", "completed").with("status", response.status().as_u16()));
@@ -118,12 +118,12 @@ async fn authenticate(
     request: Request,
     next: Next,
 ) -> Response {
-    let peer = crate::transport::peer_ip(&request);
+    let peer = crate::answers::peer_ip(&request);
     let operator = basic_user(request.headers());
     match cases.sign_in(peer, operator, request.headers()).await {
         SignIn::Admitted => next.run(request).await,
-        SignIn::Throttled(wait) => crate::transport::throttled(wait),
-        SignIn::Busy => crate::transport::busy(),
+        SignIn::Throttled(wait) => crate::answers::throttled(wait),
+        SignIn::Busy => crate::answers::busy(),
         // The challenge is what turns this into a browser prompt rather than a dead end.
         SignIn::Refused(challenge) => (
             StatusCode::UNAUTHORIZED,
@@ -2020,7 +2020,7 @@ async fn put_package_floor(
     // A floor is set only with its entry's place held, so a restore finds every floor raised;
     // only one known to have failed gives the place back unwritten.
     let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+        return crate::answers::busy();
     };
     let floor_entry = |outcome: &str| {
         crate::audit::Entry::new("package_floor.set", outcome)
@@ -3149,7 +3149,7 @@ async fn close_enrolment_window(State(state): State<Arc<OperatorCases>>) -> Resp
     // The window is closed only with its entry's place held. It is closed here whatever the store
     // answers, so the entry says `closed` either way.
     let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+        return crate::answers::busy();
     };
     let Some((expired, saved)) = state.close_enrolment_window() else {
         return enrolment_off();
@@ -3305,7 +3305,7 @@ async fn reject_enrolment(
     // A request is rejected only with its entry's place held, so a restore rejects it again; only
     // a rejection known to have failed gives the place back unwritten.
     let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+        return crate::answers::busy();
     };
     let rejection = |outcome: &str| {
         crate::audit::Entry::new("enrolment.rejected", outcome)
@@ -3740,7 +3740,7 @@ async fn set_gateway(
     // A mark is set or cleared only with its entry's place held, so a restore finds every mark
     // cleared; only a change known to have failed gives the place back unwritten.
     let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+        return crate::answers::busy();
     };
     let mark = |outcome: &str| {
         crate::audit::Entry::new("host.gateway", outcome)
@@ -3895,7 +3895,7 @@ async fn revoke(
     // A revocation is made only with its entry's place held, so the record names every certificate
     // revoked; only one known to have failed gives the place back unwritten.
     let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+        return crate::answers::busy();
     };
     let Some(outcome) =
         state.revoke_certificate(&request.certificate.authority, &request.certificate.serial)

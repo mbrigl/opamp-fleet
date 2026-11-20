@@ -8,6 +8,7 @@
 pub mod agent_cases;
 pub mod agent_rate;
 pub mod agent_store;
+pub mod answers;
 pub mod api;
 pub mod audit;
 pub mod audit_export;

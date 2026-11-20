@@ -675,7 +675,7 @@ async fn every_mutating_operation_of_the_document_names_its_503() {
                 continue;
             }
             mutating += 1;
-            // As the Server answers it (`transport::busy`): plain text, with when to ask again.
+            // As the Server answers it (`answers::busy`): plain text, with when to ask again.
             let busy = &operation["responses"]["503"];
             if busy["content"].get("text/plain").is_none()
                 || busy["headers"].get("Retry-After").is_none()
