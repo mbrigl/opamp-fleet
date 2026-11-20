@@ -398,76 +398,87 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 ### Transport and the two planes
 
 1. **One endpoint, both transports, detected per request.** The Server serves `/v1/opamp` on its
-   Agent plane. A WebSocket upgrade (`GET`) starts the WebSocket transport, a `POST` carrying
-   `Content-Type: application/x-protobuf` is one plain-HTTP exchange, and a `POST` without that
-   type is answered `415`. Both hand every decoded report to the same processing, so transport is
-   carriage, never semantics.
+   Agent plane.
+   - A WebSocket upgrade (`GET`) starts the WebSocket transport.
+   - A `POST` carrying `Content-Type: application/x-protobuf` is one plain-HTTP exchange.
+   - A `POST` without that type is answered `415`.
+
+   Both transports hand every decoded report to the same processing, so transport is carriage,
+   never semantics.
 
 2. **The Client selects the transport by its endpoint's scheme.** `ws://` and `wss://` are
-   WebSocket, `http://` and `https://` are polling; any other scheme fails at startup. `ws://` and
-   `http://` are accepted only when the endpoint's host is LOOPBACK; any other host fails at
+   WebSocket, `http://` and `https://` are polling. Any other scheme fails at startup. The Client
+   accepts `ws://` and `http://` only when the endpoint's host is LOOPBACK. Any other host fails at
    startup with a message naming the endpoint. The default endpoint is
    `wss://127.0.0.1:4320/v1/opamp`, so WebSocket over TLS is the default: it is the only transport
-   that delivers Server-initiated changes without polling latency. `poll_interval_secs` (default
-   30) governs polling. `heartbeat_interval_secs` (default 30; `0` disables heartbeats and
-   undeclares `ReportsHeartbeat`) governs WebSocket. A heartbeat the Server offers replaces both
-   ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)).
+   that delivers Server-initiated changes without polling latency.
+   - `poll_interval_secs` (default 30) governs polling.
+   - `heartbeat_interval_secs` (default 30) governs WebSocket. `0` disables heartbeats and
+     undeclares `ReportsHeartbeat`.
+   - A heartbeat the Server offers replaces both
+     ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)).
 
 3. **Gzip and a message size limit on both transports.** The Server accepts gzip request bodies
-   (a Baseline MUST) and enforces `max_message_size_bytes` (default 64 MiB, `0` refused at
-   startup) in both directions and on both transports, applied after decompression: `413` on plain
-   HTTP, a `1009` close on WebSocket, and an oversized reply is discarded rather than sent. The
-   shared helpers that implement this live in `crates/opamp`
+   (a Baseline MUST). It enforces `max_message_size_bytes` (default 64 MiB, `0` refused at
+   startup) in both directions and on both transports, applied after decompression:
+   - an oversized request is answered `413` on plain HTTP;
+   - an oversized message closes a WebSocket with `1009`;
+   - an oversized reply is discarded rather than sent.
+
+   The shared helpers that implement this live in `crates/opamp`
    ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
 
 4. **Reconnection belongs to the Client's transport layer, and a fleet comes back spread out.**
    - The first reconnect after an established connection is lost — cut, or closed by a Server
      that shuts down — waits a delay drawn uniformly over `[0, 30 s)`. A failed attempt after it
-     is retried with exponential backoff from one second, capped at one minute, with equal jitter,
-     which the Baseline asks for so that a restarted Server is not hit by the whole fleet on the
-     same instants. The first draw starts at zero, unlike the equal jitter of the later steps,
-     because that jitter's floor is what puts a whole fleet into the same half second after a
+     is retried with exponential backoff from one second, capped at one minute, with equal
+     jitter. The Baseline asks for jitter so that the whole fleet does not hit a restarted Server
+     on the same instants. The first draw starts at zero, unlike the equal jitter of the later
+     steps. That jitter's floor would put a whole fleet into the same half second after a
      restart. Thirty seconds is the default heartbeat interval, and an Agent whose connection
      dropped alone waits 15 seconds on average.
    - The Server completes at most `max_new_connections_per_sec` (default 200) new Agent-plane
      connections a second, each a full TLS 1.3 handshake and admission; that is the rate it must
      absorb. It counts connections, not requests, so the routine polls of a large fleet are never
-     refused. A connection past it completes its handshake, is offered HTTP/1.1 alone, and is
-     answered `503` to every request, a WebSocket upgrade before it completes, with a
-     `Retry-After` of whole seconds drawn uniformly from 1 to 30, and then closed; HTTP/2 has no
-     way to close a connection after one answer, and a pooled one would be refused for as long as
-     it lived. The refused peers come back spread rather than together. A fleet of more than 6 000
-     Agents meets the bound after a restart, and its `Retry-After` spreads it further. The bound
-     limits the admissions, not the handshakes: a refused connection still costs one.
-   - The Client honours `Retry-After` on a refused upgrade as it does on plain HTTP: a `429` or
+     refused. A connection past it completes its handshake and is offered HTTP/1.1 alone. Every
+     request on it, a WebSocket upgrade before it completes, is answered `503`. The answer carries
+     a `Retry-After` of whole seconds drawn uniformly from 1 to 30, and the connection is then
+     closed. HTTP/2 has no way to close a connection after one answer, and a pooled one would be
+     refused for as long as it lived. The refused peers come back spread rather than together. A
+     fleet of more than 6 000 Agents meets the bound after a restart, and its `Retry-After`
+     spreads it further. The bound limits the admissions, not the handshakes: a refused
+     connection still costs one.
+   - The Client honours `Retry-After` on a refused upgrade as it does on plain HTTP. A `429` or
      `503` waits the `Retry-After` it carries, or the next backoff step when it carries none,
      whichever is longer.
    - After a reconnect the Client sends a full status report. The Server keys no state on the
-     connection ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)).
+     connection ([CLT-modes-and-gateway §3](CLT-modes-and-gateway.md)).
 
 5. **TLS is TLS 1.3 alone, on rustls with the `ring` provider, everywhere; no OpenSSL, no system
-   TLS library.** `reqwest` requires the `tls12` feature of `rustls`, so the floor is held where
-   every configuration is built rather than by the build. `opamp::tls::provider()` is the `ring`
-   provider with the three TLS 1.3 suites and nothing else: `TLS13_AES_256_GCM_SHA384`,
-   `TLS13_AES_128_GCM_SHA256` and `TLS13_CHACHA20_POLY1305_SHA256`. Every rustls configuration of
-   both ends is built from it with the protocol versions pinned to TLS 1.3
-   ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
-   Each binary installs it process-wide at
-   startup, and every `reqwest` client is built with a minimum of TLS 1.3. This covers every
-   connection: OpAMP, the REST API, downloads, mirrors, own telemetry and the Server's connections
-   to its stores. `axum-server` (`tls-rustls-no-provider`) terminates TLS on the Server,
-   `tokio-tungstenite` (`rustls-tls-webpki-roots`) carries `wss://`, and `reqwest`
-   (`rustls-no-provider`, `gzip`) carries `https://`. The `*-no-provider` features keep
-   `aws-lc-rs` out of the build, so a missing provider is an error, never a silent fallback.
-   Without `[tls] ca_file` a Client trusts the built-in webpki roots on `wss://` and the
-   platform's trust store on `https://`, the default `reqwest` takes. With it, that bundle
-   replaces both, so self-signed deployments work; trust is the operator's file, never a Server's
-   instruction.
+   TLS library.** `reqwest` requires the `tls12` feature of `rustls`, so the code holds the floor
+   where it builds every configuration rather than in the build.
+   - `opamp::tls::provider()` is the `ring` provider with the three TLS 1.3 suites and nothing
+     else: `TLS13_AES_256_GCM_SHA384`, `TLS13_AES_128_GCM_SHA256` and
+     `TLS13_CHACHA20_POLY1305_SHA256`.
+   - Every rustls configuration of both ends is built from it with the protocol versions pinned
+     to TLS 1.3 ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
+   - Each binary installs it process-wide at startup, and every `reqwest` client is built with a
+     minimum of TLS 1.3.
+   - This covers every connection: OpAMP, the REST API, downloads, mirrors, own telemetry and the
+     Server's connections to its stores.
+   - `axum-server` (`tls-rustls-no-provider`) terminates TLS on the Server, `tokio-tungstenite`
+     (`rustls-tls-webpki-roots`) carries `wss://`, and `reqwest` (`rustls-no-provider`, `gzip`)
+     carries `https://`. The `*-no-provider` features keep `aws-lc-rs` out of the build, so a
+     missing provider is an error, never a silent fallback.
+   - Without `[tls] ca_file` a Client trusts the built-in webpki roots on `wss://` and the
+     platform's trust store on `https://`, the default `reqwest` takes. With it, that bundle
+     replaces both, so self-signed installations work. Trust is the operator's file, never a
+     Server's instruction.
 
 6. **Plaintext on LOOPBACK alone, refused at startup elsewhere.** A listener without TLS is
    accepted only on a LOOPBACK address. `opamp`'s `Listener::serve` refuses a plaintext listener
    on any other address, and `opamp::client::connection` refuses `ws://` or `http://` to any other
-   host. Each end refuses such a configuration at startup with a message naming the setting; it
+   host. Each end refuses such a configuration at startup with a message naming the setting. It
    never warns and continues.
 
 7. **Two listeners, split by audience rather than by path.**
@@ -477,29 +488,30 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
    | Agent | `listen` | `127.0.0.1:4320` | always | `/v1/opamp`, the package download route, and the Gateways' revocation list (clause 63) |
    | Operator | `[rest] listen` | `127.0.0.1:4321` | always | `/api/v1/…`, `/api/v1/openapi.json`, `/api/v1/docs` with its vendored Redoc bundle, and the bundled UI at `/` |
 
-   The Agent plane listens on LOOPBACK by default. Serving the estate is one deliberate line in
-   `server.toml`, together with the TLS material it needs. `[rest]` is a table so that the plane's
-   own settings (its authentication,
-   clauses 42 and 71 to 75,
-   and its connection cap)
-   live inside it; unknown keys are refused as everywhere
-   ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
-   The router is split accordingly:
+   The bundled UI is the rudimentary one the specification's Non-Goal *Shipping a production UI*
+   leaves to the Server. The Agent plane listens on LOOPBACK by default. Serving the estate is one
+   deliberate line in `server.toml`, together with the TLS material it needs. `[rest]` is a table
+   so that the plane's own settings live inside it: its authentication
+   (clause 42) and its
+   connection cap. Unknown keys are refused as everywhere
+   ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)). The router is split accordingly:
    `fleet_server::agent_app(state, admission)` and `fleet_server::operator_app(state, auth)`.
 
 8. **The Operator plane is loopback by default.** Its reachability is its first protection; a
    network-open default would export the fleet's full control surface. Reaching it from elsewhere
-   is one deliberate line in `server.toml`, or an SSH tunnel. It serves TLS with the material
-   clause 9 gives it, on every address. Off LOOPBACK it requires authentication as the admission
-   decision states; a Server lacking it is refused at startup.
+   takes one deliberate line in `server.toml`, or an SSH tunnel. It serves TLS with the material
+   clause 9 gives it, on every address. Off LOOPBACK it requires authentication as
+   clause 42 states. A
+   Server lacking it is refused at startup.
 
 9. **`[tls]` is required and serves the Agent plane, and the Operator plane too unless
-   `[rest.tls]` is present.** `[tls] cert_file` and `key_file` serve the Agent plane, with ALPN
-   `h2` and `http/1.1`. A Server without `[tls]` is refused at startup with a message naming the
-   section. `[tls] client_ca_file` applies to the Agent plane alone, and what it requires is
-   decided by clauses 34 and 35.
-   Without `[rest.tls]`, the Operator plane serves `[tls] cert_file` and `key_file` as well, with
-   the same ALPN.
+   `[rest.tls]` is present.**
+   - `[tls] cert_file` and `key_file` serve the Agent plane, with ALPN `h2` and `http/1.1`.
+   - A Server without `[tls]` is refused at startup with a message naming the section.
+   - `[tls] client_ca_file` applies to the Agent plane alone, and what it requires is decided by
+     [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md).
+   - Without `[rest.tls]`, the Operator plane serves `[tls] cert_file` and `key_file` as well,
+     with the same ALPN.
 
 10. **`[rest.tls]` holds `cert_file` and `key_file`, both required, and nothing else.**
     `cert_file` is a PEM chain, the leaf first and any intermediates after it. `key_file` is its
@@ -507,30 +519,35 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     Operator plane asks for no client certificate. The Operator plane serves the pair with ALPN
     `h2` and `http/1.1` and TLS 1.3 alone, as clause 5 decides for every listener.
 
-11. **The `[rest.tls]` pair is checked at startup as `[tls]`'s is.** A file that cannot be read, a
-    `cert_file` with no certificate, a `key_file` with no usable private key, and a key that does
-    not match the certificate each refuse the start with a message naming the file. The Server
-    checks nothing else about the certificate: not its names, not its issuer, and not its naming.
-    It is the operator's PKI that answers for those.
+11. **The `[rest.tls]` pair is checked at startup as `[tls]`'s is.** Each of the following refuses
+    the start with a message naming the file:
+    - a file that cannot be read;
+    - a `cert_file` with no certificate;
+    - a `key_file` with no usable private key;
+    - a key that does not match the certificate.
 
-12. **A new `[rest.tls]` certificate takes effect when the Server restarts.** The files are read
-    once, at startup. Replacing them changes nothing that is served until the next start.
+    The Server checks nothing else about the certificate: not its names, not its issuer, and not
+    its naming. The operator's PKI answers for those.
+
+12. **A new `[rest.tls]` certificate takes effect when the Server restarts.** The Server reads the
+    files once, at startup. Replacing them changes nothing that is served until the next start.
 
 13. **`[rest.tls] cert_file` is a certificate the Server depends on.** `server pki status` lists
-    it, and the running Server warns before it ends, at startup and daily, under the expiry rule
-    of [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md). A file named in both
+    it. The running Server warns before it ends, at startup and daily, under the expiry rule of
+    [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md). A file named in both
     `[tls]` and `[rest.tls]` is listed once.
 
 14. **Two listeners always; addresses that cannot both be bound fail at startup.** There is no
-    single-port mode. The same port on the same address, or on an address that covers every
-    interface (`0.0.0.0:4320` and `127.0.0.1:4320`), is refused at load with a message naming both
-    keys. Both listeners are bound before either serves, and a bind failure names the plane.
+    single-port mode. The Server refuses at load the same port on the same address, or on an
+    address that covers every interface (`0.0.0.0:4320` and `127.0.0.1:4320`). Its message names
+    both keys. Both listeners are bound before either serves, and a bind failure names the
+    plane.
 
 15. **Every plane's server is built in one place, and 30 seconds bound the time to a
-    connection's first request and to each HTTP/1 header read.** `listen::plane` serves both planes
-    on `opamp::server::listen` ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)), which
-    serves plain and TLS through `axum_server`. Its `bounded` sets `HEADER_READ_TIMEOUT`, 30 seconds
-    and hyper's own default, in two places on every listener:
+    connection's first request and to each HTTP/1 header read.** `listen::plane` serves both
+    planes on `opamp::server::listen` ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)),
+    which serves plain and TLS through `axum_server`. Its `bounded` sets `HEADER_READ_TIMEOUT`, 30
+    seconds and hyper's own default, in two places on every listener:
     - as the HTTP/1 `header_read_timeout`, with `hyper_util::rt::TokioTimer` installed on the
       HTTP/1 builder;
     - as `axum_server`'s `first_request_timeout`, which bounds the time to a connection's first
@@ -543,48 +560,52 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     `hyper-util` is a dependency of `opamp`'s `server` feature for this.
 
 16. **The TLS handshake deadline is stated, not inherited.** `TLS_HANDSHAKE_TIMEOUT` is 10 seconds
-    on both planes' acceptors: `axum_server`'s default value, named in this code so it reads as a
-    decision.
+    on both planes' acceptors. It is `axum_server`'s default value, named in this code so that it
+    reads as a decision.
 
-17. **Shutdown is one bounded drain for both planes.** One `Handle` is shared by both listeners. A
-    stop closes both listeners at once and tells each WebSocket session to close at an instant
-    drawn uniformly over `drain_secs`
-    ([SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md));
-    whatever has not ended 2 seconds after that window is cut, and the Agent-record flush
-    of [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md) runs afterwards.
+17. **Shutdown is one bounded drain for both planes.** Both listeners share one `Handle`. A stop
+    closes both listeners at once. It tells each WebSocket session to close at an instant drawn
+    uniformly over `drain_secs`
+    ([SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md)). Whatever has
+    not ended 2 seconds after that window is cut. The Agent-record flush of
+    [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md) runs afterwards.
 
 18. **No request timeout, but a floor on the pace of every body and every message; no
-    `tower-http`, no `server.toml` key for these bounds.** The long routes stay long: nothing has
-    a deadline, and a connection with nothing in flight (an idle WebSocket session between
-    messages, a keep-alive connection between requests) is not bounded by this clause. A request
-    body begins when its headers end, and a WebSocket message with its first byte. From then on
-    it must deliver at least `MIN_PACE_BYTES` (64 KiB) within every `PACE_WINDOW` (60 s), each
-    window measured from the end of the one before, or have ended. A body announced in the headers
-    but never sent is therefore bounded as one that stops. A body that falls behind is answered
-    `408` and whatever was staged from it is removed; a WebSocket message that falls behind closes
-    its connection with `1008`. The floor holds on every listener `opamp`'s server serves (the
-    Agent plane, the Operator plane, the Gateway endpoint and the Supervisor Endpoint), for every
-    route, the package upload included, and on both HTTP versions. The two values are named
-    constants, the same everywhere: a knob is added when a deployment needs a value other than
-    these, not before.
+    `tower-http`, no `server.toml` key for these bounds.**
+    - The long routes stay long: nothing has a deadline. This clause does not bound a connection
+      with nothing in flight, such as an idle WebSocket session between messages or a keep-alive
+      connection between requests.
+    - A request body begins when its headers end, and a WebSocket message with its first byte.
+      From then on it must deliver at least `MIN_PACE_BYTES` (64 KiB) within every `PACE_WINDOW`
+      (60 s), or have ended. Each window is measured from the end of the one before. A body
+      announced in the headers but never sent is therefore bounded as one that stops.
+    - A body that falls behind is answered `408`, and whatever was staged from it is removed. A
+      WebSocket message that falls behind closes its connection with `1008`.
+    - The floor holds on every listener `opamp`'s server serves: the Agent plane, the Operator
+      plane, the Gateway endpoint and the Supervisor Endpoint. It holds for every route, the
+      package upload included, and on both HTTP versions.
+    - The two values are named constants, the same everywhere. A knob is added when an
+      installation needs a value other than these, not before.
 
 19. **A connection cap per plane.** `max_connections` caps the Agent plane (default 10 000) and
-    `[rest] max_connections` the Operator plane (default 256); `0` is refused at startup. The cap
-    is applied in the accept loop of `opamp`'s listener. A connection past the cap is closed on
-    accept, before the TLS handshake, while the connections already established keep working. A
-    fleet larger than the default raises the key together with the process's file-descriptor
-    limit. Where several instances serve one fleet
-    ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)),
-    each connection cap counts the connections of one instance, and `max_agents` counts the Agent
-    records stored, for the whole fleet. A fleet with more connections than one instance's cap is
-    spread over enough instances, or the cap is raised.
+    `[rest] max_connections` the Operator plane (default 256). `0` is refused at startup.
+    - The accept loop of `opamp`'s listener applies the cap. A connection past the cap is closed on
+      accept, before the TLS handshake, while the connections already established keep working.
+    - A fleet larger than the default raises the key together with the process's file-descriptor
+      limit.
+    - Where several instances serve one fleet
+      ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)), each
+      connection cap counts the connections of one instance. `max_agents` counts the Agent records
+      stored, for the whole fleet. A fleet with more connections than one instance's cap is spread
+      over enough instances, or the cap is raised.
 
 20. **HTTP/2 is bounded on every listener.** `opamp`'s listener sets the HTTP/2 builder of every
     listener it serves, so every TLS listener, where ALPN offers `h2`, carries the bounds.
-    `H2_MAX_CONCURRENT_STREAMS` is 100 per connection. A keep-alive ping is sent every
-    `H2_KEEP_ALIVE_INTERVAL` (30 s), and a peer that leaves one unanswered for
-    `H2_KEEP_ALIVE_TIMEOUT` (20 s) is dropped. They are named constants, not keys, as clause 18
-    states for the HTTP/1 bound.
+    - `H2_MAX_CONCURRENT_STREAMS` is 100 per connection.
+    - A keep-alive ping is sent every `H2_KEEP_ALIVE_INTERVAL` (30 s).
+    - A peer that leaves one unanswered for `H2_KEEP_ALIVE_TIMEOUT` (20 s) is dropped.
+
+    They are named constants, not keys, as clause 18 states for the HTTP/1 bound.
 
 21. **The Server dials only what its configuration names, for a purpose an ADR in force decides,
     over TLS 1.3.** Each outbound connection runs over the provider of clause 5, and plaintext
@@ -607,16 +628,16 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     | Key | Default | Rule |
     |---|---|---|
     | `messages_per_sec` | `10` | Tokens added to a host's or an Agent's bucket per second, continuously. `0` is refused at startup with a message naming the key. |
-    | `burst` | `300` | That bucket's capacity, enough for one full report from each of the 256 Agents a host may speak for (SEC-bootstrap-certificates-and-enrolment §11) after a reconnect. A new bucket starts full. `0` is refused at startup with a message naming the key. |
+    | `burst` | `300` | That bucket's capacity, enough for one full report from each of the 256 Agents a host may speak for ([SEC-bootstrap-certificates-and-enrolment §11](SEC-bootstrap-certificates-and-enrolment.md)) after a reconnect. A new bucket starts full. `0` is refused at startup with a message naming the key. |
     | `gateway_messages_per_sec` | `500` | Tokens added per second to the aggregate bucket of a host marked as a Gateway. `0` is refused at startup with a message naming the key. |
-    | `gateway_burst` | `10000` | The aggregate bucket's capacity: one full report from each Agent at the default `max_carried_agents` (CLT-modes-and-gateway). `0` is refused at startup with a message naming the key. |
+    | `gateway_burst` | `10000` | The aggregate bucket's capacity: one full report from each Agent at the default `max_carried_agents` ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)). `0` is refused at startup with a message naming the key. |
 
 23. **The Server warns when the limit is below what the fleet's heartbeat needs.**
     `messages_per_sec` times the offered `[connection_offer] heartbeat_interval_secs` is the number
-    of Agents one host can report for at that interval. Without an offer, the Baseline's 30 s is
-    used. When that product is below 256, the Server logs a warning at startup naming both keys.
-    It is a warning, not a refusal: a limit set too low costs availability, not security. At the
-    defaults the product is 300.
+    of Agents one host can report for at that interval. Without an offer, the Server uses the
+    Baseline's 30 s. When that product is below 256, the Server logs a warning at startup naming
+    both keys. It is a warning, not a refusal: a limit set too low costs availability, not
+    security. At the defaults the product is 300.
 
 24. **What is counted.** Each of the following costs one token, on every connection that passed
     admission:
@@ -628,8 +649,9 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 
     On `/v1/opamp` the check runs first in `on_message`: before enrolment, before a CSR is read,
     and before `process_presented` takes the fleet lock. On the download route it runs in
-    `admit_download` once the certificate is admitted, before the route's handler. Which bucket a
-    message or a download is counted in is [CLT-modes-and-gateway](CLT-modes-and-gateway.md)'s.
+    `admit_download` once the certificate is admitted, before the route's handler.
+    [CLT-modes-and-gateway §26](CLT-modes-and-gateway.md) decides which bucket a message or a
+    download is counted in.
 
     Not counted: a WebSocket upgrade that sends nothing, which the connection cap bounds, and the
     Gateways' revocation list.
@@ -646,19 +668,21 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 
     On plain HTTP the reply is the protobuf body of a `200`, never a `429` or a `503`. The
     Baseline gives `Retry-After` to reconnect attempts, and this keeps the OpAMP answer apart from
-    the failed-admission throttle of clause 48.
+    the failed-admission throttle
+    (clause 48).
 
     The Server does not close the connection. A WebSocket Client that honours the Baseline closes
-    it itself and comes back after 30 s; messages that arrive before it does are counted and
-    answered the same way. A throttled message leaves `sequence_num` where it was, so the next
-    message the Server processes from that Agent is answered with `ReportFullState`.
+    it itself and comes back after 30 s. Messages that arrive before it does are counted and
+    answered the same way. A throttled message leaves `sequence_num` where it was, so the Server
+    answers the next message it processes from that Agent with `ReportFullState`.
 
 26. **What a download past the limit gets.** The download route is plain HTTP and not OpAMP, so it
     has no `ServerErrorResponse`. A request past the limit is answered `429` with
     `Retry-After: 30`, and the artifact is not read. This `429` differs from the one the
-    failed-admission throttle of clause 48 sends:
+    failed-admission throttle
+    (clause 48) sends:
 
-    | | The failed-admission throttle (clause 48) | This clause |
+    | | The failed-admission throttle | This clause |
     |---|---|---|
     | When it is sent | Before the certificate is judged | After the certificate is admitted |
     | Who gets it | A peer address in back-off for failed admissions | A member over its rate |
@@ -671,18 +695,17 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
 27. **Every `Unavailable` reply carries the `instance_uid` of the message it answers.** The Client
     and a Gateway route replies by that field alone and drop a reply without it. The throttled
     reply of clause 25 therefore names the Agent that sent the message, and only that Agent. The
-    other `Unavailable` replies carry it too. Those replies are:
-    - the Agent-record ceiling in `fleet/session.rs` (clause 19 and
-      [SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md));
-    - a CSR held back for its audit record
-      ([SEC-append-only-audit-record](SEC-append-only-audit-record.md));
-    - the full enrolment queue and the closed enrolment window in `Fleet::enrol`
-      ([SEC-bootstrap-certificates-and-enrolment §9](SEC-bootstrap-certificates-and-enrolment.md)).
+    other `Unavailable` replies carry it too, within
+    [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md) and
+    [SEC-append-only-audit-record](SEC-append-only-audit-record.md). Those replies are:
+    - the Agent-record ceiling in `fleet/session.rs`;
+    - a CSR held back for its audit record;
+    - the full enrolment queue and the closed enrolment window in `Fleet::enrol`.
 
     An undecodable message has no `instance_uid`, so its throttled reply carries none, and no Agent
     receives it.
 
-28. **The tables are bounded.** The buckets live in memory and nothing persists them. They are
+28. **The tables are bounded.** The buckets live in memory, and nothing persists them. They are
     kept in two tables:
     - Buckets keyed by host, by issuer and serial, or by an enrolling peer's address, and the
       Gateways' aggregates, hold at most `revocation::MAX_ISSUED` (100 000) entries, the
@@ -690,133 +713,146 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     - Buckets keyed by a Gateway's host and an `instance_uid` hold at most `max_agents` entries
       (default 100 000), the fleet's own ceiling.
 
-    When a table is full, a new key evicts the bucket that was used least recently. Eviction can
-    only grant tokens, never withhold them, because a new bucket starts full. Its worst case is a
-    peer that refills its own bucket early, and filling a table to that end takes as many keys in
-    use as the table holds.
+    When a table is full, a new key evicts the bucket used least recently. Eviction can only grant
+    tokens, never withhold them, because a new bucket starts full. Its worst case is a peer that
+    refills its own bucket early. Filling a table to that end takes as many keys in use as the
+    table holds.
 
 29. **The audit records every throttled message and download as a refusal.** Each one is passed
-    to the audit record
-    ([SEC-append-only-audit-record](SEC-append-only-audit-record.md))
-    as event `agent_rate.throttled` with outcome `throttled`. The entry carries:
+    to the audit record ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)) as event
+    `agent_rate.throttled` with outcome `throttled`. The entry carries:
     - the peer address;
     - `host`, or `serial` and the CA role where the certificate names no host;
     - `instance_uid`, hex, where the message carries a valid one;
     - `bucket`: `agent`, `host` or `gateway`, naming the bucket that was empty;
     - `route`: `opamp` with the `transport`, or `download`.
 
-    The entries are aggregated under SEC-append-only-audit-record's bound on refusals, by event and
-    peer address. A host that floods costs at most ten entries and one
-    `agent_rate.throttled.aggregated` count per address and second. The refusal never waits for its
-    entry. A refusal that finds the audit channel full is counted in the next entry's
-    `unrecorded_before` (SEC-append-only-audit-record). A message or download the limit lets through
-    is recorded by nothing new.
+    The entries are aggregated by event and peer address under the bound on refusals of
+    [SEC-append-only-audit-record §4](SEC-append-only-audit-record.md). A host that floods costs at
+    most ten entries and one `agent_rate.throttled.aggregated` count per address and second. The
+    refusal never waits for its entry. A refusal that finds the audit channel full is counted in
+    the next entry's `unrecorded_before`
+    ([SEC-append-only-audit-record §5](SEC-append-only-audit-record.md)). Nothing new records a
+    message or download the limit lets through.
 
-### Admission and revocation
-
-30. **The Agent plane has no credential of its own.** `server.toml` has no `[auth]` section; one
-    that is present is refused at startup with a message naming `[auth]` and saying that the Agent
-    plane admits by client certificate alone. `/v1/opamp` and the download route read no
-    `Authorization` header. One that is sent is ignored, never refused, so a Client that still
-    sends one is admitted on its certificate. The Agent plane sends no `WWW-Authenticate`
-    challenge.
-31. **The Operator plane's credential primitive.** A presented Basic password is verified against
-    the named user's Argon2id hash, and an unknown user costs the same verification against a hash
-    made at startup at the highest cost any user's hash has, so the answer's timing does not tell
-    which users exist. A password hash runs on a blocking thread, at most four at once; past that a
-    request is answered `503` with `Retry-After: 1`. Before a credential is checked, the attempt is
-    counted against the throttle of clause 48 — failures and attempts under way together may not
-    exceed `max_failures` — and an IPv6 peer is counted by its /64
-    ([`credentials.rs`](../../crates/fleet-server/src/credentials.rs)). A verification that
-    succeeded is remembered for ten minutes by the SHA-256 of the whole header value, in a table of
-    at most 1 024 entries, and compared in constant time with `constant_time_eq`; a failed one is
-    never remembered and counts toward the throttle of clause 48.
-32. **The Client sends no credential.** `supervisor.toml` has no `[auth]` section. One that is
-    present is ignored, with one notice at startup naming the section, and nothing from it is sent;
-    a Client updated by the Server must keep connecting. An `Authorization` header persisted with
-    connection settings is dropped when they are loaded
-    ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)). A `401`
-    is logged as an admission failure and retried with the transport's backoff. The communication
-    layer refuses `ws://` and `http://` to a host that is not LOOPBACK
-    ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
-33. **What the Server offers reaches only admitted members.** A connection-settings offer and a
-    `[telemetry_offer]` carrying headers are sent only on a connection whose certificate was issued
-    by the client CA. An enrolment connection
-    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md))
-    receives no offer but the certificate it asked for.
-34. **Client certificates on both transports, required in the TLS handshake.** `[tls]
-    client_ca_file` in `server.toml` is required; a configuration without it is refused at startup
-    naming the key. The Agent plane's listener verifies with `ClientAuth::Required` in `opamp`,
-    whose roots are the client CA and, while `[enrolment]` is configured, the bootstrap CA (clause
-    46). A peer presenting no certificate, or one that chains to neither, fails the handshake and
-    reaches no handler. `PeerCertificate` carries the handshake's certificate into the request;
-    `/v1/opamp` still answers `401` without one, a second line behind the handshake. The Client
-    presents its identity on `wss://` (its rustls `ClientConfig`) and on `https://` (a reqwest
-    `Identity::from_pem`).
-35. **The certificate is the whole of admission.** A connection is a member's when its certificate
-    was issued directly by the client CA, is valid and is not revoked (clause 60); any other
-    certificate that passes the handshake makes an enrolment connection (clause 46). No
-    configuration admits a peer without a certificate. Behind a Gateway, the Gateway's handshake
-    proves the downstream peer (clause 40).
-36. **A Client has two sources for its identity, and the issued one wins.** An operator may
-    provision one in `supervisor.toml`'s `[tls]` (`cert_file` and `key_file`, both or neither,
-    beside `ca_file`); a Server-issued pair is stored in `state_dir` as `client-cert.pem` and
-    `client-key.pem`. The stored pair outranks the file, the same precedence persisted connection
-    settings have; deleting it reverts to what the operator wrote. The private key is written
-    `0600` on Unix and inherits the state directory's ACL on Windows
-    ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)).
-37. **The Server signs CSRs as a local CA while `[client_ca]` is configured.** `[client_ca]` names
-    `cert_file`, `validity_days` (default 30, `0` refused; a month bounds what a certificate stolen
-    unnoticed is good for, and a host offline for a fortnight still renews on its own) and the CA's
-    key, as exactly one of `key_file`, a PKCS#8 PEM file, or `key_label`, the label of a private key
-    object on the `[pkcs11]` token. Naming both or neither fails startup naming the two keys. The
-    key is its own, never the listener's, because the CA key is the fleet's trust anchor.
-    `AcceptsConnectionSettingsRequest` is declared only while the section is present. A Client that
-    holds no Server-issued certificate, or holds one in its renewal window, generates a keypair and
-    a PEM CSR locally and sends it as `ConnectionSettingsRequest.opamp.certificate_request`, only
-    once the Server has declared the capability (the pessimistic gate on sending in
-    [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)). A CSR on
-    a connection whose certificate chains to the client CA is signed at once; a CSR on an enrolment
-    connection waits for an operator
-    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
-    A CSR that does not parse, or that arrives while no `[client_ca]` is configured, is answered
-    with a `ServerErrorResponse` of type `BadRequest`. The issued certificate travels back as an
-    ordinary connection-settings offer with no private key in it.
-38. **A bootstrap certificate carries a host to its first CSR, and an operator approves it.** It is
-    issued by the bootstrap CA, never by the client CA, and the Server tells it apart from an issued
-    one by that issuer. The Server issues it
-    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
-    Any number may be valid at once, one per customer, site or batch as the operator chooses,
-    because none opens anything on its own: it needs an open enrolment window
-    ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md))
-    and an operator's approval
-    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
-    A short validity limits its reach. Handing it to a host is the operator's job.
+30. **The Agent plane has no credential of its own.** `server.toml` has no `[auth]` section. The
+   Server refuses one that is present at startup, with a message naming `[auth]` and saying that
+   the Agent plane admits by client certificate alone. `/v1/opamp` and the download route read no
+   `Authorization` header. The Server ignores one that is sent and never refuses it, so a Client
+   that still sends one is admitted on its certificate. The Agent plane sends no
+   `WWW-Authenticate` challenge.
+31. **The Operator plane's credential primitive.**
+   - The Server verifies a presented Basic password against the named user's Argon2id hash.
+   - An unknown user costs the same verification, against a hash made at startup. That hash has
+     the highest cost any user's hash has, so the answer's timing does not tell which users exist.
+   - A password hash runs on a blocking thread, at most four at once. Past that the Server answers
+     a request `503` with `Retry-After: 1`.
+   - Before a credential is checked, the attempt is counted against the throttle of clause 48.
+     Failures and attempts under way together must not exceed `max_failures`. An IPv6 peer is
+     counted by its /64 ([`credentials.rs`](../../crates/fleet-server/src/credentials.rs)).
+   - The Server remembers a verification that succeeded for ten minutes, by the SHA-256 of the
+     whole header value. The table holds at most 1 024 entries. The Server compares that value in
+     constant time with `constant_time_eq`.
+   - The Server never remembers a failed verification, and it counts toward the throttle of
+     clause 48.
+32. **The Client sends no credential.** `supervisor.toml` has no `[auth]` section.
+   - The Client ignores one that is present, with one notice at startup naming the section, and
+     sends nothing from it. A Client updated by the Server must keep connecting.
+   - The Client drops an `Authorization` header persisted with connection settings when it loads
+     them ([SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)).
+   - The Client logs a `401` as an admission failure and retries with the transport's backoff.
+   - The communication layer refuses `ws://` and `http://` to a host that is not LOOPBACK
+     ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
+33. **What the Server offers reaches only admitted members.** The Server sends a
+   connection-settings offer, and a `[telemetry_offer]` carrying headers, only on a connection
+   whose certificate the client CA issued. An enrolment connection
+   ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md))
+   receives no offer but the certificate it asked for.
+34. **Client certificates on both transports, required in the TLS handshake.**
+   - `[tls] client_ca_file` in `server.toml` is required. The Server refuses a configuration
+     without it at startup, naming the key.
+   - The Agent plane's listener verifies with `ClientAuth::Required` in `opamp`. Its roots are the
+     client CA and, while `[enrolment]` is configured, the bootstrap CA (clause 46).
+   - A peer presenting no certificate, or one that chains to neither, fails the handshake and
+     reaches no handler.
+   - `PeerCertificate` carries the handshake's certificate into the request. `/v1/opamp` still
+     answers `401` without one, a second line behind the handshake.
+   - The Client presents its identity on `wss://` (its rustls `ClientConfig`) and on `https://` (a
+     reqwest `Identity::from_pem`).
+35. **The certificate is the whole of admission.** A connection is a member's when the client CA
+   issued its certificate directly, and the certificate is valid and not revoked (clause 60). Any
+   other certificate that passes the handshake makes an enrolment connection (clause 46). No
+   configuration admits a peer without a certificate. Behind a Gateway, the Gateway's handshake
+   proves the downstream peer (clause 40).
+36. **A Client has two sources for its identity, and the issued one wins.**
+   - An operator may provision one in the `[tls]` section of `supervisor.toml`: `cert_file` and
+     `key_file`, both or neither, beside `ca_file`.
+   - The Client stores a Server-issued pair in `state_dir` as `client-cert.pem` and
+     `client-key.pem`.
+   - The stored pair outranks the file, the same precedence persisted connection settings have.
+     Deleting it reverts to what the operator wrote.
+   - The Client writes the private key `0600` on Unix. On Windows it inherits the state
+     directory's ACL ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)).
+37. **The Server signs CSRs as a local CA while `[client_ca]` is configured.**
+   - `[client_ca]` names `cert_file`, `validity_days` and the CA's key.
+   - `validity_days` defaults to 30, and `0` is refused. A month bounds what a certificate stolen
+     unnoticed is good for, and a host offline for a fortnight still renews on its own.
+   - The key is exactly one of `key_file`, a PKCS#8 PEM file, or `key_label`, the label of a
+     private key object on the `[pkcs11]` token. Naming both or neither fails startup, naming the
+     two keys.
+   - The key is its own, never the listener's, because the CA key is the fleet's trust anchor.
+   - The Server declares `AcceptsConnectionSettingsRequest` only while the section is present.
+   - A Client that holds no Server-issued certificate, or holds one in its renewal window,
+     generates a keypair and a PEM CSR locally. It sends the CSR as
+     `ConnectionSettingsRequest.opamp.certificate_request`, and only once the Server has declared
+     the capability (the pessimistic gate on sending in
+     [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)).
+   - The Server signs a CSR at once on a connection whose certificate chains to the client CA. A
+     CSR on an enrolment connection waits for an operator
+     ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
+   - The Server answers a CSR that does not parse, or that arrives while no `[client_ca]` is
+     configured, with a `ServerErrorResponse` of type `BadRequest`.
+   - The issued certificate travels back as an ordinary connection-settings offer with no private
+     key in it.
+38. **A bootstrap certificate carries a host to its first CSR, and an operator approves it.** The
+   bootstrap CA issues it, never the client CA, and the Server tells it apart from an issued one by
+   that issuer. The Server issues it
+   ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)). Any
+   number may be valid at once, one per customer, site or batch as the operator chooses, because
+   none opens anything on its own. It needs an open enrolment window
+   ([SRV-state-stores-contract-pair §8](SRV-state-stores-contract-pair.md)) and an operator's
+   approval
+   ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
+   A short validity limits its reach. Handing it to a host is the operator's job.
 39. **Renewal starts at two thirds of the validity, and the old certificate stays until the new
-    one is proved.** The Client asks again once its certificate is two thirds through its life and
-    keeps presenting the old one until the candidate has been verified by connecting with it (the
+    one is proved.** The Client asks again once its certificate is two thirds through its life. It
+    keeps presenting the old one until it has verified the candidate by connecting with it (the
     verification by connecting in
-    [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)); on
-    failure the previous certificate stays in force and the offer is reported `FAILED`.
+    [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md)). On
+    failure the previous certificate stays in force, and the Client reports the offer `FAILED`.
 40. **Mutual TLS is per hop, and a Gateway's handshake admits the peers behind it.** Between an
     Agent and the Server through a Gateway there are two mutual-TLS connections, each proving the
-    peer at that hop. The Gateway holds its own client identity for the upstream leg, obtained
-    through the same CSR flow, and admits a downstream peer by its handshake against the fleet's
-    client CA and the Server's revocation list, or, where it holds the bootstrap CA's certificate, a
-    peer presenting a bootstrap certificate as an enrolling peer
-    ([CLT-modes-and-gateway](CLT-modes-and-gateway.md), which also owns the Gateway's downstream TLS
-    keys). The Server admits the Gateway, and the Gateway's mark
-    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md))
-    lets its certificate speak for the Agents it carries.
+    peer at that hop.
+    - The Gateway holds its own client identity for the upstream leg, obtained through the same
+      CSR flow.
+    - It admits a downstream peer by its handshake against the fleet's client CA and the Server's
+      revocation list.
+    - Where it holds the bootstrap CA's certificate, it admits a peer presenting a bootstrap
+      certificate as an enrolling peer.
+    - [CLT-modes-and-gateway](CLT-modes-and-gateway.md) decides this admission and the Gateway's
+      downstream TLS keys.
+    - The Server admits the Gateway. The Gateway's mark
+      ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md))
+      lets its certificate speak for the Agents it carries.
 41. **Admission is a fleet-wide trust boundary, and within it the host is the only bound between
-    Agents.** A report's `instance_uid` is self-asserted; an admitted peer may report under any
+    Agents.** A report's `instance_uid` is self-asserted. An admitted peer may report under any
     `instance_uid` its host speaks for
     ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)),
     and through a Gateway under any at all. Per-Agent authorization is not added: binding a
     certificate to one `instance_uid` breaks Server-initiated re-keying, certificate renewal and
     Gateway Mode. Operators who need isolation between mutually distrusting Agents put them behind
-    separate Servers or network segments. This is stated in [`SECURITY.md`](../../SECURITY.md) and
-    in the Server's admission and identity module docs.
+    separate Servers or network segments. [`SECURITY.md`](../../SECURITY.md) and the Server's
+    admission and identity module docs state this.
 42. **The Operator plane is guarded by `[rest.auth]`, by Basic, OIDC or both, required beyond the
     loopback.**
     - `[rest.auth] basic_users` is a map of `user = "$argon2id$…"` (clause 50); several
@@ -848,231 +884,263 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`; a host name is never
     - The Agent plane, the package download included, is untouched by it.
 
 43. **A re-sent credential is not a cross-site licence.** The body-less `POST` acts on the Operator
-    plane refuse a request whose `Sec-Fetch-Site` says it is cross-site (`403`), and every other
-    mutating route is a JSON `PUT`/`DELETE` a browser sends only after a preflight this Server
-    answers for nobody.
+    plane refuse a request whose `Sec-Fetch-Site` says it is cross-site (`403`). Every other
+    mutating route is a JSON `PUT`/`DELETE`, which a browser sends only after a preflight. This
+    Server answers that preflight for nobody.
 44. **A cleartext operator password is refused, not warned about.** A `[rest] listen` that is not
-    LOOPBACK must serve TLS; a configuration that would serve that plane in plaintext is refused at
-    startup naming the setting. A TLS-terminating proxy in front reaches the plane on a LOOPBACK
-    `listen`.
+    LOOPBACK must serve TLS. The Server refuses at startup a configuration that would serve that
+    plane in plaintext, naming the setting. A TLS-terminating proxy in front reaches the plane on a
+    LOOPBACK `listen`.
 45. **The operators' credentials carry no rights.** A Basic credential and a token are the only
     credentials of the Operator plane, and neither reaches an Agent's host. Every authenticated
     operator can do everything the plane offers. The Server reads no role, group or scope from a
     token to decide what a request may do.
 
-46. **Enrolment has a CA of its own.** `[enrolment] bootstrap_ca_file` in `server.toml` names the CA
-    that issues bootstrap certificates, and its key is named by exactly one of
-    `bootstrap_ca_key_file`, PKCS#8 PEM, or `bootstrap_ca_key_label`, a private key object on the
-    `[pkcs11]` token. The handshake accepts a certificate from the client CA or the bootstrap CA
-    (clause 34). While `[enrolment]` is set, a connection is a member's only when its certificate
-    was issued directly by a CA in `client_ca_file`. Any other, from the bootstrap CA or from an
-    intermediate below either CA, is an enrolment connection, so no chain lifts a bootstrap
-    certificate into the fleet. The Server refuses to start on a bootstrap CA that shares a
-    certificate with `client_ca_file`, a bootstrap CA key that is the client CA's key or does not
-    match `bootstrap_ca_file`, both or neither of the two key settings when the Server is to issue,
-    or an `[enrolment]` without `[client_ca]`. Without either key setting enrolment works with
-    bootstrap certificates made elsewhere, and `POST /api/v1/bootstrap-certificates` is answered
-    `409`, naming the missing key. Without `[enrolment]` no bootstrap certificate passes the
-    handshake, and a host gets its first certificate from an operator.
+46. **Enrolment has a CA of its own.**
+    - `[enrolment] bootstrap_ca_file` in `server.toml` names the CA that issues bootstrap
+      certificates. Exactly one of `bootstrap_ca_key_file`, PKCS#8 PEM, or
+      `bootstrap_ca_key_label`, a private key object on the `[pkcs11]` token, names its key.
+    - The handshake accepts a certificate from the client CA or the bootstrap CA (clause 34).
+    - While `[enrolment]` is set, a connection is a member's only when a CA in `client_ca_file`
+      issued its certificate directly. Any other is an enrolment connection, from the bootstrap CA
+      or from an intermediate below either CA. So no chain lifts a bootstrap certificate into the
+      fleet.
+    - The Server refuses to start on any of these:
+      - a bootstrap CA that shares a certificate with `client_ca_file`;
+      - a bootstrap CA key that is the client CA's key or does not match `bootstrap_ca_file`;
+      - both or neither of the two key settings when the Server is to issue;
+      - an `[enrolment]` without `[client_ca]`.
+    - Without either key setting, enrolment works with bootstrap certificates made elsewhere. The
+      Server then answers `POST /api/v1/bootstrap-certificates` with `409`, naming the missing key.
+    - Without `[enrolment]` no bootstrap certificate passes the handshake, and a host gets its
+      first certificate from an operator.
 47. **The package download is reached with a client certificate.** Its route on the Agent plane
     sits behind the same handshake as `/v1/opamp`
     ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The route requires a
-    certificate from the client CA; a bootstrap certificate is answered `401`. The Client presents
-    its certificate only to the Server's own origin — the scheme, host and port of its OpAMP
-    endpoint — and presents none to any other host or on a redirect hop that leaves that origin
+    certificate from the client CA, and answers a bootstrap certificate `401`. The Client presents
+    its certificate only to the Server's own origin, the scheme, host and port of its OpAMP
+    endpoint. It presents none to any other host, or on a redirect hop that leaves that origin
     ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)).
-48. **Repeated admission failures from one peer address are throttled.** `[admission_throttle]` in
-    `server.toml` sets `max_failures` (default 10), `window_secs` (default 60) and `backoff_secs`
-    (default 300). Every `401` on `/v1/opamp` and on the download route counts as a failure of the
-    peer's IP address. A peer address with `max_failures` failures within `window_secs` is in
-    back-off for `backoff_secs`: each plain-HTTP request is answered `429` with `Retry-After` set
-    to the remaining seconds, and each WebSocket upgrade `GET` is refused the same way before the
-    upgrade completes. A success clears nothing — behind a shared address a member's success would
-    wipe a guesser's count — so failures only age out of the window. The Operator plane counts its
-    own `401`s the same way in a table of its own. Each table holds a bounded number of addresses;
-    when it is full, the address heard from least recently that is not in back-off is dropped
-    first. On the Agent plane a `401` follows a handshake that succeeded — a revoked certificate,
-    or a bootstrap certificate on the download route — so the throttle does not stop guessing; it
-    bounds what a refused host that keeps retrying costs in handshakes, revocation lookups and
-    audit entries
-    ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)).
+48. **Repeated admission failures from one peer address are throttled.**
+    - `[admission_throttle]` in `server.toml` sets `max_failures` (default 10), `window_secs`
+      (default 60) and `backoff_secs` (default 300).
+    - Every `401` on `/v1/opamp` and on the download route counts as a failure of the peer's IP
+      address.
+    - A peer address with `max_failures` failures within `window_secs` is in back-off for
+      `backoff_secs`. Each plain-HTTP request is answered `429` with `Retry-After` set to the
+      remaining seconds. Each WebSocket upgrade `GET` is refused the same way before the upgrade
+      completes.
+    - A success clears nothing, so failures only age out of the window. Behind a shared address a
+      member's success would otherwise wipe a guesser's count.
+    - The Operator plane counts its own `401`s the same way, in a table of its own.
+    - Each table holds a bounded number of addresses. When it is full, the Server drops first the
+      address heard from least recently that is not in back-off.
+    - On the Agent plane a `401` follows a handshake that succeeded: a revoked certificate, or a
+      bootstrap certificate on the download route. So the throttle does not stop guessing. It
+      bounds what a refused host that keeps retrying costs in handshakes, revocation lookups and
+      audit entries ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)).
 49. **Enrolment reaches the Server directly or through a Gateway, and the Server decides it.** A
     host enrols by connecting to the Server, or through a Gateway that holds the bootstrap CA's
-    certificate: the Gateway admits it as an enrolling peer and relays its one CSR, which carries a
-    bootstrap proof, and nothing else it sends
-    ([CLT-modes-and-gateway §24](CLT-modes-and-gateway.md)). The Server decides a relayed enrolment
-    as any other
+    certificate. That Gateway admits it as an enrolling peer and relays its one CSR, which carries
+    a bootstrap proof, and nothing else it sends
+    ([CLT-modes-and-gateway §24](CLT-modes-and-gateway.md)). The Server decides a relayed
+    enrolment as any other
+    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)). The
+    Server signs as a renewal a CSR that a Gateway forwards from a peer that holds a client
+    certificate. An operator may also provision a host with a client certificate.
+50. **No credential in `server.toml` authenticates on its own.**
+    - An entry of `[rest.auth] basic_users` is an Argon2id PHC string with at least `m=19456`,
+      `t=2` and `p=1`, a 32-byte output and a 16-byte salt.
+    - The Server refuses any other value at startup, with a message naming the section and the
+      user. The message never echoes the value.
+    - `server hash-credential --basic` reads the password from standard input, without echo on a
+      terminal, and prints the line to paste.
+    - The hashing adds the RustCrypto `argon2` crate and no system dependency.
+51. **A claim is a canonical UUID in text.** A claim is thirty-two hexadecimal digits in groups of
+    8, 4, 4, 4 and 12 joined by hyphens, in either case. It may stand alone or as part of a longer
+    value, the Baseline's "part of the field". The Server reads the `urn:uuid:` prefix of RFC 9562
+    the same way. A run of 32 hex digits without hyphens is not a claim: it is what a fingerprint
+    or a hash looks like.
+52. **Every value is searched.** The Server searches for claims in each attribute of the subject,
+    read as text whichever string type encodes it. It searches each requested SAN of a type that
+    carries text: DNS name, URI, e-mail address. The Server reads a SAN for this check only, and
+    still drops it from the certificate
     ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
-    A CSR a Gateway forwards from a peer that holds a client certificate is signed as a renewal. A
-    host can also be provisioned a client certificate by an operator.
-50. **No credential in `server.toml` authenticates on its own.** An entry of `[rest.auth]
-    basic_users` is an Argon2id PHC string with at least `m=19456`, `t=2` and `p=1`, a 32-byte
-    output and a 16-byte salt. Any other value is refused at startup with a message naming the
-    section and the user, and never echoing the value. `server hash-credential --basic` reads the
-    password from standard input, without echo on a terminal, and prints the line to paste. The
-    hashing adds the RustCrypto `argon2` crate and no system dependency.
-51. **A claim is a canonical UUID in text.** Thirty-two hexadecimal digits in groups of 8, 4, 4, 4
-    and 12 joined by hyphens, in either case, standing alone or as part of a longer value — the
-    Baseline's "part of the field". The `urn:uuid:` prefix of RFC 9562 is read the same way. A run
-    of 32 hex digits without hyphens is not a claim: it is what a fingerprint or a hash looks like.
-52. **Every value is searched.** Each attribute of the subject, read as text whichever string type
-    encodes it, and each requested SAN of a type that carries text — DNS name, URI, e-mail address
-    — is searched for claims. A SAN is read for this check only; the Server still drops it from
-    the certificate
-    ([SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
-53. **The sender is the message's `instance_uid`.** The `instance_uid` of the `AgentToServer` that
-    carries the CSR, as the message states it and before any re-key the same message causes, is
-    compared byte for byte with each claim. On an enrolment connection it is the same field.
-54. **A mismatch is refused, a match or no claim is signed.** A CSR with one claim that differs
-    from the sender's is answered `BadRequest`, naming the mismatch without echoing the CSR, and
-    never reaches the signer or the enrolment queue. A CSR whose claims all match is signed as any
-    other. A CSR with no claim is signed as clause 37 and the renewal proof
-    ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)) decide; that is this project's own Client.
-55. **The Server gives every certificate it signs a random serial.** 16 bytes from the system's
-    secure random source, the top bit cleared so the encoding stays positive. Two certificates from
-    one key have two serials.
+53. **The sender is the message's `instance_uid`.** The Server compares each claim byte for byte
+    with the `instance_uid` of the `AgentToServer` that carries the CSR. It takes that value as the
+    message states it, before any re-key the same message causes. On an enrolment connection it is
+    the same field.
+54. **A mismatch is refused, a match or no claim is signed.**
+    - The Server answers `BadRequest` to a CSR with one claim that differs from the sender's. The
+      answer names the mismatch without echoing the CSR. Such a CSR never reaches the signer or the
+      enrolment queue.
+    - The Server signs a CSR whose claims all match as any other.
+    - The Server signs a CSR with no claim as clause 37 and the renewal proof
+      ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)) decide. This project's Client sends such
+      a CSR.
+55. **The Server gives every certificate it signs a random serial.** The serial is 16 bytes from the
+    system's secure random source, with the top bit cleared so that the encoding stays positive.
+    Two certificates from one key have two serials.
 56. **A revoked certificate is named by its CA and serial.** `POST /api/v1/revocations` with
     `{"certificate": {"authority": "client" | "bootstrap", "serial": "<hex>"}}` revokes one, under
     every certificate of that CA file. The client CA covers certificates the Server signed and
-    those an operator provisioned from it; the bootstrap CA lets a lost bootstrap certificate be
-    revoked. An authority this Server does not have is answered `400`, so a typo cannot pass for a
-    revocation.
+    those an operator provisioned from it. The bootstrap CA lets an operator revoke a lost
+    bootstrap certificate. The Server answers `400` to an authority it does not have, so a typo
+    cannot pass for a revocation.
 57. **A revocation follows renewal.** A certificate is revoked when it, or any predecessor in its
     chain in the certificate register
-    ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)),
-    is on the list. A connection that presents a revoked one is refused before its CSR is read, and
-    an open session re-checks its certificate before a CSR it carries is signed.
-58. **There is no credential to revoke.** `POST /api/v1/revocations` with `{"credential": …}` is
-    answered `400`, naming the field and saying that the Agent plane admits by client certificate
-    alone. A credential entry on the persisted list is dropped when the list is loaded, with one
-    log line that names the number of entries dropped, and the list is written back without it;
-    the Server starts either way.
+    ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md)), is on the list. The
+    Server refuses a connection that presents a revoked one before it reads its CSR. An open
+    session re-checks its certificate before the Server signs a CSR it carries.
+58. **There is no credential to revoke.** The Server answers `POST /api/v1/revocations` with
+    `{"credential": …}` with `400`, naming the field and saying that the Agent plane admits by
+    client certificate alone. The Server drops a credential entry on the persisted list when it
+    loads the list. One log line names the number of entries dropped. The Server writes the list
+    back without the entry, and starts either way.
 59. **A revocation can be lifted.** `GET /api/v1/revocations` lists each entry with its id, kind,
-    time, authority and serial; `DELETE /api/v1/revocations/{id}` removes one, answered `404` for
-    an unknown id. Lifting one takes effect at the next connection; it reopens nothing.
-60. **Admission checks the list after the handshake.** On `/v1/opamp` and on the download route, a
-    peer whose certificate is revoked is answered `401` without a challenge, as every refusal
-    behind the handshake is, and the failure counts toward its admission throttle. The answer does
-    not say that the certificate was revoked.
-61. **A revocation ends the sessions it concerns, and only those, on every instance.** Each instance
-    records, per WebSocket session, the issuer and serial of the certificate that admitted it. On
-    the filesystem store the one Server holds every session, and a revocation reaches them in
-    process as it is committed, through the revocation list's subscription. On PostgreSQL a
-    revocation committed on any instance reaches every instance by its notification
-    ([SRV-instances-share-one-postgresql §9](SRV-instances-share-one-postgresql.md)),
-    or after a missed one by the re-read of that ADR's clause 10. Either way it is
-    checked against every open session there at once; a session checks itself once
-    more as it starts, so a revocation landing during its admission is not missed. A session it
-    concerns is closed with WebSocket close code `1008` (policy violation) and the reason `revoked`.
-    Other sessions are not touched. On plain HTTP every request is admitted anew, against the list
-    the instance holds, so the next poll is refused.
-62. **A session ends when its certificate expires.** A WebSocket session is closed with `1008` and
-    the reason `certificate expired` at the `not_after` of the certificate that admitted it. A
-    Client renews at two thirds of the life and reconnects to prove the new certificate, so a
-    healthy fleet never meets this close; it ends what renewal did not replace.
-63. **The list reaches the Gateways from a route of their own.** `GET /v1/gateway/revocations` on
-    the Agent plane is admitted as `/v1/opamp` is — the handshake's client certificate from the
-    client CA, checked against the list — and is answered only to a certificate whose host an
-    operator marked as a Gateway (`PUT /api/v1/hosts/{host}/gateway`,
-    [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md));
-    any other is answered `403`. The body is JSON: every certificate of the client CA that is
-    revoked by clause 57, its own entry or a predecessor's, each by the SHA-256 of its issuer's name
-    and its serial, so the Gateway resolves no chain; and a version that changes with every change
-    to the list, carried as an `ETag`, so a fetch with `If-None-Match` is answered `304`. With
-    PostgreSQL it is the list's one version in the database
-    ([SRV-state-stores-contract-pair §10](SRV-state-stores-contract-pair.md)),
-    the same on every instance, so an `ETag` one instance gave is answered `304` by
-    another. Bootstrap certificates are not on it: a Gateway admits no bootstrap certificate. The
-    route is outside the OpenAPI document, as the package download is.
-64. **One PKCS#11 token, named in `server.toml`.** `[pkcs11]` names `module`, the path of the
-    PKCS#11 library; `token_label`; and `pin_file`, a file that holds the user PIN. The PIN file may
-    be read by the account that owns it and its group and written by that account alone, as
-    `password_file` may
-    ([SRV-state-stores-contract-pair §24](SRV-state-stores-contract-pair.md)).
-    One that others may read, or its group may write, fails startup naming it. The PIN
-    is never written into `server.toml` (clause 50). The Server loads the module at startup through
-    `cryptoki` and keeps a pool of four sessions on the token, opened as they are needed; no setting
-    changes the number. PKCS#11 initialises a module once per process, so instances that share a
-    process, as tests run them, share one `cryptoki` context. A module that does not load, a token
-    that is not found or a PIN that is refused fails startup, naming the key.
-65. **The token is optional, whichever store holds the records.** With `[pkcs11]` set, each key may
-    be named by its label; without it, by its file. `[database] store` does not decide it. A
-    `key_label` while `[pkcs11]` is not set fails startup, naming both keys.
-66. **The token signs; the Server builds.** A PKCS#11 key implements `rcgen`'s `SigningKey`: its
-    public half is read from the token once, and each signature is one `C_Sign` with `CKM_ECDSA`
-    over the SHA-256 the Server computes, its `r || s` encoded as the DER `ECDSA-Sig-Value` X.509
-    asks for. The certificate's contents, its serial and its validity are made as with a key file.
-    The adapter sits behind the `CertificateSigner` port and behind a signer port of the same shape
-    for bootstrap certificates and audit checkpoints. A separate signing service can later take a
-    port's place without a change to the use cases.
-67. **The Server signs only what a use case justifies, and audits every signature.** A host
-    certificate is signed for a valid renewal proof, an approved enrolment request or a member's
-    CSR on its own connection. A bootstrap certificate is signed for an operator's request, and a
-    checkpoint on the schedule of
-    [SEC-append-only-audit-record §11](SEC-append-only-audit-record.md). Every certificate signed
-    with a token key writes the audit entry `pkcs11.signed`. It names the key's label as
-    `key_label`, the certificate's `issuer` and `serial`, and as `use_case` the one that asked for
-    it: `renewal`, `enrolment_approval`, `member_csr` or `bootstrap_issue`. A checkpoint is its own
-    signature's entry: it names the key and carries the signature, and no `pkcs11.signed` is written
-    beside it. The entry's place in the record is held before the token is asked to sign, so without
-    a record nothing is signed. It stands beside the entry the use case writes for its decision. A
-    signature made with a key file writes none.
+    time, authority and serial. `DELETE /api/v1/revocations/{id}` removes one, and is answered
+    `404` for an unknown id. Lifting one takes effect at the next connection; it reopens nothing.
+60. **Admission checks the list after the handshake.** On `/v1/opamp` and on the download route,
+    the Server answers a peer whose certificate is revoked `401` without a challenge. Every
+    refusal behind the handshake is answered so. The failure counts toward its admission
+    throttle. The answer does not say that the certificate was revoked.
+61. **A revocation ends the sessions it concerns, and only those, on every instance.**
+    - Each instance records, per WebSocket session, the issuer and serial of the certificate that
+      admitted it.
+    - On the filesystem store the one Server holds every session. A revocation reaches them in
+      process as it is committed, through the revocation list's subscription.
+    - On PostgreSQL a revocation committed on any instance reaches every instance by its
+      notification ([SRV-instances-share-one-postgresql §9](SRV-instances-share-one-postgresql.md)).
+      After a missed notification it arrives by the re-read of
+      [SRV-instances-share-one-postgresql §10](SRV-instances-share-one-postgresql.md).
+    - Either way the instance checks it against every open session there at once. A session checks
+      itself once more as it starts, so a revocation landing during its admission is not missed.
+    - The instance closes a session the revocation concerns with WebSocket close code `1008`
+      (policy violation) and the reason `revoked`. It does not touch other sessions.
+    - On plain HTTP the Server admits every request anew, against the list the instance holds, so
+      it refuses the next poll.
+62. **A session ends when its certificate expires.** The Server closes a WebSocket session with
+    `1008` and the reason `certificate expired` at the `not_after` of the certificate that
+    admitted it. A Client renews at two thirds of the life and reconnects to prove the new
+    certificate, so a healthy fleet never meets this close. It ends what renewal did not replace.
+63. **The list reaches the Gateways from a route of their own.**
+    - `GET /v1/gateway/revocations` on the Agent plane is admitted as `/v1/opamp` is: the
+      handshake's client certificate from the client CA, checked against the list.
+    - The route answers only a certificate whose host an operator marked as a Gateway
+      (`PUT /api/v1/hosts/{host}/gateway`,
+      [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)). It
+      answers any other `403`.
+    - The body is JSON. It holds every certificate of the client CA that clause 57 revokes, by its
+      own entry or a predecessor's. Each is named by the SHA-256 of its issuer's name and its
+      serial, so the Gateway resolves no chain.
+    - The body also holds a version that changes with every change to the list, carried as an
+      `ETag`, so a fetch with `If-None-Match` is answered `304`.
+    - With PostgreSQL the version is the list's one version in the database
+      ([SRV-state-stores-contract-pair §10](SRV-state-stores-contract-pair.md)), the same on every
+      instance. So another instance answers `304` to an `ETag` one instance gave.
+    - Bootstrap certificates are not on it: a Gateway admits no bootstrap certificate.
+    - The route is outside the OpenAPI document, as the package download is.
+64. **One PKCS#11 token, named in `server.toml`.**
+    - `[pkcs11]` names `module`, the path of the PKCS#11 library; `token_label`; and `pin_file`, a
+      file that holds the user PIN.
+    - Only the account that owns the PIN file and that file's group may read it. Only that
+      account may write it. The same holds for `password_file`
+      ([SRV-state-stores-contract-pair §24](SRV-state-stores-contract-pair.md)). A PIN file that
+      others may read, or its group may write, fails startup naming it.
+    - The PIN is never written into `server.toml` (clause 50).
+    - The Server loads the module at startup through `cryptoki`. It keeps a pool of four sessions
+      on the token, opened as they are needed. No setting changes the number.
+    - PKCS#11 initialises a module once per process, so instances that share a process, as tests
+      run them, share one `cryptoki` context.
+    - A module that does not load, a token that is not found, or a PIN that is refused fails
+      startup, naming the key.
+65. **The token is optional, whichever store holds the records.** With `[pkcs11]` set, the
+    configuration may name each key by its label; without it, by its file. `[database] store` does
+    not decide it. A `key_label` while `[pkcs11]` is not set fails startup, naming both keys.
+66. **The token signs; the Server builds.**
+    - A PKCS#11 key implements `rcgen`'s `SigningKey`. The Server reads its public half from the
+      token once.
+    - Each signature is one `C_Sign` with `CKM_ECDSA` over the SHA-256 the Server computes. Its
+      `r || s` is encoded as the DER `ECDSA-Sig-Value` X.509 asks for.
+    - The Server makes the certificate's contents, its serial and its validity as with a key file.
+    - The adapter sits behind the `CertificateSigner` port, and behind a signer port of the same
+      shape for bootstrap certificates and audit checkpoints. A separate signing service may later
+      take a port's place without a change to the use cases.
+67. **The Server signs only what a use case justifies, and audits every signature.**
+    - The Server signs a host certificate for a valid renewal proof, an approved enrolment request
+      or a member's CSR on its own connection.
+    - It signs a bootstrap certificate for an operator's request, and a checkpoint on the schedule
+      of [SEC-append-only-audit-record §11](SEC-append-only-audit-record.md).
+    - Every certificate signed with a token key writes the audit entry `pkcs11.signed`. The entry
+      names the key's label as `key_label`, the certificate's `issuer` and `serial`, and as
+      `use_case` the one that asked for it: `renewal`, `enrolment_approval`, `member_csr` or
+      `bootstrap_issue`.
+    - A checkpoint is its own signature's entry: it names the key and carries the signature, and
+      no `pkcs11.signed` is written beside it.
+    - The Server holds the entry's place in the record before it asks the token to sign, so without
+      a record nothing is signed. The entry stands beside the entry the use case writes for its
+      decision.
+    - A signature made with a key file writes none.
 68. **SoftHSM2 is the planned token, and says so.** The Server is built and tested against
-    SoftHSM2; a hardware or cloud HSM is a change of `[pkcs11] module`, nothing else. SoftHSM2 keeps
-    its token in files on one host, so it serves the Server instances of that host alone
-    (clause 70). The module the `[pkcs11]` section loads is a library the operator has the Server
-    load, which clause 21 leaves to the ADR
-    that loads it. This clause decides that the module may open a connection of its own to a
-    network HSM: to the address the vendor's client configuration names, over the module's own TLS
-    stack. The Server neither builds that connection nor sees it; it and the device's protection of
-    it are the operator's. When the module's `C_GetInfo` names `SoftHSM` as its manufacturer, the
-    Server starts, logs a warning that the keys have no hardware protection, and writes the audit
-    entry `pkcs11.software_token` at every startup. The Dev Container and the CI runner install
-    SoftHSM2 for the tests, beside the packages they already install, within
-    [NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md).
+    SoftHSM2. A hardware or cloud HSM is a change of `[pkcs11] module`, nothing else. SoftHSM2
+    keeps its token in files on one host, so it serves the Server instances of that host alone
+    (clause 70).
+    - The module the `[pkcs11]` section loads is a library the operator has the Server load.
+      clause 50 leaves such a
+      library to the ADR that loads it. This clause decides that the module may open a connection
+      of its own to a network HSM. It goes to the address the vendor's client configuration names,
+      over the module's own TLS stack. The Server neither builds that connection nor sees it. That
+      connection and the device's protection of it are the operator's.
+    - When the module's `C_GetInfo` names `SoftHSM` as its manufacturer, the Server still starts.
+      At every startup it then logs a warning that the keys have no hardware protection, and
+      writes the audit entry `pkcs11.software_token`.
+    - The Dev Container and the CI runner install SoftHSM2 for the tests, beside the packages they
+      already install, within
+      [NUC-container-hides-host-daemon](NUC-container-hides-host-daemon.md).
     - SoftHSM2 reads a configuration of its own, `softhsm2.conf`, from the path in `SOFTHSM2_CONF`
       or from `/etc/softhsm2.conf`. Its `directories.tokendir` names the directory that holds the
-      tokens, encrypted under their PINs. The Server neither writes nor reads either; it loads the
+      tokens, encrypted under their PINs. The Server neither writes nor reads either. It loads the
       module, and the module finds its configuration as it always does.
     - In production `softhsm2.conf`, the token directory and the token's initialisation are the
       operator's, as an HSM's setup is. The token directory is the keys: it belongs in the backup,
-      readable by the Server's account alone, and a copy of it with the PIN file is a copy of every
-      key on the token.
-    - In the Dev Container and on the CI runner the project creates both: a `softhsm2.conf` whose
-      token directory lies outside the repository, and a token initialised for the tests, its PIN in
-      a file beside it. Nothing of it is committed.
+      readable by the Server's account alone. A copy of it with the PIN file is a copy of every key
+      on the token.
+    - In the Dev Container and on the CI runner the project creates both. It creates a
+      `softhsm2.conf` whose token directory lies outside the repository. It initialises a token for
+      the tests, its PIN in a file beside it. Nothing of it is committed.
     - With a hardware or cloud HSM neither file exists; the vendor's client configures how the
       module reaches the device.
     - The Server's image carries no PKCS#11 module
       ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)). An
       operator who runs the image with a token mounts the module into the container, with what it
-      loads, and names its path in `[pkcs11] module`; with SoftHSM2 also its configuration, named by
-      `SOFTHSM2_CONF`, and its token directory. A module that does not load in the container fails
-      startup (clause 64).
+      loads, and names its path in `[pkcs11] module`. With SoftHSM2 the operator also mounts its
+      configuration, named by `SOFTHSM2_CONF`, and its token directory. A module that does not
+      load in the container fails startup (clause 64).
 69. **An existing fleet moves to new CA keys at its ordinary renewal.** A key file cannot be
-    imported into a token without leaving a copy outside it. So the move makes a new client CA on
-    the token, with `opamp-fleetctl pki token-init` on the Server host. For a transition,
-    `client_ca_file` names the old and the new CA certificate; the handshake trusts both, and the
-    Server signs every renewal with the new key. A renewal proof is accepted when its certificate
-    was issued by any CA in `client_ca_file`, so a host whose certificate the old CA signed renews
-    to one the new key signs. Once the last certificate the old CA signed has ended, the operator
-    removes it from `client_ca_file`. A new bootstrap CA takes the old one's place as
-    [OPS-operator-program-fleetctl §12](OPS-operator-program-fleetctl.md) makes it.
+    imported into a token without leaving a copy outside it.
+    - So the move makes a new client CA on the token, with `opamp-fleetctl pki token-init` on the
+      Server host.
+    - For a transition, `client_ca_file` names the old and the new CA certificate. The handshake
+      trusts both, and the Server signs every renewal with the new key.
+    - The Server accepts a renewal proof when any CA in `client_ca_file` issued its certificate.
+      So a host whose certificate the old CA signed renews to one the new key signs.
+    - Once the last certificate the old CA signed has ended, the operator removes it from
+      `client_ca_file`.
+    - A new bootstrap CA takes the old one's place as
+      [OPS-operator-program-fleetctl §12](OPS-operator-program-fleetctl.md) makes it.
 70. **Instances that share the keys reach the same ones.** A key on the token is no file, so an
     instance whose CA keys are named by their labels need not be alone
-    ([SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)).
-    Instances that sign with shared keys name the same labels on a token every one of
-    them reaches: a network HSM all of them reach, or a token that the HSM's own replication keeps
+    ([SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)). Instances
+    that sign with shared keys name the same labels on a token every one of them reaches. That
+    token is a network HSM all of them reach, or one that the HSM's own replication keeps
     identical on each host.
     - SoftHSM2 keeps its token in files on one host, and the instances on that host may share it:
       that is redundancy of processes, not of hosts. Instances on several hosts need a network
       HSM, or no CA key on the Server at all, the certificates then being issued outside it. The
       Server cannot tell which host a token's files are on, so keeping a SoftHSM2 token's
       instances on its host is the operator's. The Server does not copy keys between tokens.
-    - The audit key's label, which every instance on one database names alike, is decided by
-      [SEC-append-only-audit-record §16](SEC-append-only-audit-record.md).
-
-### Signing in with OpenID Connect
+    - [SEC-append-only-audit-record §16](SEC-append-only-audit-record.md) decides the audit key's
+      label, which every instance on one database names alike.
 
 71. **A bearer token is a JWT the Server validates on every request.**
     - The signature is checked against the issuer's JSON Web Key Set, with an allow-list of RS256,
