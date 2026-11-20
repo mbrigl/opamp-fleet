@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-14
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and the delivered-block check (`check_delivered_block`) each kind states, the Client Agent in `build_engine`, the capability set and the handling of a received or stored remote configuration of the Client Agent and of a Supervisor's Agent in agent.rs), crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` and `remote_config_disabled` keys), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[[supervisor]]` blocks and the `[supervisors]` section of supervisor.toml (among them `delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`), the `[features]` table of crates/fleet-agent/Cargo.toml, the artifact documents under docs/artifacts/ each wrapped kind adds
+- **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and the delivered-block check (`check_delivered_block`) each kind states, the Client Agent in `build_engine`, the capability set and the handling of a received or stored remote configuration of the Client Agent and of a Supervisor's Agent in agent.rs and agent/remote_config.rs), crates/fleet-agent/src/config.rs (supervisor_dir, program resolution, the `server_manages_set` and `remote_config_disabled` keys), crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[[supervisor]]` blocks and the `[supervisors]` section of supervisor.toml (among them `delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`), the `[features]` table of crates/fleet-agent/Cargo.toml, the artifact documents under docs/artifacts/ each wrapped kind adds
 
 ## Context
 
@@ -70,12 +70,12 @@ renamed: the process starts happily on a file nobody writes to.
 What the fleet needs to manage on a Client is which Supervisors it runs. Everything else in
 `supervisor.toml` ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), the
 Server endpoint, the credential, the state directory and the instance name, is host-local trust and
-wiring; a Server that could rewrite it could cut a Client off with one bad push. The specification
-allows an Agent's effective configuration to merge in local configuration, and bounds a remote
-configuration to its Supervisor and the Client's list of Supervisors (Q-5). The program a
-Supervisor spawns is itself a trust anchor: a Server, or someone who has compromised it without
-the package-signing key, that could name any program on the host would have fleet-wide code
-execution that bypasses signature verification entirely.
+wiring; a Server that could rewrite it could cut a Client off with one bad delivery. The
+specification allows an Agent's effective configuration to merge in local configuration, and bounds
+a remote configuration to its Supervisor and the Client's list of Supervisors (Q-5). The program a
+Supervisor spawns is itself a trust anchor: a Server, or someone who has compromised it without the
+package-signing key, that could name any program on the host would have fleet-wide code execution
+that bypasses signature verification entirely.
 
 Keeping a delivered block to a program from its own directory, a program that arrived as a signed
 package, prevents that. It is not enough on its own: a block's `env` and `args` would pass to that
@@ -124,7 +124,7 @@ declares the constant `AGENT_CAPABILITIES`: `ReportsStatus`, `AcceptsRemoteConfi
 `AcceptsOpAmpConnectionSettings`, `ReportsConnectionSettingsStatus`, `ReportsOwnMetrics`,
 `ReportsOwnTraces` and `ReportsOwnLogs`. `build_engine` in
 `crates/fleet-agent/src/supervisor/mod.rs` adds `ReportsHeartbeat` when heartbeats are enabled,
-and `AcceptsPackages` with `ReportsPackageStatuses` when `[self_update]` consents and a
+and `AcceptsPackages` with `ReportsPackageStatuses` when `[packages] self_update` consents and a
 verification key is configured
 ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)). Its effective configuration
 is the redacted text of `supervisor.toml`. Only `AcceptsRemoteConfig` and `ReportsRemoteConfig`
@@ -185,7 +185,7 @@ operator's agent on what the Server chose. For a listed Supervisor any key a del
 change is a remote configuration under another name.
 
 **One offer of a configuration reaches a Client twice in the normal case.** After a rollout, a
-heartbeat that left the Client before the Server's push arrived still names the old hash, and the
+heartbeat that left the Client before the Server's offer arrived still names the old hash, and the
 Server answers it with the offer again. A second apply would wait behind the first and restart the
 Managed Process once more after the first had reported `APPLIED`: on a test host a flaky
 end-to-end test, on a production host a needless restart. A package offer is treated the same way:
@@ -219,255 +219,308 @@ name Supervisors in `[supervisors] remote_config_disabled`, whose Agents neither
 remote configuration and run only on what the operator placed on the host, and take an offered
 configuration whose hash an Agent is applying or has applied as a report, not a second apply.
 
-1. **Two Ports, as modules.** The Managed-Process Port is a message pair, `ProcessCommand` in and
-   `ProcessEvent` out, plus a `Plugin` factory trait that validates a block's settings (`check`,
-   side-effect free) and starts the adapter task (`start`). Channels keep the trait object-safe
-   without `async-trait`, make every adapter a plain tokio task, and keep the core free of process
-   handles. The Server-facing Port is the engine seam the transports consume (build reports,
-   handle a `ServerToAgent`, produce disconnects) over *n* Agents.
+1. **Two Ports, as modules.**
+   - The Managed-Process Port is a message pair, `ProcessCommand` in and `ProcessEvent` out. A
+     `Plugin` factory trait goes with it: it validates a block's settings (`check`, side-effect
+     free) and starts the adapter task (`start`).
+   - Channels keep the trait object-safe without `async-trait`, make every adapter a plain tokio
+     task, and keep the core free of process handles.
+   - The Server-facing Port is the engine seam the transports consume over *n* Agents: build
+     reports, handle a `ServerToAgent`, produce disconnects.
 
-2. **A compiled-in registry selected by `type`, each wrapped kind a Cargo feature.** The kinds are
-   `collector` (the Collector Supervisor), `command` (the Custom Supervisor for any Foreign
-   Agent), and the wrapped kinds, each of which knows one third-party agent (clause 15). A new
-   process kind is one module and one registry line (`registry()` in `supervisor/mod.rs`); the
-   core stays untouched. Each wrapped kind is a feature of `fleet-agent` named after its `type`,
-   and the default features are all of them, so the published build carries every kind and a
-   build that leaves one out is built with `--no-default-features --features <kinds>`. A new
-   wrapped kind is a feature too, in the default set. `collector` and `command` are always
-   compiled in: they are the integration paths the specification names, and `command` runs any
-   Foreign Agent no wrapper covers. An unknown `type`, one this build does not carry, fails
-   startup naming the known ones. Plugins are not loaded dynamically. A build's kinds are what its
-   Client Agent reports (clause 18). A build that leaves a kind out is published under a package
-   name of its own (clause 24); a self-update into a build that lacks a kind a block on the host
-   names fails its start and is rolled back like any failed attempt
-   ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
+2. **A compiled-in registry selected by `type`, each wrapped kind a Cargo feature.**
+   - The kinds are `collector` (the Collector Supervisor), `command` (the Custom Supervisor for any
+     Foreign Agent), and the wrapped kinds, each of which knows one third-party agent (clause 15).
+   - A new process kind is one module and one registry line (`registry()` in `supervisor/mod.rs`).
+     The core stays untouched.
+   - Each wrapped kind is a feature of `fleet-agent` named after its `type`. The default features
+     are all of them, so the released build carries every kind. A build that leaves one out is
+     built with `--no-default-features --features <kinds>`. A new wrapped kind is a feature too, in
+     the default set.
+   - `collector` and `command` are always compiled in. They are the integration paths the
+     specification names, and `command` runs any Foreign Agent no wrapper covers.
+   - An unknown `type`, one this build does not carry, fails startup naming the known ones.
+   - Plugins are not loaded dynamically.
+   - A build's kinds are what its Client Agent reports (clause 18).
+   - A build that leaves a kind out is released under a package name of its own (clause 24). A
+     self-update into a build that lacks a kind a block on the host names fails its start. It is
+     rolled back like any failed attempt
+     ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
 
-3. **A block is parsed in two stages.** The core takes the common keys, `type`, `name`,
-   `service_name` ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)), `endpoint_port`,
-   `program_path` ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)),
-   `stop_timeout_secs`, `apply_grace_secs` and `retain_previous_secs`, and the program key the kind
-   names (`binary` for `collector`, `command` for `command`), which clause 21 resolves. Everything
-   else is the kind's, parsed with `deny_unknown_fields`. `name` follows the instance-name grammar
-   of [CLT-installed-service-and-state](CLT-installed-service-and-state.md), because it is a
-   directory name, and is unique across blocks.
+3. **A block is parsed in two stages.**
+   - The core takes the common keys: `type`, `name`, `service_name`
+     ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)), `endpoint_port`, `program_path`
+     ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)),
+     `stop_timeout_secs`, `apply_grace_secs` and `retain_previous_secs`. It also takes the program
+     key the kind names (`binary` for `collector`, `command` for `command`), which clause 21
+     resolves.
+   - Everything else is the kind's, parsed with `deny_unknown_fields`.
+   - `name` follows the instance-name grammar of
+     [CLT-installed-service-and-state](CLT-installed-service-and-state.md), because it is a
+     directory name. It is unique across blocks.
 
-4. **Each Supervisor is one Agent; the pool is one connection.** Every Supervisor has its own
-   persisted `instance_uid`, `sequence_num` and capability set, and all of them ride the Client's
-   single upstream connection, disambiguated by `instance_uid` alone: the n-over-m model of
-   [CLT-modes-and-gateway](CLT-modes-and-gateway.md) with m fixed at one. The Client Agent
-   ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)) is always present beside
-   them, with or without any `[[supervisor]]` block. The Server needs no Supervisor-specific code.
+4. **Each Supervisor is one Agent; the pool is one connection.**
+   - Every Supervisor has its own persisted `instance_uid`, `sequence_num` and capability set.
+   - All of them ride the Client's single upstream connection, disambiguated by `instance_uid`
+     alone. That is the n-over-m model of [CLT-modes-and-gateway](CLT-modes-and-gateway.md) with
+     m fixed at one.
+   - The Client Agent ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)) is
+     always present beside them, with or without any `[[supervisor]]` block.
+   - The Server needs no Supervisor-specific code.
 
-5. **The Supervisor Endpoint is WebSocket-only on loopback.** It is bound for every Supervisor at
-   start to `127.0.0.1:<endpoint_port>` (`0`, the default, is an ephemeral port), so a taken port
-   fails the start rather than later, and accepted with `tokio-tungstenite`, with no HTTP
-   framework in the Client. It declares `AcceptsStatus` and `AcceptsEffectiveConfig`, enforces the
-   message size limit, and folds **content, not identity**: a connecting process's description,
-   health, effective configuration and available components become events of the owning Agent,
-   whose `instance_uid` stays the Supervisor's.
+5. **The Supervisor Endpoint is WebSocket-only on loopback.**
+   - The Client binds it for every Supervisor at start to `127.0.0.1:<endpoint_port>`. `0`, the
+     default, is an ephemeral port. A taken port thus fails the start rather than later.
+   - It accepts connections with `tokio-tungstenite`, with no HTTP framework in the Client.
+   - It declares `AcceptsStatus` and `AcceptsEffectiveConfig` and enforces the message size limit.
+   - It folds **content, not identity**. A connecting process's description, health, effective
+     configuration and available components become events of the owning Agent, whose
+     `instance_uid` stays the Supervisor's.
 
-6. **Process management follows the reference supervisor.** Spawn via `tokio::process`;
-   watchdog-restart an unexpectedly exited process with exponential backoff; stop gracefully with
-   SIGTERM, a wait of up to the stop timeout, then a kill on Unix, signalling the process group
-   where the kind leads one (clause 53), and `Child::kill` on Windows. On Client shutdown the
-   Managed Processes stop first, then each Agent's `agent_disconnect` goes out, within the service
-   managers' stop budgets ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)).
-   The Collector Supervisor passes each written configuration entry as its own `--config` (never a
-   supplementary entry,
-   [SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)), appends its extra
-   `args`, does not start before a configuration exists, and manipulates no YAML.
+6. **Process management follows the reference supervisor.**
+   - The Runner spawns via `tokio::process`.
+   - It watchdog-restarts an unexpectedly exited process with exponential backoff.
+   - It stops gracefully. On Unix that is SIGTERM, a wait of up to the stop timeout, then a kill,
+     signalling the process group where the kind leads one (clause 53). On Windows it is
+     `Child::kill`.
+   - On Client shutdown the Managed Processes stop first, then each Agent's `agent_disconnect` goes
+     out, within the service managers' stop budgets
+     ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)).
+   - The Collector Supervisor passes each written configuration entry as its own `--config`, never
+     a supplementary entry
+     ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)). It appends its
+     extra `args`, does not start before a configuration exists, and manipulates no YAML.
 
-7. **Configuration status is health-gated.** `RemoteConfigStatus` is `APPLYING` on receipt,
-   `APPLIED` only once the Managed Process has been (re)started on the new files and survived the
-   apply grace, and `FAILED` with the error otherwise. A process that exits within the grace fails
-   the apply and stays supervised.
+7. **Configuration status is health-gated.**
+   - `RemoteConfigStatus` is `APPLYING` on receipt.
+   - It is `APPLIED` only once the Managed Process has been (re)started on the new files and
+     survived the apply grace.
+   - It is `FAILED`, with the error, otherwise.
+
+   A process that exits within the grace fails the apply and stays supervised.
 
 8. **The lifecycle vocabulary is closed and every operation runs in the kind's adapter.**
-   `ProcessCommand` is `ApplyConfig`, `ApplyPackage`, `Restart` (the Server's restart command:
-   respawn on the current files, no configuration acknowledgement), `Shutdown` and `Uninstall`;
-   `ProcessEvent` carries description, pid, health, effective configuration, available
-   components, and the outcomes `ConfigApplied`, `PackageApplied` and `Uninstalled`. The shared
-   `Runner` implements the whole vocabulary (spawn and watchdog, bounded stop, restart as the
-   configuration apply, swap-and-gate as the package install, stop-only uninstall), and a kind
-   overrides only the steps its agent does differently. A kind that overrides nothing is complete.
+   - `ProcessCommand` is `ApplyConfig`, `ApplyPackage`, `Restart`, `Shutdown` and `Uninstall`.
+     `Restart` is the Server's restart command: respawn on the current files, with no
+     configuration acknowledgement.
+   - `ProcessEvent` carries description, pid, health, effective configuration and available
+     components, and the outcomes `ConfigApplied`, `PackageApplied` and `Uninstalled`.
+   - The shared `Runner` implements the whole vocabulary: spawn and watchdog, bounded stop,
+     restart as the configuration apply, swap-and-gate as the package install, stop-only
+     uninstall.
+   - A kind overrides only the steps its agent does differently. A kind that overrides nothing is
+     complete.
 
-9. **Reload is an apply strategy, not a command.** `ApplyConfig` is the only configuration
-   operation; the adapter applies it by restart (the default) or by a reload its kind knows, with
-   systemd's `reload-or-restart` semantics: a reload that cannot be delivered, or a process that
-   dies on it, falls back to a restart on the new files. The health gate of clause 7 applies to
-   both paths. The mechanism is the kind's alone: `collector` and `command` restart, and a wrapped
-   kind reloads on a signal its ADR names or restarts. No block declares one, because a signal
-   written for a program the kind knows nothing about is the one value whose error is invisible.
+9. **Reload is an apply strategy, not a command.**
+   - `ApplyConfig` is the only configuration operation.
+   - The adapter applies it by restart, the default, or by a reload its kind knows, with systemd's
+     `reload-or-restart` semantics. A reload that cannot be delivered, or a process that dies on
+     it, falls back to a restart on the new files.
+   - The health gate of clause 7 applies to both paths.
+   - The mechanism is the kind's alone. `collector` and `command` restart. A wrapped kind reloads
+     on a signal its ADR names, or restarts.
+   - No block declares a reload. A signal written for a program the kind knows nothing about is the
+     one value whose error is invisible.
 
-10. **Install and update run behind the Plugin, in one contract.** `ApplyPackage` hands the
-    adapter a verified artifact and expects a health-gated outcome with rollback on failure
-    ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The swap on
-    `InstallTarget` (one file or a tree) is the shared default; a kind whose installation is not a
-    file swap implements the step itself inside the same contract. Resolving the program and
-    declaring `AcceptsPackages` stay in the core (clauses 21 and 22), because a capability the
-    Server acts on must derive from what the core reads, never from per-kind behaviour.
+10. **Install and update run behind the Plugin, in one contract.**
+    - `ApplyPackage` hands the adapter a verified artifact and expects a health-gated outcome with
+      rollback on failure ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)).
+    - The swap on `InstallTarget` (one file or a tree) is the shared default. A kind whose
+      installation is not a file swap implements the step itself inside the same contract.
+    - Resolving the program and declaring `AcceptsPackages` stay in the core (clauses 21 and 22).
+      A capability the Server acts on must derive from what the core reads, never from per-kind
+      behaviour.
 
-11. **Uninstall undoes what installing did, and the core purges.** A Supervisor removed from the
-    set receives `Uninstall` before its directory is purged (the purge of a removed Supervisor,
-    [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)): the adapter stops
-    its process, undoes whatever its installs left outside the Supervisor's directory, answers
-    `Uninstalled` and exits. The generic uninstall is exactly the bounded graceful stop. An `Err`
-    outcome is logged with what could not be undone; it does not hold up the removal. A Supervisor
-    that is only changed is stopped, never uninstalled.
+11. **Uninstall undoes what installing did, and the core purges.**
+    - A Supervisor removed from the set receives `Uninstall` before its directory is purged (the
+      purge of a removed Supervisor,
+      [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)).
+    - The adapter then stops its process, undoes whatever its installs left outside the
+      Supervisor's directory, answers `Uninstalled` and exits.
+    - The generic uninstall is exactly the bounded graceful stop.
+    - The Client logs an `Err` outcome with what was left undone. It does not hold up the removal.
+    - A Supervisor that is only changed is stopped, never uninstalled.
 
 12. **The core persists a configuration, the adapter delivers it.** Receiving, validating,
-    persisting and status-reporting a remote configuration are OpAMP mechanics, identical for
-    every kind, and stay in the core. Everything between the written files and the running
-    process (pointing it at them, merging, restart or reload, applying through an API) is the
-    kind's.
+    persisting and status-reporting a remote configuration are OpAMP mechanics. They are identical
+    for every kind and stay in the core. Everything between the written files and the running
+    process is the kind's: pointing the process at them, merging, restart or reload, applying
+    through an API.
 
-13. **Derivable means derived, and decided elsewhere means not written here.** A value this Client
-    can compute from the kind, the platform and its own layout is not a block key, and neither is
-    a value the fleet is the better place to set. A block carrying such a key fails at startup with
-    a message naming the key and what supplies the value, never a silent override. This covers a
-    wrapped kind's program key, `program_path`, `service_name`, `endpoint_port` and the three
-    timing keys; `command`'s `working_dir` and `reload_signal`; and `[supervisor.attributes]`,
-    since a Server Label tags one Agent among several
-    ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) while the Client-wide
-    `[attributes]` describe the host. A configuration a freshly self-updated version refuses is
-    that update's failed attempt: a run resolves the update in flight even when the file does not
-    load, so the host returns to the version that could read it
-    ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
+13. **Derivable means derived, and decided elsewhere means not written here.**
+    - A value this Client can compute from the kind, the platform and its own layout is not a block
+      key. Neither is a value the fleet is the better place to set.
+    - A block carrying such a key fails at startup with a message naming the key and what supplies
+      the value. It is never a silent override.
+    - This covers:
+      - a wrapped kind's program key, `program_path`, `service_name`, `endpoint_port` and the three
+        timing keys;
+      - `command`'s `working_dir` and `reload_signal`;
+      - `[supervisor.attributes]`, since a Server Label tags one Agent among several
+        ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md)) while the Client-wide
+        `[attributes]` describe the host.
+    - A configuration a freshly self-updated version refuses is that update's failed attempt. A run
+      resolves the update in flight even when the file does not load. The host thus returns to the
+      version that can read the file
+      ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
 
 14. **A kind states what it knows, and the spawn applies it.** `Plugin::defaults()` returns
-    `KindDefaults`, compile-time constants resolved per platform: the program's file name, its
-    `program_path` inside a tree, the `service_name` it presents, its timing corrections (clause
-    17), and whether a block may pin `endpoint_port`. Beyond that:
-    - **Working directory:** a Managed Process starts in the directory its program lives in,
-      `program/` for a single file and the tree root for a tree, unless a kind names another; no
+    `KindDefaults`, compile-time constants resolved per platform:
+    - the program's file name;
+    - its `program_path` inside a tree;
+    - the `service_name` it presents;
+    - its timing corrections (clause 17);
+    - whether a block may pin `endpoint_port`.
+
+    Beyond that:
+    - **Working directory:** a Managed Process starts in the directory its program lives in, unless
+      a kind names another. That is `program/` for a single file and the tree root for a tree. No
       block sets it. Every path the Client hands a process is absolute.
     - **Directories the agent writes into:** a kind lists them in the process specification
-      (`ensure_dirs`), and they are created owner-only **before every spawn**, so a directory
-      removed under a running fleet returns on the next restart. They lie outside `program/`,
-      which a package swap replaces whole. An installation that fails for want of a directory is
-      this Client's failure, not the operator's.
+      (`ensure_dirs`). The Runner creates them, open to their owning account alone, **before every
+      spawn**, so a directory removed under a running fleet returns on the next restart. They lie
+      outside `program/`, which a package swap replaces whole. An installation that fails for want
+      of a directory is this Client's failure, not the operator's.
     - **Version:** asking the program for its version is the kind's. `collector` and the wrapped
       kinds do it themselves, reading the answer as clause 55 decides. `version_args` exists only
-      on `command`, where it is also the preflight a staged program is run with before the running
+      on `command`. There it is also the preflight a staged program is run with before the running
       one stops (clause 54).
 
 15. **Each wrapped agent is decided in an ADR of its own.** The rule here is general; what a
-    particular kind knows is not, and an upstream that moves a path should touch one document: the
-    kind's own ADR. `collector` and `command` are decided in clause 16.
+    particular kind knows is not. An upstream that moves a path then touches one document: the
+    kind's own ADR. Clause 16 decides `collector` and `command`.
 
 16. **What stays in a block, stays for a stated reason.**
-    - `collector` is one kind for both distributions and keeps `binary`: `otelcol` and
+    - `collector` is one kind for both distributions and keeps `binary`. `otelcol` and
       `otelcol-contrib` share a lifecycle, a configuration mechanism and a supervision story, and
-      which one a host runs is a decision. Its `service_name` falls back to the program's file
-      name.
-    - `collector` and `command` keep `args` and `env`: a feature gate or a per-host value read as
-      `${env:VAR}` is a decision nothing can derive. The wrapped kinds build both whole and take
-      neither; an operator who needs to change how a wrapped agent runs does it in that agent's
+      which one a host runs is a decision. Its `service_name` falls back to the program's file name.
+    - `collector` and `command` keep `args` and `env`. A feature gate, or a per-host value read as
+      `${env:VAR}`, is a decision nothing can derive. The wrapped kinds build both whole and take
+      neither. An operator who needs to change how a wrapped agent runs does it in that agent's
       configuration, which the fleet delivers.
     - `endpoint_port` is a key of `collector` only, the one kind whose Managed Process connects to
       the Endpoint. It cannot be derived: the port appears in the Collector configuration the
       fleet delivers, which this Client writes byte for byte and never rewrites. A non-zero value
-      on another kind is refused; `0` is the default written out and passes. The default stays
+      on another kind is refused. `0` is the default written out and passes. The default stays
       ephemeral so two Collector Supervisors on one host do not collide.
-    - `command` keeps `args`, `env` and `version_args`: without them most Foreign Agents never find
+    - `command` keeps `args`, `env` and `version_args`. Without them most Foreign Agents never find
       their configuration and report no version, and each fails visibly when wrong.
-    - A wrapped kind may keep a key where a decision exists that nobody else can make; the kind's
+    - A wrapped kind may keep a key where a decision exists that nobody else can make. The kind's
       own ADR names the key and the decision.
 
-17. **Timing is a fleet policy, then a kind's correction, never a host's.** `[supervisors]` holds
-    `stop_timeout_secs` (default 10) and `apply_grace_secs` (default 3); `[updates]` holds
-    `retain_previous_secs` (default one day,
-    [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). A wrapped kind may
-    correct any of the three where its agent demands it (an agent whose shutdown drains for up to a
-    minute), and its blocks may state none of them. Only `collector` and `command` blocks may
-    override them, because there no kind exists to hold the value.
+17. **Timing is a fleet policy, then a kind's correction, never a host's.**
+    - `[supervisors]` holds `stop_timeout_secs` (default 10) and `apply_grace_secs` (default 3).
+      `[updates]` holds `retain_previous_secs` (default one day,
+      [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)).
+    - A wrapped kind may correct any of the three where its agent demands it, such as an agent
+      whose shutdown drains for up to a minute. Its blocks may state none of them.
+    - Only `collector` and `command` blocks may override them, because there no kind exists to hold
+      the value.
 
-18. **A Client reports which kinds it carries.** Its Client Agent reports one non-identifying
-    attribute per compiled-in kind, `supervisor.kind.<kind> = "true"`, so a Selector can aim a
-    Supervisor set at Clients that can run it. One key per kind, because a Selector is equality
-    over string values and the question is about one member of the set. An operator cannot state
-    one: `[attributes]` refuses every `supervisor.*` key at startup
-    ([CLT-what-an-agent-reports §10](CLT-what-an-agent-reports.md)).
-    `AvailableComponents` is
-    not used for this: the message is *Development* in the pinned Baseline
-    ([API-protocol-pinned-interop-checked](API-protocol-pinned-interop-checked.md)) and Selectors do
-    not match it.
+18. **A Client reports which kinds it carries.**
+    - Its Client Agent reports one non-identifying attribute per compiled-in kind,
+      `supervisor.kind.<kind> = "true"`. A Selector can then aim a Supervisor set at Clients that
+      can run it.
+    - There is one key per kind, because a Selector is equality over string values and the question
+      is about one member of the set.
+    - An operator cannot state one: `[attributes]` refuses every `supervisor.*` key at startup
+      ([CLT-what-an-agent-reports §10](CLT-what-an-agent-reports.md)).
+    - `AvailableComponents` is not used for this. The message is *Development* in the pinned
+      Baseline ([API-protocol-pinned-interop-checked](API-protocol-pinned-interop-checked.md)), and
+      Selectors do not match it.
 
 19. **A kind binds itself to one artifact's shape.** The derived paths are those of the artifact
-    `opamp-fleetctl package fetch` builds. A tree packed differently does not fit, and the answer
-    is to repack it with the tool, not to reopen a key.
+    `opamp-fleetctl package fetch` builds. A tree packed differently does not fit. The answer is to
+    repack it with the tool, not to reopen a key.
 
-20. **Every wrapped agent has an artifact document, pinned by two tests.** The shape a kind runs
-    and the tool packs is written once, in `docs/artifacts/<agent>.md`, for the wrapped kinds
-    only. `collector` needs none: its artifact is installed as published, found by the name in
-    `binary`, and handed configurations it does not inspect, so there is no second end to keep in
-    step. Each document has the same eight sections: source (repository, tag form, version
-    reading); assets per platform and their naming; integrity (checksum form and location);
-    treatment (as published, or which repack); shape in the delivered tree; what the Client
-    derives from it, per platform, and why; the Configurations the tool uploads and what the agent
-    reads them as; and what can change upstream, with the test that goes red. Each document is
-    pinned by **one test per side**, one against the tool's `Plan` (asset name, checksum source,
-    action, output name) and one against the kind's constants (program name, `program_path`,
-    derived directories, arguments), `cfg`-gated per platform, and both name the document.
+20. **Every wrapped agent has an artifact document, pinned by two tests.**
+    - The shape a kind runs and the tool packs is written once, in `docs/artifacts/<agent>.md`, for
+      the wrapped kinds only.
+    - `collector` needs none. Its artifact is installed as released upstream, found by the name in
+      `binary`, and handed configurations it does not inspect. There is no second end to keep in
+      step.
+    - Each document has the same eight sections:
+      1. source (repository, tag form, version reading);
+      2. assets per platform and their naming;
+      3. integrity (checksum form and location);
+      4. treatment (as released, or which repack);
+      5. shape in the delivered tree;
+      6. what the Client derives from it, per platform, and why;
+      7. the Configurations the tool uploads and what the agent reads them as;
+      8. what can change upstream, with the test that goes red.
+    - Each document is pinned by **one test per side**, `cfg`-gated per platform, and both tests
+      name the document:
+      - one against the tool's `Plan` (upstream file name, checksum source, action, output name);
+      - one against the kind's constants (program name, `program_path`, derived directories,
+        arguments).
 
 21. **The program key is a bare file name.** `binary` (`collector`) and `command` (`command`) take
-    a file name with no path separator and no `..`, resolving to `program/<value>`, or to
+    a file name with no path separator and no `..`. It resolves to `program/<value>`, or to
     `program/tree/<program_path>` when the block names a tree. A wrapped kind names its own program
     (clause 14). Anything else fails at startup:
-    - an **absolute path**, and on Windows a rooted path without a drive letter, with a message
-      naming the block, the value and the way across: a program the fleet manages reaches the
-      host as a package and is named here by its bare file name;
-    - any other shape (`./x`, `a/b`, `../x`) with a message naming the rule.
+    - an **absolute path**, and on Windows a rooted path without a drive letter. The message names
+      the block, the value and the way across: a program the fleet manages reaches the host as a
+      package and is named here by its bare file name;
+    - any other shape (`./x`, `a/b`, `../x`), with a message naming the rule.
 
-    A bare name cannot escape the directory, so nothing has to be sanitised, and it never searches
+    A bare name cannot escape the directory, so nothing has to be sanitised. It never searches
     `$PATH`.
 
-22. **Every Supervisor accepts packages.** Since every program lives in a directory this Client
-    owns, every Supervisor's Agent declares `AcceptsPackages`; the capability is a constant, not a
-    function of the configuration. The `program/` directory is prepared at start, before the first
-    package arrives. A block carrying `accepts_packages` fails at startup with a message saying
-    the bare file name already makes the program updatable. Startup logs, once per Supervisor,
-    where its program is.
+22. **Every Supervisor accepts packages.**
+    - Every program lives in a directory this Client owns, so every Supervisor's Agent declares
+      `AcceptsPackages`. The capability is a constant, not a function of the configuration.
+    - The Client prepares the `program/` directory at start, before the first package arrives.
+    - A block carrying `accepts_packages` fails at startup, with a message saying the bare file
+      name already makes the program updatable.
+    - Startup logs, once per Supervisor, where its program is.
 
 23. **A vendor agent is brought in by repacking.** An agent installed by the machine's package
-    manager is not supervised here; it is repacked as a relocatable artifact and delivered as a
+    manager is not supervised here. It is repacked as a relocatable artifact and delivered as a
     package ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)). The manual
     documents the fleet-delivered route for every agent it describes.
 
-24. **The Client's own consent stays explicit.** `[self_update]` names the package it takes
-    ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)); nothing about it is
+24. **The Client's own consent stays explicit.** `[packages] self_update` is the consent, and the
+    one package it admits is the Client's own Agent type
+    ([CLT-self-update-signed-package §2](CLT-self-update-signed-package.md)). Nothing about it is
     derived from a path. A package written over the Client takes the host out of reach, which is
     where implicit consent would be wrong.
 
-25. **Placeholders name a Supervisor's own directories.** In the `args` and `env` values of
-    `collector` and `command` blocks, `${supervisor_dir}` expands to `<supervisor_dir>/<name>` and
-    `${config_dir}` to `<supervisor_dir>/<name>/config`, where the received configuration's
-    entries are written
-    ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)), so
-    `args = ["-c", "${config_dir}/fluent-bit-conf"]` cannot drift. They are expanded when the
-    Supervisor starts, and **never** in the program key, whose written shape is what the operator
-    reads. An unrecognised `${…}` is passed through verbatim, neither refused nor emptied, because a
-    Foreign Agent's own configuration language may use the same syntax (Fluent Bit's does).
+25. **Placeholders name a Supervisor's own directories.**
+    - In the `args` and `env` values of `collector` and `command` blocks, `${supervisor_dir}`
+      expands to `<supervisor_dir>/<name>`. `${config_dir}` expands to
+      `<supervisor_dir>/<name>/config`, where the received configuration's entries are written
+      ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)). So
+      `args = ["-c", "${config_dir}/fluent-bit-conf"]` cannot drift.
+    - They are expanded when the Supervisor starts. They are **never** expanded in the program key,
+      whose written shape is what the operator reads.
+    - An unrecognised `${…}` is passed through verbatim, neither refused nor emptied. A Foreign
+      Agent's own configuration language may use the same syntax (Fluent Bit's does).
 
-26. **The Server manages the set through the Client Agent, and only the blocks are read.** A
-    remote configuration offered to the Client Agent, a Configuration stated for the Agent type
-    `supervisor` ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)), is
-    parsed entry by entry as TOML. The union of the entries' `[[supervisor]]` blocks, in entry-name
-    order, is the offered set; every other top-level key is ignored. The boundary is enforced by
-    what the Client takes, not by policing what the Server sends. A duplicate `name` within or
-    across entries, an entry that is not TOML, or a block the startup parser would refuse fails the
-    offer.
+26. **The Server manages the set through the Client Agent, and only the blocks are read.**
+    - A remote configuration offered to the Client Agent is a Configuration stated for the Agent
+      type `supervisor`
+      ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md)).
+      The Client parses it entry by entry as TOML.
+    - The union of the entries' `[[supervisor]]` blocks, in entry-name order, is the offered set.
+      The Client ignores every other top-level key.
+    - The boundary is enforced by what the Client takes, not by policing what the Server sends.
+    - The offer fails on a duplicate `name` within or across entries, on an entry that is not TOML,
+      and on a block the startup parser would refuse.
 
-27. **An offered set is validated as startup would read it, before anything stops.** The merge is
-    the running file's globals with the offered blocks. Each block passes the same checks startup
-    applies: kind known, program key present and well-shaped, `service_name`, `endpoint_port` and
-    timing as this decision allows them, retired keys refused, and the kind's strict settings
-    parsed through the side-effect-free `Plugin::check`. A set that fails is reported `FAILED`
-    with the reason; nothing is stopped, nothing is written, the running set stays in force.
+27. **An offered set is validated as startup would read it, before anything stops.**
+    - The merge is the running file's globals with the offered blocks.
+    - Each block passes the same checks startup applies:
+      - kind known;
+      - program key present and well-shaped;
+      - `service_name`, `endpoint_port` and timing as this decision allows them;
+      - retired keys refused;
+      - the kind's strict settings parsed through the side-effect-free `Plugin::check`.
+    - A set that fails is reported `FAILED` with the reason. Nothing is stopped, nothing is
+      written, and the running set stays in force.
 
 28. **A delivered block may name only a Client-owned program.** The apply path checks that every
     offered block's program resolves inside the Supervisor's own `program/`. Clause 21 already
-    refuses every other shape for every principal, so this check cannot fire today; it stays as
+    refuses every other shape for every principal, so this check cannot fire today. It stays as
     defence in depth against a future shape, in the apply path that knows the block came from the
     Server.
 
@@ -482,330 +535,389 @@ configuration whose hash an Agent is applying or has applied as a report, not a 
        introducing itself as a new Agent on the running connection.
 
     Unchanged Supervisors keep running untouched. A failed write restarts the stopped Supervisors
-    from the still-standing old file. A crash before the write restarts into the old file, one
-    after it into the new one; both converge, because startup builds exactly what the file says.
+    from the still-standing old file. A crash before the write restarts into the old file, and one
+    after it into the new one. Both converge, because startup builds exactly what the file says.
 
-30. **`supervisor.toml` remains the single truth.** No overlay and no second file: after an apply
-    the file is the configuration, the same file the operator reads and the Client Agent reports
-    as its effective configuration (refreshed in the same step), and an offline restart runs the
-    delivered Supervisors because they are in it. Only the `[[supervisor]]` array is replaced, by
-    editing the document with `toml_edit`, so the operator's comments, ordering and formatting
-    survive byte for byte and the offered blocks keep their text. The write goes through a sibling
-    temporary file renamed into place; on Unix it carries the existing file's mode, and a file
-    created by the write is `0600`, because it holds the credential.
+30. **`supervisor.toml` remains the single truth.**
+    - There is no overlay and no second file. After an apply the file is the configuration. It is
+      the same file the operator reads and the Client Agent reports as its effective configuration,
+      refreshed in the same step. An offline restart runs the delivered Supervisors because they
+      are in it.
+    - Only the `[[supervisor]]` array is replaced, by editing the document with `toml_edit`. The
+      operator's comments, ordering and formatting survive byte for byte, and the offered blocks
+      keep their text.
+    - The write goes through a sibling temporary file renamed into place. On Unix it carries the
+      existing file's mode. A file the write creates is `0600`, because it holds the credential.
 
-31. **The status is honest.** The Client Agent reports `APPLYING` on receipt, `APPLIED` once the
-    file is written and the starts have succeeded, and `FAILED` when parsing, validation, the
-    write or a start fails. A started Supervisor whose process later crashes is a health fact of
-    that Supervisor's Agent, not a failed configuration.
+31. **The status is honest.** The Client Agent reports:
+    - `APPLYING` on receipt;
+    - `APPLIED` once the file is written and the starts have succeeded;
+    - `FAILED` when parsing, validation, the write or a start fails.
+
+    A started Supervisor whose process later crashes is a health fact of that Supervisor's Agent,
+    not a failed configuration.
 
 32. **No offer, no change.** A Client to which no Supervisor set is offered runs its locally
-    written blocks. The first applied offer replaces the local set, and from then on, while
-    `[supervisors] server_manages_set` is true, the Server's set is authoritative for that
-    Client's Supervisors (clauses 38 to 44); the offer is compared against the file, not against
-    the last offer.
+    written blocks. The first applied offer replaces the local set. From then on, while
+    `[supervisors] server_manages_set` is true, the Server's set is authoritative for that Client's
+    Supervisors (clauses 38 to 44). The Client compares the offer against the file, not against the
+    last offer.
 
-33. **The purge never leaves the Supervisor root.** A symlink where a Supervisor's directory should
-    be is unlinked, never followed, and a directory whose resolved path lies outside the root is
-    left alone with a warning.
+33. **The purge never leaves the Supervisor root.** The purge unlinks a symlink where a
+    Supervisor's directory belongs, and never follows it. It leaves alone, with a warning, a
+    directory whose resolved path lies outside the root.
 
 34. **A directory the purge cannot delete fails nothing.** The Supervisor is already stopped and
-    the file written, so the set the Server asked for is running; a purge error (a file held open
-    on Windows, permissions) is a warning naming the path. The purge renamed the directory to a
-    tombstone before deleting it, and the next start and the next purge remove the tombstone
-    again ([CLT-accounts-service-runs-under §25](CLT-accounts-service-runs-under.md)).
+    the file written, so the set the Server asked for is running. A purge error, such as a file held
+    open on Windows or a permission, is a warning naming the path. The purge renamed the directory
+    to a tombstone before deleting it. The next start and the next purge remove the tombstone again
+    ([CLT-accounts-service-runs-under §25](CLT-accounts-service-runs-under.md)).
 
-35. **A delivered block brings no environment and no arguments the operator did not allow.** In
-    the apply path, a delivered block's `env` entries, `args` and `version_args` must equal those
-    of the running block of the same name, or be allowed by the operator in `supervisor.toml`'s
-    `[supervisors]` section, keys the Server cannot change (clause 26). `delivered_env` is a list
-    of variable names, each exact or ending in `*` as a prefix (`["OTEL_*", "GOMAXPROCS"]`), and
-    defaults to none; `delivered_args = true` lets delivered blocks state arguments, and defaults
-    to `false`. Names are compared without regard to case, as Windows compares them. Whatever the
-    list says, a delivered `env` that adds or changes a variable steering which code a program
-    loads is refused: `PATH`, every `LD_*` and `DYLD_*`, `GCONV_PATH`, `GLIBC_TUNABLES`,
-    `OPENSSL_CONF`, `OPENSSL_ENGINES`, `DOTNET_STARTUP_HOOKS`, `COR_PROFILER*`,
-    `CORECLR_PROFILER*`, `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`,
-    `PYTHONPATH`, `PYTHONSTARTUP`, `PERL5LIB`, `PERL5OPT`, `RUBYOPT`, `BASH_ENV` and `ENV`. So is a
-    new or changed value that contains `${config_dir}` or `${supervisor_dir}`: the Server delivers
-    files there that no one signed, and an allowed name such as `OTEL_JAVAAGENT_EXTENSIONS` would
-    load one. The list is a floor, not a guarantee: `delivered_env = ["*"]` leaves only it between
-    a delivered block and every other variable a program reads. A block that breaks this fails the
-    whole offer before anything stops (clause 27), naming the block and the variable or key. A
-    block the operator writes is unaffected: the rule is about what the Server may add.
+35. **A delivered block brings no environment and no arguments the operator did not allow.**
+    - In the apply path, a delivered block's `env` entries, `args` and `version_args` must equal
+      those of the running block of the same name, or be allowed by the operator. The operator
+      allows them in `supervisor.toml`'s `[supervisors]` section, whose keys the Server cannot
+      change (clause 26):
+      - `delivered_env` is a list of variable names, each exact or ending in `*` as a prefix
+        (`["OTEL_*", "GOMAXPROCS"]`). It defaults to none.
+      - `delivered_args = true` lets delivered blocks state arguments. It defaults to `false`.
+    - Names are compared without regard to case, as Windows compares them.
+    - Whatever the list says, the Client refuses a delivered `env` that adds or changes a variable
+      steering which code a program loads: `PATH`, every `LD_*` and `DYLD_*`, `GCONV_PATH`,
+      `GLIBC_TUNABLES`, `OPENSSL_CONF`, `OPENSSL_ENGINES`, `DOTNET_STARTUP_HOOKS`,
+      `COR_PROFILER*`, `CORECLR_PROFILER*`, `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`,
+      `JDK_JAVA_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PERL5LIB`, `PERL5OPT`, `RUBYOPT`,
+      `BASH_ENV` and `ENV`.
+    - It also refuses a new or changed value that contains `${config_dir}` or `${supervisor_dir}`.
+      The Server delivers files there that no one signed, and an allowed name such as
+      `OTEL_JAVAAGENT_EXTENSIONS` would load one.
+    - The list is a floor, not a guarantee. `delivered_env = ["*"]` leaves only it between a
+      delivered block and every other variable a program reads.
+    - A block that breaks this fails the whole offer before anything stops (clause 27). The reason
+      names the block and the variable or key.
+    - A block the operator writes is unaffected: the rule is about what the Server may add.
 
-36. **A delivered block names no host path outside its own configuration directory.** A kind
-    states which of its settings name a file the Supervisor reads, and confines them in a
-    delivered block (`Plugin::check_delivered`); by default a kind names none. In a delivered
-    block each such setting must be `${config_dir}/` followed by a relative path with no `..`, `.`
-    or root component, unless it equals the running block's value and the settings that say where
-    the file's content goes are unchanged. The kind's own ADR names those settings and what else a
-    delivered block of the kind must state so that the Server cannot choose whom the agent trusts;
-    for an operator-written block that ADR stands as it is.
+36. **A delivered block names no host path outside its own configuration directory.**
+    - A kind states which of its settings name a file the Supervisor reads, and confines them in a
+      delivered block (`Plugin::check_delivered`). By default a kind names none.
+    - In a delivered block each such setting must be `${config_dir}/` followed by a relative path
+      with no `..`, `.` or root component. The one exception: it equals the running block's value,
+      and the settings that say where the file's content goes are unchanged.
+    - The kind's own ADR names those settings. It also names what else a delivered block of the
+      kind must state so that the Server cannot choose whom the agent trusts. For an
+      operator-written block that ADR stands as it is.
 
-37. **What is checked is what is written.** The rewritten `supervisor.toml` is rendered before
-    anything stops, with every delivered table and its sub-tables placed in the order of the set,
-    and the offer is refused unless the rendered file reads back as exactly the set that passed
+37. **What is checked is what is written.** The Client renders the rewritten `supervisor.toml`
+    before anything stops, with every delivered table and its sub-tables placed in the order of the
+    set. It refuses the offer unless the rendered file reads back as exactly the set that passed
     clauses 27, 35 and 36.
 
-38. **The key `server_manages_set`.** `[supervisors] server_manages_set` is a boolean and defaults
-    to `true`, the behaviour clauses 26 to 37 describe, with the purge of a removed Supervisor
-    ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)) and the orphaned
-    directories of [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md). It is read
-    when the configuration is loaded, like every key of the file, and is never taken from the
-    Server, since the Supervisor-set apply replaces only the `[[supervisor]]` array (clauses 26 and
-    30). A change takes effect at the next start of the Client.
+38. **The key `server_manages_set`.**
+    - `[supervisors] server_manages_set` is a boolean and defaults to `true`. `true` is the
+      behaviour clauses 26 to 37 describe, with the purge of a removed Supervisor
+      ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)) and the
+      orphaned directories of [CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md).
+    - The Client reads it when the configuration is loaded, like every key of the file. It never
+      takes it from the Server, since the Supervisor-set apply replaces only the `[[supervisor]]`
+      array (clauses 26 and 30).
+    - A change takes effect at the next start of the Client.
 
 39. **With `server_manages_set` false, the Client Agent declares neither remote-configuration
-    capability.** It is built without `AcceptsRemoteConfig` and without `ReportsRemoteConfig`.
-    Every other capability stays as the context lists it: `ReportsStatus`,
-    `ReportsEffectiveConfig` with `supervisor.toml` as its effective configuration,
-    `ReportsHealth`, the connection-settings bits, the own-telemetry bits, `ReportsHeartbeat` where
-    enabled, and `AcceptsPackages` with `ReportsPackageStatuses` where `[self_update]` consents and
-    a verification key is configured. Self-update is a separate consent (clause 24) and is not
-    touched. The Server then offers the Client no set
-    ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the offer of a
-    remote configuration).
+    capability.**
+    - It is built without `AcceptsRemoteConfig` and without `ReportsRemoteConfig`.
+    - Every other capability stays as the context lists it:
+      - `ReportsStatus`;
+      - `ReportsEffectiveConfig`, with `supervisor.toml` as its effective configuration;
+      - `ReportsHealth`;
+      - the connection-settings bits and the own-telemetry bits;
+      - `ReportsHeartbeat` where enabled;
+      - `AcceptsPackages` with `ReportsPackageStatuses`, where `[packages] self_update` consents
+        and a verification key is configured.
+    - Self-update is a separate consent (clause 24), and the key does not touch it.
+    - The Server then offers the Client no set
+      ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the offer of a
+      remote configuration).
 
-40. **A set that arrives anyway is ignored.** It is not stored, not applied, and no
-    `RemoteConfigStatus` is reported: no Supervisor stops or starts and `supervisor.toml` is not
-    written. The Baseline's rule for a part of a message the Agent does not support is that it
-    *"SHOULD ignore it"*. The Client logs a warning naming the offered hash once per hash it has
-    seen since start, remembering at most as many hashes as it does for a Supervisor under clause
-    48 before it starts over. The Supervisor-set apply itself refuses to run while the key is
-    `false` and logs the hash it was handed, so no path that hands it a set gets past the key.
+40. **A set that arrives anyway is ignored.**
+    - The Client does not store it, does not apply it, and reports no `RemoteConfigStatus`. No
+      Supervisor stops or starts, and `supervisor.toml` is not written. The Baseline's rule for a
+      part of a message the Agent does not support is that it *"SHOULD ignore it"*.
+    - The Client logs a warning naming the offered hash, once per hash it has seen since start. It
+      remembers at most as many hashes as it does for a Supervisor under clause 48 before it starts
+      over.
+    - The Supervisor-set apply itself refuses to run while the key is `false`, and logs the hash it
+      was handed. No path that hands it a set gets past the key.
 
-41. **A stored set from before is not restored, and is removed at start.** When the key is
-    `false` and `remote-config.pb` exists in `state_dir`, the Client, before it connects:
+41. **A stored set from before is not restored, and is removed at start.** When the key is `false`
+    and `remote-config.pb` exists in `state_dir`, the Client, before it connects:
     - does not restore it, so it reports no `RemoteConfigStatus` and no
       `last_remote_config_hash`;
     - deletes `remote-config.pb` first, so nothing that fails after it can leave the stored hash
       behind;
     - then deletes, as far as it can, each entry copy in `<state_dir>/config/` whose bytes are
-      still the ones the stored map holds, leaving every other file there, the comparison clause
-      49 makes for a Supervisor;
-    - deletes a `remote-config.pb` that does not decode and leaves `config/` as it is;
-    - logs once, naming the stored hash and every copy it kept or could not remove.
+      still the ones the stored map holds, as clause 49 compares for a Supervisor; it leaves every
+      other file there;
+    - deletes a `remote-config.pb` that does not decode, and leaves `config/` as it is;
+    - logs once, naming the stored hash and every copy it kept or failed to remove.
 
-    Nothing runs on these files, and the set they carry is already in `supervisor.toml`, so a file
-    that cannot be read or deleted is a warning naming the error, and startup continues. Kept,
-    `remote-config.pb` would be reported `APPLIED` again once the key returns to `true`, and the
-    Server would not offer its set while that hash is unchanged, though the file may by then hold
-    the operator's blocks; the warning for `remote-config.pb` itself says so.
+    Nothing runs on these files, and the set they carry is already in `supervisor.toml`. A file
+    that cannot be read or deleted is therefore a warning naming the error, and startup continues.
+    Kept, `remote-config.pb` would be reported `APPLIED` again once the key returns to `true`. The
+    Server would then not offer its set while that hash is unchanged, though the file may by then
+    hold the operator's blocks. The warning for `remote-config.pb` itself says so.
 
-42. **The blocks in the file stay, and are the operator's.** Setting the key rewrites nothing:
-    every `[[supervisor]]` block stays as it is, including blocks an earlier applied set wrote, and
-    the Client runs them as written. From then on only the operator changes them. An operator who
-    switches the key off reviews the blocks first, since some of them may be the Server's. A
-    Supervisor's own remote configuration is not affected: each Supervisor's Agent keeps taking
-    its configuration unless it is named in `remote_config_disabled`. `delivered_args` and
-    `delivered_env` keep their meaning and have nothing to act on while no set is delivered.
+42. **The blocks in the file stay, and are the operator's.**
+    - Setting the key rewrites nothing. Every `[[supervisor]]` block stays as it is, including
+      blocks an earlier applied set wrote, and the Client runs them as written.
+    - From then on only the operator changes them. An operator who switches the key off reviews the
+      blocks first, since some of them may be the Server's.
+    - A Supervisor's own remote configuration is not affected. Each Supervisor's Agent keeps taking
+      its configuration unless it is named in `remote_config_disabled`.
+    - `delivered_args` and `delivered_env` keep their meaning, and have nothing to act on while no
+      set is delivered.
 
-43. **Together with `remote_config_disabled` it closes what that list leaves open.** With the key
-    `false` the Server can neither remove a listed Supervisor nor add the same agent under a name
-    that is not listed. The Server can still install a signed package into a Supervisor, restart a
-    Managed Process, offer connection settings, and configure every Supervisor not named in
-    `remote_config_disabled`.
-
-    A command a configuration can run (a check or exec entry an agent's configuration names, the
-    configuration a `command` kind's program reads) runs as the account its Managed Process runs
-    under. Where a process account is registered, that is the process account, which cannot write
-    `supervisor.toml` ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)). Where
-    none is, it is the Client's account, and what the key holds against the Server holds only while
-    every Supervisor whose configuration language can run commands is named in
-    `remote_config_disabled`. Otherwise the Server can configure such a Supervisor to rewrite
-    `supervisor.toml`, and the key flips at the next start. A signed Client build can also still
-    replace the Client's own program where `[self_update]` consents
-    ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)), and that program reads
-    the key.
+43. **Together with `remote_config_disabled` it closes what that list leaves open.**
+    - With the key `false` the Server can neither remove a listed Supervisor nor add the same agent
+      under a name that is not listed.
+    - The Server can still install a signed package into a Supervisor, restart a Managed Process,
+      offer connection settings, and configure every Supervisor not named in
+      `remote_config_disabled`.
+    - A command a configuration can run runs as the account its Managed Process runs under. Such a
+      command is a check or exec entry an agent's configuration names, or the configuration a
+      `command` kind's program reads.
+      - Where a process account is registered, that is the process account, which cannot write
+        `supervisor.toml` ([CLT-accounts-service-runs-under](CLT-accounts-service-runs-under.md)).
+      - Where none is, it is the Client's account. What the key holds against the Server then holds
+        only while every Supervisor whose configuration language can run commands is named in
+        `remote_config_disabled`. Otherwise the Server can configure such a Supervisor to rewrite
+        `supervisor.toml`, and the key flips at the next start.
+    - A signed Client build can also still replace the Client's own program where
+      `[packages] self_update` consents
+      ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)), and that
+      program reads the key.
 
 44. **Switching `server_manages_set` back on hands the set to the Server again.** When the key
-    returns to `true`, the next start declares both capabilities, reports no hash, unless that
-    earlier start warned that it could not remove `remote-config.pb` itself, and is offered
-    whatever set is released to the Client Agent
+    returns to `true`, the next start declares both capabilities. It reports no hash, unless that
+    earlier start warned that it failed to remove `remote-config.pb` itself. It is offered whatever
+    set is released to the Client Agent
     ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). The first
-    applied offer replaces the `[[supervisor]]` array, the operator's blocks included, and purges
+    applied offer replaces the `[[supervisor]]` array, the operator's blocks included. It purges
     each Supervisor it removes (clause 32 and the purge of a removed Supervisor,
     [PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)).
 
-45. **The key `remote_config_disabled`.** `[supervisors] remote_config_disabled` is a list of
-    Supervisor names and defaults to empty. It is read when the configuration is loaded, like
-    every key of the file, and is never taken from the Server: the Supervisor-set apply keeps the
-    running file's globals and replaces only the `[[supervisor]]` array (clauses 26, 27 and 30). A
-    Server that deletes a listed Supervisor's block and delivers it again under the same name gets
-    a Supervisor that is still listed.
+45. **The key `remote_config_disabled`.**
+    - `[supervisors] remote_config_disabled` is a list of Supervisor names and defaults to empty.
+    - The Client reads it when the configuration is loaded, like every key of the file. It never
+      takes it from the Server: the Supervisor-set apply keeps the running file's globals and
+      replaces only the `[[supervisor]]` array (clauses 26, 27 and 30).
+    - A Server that deletes a listed Supervisor's block and delivers it again under the same name
+      gets a Supervisor that is still listed.
 
-46. **A name that matches no block is a notice, not a refusal.** At startup each listed name that
-    no `[[supervisor]]` block carries is logged once as a notice naming it, because the set may
-    arrive later from the Server. A listed name equal to the Client's own `name` and to no block is
-    logged with a notice that the Client Agent is not covered; that is clauses 38 to 44. A value
-    that breaks the instance-name grammar (clause 3) fails startup naming the key and the value,
-    because no block can ever carry it.
+46. **A name that matches no block is a notice, not a refusal.**
+    - At startup the Client logs once, as a notice, each listed name that no `[[supervisor]]` block
+      carries, because the set may arrive later from the Server.
+    - It logs a listed name equal to the Client's own `name` and to no block with a notice that the
+      Client Agent is not covered. Clauses 38 to 44 cover the Client Agent.
+    - A value that breaks the instance-name grammar (clause 3) fails startup naming the key and the
+      value, because no block can ever carry it.
 
-47. **A listed Supervisor's Agent declares neither remote-configuration capability.** It is built
-    without `AcceptsRemoteConfig` and without `ReportsRemoteConfig`. Every other capability stays
-    as it is: `ReportsEffectiveConfig`, `AcceptsRestartCommand`, and `AcceptsPackages` with
-    `ReportsPackageStatuses` where a verification key is configured. The Server then offers it no
-    remote configuration
-    ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the offer of a
-    remote configuration), and nothing on the Server changes.
+47. **A listed Supervisor's Agent declares neither remote-configuration capability.**
+    - It is built without `AcceptsRemoteConfig` and without `ReportsRemoteConfig`.
+    - Every other capability stays as it is: `ReportsEffectiveConfig`, `AcceptsRestartCommand`, and
+      `AcceptsPackages` with `ReportsPackageStatuses` where a verification key is configured.
+    - The Server then offers it no remote configuration
+      ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), the offer of a
+      remote configuration), and nothing on the Server changes.
 
-48. **A remote configuration that arrives anyway is ignored.** It is not stored, no entry file is
-    written, nothing is handed to the process adapter, and no `RemoteConfigStatus` is reported,
-    since the Agent declares no `ReportsRemoteConfig`. The Baseline's rule for a part of a message
-    the Agent does not support is that it *"SHOULD ignore it"*. The Client logs a warning naming
-    the Supervisor and the offered hash once per hash it has seen since start, so a Server that
-    resends the same offer on every exchange does not flood the log.
+48. **A remote configuration that arrives anyway is ignored.**
+    - The Client does not store it, writes no entry file, and hands nothing to the process adapter.
+    - It reports no `RemoteConfigStatus`, since the Agent declares no `ReportsRemoteConfig`. The
+      Baseline's rule for a part of a message the Agent does not support is that it *"SHOULD
+      ignore it"*.
+    - The Client logs a warning naming the Supervisor and the offered hash, once per hash it has
+      seen since start. A Server that resends the same offer on every exchange thus does not flood
+      the log.
 
 49. **A stored remote configuration from before is removed at start, and the operator's files
-    stay.** When a listed Supervisor starts, at Client startup or when a delivered set adds or
-    changes it, and a `remote-config.pb` exists in its directory, the Client, before the kind is
+    stay.** A listed Supervisor starts at Client startup, or when a delivered set adds or changes
+    it. When a `remote-config.pb` then exists in its directory, the Client, before the kind is
     started:
     - deletes from `config/` each entry file the stored map names whose bytes are still the ones
       the map holds, and `.supplementary` if its bytes are still the ones the map would write;
     - leaves every other file in `config/` untouched, since the operator wrote or overwrote it;
     - deletes `remote-config.pb`;
-    - logs once, naming the Supervisor, the stored hash, and every file it kept because its
-      content had changed.
+    - logs once, naming the Supervisor, the stored hash, and every file it kept because its content
+      had changed.
 
-    A `remote-config.pb` that does not decode is deleted, `config/` is left as it is, and the
-    warning says that `config/` may still hold files the Server wrote. No status is restored, so a
-    listed Supervisor reports no `RemoteConfigStatus` after a restart and no
-    `last_remote_config_hash`.
+    The Client deletes a `remote-config.pb` that does not decode and leaves `config/` as it is. The
+    warning then says that `config/` may still hold files the Server wrote. No status is restored,
+    so a listed Supervisor reports no `RemoteConfigStatus` and no `last_remote_config_hash` after a
+    restart.
 
-    Storing an offer (`store_remote_config`) removes the previous entry files, writes the new
-    ones, and writes `remote-config.pb` last. A store cut short, by a crash or a failed write,
-    therefore never leaves a new `.pb` beside the previous offer's files, which the comparison
-    above would keep as the operator's. What it can leave is the previous `.pb` beside some of the
-    new offer's files. The previous map names none of those, so they stay in `config/`: a stop
-    after the first new entry file and before the `.pb` is the one window in which the drop cannot
-    tell the Server's files from the operator's.
+    Storing an offer (`store_remote_config`) removes the previous entry files, writes the new ones,
+    and writes `remote-config.pb` last.
+    - A store cut short, by a crash or a failed write, therefore never leaves a new `.pb` beside the
+      previous offer's files, which the comparison above would keep as the operator's.
+    - What it can leave is the previous `.pb` beside some of the new offer's files. The previous map
+      names none of those, so they stay in `config/`.
+    - A stop after the first new entry file and before the `.pb` is thus the one window in which
+      the drop cannot tell the Server's files from the operator's.
 
-50. **What a listed Supervisor runs is the operator's.** The kinds are unchanged. A listed
-    Supervisor runs on the files the operator places in `<supervisor_dir>/<name>/config/`, under
-    the names its kind reads (the context lists them), with roles in `.supplementary` in the
-    format `storage.rs` writes. For `collector` and `command` the process also gets the block's
-    `args` and `env`, which are the operator's as clause 51 keeps them. With remote configuration
-    switched off, nothing else writes into that directory. A listed Supervisor with no such file
-    does what its kind does before its first remote configuration: a `collector` waits and says
-    so, and a wrapped kind waits or lets its agent exit and be reported, as its ADR decides.
+50. **What a listed Supervisor runs is the operator's.**
+    - The kinds are unchanged. A listed Supervisor runs on the files the operator places in
+      `<supervisor_dir>/<name>/config/`, under the names its kind reads (the context lists them).
+      Roles go in `.supplementary`, in the format `storage.rs` writes.
+    - For `collector` and `command` the process also gets the block's `args` and `env`. Those are
+      the operator's, as clause 51 keeps them.
+    - With remote configuration switched off, nothing else writes into that directory.
+    - A listed Supervisor with no such file does what its kind does before its first remote
+      configuration. A `collector` waits and says so. A wrapped kind waits, or lets its agent exit
+      and be reported, as its ADR decides.
 
 51. **A delivered block for a listed Supervisor repeats the running block whole.** In the
     Supervisor-set apply, the check of a delivered block (`check_delivered_block` in
     `crates/fleet-agent/src/supervisor/mod.rs`, called from `apply_inner` in
-    `crates/fleet-agent/src/reconfigure.rs`) ignores `delivered_args` and `delivered_env` (the
-    `SupervisorsConfig` fields of `crates/fleet-agent/src/config.rs`) for a block whose name is in
-    `remote_config_disabled`, and holds such a block to this:
-    - **A block of that name runs:** the delivered block equals it entirely, compared as the
-      parsed block. That covers `type`, the core keys (`service_name`, `endpoint_port`,
-      `stop_timeout_secs`, `apply_grace_secs`, `retain_previous_secs`, `program_path`) and every
-      kind setting, among them `args`, `version_args` and `env` and every setting a wrapped kind
-      keeps. A key the running block lacks may not appear, and one it has may not change or go.
-      Absent and empty differ.
+    `crates/fleet-agent/src/reconfigure.rs`) treats a block whose name is in
+    `remote_config_disabled` apart. It ignores `delivered_args` and `delivered_env` (the
+    `SupervisorsConfig` fields of `crates/fleet-agent/src/config.rs`) for that block, and holds the
+    block to this:
+    - **A block of that name runs:** the delivered block equals it entirely, compared as the parsed
+      block.
+      - That covers `type`, the core keys (`service_name`, `endpoint_port`, `stop_timeout_secs`,
+        `apply_grace_secs`, `retain_previous_secs`, `program_path`) and every kind setting. Among
+        them are `args`, `version_args` and `env`, and every setting a wrapped kind keeps.
+      - A key the running block lacks must not appear. A key it has must not change or go.
+      - Absent and empty differ.
     - **No block of that name runs, because the block is added:** the delivered block carries
-      nothing beyond what naming its program requires. That is `type` and `name`, plus the kind's
-      program key where the kind does not name its own program: `binary` for `collector` and
-      `command` for `command`. A wrapped kind's block carries `type` and `name` alone, since a
-      wrapped kind installs and names its own program and refuses the key (clause 13). A setting
-      the kind keeps is then the operator's to write into the host's `supervisor.toml`, and from
-      then on the running block is the one a delivered block must equal.
+      nothing beyond what naming its program requires.
+      - That is `type` and `name`, plus the kind's program key where the kind does not name its own
+        program: `binary` for `collector` and `command` for `command`.
+      - A wrapped kind's block carries `type` and `name` alone, since a wrapped kind installs and
+        names its own program and refuses the key (clause 13).
+      - A setting the kind keeps is then the operator's to write into the host's `supervisor.toml`.
+        From then on the running block is the one a delivered block must equal.
 
     A block that breaks this fails the whole offer before anything stops, as clauses 27 and 35
-    refuse a block: the set is reported `FAILED` with a reason naming the block and the key,
-    nothing is stopped, nothing is written, and the running set stays in force. Without this, the
-    Server could configure a listed Supervisor through its block instead of its `config/`. It
-    could put a configuration on a Collector's command line or into its environment
-    (`--config=yaml:…`, `--config=env:VAR`) where `delivered_args` or `delivered_env` allow it. It
-    could also, through the settings a wrapped kind keeps, change which peer the operator's agent
-    talks to and, with a file setting pointed at a file no remote configuration writes, what it
-    trusts (the context describes how). Equality closes that route for every key, including keys
-    a kind adds later. A list of the keys that matter would have to be kept current with every
-    kind. The Server can still remove a listed block or deliver it unchanged. Delivering it
-    unchanged is how a Server that manages the set keeps it.
+    refuse a block. The set is reported `FAILED` with a reason naming the block and the key.
+    Nothing is stopped, nothing is written, and the running set stays in force.
+
+    Without this rule, the Server would configure a listed Supervisor through its block instead of
+    its `config/`:
+    - it would put a configuration on a Collector's command line or into its environment
+      (`--config=yaml:…`, `--config=env:VAR`), where `delivered_args` or `delivered_env` allow it;
+    - through the settings a wrapped kind keeps, it would change which peer the operator's agent
+      talks to;
+    - with a file setting pointed at a file no remote configuration writes, it would change what
+      the agent trusts (the context describes how).
+
+    Equality closes that route for every key, including keys a kind adds later. A list of the keys
+    that matter would have to be kept current with every kind. The Server can still remove a listed
+    block or deliver it unchanged. Delivering it unchanged is how a Server that manages the set
+    keeps it.
 
 52. **Switching it back on hands `config/` to the Server again.** When a name leaves the list, the
-    next start declares both capabilities, reports no hash, and is offered whatever is released to
-    that Agent ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)). The
-    first stored offer replaces every file in `config/`
+    next start declares both capabilities and reports no hash. It is offered whatever is released
+    to that Agent ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)).
+    The first stored offer replaces every file in `config/`, the operator's included
     ([SRV-configurations-compose-one-map](SRV-configurations-compose-one-map.md), how a received
-    configuration is stored), the operator's included.
+    configuration is stored).
 
-53. **A kind may lead its own process group, and is then stopped as a group.** A kind whose agent
-    leaves a worker behind when only its own process dies starts it in its own process group
-    (`ProcessSpec::own_process_group`), and the Runner's stop signals the group, so the escalation
-    to `SIGKILL` cannot leave the worker behind. Leading a group is opt-in per kind; kinds with one
-    process keep signalling the pid. On Windows a program the second service starts runs in a job
-    of its own, and a stop ends the job with everything in it
-    ([CLT-accounts-service-runs-under §19 and §20](CLT-accounts-service-runs-under.md)). A program
-    the Client starts itself on Windows has no group, and its stop ends the pid alone.
+53. **A kind may lead its own process group, and is then stopped as a group.**
+    - A kind whose agent leaves a worker behind when only its own process dies starts it in its own
+      process group (`ProcessSpec::own_process_group`).
+    - The Runner's stop then signals the group, so the escalation to `SIGKILL` cannot leave the
+      worker behind.
+    - Leading a group is opt-in per kind. Kinds with one process keep signalling the pid.
+    - On Windows a program the second service starts runs in a job of its own. A stop ends the job
+      with everything in it
+      ([CLT-accounts-service-runs-under §19 and §20](CLT-accounts-service-runs-under.md)).
+    - A program the Client starts itself on Windows has no group, and its stop ends the pid alone.
 
-54. **A package is proved to run before it is installed.** For every kind, after an artifact is
-    unpacked to its staged name
-    ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), the staged name of an
-    unpacked artifact) and before the swap, the Runner runs the staged program once with a preflight
-    its kind supplies. A failure answers `PackageApplied{Err}` carrying the dynamic linker's own
-    message (*"version `GLIBC_2.39' not found"*, *"cannot open shared object file"*), and nothing
-    is swapped, so a running Managed Process is never stopped for a package that could not run. A
-    kind's preflight is its version arguments, with whatever environment its ADR adds; `command`
-    uses its `version_args`, so a `command` block without them has no preflight. The health gate
-    and rollback of [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md) remain
-    the second line.
+54. **A package is proved to run before it is installed.**
+    - For every kind, the Runner runs the staged program once with a preflight its kind supplies.
+      It does so after an artifact is unpacked to its staged name
+      ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md), the staged name of
+      an unpacked artifact), and before the swap.
+    - A failure answers `PackageApplied{Err}`, carrying the dynamic linker's own message
+      (*"version `GLIBC_2.39' not found"*, *"cannot open shared object file"*). Nothing is
+      swapped, so a running Managed Process is never stopped for a package that cannot run.
+    - A kind's preflight is its version arguments, with whatever environment its ADR adds.
+      `command` uses its `version_args`, so a `command` block without them has no preflight.
+    - The health gate and rollback of
+      [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md) remain the second
+      line.
 
 55. **A version probe may bring its own parser.** `VersionProbe` takes an optional parse function,
     strict Semantic Versioning by default. A kind whose program prints its version in another form
-    supplies the parser, and its ADR says how the form is read.
+    supplies the parser. Its ADR says how the form is read.
 
-56. **An offer of the hash applying or applied is a report, not an apply.** A remote
-    configuration whose `config_hash` is the hash of the status the Agent holds, `APPLYING` or
-    `APPLIED`, is not stored, not handed to the process adapter or to the Supervisor-set apply,
-    and restarts nothing. The Agent reports the status it holds again in its next message. This
-    holds for a Supervisor's Agent and for the Client Agent alike. A Server answers a heartbeat
-    that left the Client before its push arrived with the offer again, so one offer reaching a
-    Client twice is the normal case, not a fault. An offer of another hash is taken as before,
-    after the one applying. A hash whose apply `FAILED` is applied again when offered again, so a
-    host repaired after the failure takes the offer once more. A deliberate restart stays the
-    `Restart` command. [PKG-signed-packages-and-delivery §49](PKG-signed-packages-and-delivery.md)
-    treats a package hash already installed or in flight the same way.
+56. **An offer of the hash applying or applied is a report, not an apply.**
+    - A remote configuration whose `config_hash` is the hash of the status the Agent holds,
+      `APPLYING` or `APPLIED`, is not stored. It is not handed to the process adapter or to the
+      Supervisor-set apply, and it restarts nothing.
+    - The Agent reports the status it holds again in its next message.
+    - This holds for a Supervisor's Agent and for the Client Agent alike.
+    - A Server answers a heartbeat that left the Client before the offer arrived with the offer
+      again. One offer reaching a Client twice is thus the normal case, not a fault.
+    - The Agent takes an offer of another hash as before, after the one applying.
+    - The Agent applies a hash whose apply `FAILED` again when it is offered again. A host repaired
+      after the failure thus takes the offer once more.
+    - A deliberate restart stays the `Restart` command.
+    - [PKG-signed-packages-and-delivery §49](PKG-signed-packages-and-delivery.md) treats a package
+      hash already installed or in flight the same way.
 
-57. **The version probe and the preflight ask the program as its start runs it.** `VersionProbe`
-    and `Preflight` each take an optional working directory, inherited when none is named. A kind
-    that names a working directory for the start (clause 14) names it for both, so the version is
-    asked of the program the Supervisor runs, and the preflight starts in the same place inside the
-    staged tree. The staged tree's root is known only once the package is staged, so a preflight
-    writes `${staged}` for it, and `${staged}` resolves to that root in the preflight's arguments,
-    in the values of its environment and in its working directory. A program handed paths into its
-    own tree, or a tree carrying its own libraries, is proved against the staged tree rather than
-    against what the running version leaves behind. `VersionProbe` takes an environment too, empty
-    by default: a kind whose start hands its program an environment the program needs to run at
-    all, such as the library path of a tree carrying its own libraries, hands the probe the same,
-    pointing into the live tree. `collector` and `command` name no working directory and no
-    environment for either.
+57. **The version probe and the preflight ask the program as its start runs it.**
+    - `VersionProbe` and `Preflight` each take an optional working directory, inherited when none
+      is named.
+    - A kind that names a working directory for the start (clause 14) names it for both. The
+      version is then asked of the program the Supervisor runs, and the preflight starts in the
+      same place inside the staged tree.
+    - The staged tree's root is known only once the package is staged. A preflight therefore
+      writes `${staged}` for it. `${staged}` resolves to that root in the preflight's arguments, in
+      the values of its environment and in its working directory.
+    - A program handed paths into its own tree, or a tree carrying its own libraries, is thus proved
+      against the staged tree rather than against what the running version leaves behind.
+    - `VersionProbe` takes an environment too, empty by default. A kind whose start hands its
+      program an environment the program needs to run at all hands the probe the same, pointing
+      into the live tree. The library path of a tree carrying its own libraries is such an
+      environment.
+    - `collector` and `command` name no working directory and no environment for either.
 
-**Out of scope:** dynamic plugin loading; plain-HTTP polling on the Supervisor Endpoint; injecting
-the `opampextension` configuration into a Collector's configuration; connection pools larger than
-one (Gateway Mode, [CLT-modes-and-gateway](CLT-modes-and-gateway.md)); reporting the kinds through
-`AvailableComponents`; a machine-readable artifact manifest shared by tool and kind; reconciling a
-locally edited `[[supervisor]]` set against the last applied offer at startup; an opt-in reaping of
-orphaned directories; migrating a Supervisor tree when its root moves; a supervise-only mode for
-programs this Client does not install, which would need its own decision and capability model; how
-a multi-file tree is unpacked and swapped
-([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md)); keeping some blocks from
-the Server while it manages the others; how the fleet view or the REST API shows that a host keeps
-its set, beyond the capability set the Server already lists; any change on the Server, the REST API
-or the bundled UI for either switch; the restart command and package delivery to a listed
-Supervisor, which stay as they are; what a listed Supervisor reports as its effective configuration
-when its process reports none (the empty map, as for any Supervisor before its first remote
-configuration); a group stop through a job object for a program the Client starts itself on Windows.
+**Out of scope:**
+- dynamic plugin loading;
+- plain-HTTP polling on the Supervisor Endpoint;
+- injecting the `opampextension` configuration into a Collector's configuration;
+- connection pools larger than one (Gateway Mode,
+  [CLT-modes-and-gateway](CLT-modes-and-gateway.md));
+- reporting the kinds through `AvailableComponents`;
+- a machine-readable artifact manifest shared by tool and kind;
+- reconciling a locally edited `[[supervisor]]` set against the last applied offer at startup;
+- an opt-in reaping of orphaned directories;
+- migrating a Supervisor tree when its root moves;
+- a supervise-only mode for programs this Client does not install, which would need its own
+  decision and capability model;
+- how a multi-file tree is unpacked and swapped
+  ([PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md));
+- keeping some blocks from the Server while it manages the others;
+- how the fleet view or the REST API shows that a host keeps its set, beyond the capability set
+  the Server already lists;
+- any change on the Server, the REST API or the Server's rudimentary UI for either switch (a
+  production UI is a Non-Goal of the [specification](../SPECIFICATION.md), *Shipping a production
+  UI*);
+- the restart command and package delivery to a listed Supervisor, which stay as they are;
+- what a listed Supervisor reports as its effective configuration when its process reports none
+  (the empty map, as for any Supervisor before its first remote configuration);
+- a group stop through a job object for a program the Client starts itself on Windows.
 
 ## Alternatives considered
 
-- **Apply every remote configuration received.** A heartbeat that crosses the Server's push
+- **Apply every remote configuration received.** A heartbeat that crosses the Server's offer
   brings the same offer a second time, and its apply restarts the Managed Process once more after
   the first has reported `APPLIED`. An offer of the hash applying or applied is a report (clause
   56).
-- **The Server holds back the offer while its push is in flight.** A heartbeat that crosses a push
-  is a race of the Baseline that any Server can produce, and the Server cannot know whether the
-  push arrived. Only the Client knows what it is applying, so it decides (clause 56).
+- **The Server holds back the offer while it is in flight.** A heartbeat that crosses an offer is
+  a race of the Baseline that any Server can produce, and the Server cannot know whether the offer
+  arrived. Only the Client knows what it is applying, so it decides (clause 56).
 - **A repeated offer of a hash that failed is a report too.** A host repaired after the failure
   would then need a new hash to try again, which only a changed Configuration gives. The repeat of
   a failed hash is applied again; what a Server re-offers after a failure is the Server's
@@ -851,8 +963,8 @@ configuration); a group stop through a job object for a program the Client start
 - **A feature for `collector` and `command` too.** A build without either has no way left to run
   a Collector or an unwrapped agent; the two are the core's own paths, not a vendor's.
 - **A self-update package derived from the build's kinds.** It names a package per combination of
-  features and decides at build time what the operator decides in `[self_update]`; the probation
-  already rolls back a build that cannot read the host's blocks.
+  features and decides at build time what the operator decides in `[packages] self_update`; the
+  probation already rolls back a build that cannot read the host's blocks.
 - **A denylist of dangerous variables alone.** `LD_PRELOAD` is one of many; `PYTHONPATH`,
   `NODE_OPTIONS`, `JAVA_TOOL_OPTIONS`, `BASH_ENV` and every program's own plugin variable reach as
   far, and the list never ends. An allow-list the operator writes ends it; the loader variables are
@@ -889,7 +1001,7 @@ configuration); a group stop through a job object for a program the Client start
 - **Refusing unknown `${…}` placeholders.** It would break agents whose own syntax overlaps to
   catch a typo.
 - **The Server delivering the whole `supervisor.toml`.** Endpoint, credential and state directory
-  are the host's trust anchors; one bad push could leave the Client unreachable.
+  are the host's trust anchors; one bad delivery could leave the Client unreachable.
 - **A separate overlay file for the delivered set** (the `opampsupervisor` model). Two files would
   answer "what does this Client run", and an offline restart would depend on state the operator
   never sees.
@@ -1133,7 +1245,7 @@ configuration); a group stop through a job object for a program the Client start
 - Negative / trade-offs: `server_manages_set = false` holds against the Server only while every
   Supervisor whose configuration language can run commands as the Client's account is in
   `remote_config_disabled`, and a signed Client build can still replace the program that reads it
-  where `[self_update]` consents (clause 43).
+  where `[packages] self_update` consents (clause 43).
 - Negative / trade-offs: a host that keeps its set is managed by hand. A Supervisor set released to
   it reaches nothing, and G-1's loop does not close for the Client Agent there by design.
 - Negative / trade-offs: the blocks an earlier set wrote stay in force without notice when the
@@ -1161,12 +1273,13 @@ configuration); a group stop through a job object for a program the Client start
   visible upstream; kinds that install through OS package managers; the kinds in
   `AvailableComponents` once it leaves *Development*; the next wrapped agent (Fluent Bit is the
   documented candidate); a machine-readable artifact manifest if wrapped agents multiply; startup
-  reconciliation of a locally edited set; a bundled-UI editor for Supervisor sets; an opt-in reap
-  of orphaned directories; a purge option on `service uninstall`; pruning stale `.rollback` files
-  on a schedule; a supervise-only mode as its own decision; keeping chosen blocks from the Server
-  while it manages the rest; showing in the fleet view that a host keeps its set; reporting a
-  listed Supervisor's local files as its effective configuration when its process reports none;
-  storing an offer so that a stop part-way leaves no file the drop of clause 49 cannot attribute.
+  reconciliation of a locally edited set; an editor for Supervisor sets in the Server's rudimentary
+  UI; an opt-in reap of orphaned directories; a purge option on `service uninstall`; pruning stale
+  `.rollback` files on a schedule; a supervise-only mode as its own decision; keeping chosen blocks
+  from the Server while it manages the rest; showing in the fleet view that a host keeps its set;
+  reporting a listed Supervisor's local files as its effective configuration when its process
+  reports none; storing an offer so that a stop part-way leaves no file the drop of clause 49 cannot
+  attribute.
 
 ## Enforcement
 
@@ -1175,13 +1288,18 @@ configuration); a group stop through a job object for a program the Client start
   `a_client_reports_the_kinds_it_was_compiled_with`,
   `the_fleets_timing_reaches_a_supervisor_that_says_nothing`,
   `a_build_carries_exactly_the_wrapped_kinds_its_features_name`,
-  `a_kind_left_out_of_the_build_is_an_unknown_type`. `scripts/check-rust.sh` lints `fleet-agent`
-  on Linux without any wrapped kind and runs its tests without any, so a smaller build stays
-  compiling and the second test decides something. No wrapped kind is built yet, so the script
-  carries no lint of one alone. Windows and macOS lint the default build only; a smaller build there
-  is checked by whoever builds one. That a wrapped kind's block needs neither a program nor a type,
-  that restating a derived value is refused (clause 13), and that a kind's timing correction reaches
-  its Supervisor (clause 17) is shown with a wrapped kind, by the tests its ADR names.
+  `a_kind_left_out_of_the_build_is_an_unknown_type`.
+- `scripts/check-rust.sh` lints `fleet-agent` on Linux without any wrapped kind, and with each
+  wrapped kind its `[features]` table names alone. It runs the tests without any wrapped kind. A
+  smaller build thus stays compiling, and
+  `a_build_carries_exactly_the_wrapped_kinds_its_features_name` decides something.
+- `fleet-agent` carries no wrapped kind today. Its `[features]` table holds `default` alone, so the
+  script lints no wrapped kind alone.
+- Windows and macOS lint the default build only. Whoever builds a smaller build there checks it.
+- A wrapped kind's own ADR names the tests that show, with that kind:
+  - that its block needs neither a program nor a type;
+  - that restating a derived value is refused (clause 13);
+  - that its timing correction reaches its Supervisor (clause 17).
 - Two-stage parse and retired keys: `supervisor_blocks_split_common_keys_from_plugin_settings`,
   `a_supervisor_block_needs_type_and_a_valid_name`, `duplicate_supervisor_names_are_rejected`,
   `attributes_describe_the_host_and_a_block_no_longer_tags_one_agent`
@@ -1248,7 +1366,8 @@ configuration); a group stop through a job object for a program the Client start
   `installs_packages_reflects_declared_package_acceptance`,
   `a_tree_supervisor_prepares_its_root_and_leaves_the_tree_to_the_package`,
   `a_program_path_that_is_neither_fails_the_build`, `a_block_without_a_program_fails_the_build`,
-  `an_orphaned_supervisor_directory_is_not_reaped_at_startup` (CLT-accounts-service-runs-under §25).
+  `an_orphaned_supervisor_directory_is_not_reaped_at_startup`
+  ([CLT-accounts-service-runs-under §25](CLT-accounts-service-runs-under.md)).
 - Placeholders: `the_placeholders_name_this_supervisors_own_directories` and
   `an_unknown_placeholder_is_passed_through_untouched`
   (`crates/fleet-agent/src/supervisor/ports.rs`),
@@ -1335,10 +1454,11 @@ configuration); a group stop through a job object for a program the Client start
   `an_offer_of_another_hash_is_applied_after_the_one_applying`,
   `a_repeated_offer_of_a_hash_that_failed_is_applied_again`; and in
   `crates/fleet-agent/tests/e2e.rs`
-  `a_config_change_reaches_both_supervised_agents_over_one_connection`, whose Server's push is
+  `a_config_change_reaches_both_supervised_agents_over_one_connection`, whose Server's offer is
   delayed past a heartbeat.
 
-**Not mechanically decidable:** the process-group stop (clause 53) has no dedicated test: a worker
-left behind shows only with an agent that forks one, so review of the spawn and of `signal_child`
-in `crates/fleet-agent/src/supervisor/process.rs`, and of `send_signal` and `stop_program` in
-`crates/fleet-agent/src/supervisor/channel.rs` for a program the second service starts, holds it.
+**Not mechanically decidable:** the process-group stop (clause 53) has no dedicated test. A worker
+left behind shows only with an agent that forks one. Review holds it, of the spawn and of
+`signal_child` in `crates/fleet-agent/src/supervisor/process.rs`, and of `send_signal` and
+`stop_program` in `crates/fleet-agent/src/supervisor/channel.rs` for a program the second service
+starts.

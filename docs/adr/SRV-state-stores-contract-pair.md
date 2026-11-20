@@ -1,4 +1,4 @@
-# SRV-state-stores-contract-pair: The Server's state lives under one data directory or in PostgreSQL and S3, one store per domain, and an approval records its certificate with its decision, and the contract pair leaves over 0.8.5 and the release after it
+# SRV-state-stores-contract-pair: The Server's state lives under one data directory or in PostgreSQL and S3, one store per domain, an approval records its certificate with its decision, and the schema drops a column only a release after none names it
 
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-19
@@ -6,35 +6,6 @@
 - **Applies to:** every storage port in `crates/fleet-server/src/` (`agent_store.rs`, `configs.rs`, `deployments.rs`, `packages.rs`, `blobs.rs`, `bootstrap.rs`, `enrolment.rs`, `revocation.rs`, `audit.rs`) and every adapter under `crates/fleet-server/src/fs/`, `crates/fleet-server/src/postgres/` and `crates/fleet-server/src/s3.rs`, the embedded schema and its migrations, the wiring in `crates/fleet-server/src/lib.rs` and `crates/fleet-server/src/main.rs`, `data_dir`, the `[blobs]` and `[database]` sections and the `[audit]` keys `max_file_bytes`, `keep_files` and `retain_days` of `server.toml` and their parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `server migrate`, `server migrate-to-postgres` and `server blobs-to-s3` commands, the `object_store`, `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls` dependencies in `Cargo.toml` and `deny.toml`, the S3 and PostgreSQL adapters' tests and the CI jobs that run them, the rustfs and postgres services in `observability/compose.yaml` and their forward into the Dev Container, the approval of an enrolment request in `crates/fleet-server/src/fleet/approval.rs` and `crates/fleet-server/src/api.rs` and the audit entries it writes, `docs/ARCHITECTURE.md`, and every document that names where the Server keeps its state
 
 ## Context
-
-Clause 22, the Server's schema, was restated on 2026-11-19. Until then an earlier ADR carried
-every clause of this one under the same number. That ADR was superseded by this one and deleted by
-the normalization of 2026-11-19. The first text of this ADR left out the last three bullets of
-clause 22 by mistake; the normalization restored them word for word. Clause 22 changes in three
-places:
-
-- A default given to a column that has none counts as a migration that only adds. Such a
-  default changes no stored row; PostgreSQL applies it only to later inserts and updates.
-- A column is removed only by a release after the one that stopped *naming* it in the statements
-  it runs while serving, not merely after the one that stopped using its values.
-- The schedule of the contract pair: release 0.8.5 gives the pair defaults and stops naming it,
-  and the release after 0.8.5 drops it.
-
-The earlier schedule did not hold. It had the release after 0.8.0 write
-the Deployments' mirror columns no more and the release after that remove them. Release 0.8.1
-stopped writing values into them and adding to the Hosts' arrays, yet it and every release up to
-0.8.4 still name the columns in their `INSERT`s. The columns are `NOT NULL` without a default, so
-none of them could be dropped or let be `NULL` while such a Server served beside the release that
-did. A Server of 0.8.4 also decodes each Host's array as a list that is never `NULL`, and fails on a
-`NULL`. Releases 0.8.2 to 0.8.4 removed nothing.
-[SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)
-allows that: what N+1 stops using is removed by N+2 "at the earliest". The record still
-named a step that no release took, and a reader would take the next release's change for a
-deviation from it.
-
-The human decided the questions on 2026-11-19: a default counts as an addition, the release that
-stops naming the pair names 0.8.4 as the oldest Server, and clause 22 keeps the concrete steps.
-The Context of the Server's state follows.
 
 ### The Server's state and its stores
 
@@ -101,6 +72,18 @@ decision: one writer task per instance gives every entry its place in the chain 
 and writes them in batches, and an entry is accepted before the act it records
 ([SEC-append-only-audit-record §5](SEC-append-only-audit-record.md)).
 
+### The schema
+
+On PostgreSQL the Server applies its schema itself, and several instances serve one database.
+During a rolling update, instances of a release and of the release after it serve side by side
+([SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)). A column the
+newer release removes fails every statement of the older one that still names it. A column that is
+`NOT NULL` without a default fails every `INSERT` of a release that no longer names it. A default
+changes no stored row: PostgreSQL applies it only to later inserts and updates. The contract pair
+left the schema by this path: the Deployments' `packages` and `configurations` columns, which
+mirrored their member tables, and the Hosts' `instance_uids` arrays, which the bindings' table
+replaced.
+
 ## Decision
 
 We will keep all of the Server's state under one `data_dir`, one store per domain behind a port
@@ -126,11 +109,11 @@ that decides its request, and move an old layout by an offline command.
      ([OPS-releases-attestations-server-image §16](OPS-releases-attestations-server-image.md)).
    - `config_dir` and `packages_dir` do not exist. A `server.toml` that names either fails
      startup, naming the key and `server migrate`.
-   - The Server creates every directory under `data_dir` owner-only (`0700`) and writes every
-     file `0600`. These are Unix modes: the Server ships on Linux only, and built for Windows it
-     sets no ACL, so `data_dir` keeps the access its parent directory hands down. Restricting it
-     to the Server's account is then the operator's, as no installer exists for the Server
-     there.
+   - The Server creates every directory under `data_dir` with mode `0700`. It writes every file
+     with mode `0600`. So only the Server's account reaches them. These are Unix modes, as the
+     Server ships on Linux only. Built for Windows, it sets no ACL, so `data_dir` keeps the access
+     its parent directory hands down. Restricting it to the Server's account is then the
+     operator's, as no installer exists for the Server there.
    - Every file is written through a temporary file and a rename. Where a record answers a
      security decision (the register, the revocation list, the audit), the rename is synced to
      disk before the decision is answered.
@@ -176,7 +159,8 @@ that decides its request, and move an old layout by an offline command.
 
 4. **The filesystem adapter keeps one JSON file per Agent, `data_dir/agents/<instance_uid>.json`;
    the PostgreSQL adapter keeps one row per Agent.**
-   - The directory is created owner-only. Writes go through a temp file and an atomic rename.
+   - The directory is created with mode `0700`. Writes go through a temp file and an atomic
+     rename.
      Every file is loaded at startup, and a file that does not parse fails startup naming it.
    - The envelope is this adapter's format: scalars, the labels and the effective-configuration
      text are readable JSON; the wire-typed fields are protobuf bytes in base64. That encoding's
@@ -210,7 +194,7 @@ that decides its request, and move an old layout by an offline command.
      Package; they are managed through the REST API and restored at startup.
    - `OffersPackages` and `AcceptsPackagesStatus` are declared only while the store holds a
      Package; an undeclared capability is never exercised.
-   - The directories under `data_dir` are owner-only and every file `0600` (clause 1).
+   - The directories under `data_dir` are `0700` and every file `0600` (clause 1).
 
 8. **An operator opens an enrolment window for a bounded time, and it is closed by default.**
    - `POST /api/v1/enrolment/window` with `{"open_for_secs": n}` opens the window, or moves its
@@ -274,8 +258,8 @@ that decides its request, and move an old layout by an offline command.
        decided it has ended. Decided with the certificate this instance signed, the commit landed
        and the approval stands. Waiting, or decided with another certificate, the signature is
        rolled back. A read back that fails, or waits out its bound, leaves the outcome unknown.
-     - Unless the approval stands, the request waits and the approval answers that it could not
-       be written.
+     - Unless the approval stands, the request waits and the approval answers that it was not
+       written.
    - The audit record names each signature and what came of it
      ([SEC-append-only-audit-record](SEC-append-only-audit-record.md)):
      - `issuance.signed` is recorded before the decision is written, and for an enrolment it
@@ -283,14 +267,15 @@ that decides its request, and move an old layout by an offline command.
      - `enrolment.approved` is recorded once the decision is written, before the approval is
        answered, and names the certificate under `serial`;
      - `issuance.undecided`, with `serial`, `request` and the outcome `rolled_back`, records a
-       signature whose decision was not written, and with the outcome `unknown` one whose request
-       could not be read back, for which the register answers.
+       signature whose decision was not written. With the outcome `unknown` it records one whose
+       request failed to be read back, for which the register answers.
      - A certificate of an enrolment counts as issued where `enrolment.approved` names its serial,
-       and as not issued where `issuance.undecided` names it with the outcome `rolled_back`. For a
-       signature neither names — after a crash before or after the decision, or an
-       `enrolment.approved` the record could not take — and for the outcome `unknown`, the register
-       answers while the certificate is valid: it was issued if `GET /api/v1/certificates` lists it.
-       Nothing in the chain is removed or rewritten for it.
+       and as not issued where `issuance.undecided` names it with the outcome `rolled_back`.
+     - For a signature neither names, and for the outcome `unknown`, the register answers while
+       the certificate is valid. A signature neither names follows a crash before or after the
+       decision, or an `enrolment.approved` the record failed to take. The certificate was issued
+       if `GET /api/v1/certificates` lists it. Nothing in the chain is removed or rewritten for
+       it.
    - It holds at most 100 000 certificates, and at most 10 000 in one chain — below one root, the
      first certificate the chain renews from. It refuses a renewal once fewer than 1 000 places
      are left, so renewals alone cannot shut out an enrolment. A CSR beyond any of these is
@@ -317,10 +302,7 @@ that decides its request, and move an old layout by an offline command.
     A certificate entry is dropped with its register entry once neither the certificate
     nor any renewal of it is valid. With PostgreSQL a register entry is removed only while the
     database holds no valid certificate renewed from it, whatever the register of the instance that
-    prunes holds. A Server of 0.8.0 beside this one does neither: it moves the version with the list
-    alone, and its prune removes an entry by what its own register holds, whatever renewals the
-    database holds below it. An entry such a Server writes or removes is taken up from its
-    notification only. An entry for a certificate the register never held stays until an operator
+    prunes holds. An entry for a certificate the register never held stays until an operator
     removes it.
 
 11. **The Server records the bootstrap certificates it issued, keyed by issuer and serial, and
@@ -329,7 +311,7 @@ that decides its request, and move an old layout by an offline command.
       subject, the SHA-256 fingerprint of the public key, the issuing time, `not_after`, and
       whether a PKCS#12 file was made. With the filesystem store the record is
       `data_dir/bootstrap/<issuer>-<serial>.json` and the PKCS#12 file, when one was made, is
-      written beside it as `<issuer>-<serial>.p12`; both are owner-only and written atomically.
+      written beside it as `<issuer>-<serial>.p12`; both are `0600` and written atomically.
       With PostgreSQL the record and the file are one row, written in one transaction.
     - `GET /api/v1/bootstrap-certificates` lists every entry with whether it is revoked and
       whether its PKCS#12 file can be downloaded (`p12`).
@@ -430,8 +412,8 @@ that decides its request, and move an old layout by an offline command.
     `"s3"`. Any other value fails startup naming the key. Both are supported in production. The
     filesystem blob store is read and written by one Server instance alone. With `"s3"` every
     instance on one database uses the same bucket and prefix. On PostgreSQL every sweep of
-    unreferenced blobs (clause 13) and every cleanup of `<prefix>staging/` (clause 16) run under an
-    advisory lock, so one instance does them at a time
+    unreferenced blobs (clause 13) runs under an advisory lock, and so does every clearing of
+    `<prefix>staging/` (clause 16). So one instance does them at a time
     ([SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)).
     The lock is taken whatever the blob store: with `"fs"` the instance is alone and
     the lock decides nothing, but the PostgreSQL record store does not ask which blob store it
@@ -458,7 +440,7 @@ that decides its request, and move an old layout by an offline command.
       blob is stored.
     - A sweep takes its marks away once its deletions are done, whether its lock still holds or not,
       and also when its marking failed, since the statement may have landed without its answer.
-      Marks it could not take away its instance tries again every `[database] lease_renew_secs`.
+      Marks it failed to take away its instance tries again every `[database] lease_renew_secs`.
       Every sweep, holding the lock, takes away the marks of a lease that is not live, or of none,
       once they were last renewed more than 130 seconds before, as the database's clock reads both.
       A renewal that answered was sent at most 15 seconds before its answer, the bound of every call
@@ -469,18 +451,19 @@ that decides its request, and move an old layout by an offline command.
       deleting that blob once its mark may be taken away, and no entry is written that names a blob
       a sweep may still be deleting once its session ended and its lock is gone. A mark not yet
       renewed for its deletion may be taken away meanwhile, and its sweep then passes over its blob.
-    - Three cases are outside this. A process suspended for longer than 130 seconds while its call
-      to the blob store is in flight may delete a blob whose mark another sweep has taken away
-      meanwhile: a request sent before the suspend is sent on, or tried again, once the host runs,
-      and nothing in the process can call it back. A failover to a replica the marks had not
-      reached, under asynchronous replication, leaves the new primary without them while the old
-      sweep may still be deleting, so the exclusion holds across a failover only with the
-      synchronous replication that
-      [SRV-instances-share-one-postgresql §17](SRV-instances-share-one-postgresql.md)
-      requires. And an instance of 0.8.0 beside the instances of this release neither marks nor
-      reads a mark, so until the last one is replaced a sweep through it may still delete a blob
-      that an entry written meanwhile names. In each case the next start fails on that entry, naming
-      it, and its artifact is uploaded again.
+    - Three cases are outside this.
+      - A process may be suspended for longer than 130 seconds while its call to the blob store is
+        in flight. It may then delete a blob whose mark another sweep has taken away meanwhile. A
+        request sent before the suspend is sent on, or tried again, once the host runs. Nothing in
+        the process can call it back.
+      - Under asynchronous replication, a failover may reach a standby the marks had not reached.
+        The new primary then lacks them while the old sweep may still be deleting. So the exclusion
+        holds across a failover only with the synchronous replication that
+        [SRV-instances-share-one-postgresql §17](SRV-instances-share-one-postgresql.md)
+        requires.
+
+      In each case the next start fails on that entry, naming it, and its artifact is uploaded
+      again.
     - A sweep's lock is a session-level advisory lock, held on a connection of its own, outside
       the pool: one session more for each sweep in progress, which the database's
       `max_connections` must allow for. It waits for the lock 60 seconds, its session's
@@ -504,19 +487,20 @@ that decides its request, and move an old layout by an offline command.
       The Server touches no key outside `<prefix>`. A key under `<prefix>blobs/` that is not a hash,
       or any other key under `<prefix>`, fails startup naming the key.
     - `<lease>` is the identifier of the lease of the instance that writes the upload
-      ([SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md)),
-      or `fs` with the filesystem record store, which has one Server and no lease. A
-      staging object is left behind only by an upload that was cut off, or one whose staging
-      object could not be deleted. The cleanup runs with every sweep of clause 13 — at startup, and
-      after an entry is replaced or deleted, a Package deleted, or an upload fails — and whenever
-      an instance takes over a lapsed lease. It deletes the staging keys of every lease that is not
-      live, and never those of a live one. With the filesystem record store it deletes everything
-      under `<prefix>staging/`, and at startup alone, as every upload in progress is its one
-      Server's. A starting instance therefore never deletes an upload another
-      instance is still writing, and a staging object that a lease released at an orderly
-      shutdown left, or that a takeover's cleanup could not delete, goes with the next sweep on
-      any instance. There is no periodic cleanup.
-    - A multipart upload that was cut off before it completed is not an object, and the cleanup
+      ([SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md)).
+      With the filesystem record store, which has one Server and no lease, it is `fs`.
+    - A staging object is left behind only by an upload that was cut off, or by one whose staging
+      object failed to be deleted. The clearing runs with every sweep of clause 13. Such a sweep
+      runs at startup, after an entry is replaced or deleted, after a Package is deleted, and after
+      an upload fails. The clearing also runs whenever an instance takes over a lapsed lease.
+    - The clearing deletes the staging keys of every lease that is not live, and never those of a
+      live one. With the filesystem record store it deletes everything under `<prefix>staging/`,
+      at startup alone, as every upload in progress is its one Server's. A starting instance
+      therefore never deletes an upload another instance is still writing.
+    - A staging object left by a lease released at an orderly shutdown goes with the next sweep on
+      any instance. So does one that a takeover's clearing failed to delete. There is no periodic
+      clearing.
+    - A multipart upload that was cut off before it completed is not an object, and the clearing
       does not see it. Its parts are the operator's to expire, with a lifecycle rule on the bucket
       that aborts incomplete multipart uploads.
     - The Server does not create the bucket. A bucket that does not exist or cannot be listed
@@ -554,9 +538,10 @@ that decides its request, and move an old layout by an offline command.
     - With `access_key_id` and `secret_access_key_file` set, the Server reads the secret from
       that file and signs with that key pair. An `access_key_id` without the file, or the
       reverse, fails startup naming both keys.
-    - The file may be read by its owner and its group, as an orchestrator mounts a secret for a
-      group (`0440` with Kubernetes' `fsGroup`), and by nobody else, and written by its owner
-      alone: a file others may read, or its group may write, fails startup naming the key.
+    - The account that owns the file and its group may read it, and nobody else. The group lets
+      an orchestrator mount a secret for a group (`0440` with Kubernetes' `fsGroup`). Only the
+      account that owns the file may write it. A file others may read, or its group may write,
+      fails startup naming the key.
     - Without them, the Server uses the workload identity of its platform, in this order: a web
       identity token (`AWS_WEB_IDENTITY_TOKEN_FILE` with `AWS_ROLE_ARN`), the container
       credentials of ECS or EKS (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, or
@@ -624,7 +609,7 @@ that decides its request, and move an old layout by an offline command.
       transaction committed after one waits for its flush too, so no take, binding, report or
       audit entry committed later outlives a record it follows.
     - A call of the enrolment, register, revocation or Host port changes the rows it names and no
-      other (clause 2), and counts the bound it could pass in the same transaction.
+      other (clause 2). It counts the bound it can pass in the same transaction.
     - A Configuration's revisions, a Package's entries and a Deployment's members are rows of their
       own, and a package floor one row per Agent type, written under `SELECT … FOR UPDATE` after
       the check that it is not lowered
@@ -632,61 +617,49 @@ that decides its request, and move an old layout by an offline command.
 
 22. **The Server applies its own schema.**
     - The schema is embedded in the binary as numbered migrations. At startup the Server applies,
-      in one transaction, every migration the database has not yet seen, and records each in a
+      in one transaction, every migration the database has not yet seen. It records each in a
       table of its own.
-    - A migration only adds: tables, columns with defaults, indexes, and a default given to a
-      column that has none (`ALTER COLUMN … SET DEFAULT`), which changes no stored row. A column
-      or table is removed only by a release after the one that stopped naming it in the
-      statements it runs while serving.
+    - A migration adds tables, columns with defaults, indexes, and a default for a column that has
+      none (`ALTER COLUMN … SET DEFAULT`), which changes no stored row. A migration removes a column
+      or a table only in a release after the one that stopped naming it. Naming counts in every
+      statement that release runs while serving.
     - Each migration names the oldest Server version that understands the schema it leaves, and
       the schema table records it. A database whose schema names a version newer than a Server
-      fails that Server's startup, naming both versions; the Server changes nothing in it.
+      fails that Server's startup, naming both versions. The Server then changes nothing in it.
     - Migrations 3 to 10, the schema of the release in which several instances share a database,
       name that release, 0.8.0. A Server of 0.7.1 holds no lease, keeps its audit record in files
-      and leaves the revocation list's version where it was, so it refuses the schema once a
+      and leaves the revocation list's version where it was. It therefore refuses the schema once a
       Server of 0.8.0 has applied them, rather than serve beside its instances
       ([SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)).
       A rollback to 0.7.1 after the upgrade restores the database from its backup.
     - Migration 13 adds the table of the sweeps' marks (clause 14) and names 0.8.0, which reads
       and writes none of them.
-    - Migration 14 adds the count of the Agents' records: one row, which a trigger on the Agents'
-      table raises and lowers as rows are added and removed, so the Agent-record ceiling is
-      decided without reading every row. A new Agent's record is created in one statement that
-      locks that row and inserts only while the count is below the ceiling, under no other lock.
-      The migration names 0.8.0, whose additions and removals the trigger counts as well. A Server
-      of 0.8.0 counts the rows under a lock of its own, which this release does not take, so while
-      one runs beside the instances of this release the ceiling may be passed by the records they
-      create at the same moment. A creation of this release locks the count's row before it
-      inserts, one of 0.8.0 inserts before its addition reaches that row: when both create the
-      record of the same new Agent at the same moment, each waits for the other, and the database
-      ends one of them as a deadlock after its `deadlock_timeout`. The report it ended is answered
-      `Unavailable`, and the Agent reports again.
-    - The first columns to be removed are the Deployments' `packages` and `configurations`,
-      which mirror their member tables, and the Hosts' `instance_uids` arrays, which the
-      bindings' table replaced. No release since 0.8.1 writes a value into the mirror columns or
-      adds to the arrays. Releases up to 0.8.4 still name the columns in their statements.
-      - Release 0.8.5 adds a migration that gives each column of the pair a default: `'{}'` for
-        `instance_uids` and `configurations`, `'[]'` for `packages`. The migration names 0.8.4
-        as the oldest Server
+    - Migration 14 adds the count of the Agents' records. The count is one row, which a trigger on
+      the Agents' table raises and lowers as rows are added and removed. So the Agent-record
+      ceiling is decided without reading every row. A new Agent's record is created in one
+      statement, under no other lock. That statement locks the count's row and inserts only while
+      the count is below the ceiling. The migration names 0.8.0, whose additions and removals the
+      trigger counts as well.
+    - The contract pair has left the schema. It was the Deployments' `packages` and
+      `configurations` columns, which mirrored their member tables, and the Hosts' `instance_uids`
+      arrays, which the bindings' table replaced. It left in two migrations:
+      - Migration 19, of release 0.8.5, gives each column of the pair a default: `'{}'` for
+        `instance_uids` and `configurations`, `'[]'` for `packages`. It names 0.8.4 as the oldest
+        Server. No statement that release 0.8.5 runs while serving names a column of the pair.
+      - Migration 20, of release 0.8.6, drops the three columns and nothing else. It names 0.8.5
+        as the oldest Server, so an instance of 0.8.6 refuses to start beside a live lease of 0.8.4
+        or older
         ([SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)).
-      - The statements release 0.8.5 runs while serving name none of the columns. It neither
-        takes an `instance_uid` out of an array, nor resets one on a Gateway's mark, nor filters
-        one in an upsert, nor reads one.
-      - A Server of 0.8.4 beside it still writes the columns and still takes a released
-        `instance_uid` out of an array. It reads no mirror column, and it reads each array only
-        to discard it. A row that release 0.8.5 left at the defaults misleads none of its
-        decisions.
-      - The release after 0.8.5 drops the columns by a migration that names 0.8.5 as the oldest
-        Server.
-    - A Server checks its schema only at its own start, and a Server of 0.7.1 holds the exclusive
-      lock of clause 23, under the same key, for its whole run. So an instance that shares the
-      database tries that lock, shared and without waiting, in the transaction that migrates the
-      schema, and holds it until that transaction ends. While another Server holds the lock, the
-      instance applies no migration and fails startup, saying that another Server holds the
-      database alone and is to be stopped first. An instance that must be alone holds the lock
+      - Migration 20 is the one migration that removes anything.
+    - A Server checks its schema only at its own start. A Server of 0.7.1 holds the exclusive lock
+      of clause 23, under the same key, for its whole run. So an instance that shares the database
+      tries that lock, shared and without waiting, in the transaction that migrates the schema. It
+      holds the lock until that transaction ends. While another Server holds the lock, the instance
+      applies no migration and fails startup. Its message says that another Server holds the
+      database alone and must be stopped first. An instance that must be alone holds the lock
       already, and does not try it again.
     - The migrations run under an advisory lock. An instance that finds it held waits for it, then
-      reads the schema table again and applies only what is still missing, so instances of a new
+      reads the schema table again and applies only what is still missing. So instances of a new
       version started together apply each migration once.
     - The Server creates tables, indexes, its schema table, and the trigger that keeps the count
       of the Agents' records with its function, and nothing else. The database, the role, its
@@ -716,10 +689,11 @@ that decides its request, and move an old layout by an offline command.
     - Without TLS the Server connects only to a loopback IP literal, and only when
       `[database.postgres] tls = false` says so. `tls = false` with any other `host` fails
       startup naming both keys (Q-1).
-    - The password is read from `password_file`, which may be read by its owner and its group, as
-      an orchestrator mounts a secret for a group, and by nobody else, and written by its owner
-      alone; one that others may read, or its group may write, fails startup naming it. No
-      password is written into `server.toml`, and the Server reads no `PG*` environment variable.
+    - The password is read from `password_file`. The account that owns the file and its group may
+      read it, and nobody else. The group lets an orchestrator mount a secret for a group. Only the
+      account that owns the file may write it. One that others may read, or its group may write,
+      fails startup naming it. No password is written into `server.toml`, and the Server reads no
+      `PG*` environment variable.
     - Connections come from a `deadpool-postgres` pool of `[database] pool_size` connections, 16
       by default and from 2 to 256, which the database's `max_connections` must allow for each
       instance; at most half of them create Agents' records at once, so the others serve every
@@ -770,8 +744,8 @@ that decides its request, and move an old layout by an offline command.
         Configuration without an Agent type is not carried, because the Server would refuse it at
         startup; the migration names it, and its file stays in the old directory for the operator to
         save again with a type.
-    - The migration prints what it carried, dropped and listed, and exits non-zero when it could
-      not carry trust data.
+    - The migration prints what it carried, dropped and listed, and exits non-zero when it failed
+      to carry trust data.
     - A Server started on an empty `data_dir` while `server.toml` still names `config_dir` or
       `packages_dir` fails startup, naming `server migrate` (clause 1).
 
@@ -800,7 +774,7 @@ that decides its request, and move an old layout by an offline command.
       No Server writes to the archive again; its instances open their chains in the
       database (clause 12).
     - It copies rather than moves: the old `data_dir` stays as the backup. It prints what it
-      copied and exits non-zero when it could not copy all of it, leaving the database without
+      copied and exits non-zero when it failed to copy all of it, leaving the database without
       the Server's tables.
     - Moving records back from PostgreSQL to files is not provided.
 
@@ -820,7 +794,8 @@ monitors a production store or database.
 
 - **Two roots, `config_dir` and `packages_dir`, with the new stores beside them.** The smallest
   change. It keeps Configurations in a top level shared with every other store, Deployments under
-  the package root, a label directory that is not owner-only, and two keys for one state.
+  the package root, a label directory open beyond the Server's account, and two keys for one
+  state.
 - **Two roots: one for state, one for bulk artifacts.** It puts the large bytes on their own
   volume, but it is a second key before anyone needs it. A `blob_dir` can be added when one does;
   the S3 store meets the need.
@@ -923,37 +898,37 @@ monitors a production store or database.
   the register that nobody holds, beside a Host with no binding, and approved again the request is
   signed a second time for the same key. Rejected; clause 9 writes the three with the decision.
 
-
-### Of clause 22's restatement
-
+- **Remove a column a release after the one that stopped using its values.** This was the first
+  schedule of the contract pair: the release after 0.8.0 would stop writing the mirror columns and
+  the release after that would remove them. It did not hold. Releases 0.8.1 to 0.8.4 wrote no
+  value into the columns, yet they still named them in their `INSERT`s, and the columns were
+  `NOT NULL` without a default. No release could drop them, or let them be `NULL`, while such a
+  Server served beside it. Clause 22 counts a release as done with a column once it stops naming
+  it.
 - **`DROP NOT NULL` instead of a default.** It does not only add: the column's values may become
-  `NULL`. A Server of 0.8.4 decodes each Host's array as a list and fails on a `NULL`.
-- **No `ALTER COLUMN` at all.** Release 0.8.5 would keep naming the columns and write only
-  constant empty values. The release after it would still need a default before it could stop
-  naming them, so the removal would move out by one more release, with no gain in safety: a
-  default changes no stored row.
-- **0.8.1 as the oldest Server.** It is the technical minimum: a Server of 0.8.0 still reads an
-  array for an `instance_uid` that no binding holds. SRV-instances-share-one-postgresql §16 lets
-  only N and N+1 serve side by side, so the rule's own reading for 0.8.5 is 0.8.4. A rolling update
-  from any of 0.8.1 to 0.8.3 straight to 0.8.5 is refused; such a skip scales the old instances to
-  zero first, as the manual already asks.
-- **Only the rule, the schedule in the backlog.** Clause 22 would keep the rule and leave the
-  steps to backlog entries. Then no further delay would need a supersession. But the record would
-  name no plan for the columns, and the tests that hold the steps would cite no clause.
-- **Clause 22 split into an ADR of its own.** Two drafts would supersede the
-  earlier ADR: one with every other clause, one with the schema. The cut is cleaner, but it moves
-  every reference to the earlier ADR at once, for a change to one clause.
+  `NULL`. A Server of 0.8.4 decoded each Host's array as a list and failed on a `NULL`.
+- **No `ALTER COLUMN` at all.** Release 0.8.5 would have kept naming the columns and written only
+  constant empty values. The release after it would still have needed a default before it could
+  stop naming them. The removal would have moved out by one more release, with no gain in safety:
+  a default changes no stored row.
+- **0.8.1 as the oldest Server of migration 19.** It was the technical lower bound: a Server of
+  0.8.0 still read an array for an `instance_uid` that no binding held.
+  [SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md) lets only a
+  release and the one after it serve side by side, so the rule's own reading for 0.8.5 was 0.8.4.
+  A rolling update from 0.8.1, 0.8.2 or 0.8.3 straight to 0.8.5 is refused; such a skip scales the
+  old instances to zero first, as the manual asks.
+- **Only the rule in clause 22, the schedule in the backlog.** No further delay would then have
+  needed a change of the record. But the record would have named no plan for the columns, and the
+  tests that held the steps would have cited no clause.
 
 ## Sources / Prior art
 
-For the restatement of clause 22: the PostgreSQL documentation of
-[`ALTER TABLE`](https://www.postgresql.org/docs/current/sql-altertable.html) states that a new
-default "will only apply in subsequent `INSERT` or `UPDATE` commands; it does not cause rows
-already in the table to change", that a subcommand takes an `ACCESS EXCLUSIVE` lock unless noted
-otherwise, and that `DROP COLUMN` "does not physically remove the column, but simply makes it
-invisible to SQL operations". The column types and the statements of 0.8.4 were read at the tag
-`version/0.8.4`.
-
+- The PostgreSQL documentation of
+  [`ALTER TABLE`](https://www.postgresql.org/docs/current/sql-altertable.html): a new default
+  "will only apply in subsequent `INSERT` or `UPDATE` commands; it does not cause rows already in
+  the table to change"; a subcommand takes an `ACCESS EXCLUSIVE` lock unless noted otherwise; and
+  `DROP COLUMN` "does not physically remove the column, but simply makes it invisible to SQL
+  operations". The column types and the statements of 0.8.4 were read at the tag `version/0.8.4`.
 - [DEV-ports-and-adapters](DEV-ports-and-adapters.md) (ports and adapters).
 - [Bindplane Bolt
   Store](https://bindplane.com/docs/advanced-setup/backup-and-disaster-recovery/bolt-store)
@@ -995,8 +970,8 @@ invisible to SQL operations". The column types and the statements of 0.8.4 were 
 
 ## Consequences
 
-- Positive: one key and one tree. Every directory is owner-only, and each directory is the shape
-  of a table or bucket.
+- Positive: one key and one tree. Every directory is the Server's account's alone, and each
+  directory is the shape of a table or bucket.
 - Positive: identical artifacts are stored once, and a blob's name is its integrity check.
 - Positive: an approval survives a restart.
 - Positive: a decision that does not commit leaves no certificate recorded, and approving the
@@ -1010,15 +985,15 @@ invisible to SQL operations". The column types and the statements of 0.8.4 were 
   up and restores with its own tools. Workload identity lets a Server in a cloud reach its bucket
   with no secret on disk.
 - Positive: the ports, the core and the REST API are the same with every store, and the
-  filesystem store remains the simplest installation. A later step to several instances starts
-  from adapters that exist and a schema that is already migrated additively.
+  filesystem store remains the simplest installation. Several instances share the same adapters
+  and a schema that is migrated additively.
 - Negative / trade-offs: every installation of the old layout runs `server migrate` once, and
   changes `server.toml` to `data_dir`; the migration cannot place the old Configurations, and the
   operator does it from the list.
 - Negative / trade-offs: re-hashing every blob of the filesystem store at startup costs time with
   a large store. An object altered in the bucket is not detected by the Server; it is served, and
   the Client refuses it.
-- Negative / trade-offs: four new dependencies, `object_store` with `reqwest`'s stream feature and
+- Negative / trade-offs: four dependencies, `object_store` with `reqwest`'s stream feature and
   an XML parser, `tokio-postgres`, `deadpool-postgres` and `tokio-postgres-rustls`, for
   `cargo-deny` to check, with feature sets that must stay off `aws-lc-rs`.
 - Negative / trade-offs: on PostgreSQL the approval holds the register's table lock from the
@@ -1042,17 +1017,13 @@ invisible to SQL operations". The column types and the statements of 0.8.4 were 
   revocation lets the revoked certificate in again, so after a restore the operator sets again the
   revocations the audit record holds since the backup.
 
-
-Of the restatement of clause 22:
-
-- Positive: the contract pair leaves in two releases, 0.8.5 and the one after it, and each step
-  is one a Server of the release before it survives.
-- Negative / trade-offs: the default's `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock on
-  `deployments` and `hosts` for the moment it changes the catalogue, at the start of the first
-  instance of 0.8.5. A rolling update straight from any of 0.8.1 to 0.8.3 to 0.8.5 is
-  refused.
-- Follow-ups: the release after 0.8.5 drops the columns, and the comments that keep them go with
-  them.
+- Positive: a column leaves the schema in two releases, and each step is one a Server of the
+  release before it survives. The contract pair left this way, in 0.8.5 and 0.8.6.
+- Negative / trade-offs: a migration that gives a column a default or drops one takes an
+  `ACCESS EXCLUSIVE` lock on its table for the moment it changes the catalogue. Migrations 19 and
+  20 took it on `deployments` and `hosts` at the start of the first instance of their release. A
+  rolling update to 0.8.6 from a release older than 0.8.5 is refused, and such a skip scales the
+  old instances to zero first.
 
 ## Enforcement
 
@@ -1258,15 +1229,16 @@ Tests that carry `Verifies: SRV-state-stores-contract-pair`:
   verified by the tests
   [SEC-append-only-audit-record](SEC-append-only-audit-record.md)
   names.
-
-Tests for the restated clause 22, which carry `Verifies:` with this ADR's number once it has one:
-
-- [`postgres/schema.rs`](../../crates/fleet-server/src/postgres/schema.rs)
-  `a_migration_only_adds`, which admits `ALTER COLUMN … SET DEFAULT` and no other
-  `ALTER COLUMN`, and a test that the migration of release 0.8.5 gives each column of the pair its
-  default and names 0.8.4;
-- a test that no statement the Server runs while serving names a column of the pair, outside the
-  migrations;
-- [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs): an instance of 0.8.4
-  beside one of 0.8.5 each writes a Deployment and a Host, and each loads what the other wrote;
-- an instance of 0.8.5 refuses to start beside a live lease of a release older than 0.8.4.
+- Tests that carry `Verifies: SRV-state-stores-contract-pair`, for the contract pair of clause
+  22:
+  - `a_migration_only_adds` in
+    [`postgres/schema.rs`](../../crates/fleet-server/src/postgres/schema.rs): it admits
+    `ALTER COLUMN … SET DEFAULT` and migration 20's drop of exactly the three columns of the pair.
+    It admits no other removal.
+  - `only_a_default_passes_for_an_altered_column` in the same file: it refuses every other change
+    of a column.
+  - `the_contract_pair_is_dropped_and_names_0_8_5` in the same file: on a migrated database it
+    finds none of the three columns. It finds migrations 19 and 20 naming 0.8.4 and 0.8.5.
+  - `an_instance_of_0_8_6_refuses_to_start_beside_a_live_lease_older_than_0_8_5` in
+    [`postgres/mod.rs`](../../crates/fleet-server/src/postgres/mod.rs): the refusal leaves the
+    schema of 0.8.5 as it was. Beside a lease of 0.8.5 the instance migrates and serves.

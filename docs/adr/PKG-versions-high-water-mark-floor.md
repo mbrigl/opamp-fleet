@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-26
 - **Deciders:** Markus Brigl
-- **Applies to:** the version rule of `crates/fleet-core/src/version.rs` and its callers, the floor statement in `crates/fleet-core/src/package.rs`, the Package identity and the store's reading of it in `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/fs/packages.rs` and `crates/fleet-server/src/migrate.rs`, the candidate test of `crates/fleet-server/src/packages.rs`, the package and `/api/v1/package-floors` routes of `crates/fleet-server/src/api.rs`, the floors' store in `crates/fleet-server/src/fs/` and `crates/fleet-server/src/postgres/`, the layout of `data_dir` in `crates/fleet-server/src/fs/mod.rs`, the `/v1/package-floors` route on the Agent plane in `crates/fleet-server/src/transport.rs` and downstream of a Gateway in `crates/fleet-agent/src/gateway/`, the command trees of `opamp-fleetctl` and its `package sign`, `package fetch` and `package floor` commands in `crates/fleet-tools/`, the Supervisor's check of a package offer in `crates/fleet-agent/src/supervisor/agent/packages.rs`, the self-update's check of an offered version in `crates/fleet-agent/src/update/`, the installed-package record in `crates/fleet-agent/src/storage.rs`, the Client's fetch of the floors, the files `package-high-water.json` and `package-floors.json` under the Client's `state_dir`, the purge in `crates/fleet-agent/src/reconfigure.rs`, and every document that tells an operator how a Package is numbered, how an old signed build is kept off the fleet, or how a Supervisor is moved to an older version
+- **Applies to:** the version rule of `crates/fleet-core/src/version.rs` and its callers, the floor statement in `crates/fleet-core/src/package.rs`, the Package identity and the store's reading of it in `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/fs/packages.rs` and `crates/fleet-server/src/migrate.rs`, the candidate test of `crates/fleet-server/src/packages.rs`, the package and `/api/v1/package-floors` routes of `crates/fleet-server/src/api.rs`, the floors' store in `crates/fleet-server/src/fs/` and `crates/fleet-server/src/postgres/`, the layout of `data_dir` in `crates/fleet-server/src/fs/mod.rs`, the `/v1/package-floors` route on the Agent plane in `crates/fleet-server/src/transport.rs` and downstream of a Gateway in `crates/fleet-agent/src/gateway/`, the command trees of `opamp-fleetctl` and its `package sign`, `package fetch` and `package floor` commands in `crates/fleet-tools/`, the Supervisor's check of a package offer in `crates/fleet-agent/src/supervisor/agent/packages.rs`, the self-update's check of an offered version in `crates/fleet-agent/src/update/`, the installed-package record in `crates/fleet-agent/src/storage.rs`, the Client's fetch of the floors in `crates/fleet-agent/src/floors.rs`, the files `package-high-water.json` and `package-floors.json` under the Client's `state_dir`, the purge in `crates/fleet-agent/src/reconfigure.rs`, and every document that tells an operator how a Package is numbered, how an old signed build is kept off the fleet, or how a Supervisor is moved to an older version
 
 ## Context
 
@@ -129,16 +129,16 @@ highest floor the operator signed for that type.
    `PackageStatuses.error_message`, naming the offered version and the version it was compared
    against. The Client's own update keeps its own rules (clause 21).
 
-8. **The high-water mark is the highest version this Client has installed for each Agent type.**
-   It lives in `<state_dir>/package-high-water.json`, as a JSON object that maps an Agent type to a
-   version. The file is written owner-only, through a temporary file and a rename. It is keyed by
-   the Agent type, not by Supervisor name. The signature binds an artifact to its Agent type, and a
-   Supervisor takes only its own type (clause 7), so the type is the one key that a Server cannot
-   change without a signature the operator never made. A name can be changed by re-adding the
-   Supervisor under another one. Every Supervisor of one type on this Client shares the type's
-   mark. The file sits outside `supervisor_dir`, and its name contains a `.`, which no Supervisor
-   name can contain (the instance-name grammar of
-   [CLT-installed-service-and-state](CLT-installed-service-and-state.md)), so no purge can delete
+8. **The high-water mark is the highest version this Client has installed for each Agent type.** It
+   lives in `<state_dir>/package-high-water.json`, as a JSON object that maps an Agent type to a
+   version. The file is written readable by the Client's account alone, through a temporary file and
+   a rename. It is keyed by the Agent type, not by Supervisor name. The signature binds an artifact
+   to its Agent type, and a Supervisor takes only its own type (clause 7). So the type is the one
+   key that a Server cannot change without a signature the operator never made. A name can be
+   changed by re-adding the Supervisor under another one. Every Supervisor of one type on this
+   Client shares the type's mark. The file sits outside `supervisor_dir`. Its name contains a `.`,
+   which no Supervisor name can contain (the instance-name grammar of
+   [CLT-installed-service-and-state](CLT-installed-service-and-state.md)). So no purge can delete
    it, even where an operator places `supervisor_dir` at `state_dir` itself. The mark rises when a
    Supervisor reports a package `Installed`, that is, once its program has survived the apply grace
    ([PKG-signed-packages-and-delivery §58](PKG-signed-packages-and-delivery.md)). It never falls. It
@@ -170,7 +170,7 @@ highest floor the operator signed for that type.
     operator also deletes `installed-package.json` of every Supervisor of that type, because
     clause 9 seeds the mark again from those records. Then the operator starts the Client.
     Deleting the whole file resets the marks of every type that no remaining record names. The
-    recommended path needs no host access: publish the old content as a new, greater version
+    recommended path needs no host access: release the old content as a new, greater version
     ([SRV-deployments-and-pinned-rollouts](SRV-deployments-and-pinned-rollouts.md)).
 
 13. **A removed Supervisor is purged, and its Agent type's high-water mark stays.** Removal is keyed
@@ -213,19 +213,24 @@ highest floor the operator signed for that type.
     behalf; each host checks its own. A host behind a Gateway therefore takes a floor only after
     the Gateway's next fetch, and keeps the old ones while the Gateway's fetches fail.
 
-17. **A Client keeps the highest verified floor of each Agent type.** It fetches the floors from
-    its endpoint after its first reply, then once an hour while it is connected, and before it
-    decides a package offer when its last fetch is more than a minute old. It verifies each against
-    `[packages] verification_key` and keeps, per Agent type, the highest version that verifies, in
-    `<state_dir>/package-floors.json`, a JSON object that maps an Agent type to a version and the
-    signature it came with, written owner-only through a temporary file and a rename. A floor that
-    does not verify, or that orders below the one kept, is ignored and logged. A failed fetch keeps
-    the floors held and is logged, and an offer is decided against them. The file lies outside
-    `supervisor_dir` and its name holds a `.`, so no purge reaches it (clause 8). A floor is
-    verified when it is kept, not again when the file is read, so a later change of the key does
-    not undo it. A file that exists but does not parse, or maps a type to a value that is not
-    SemVer, is never read as empty: every package offer, the Client's own included, is refused and
-    reported with a reason that names the file, until the operator repairs or deletes it.
+17. **A Client keeps the highest verified floor of each Agent type.**
+    - It fetches the floors from its endpoint after its first reply, then once an hour while it is
+      connected. It also fetches them before it decides a package offer when its last fetch is
+      more than a minute old.
+    - It verifies each against `[packages] verification_key`. Per Agent type it keeps the highest
+      version that verifies, in `<state_dir>/package-floors.json`. That file is a JSON object that
+      maps an Agent type to a version and the signature it came with. It is written readable by the
+      Client's account alone, through a temporary file and a rename.
+    - A floor that does not verify, or that orders below the one kept, is ignored and logged. A
+      failed fetch keeps the floors held and is logged, and an offer is decided against them.
+    - The file lies outside `supervisor_dir` and its name holds a `.`, so no purge reaches it
+      (clause 8).
+    - A floor is verified when it is kept, not again when the file is read. So a later change of
+      the key does not undo it.
+    - A file that exists but does not parse, or maps a type to a value that is not SemVer, is never
+      read as empty. Every package offer, the Client's own included, is then refused and reported
+      with a reason that names the file. The refusal lasts until the operator repairs or deletes
+      the file.
 
 18. **No package below its type's floor is taken.** A Supervisor refuses an offer whose version
     SemVer orders below the floor kept for its Agent type, before anything is downloaded, and
@@ -285,8 +290,11 @@ highest floor the operator signed for that type.
     | `package-floors.json` | the floor of every Agent type | Package floors (clause 15) |
     | `audit/audit-<first seq>.jsonl` | audit file | Audit |
 
-    With `store = "postgres"`, `data_dir` holds `audit/` and, with the filesystem blob store,
-    `blobs/`, and nothing else. Beside a bucket, a `blobs/` an earlier filesystem blob store left
+    With `store = "postgres"`, `data_dir` holds `blobs/` with the filesystem blob store, and
+    nothing else. An `audit/` an earlier Server on the filesystem store left is accepted as the
+    closed archive of its audit record
+    ([SRV-state-stores-contract-pair §27](SRV-state-stores-contract-pair.md)); the Server writes
+    nothing into it. Beside a bucket, a `blobs/` an earlier filesystem blob store left
     is accepted too, as the place the switch from the filesystem to S3 copies from
     ([SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md));
     the Server does not create it there.
@@ -331,11 +339,11 @@ Client's signature check decides the rest
   long-ago pre-release of a later version, stays installable on every host that never ran it, and
   a Server that is compromised can offer it. Rejected for the floor of its Agent type beside the
   running build, and for SemVer as the test of a version.
-- **A minimum version inside the signed package statement.** Each new signature would name the
-  oldest version a host may hold afterwards. An old build carries its old signature, which states
-  the old minimum. The floor would only take effect once a host had installed something newer,
-  and it would need its own persisted store, which is clause 8 again. It would also change the
-  signing format and every existing signature. Rejected.
+- **A lowest allowed version inside the signed package statement.** Each new signature would name
+  the oldest version a host may hold afterwards. An old build carries its old signature, which
+  states the old minimum. The floor would only take effect once a host had installed something
+  newer, and it would need its own persisted store, which is clause 8 again. It would also change
+  the signing format and every existing signature. Rejected.
 - **A signed floor document with freshness, as in TUF's snapshot and timestamp roles.** It would
   also defeat a Server that withholds a newer floor, but it needs a second key role and a
   timestamp the Client checks. The floor of clause 14 is one statement per type under the one
@@ -432,8 +440,8 @@ Client's signature check decides the rest
     deletes its Package.
   - **A mistaken high version sticks.** If a host installs a Package numbered by mistake, such as
     `100.0.0`, it refuses everything below that until an operator lowers the mark on that host
-    (clause 12). The way back without host access is to publish under a version above the
-    mistake. A floor set too high cannot be taken back from the Server either: each host is
+    (clause 12). The way back without host access is a Package under a version above the mistake.
+    A floor set too high cannot be taken back from the Server either: each host is
     lowered by hand, or the operator publishes the old content as a new, greater version.
   - **Two Supervisors of one type share a floor.** On one Client, a new Supervisor of a type cannot
     be started on an older version than another Supervisor of that type has had.
@@ -442,8 +450,8 @@ Client's signature check decides the rest
     Client keeps them. Removing `state_dir` removes them, together with the Client's identity.
   - **A floor can be withheld.** It takes effect on a host only once a Server or Gateway that
     serves it has been reached, and behind a Gateway only after the Gateway's next fetch.
-  - One more signed statement, store, route and state file. Every Client asks for the floors once
-    an hour, and before an offer at most once a minute. The floors' store is part of the
+  - One more signed statement, store, route and file under `state_dir`. Every Client asks for the
+    floors once an hour, and before an offer at most once a minute. The floors' store is part of the
     PostgreSQL schema; with the filesystem store it is a file the layout of an earlier Server does
     not name, so that Server refuses to start on the data directory until the file is moved away.
   - **Non-SemVer content:** a Server with a stored non-SemVer Package starts, warns about each
@@ -451,7 +459,7 @@ Client's signature check decides the rest
     The operator republishes such content under a SemVer version (`1.19` becomes `1.19.0`), signs
     it again and rolls it out; an Agent whose record named the old version reaches that rollout as
     a first rollout (clause 10). A script that creates Packages under non-SemVer versions gets
-    `400`. The changelog states all three.
+    `400`.
 - Follow-ups: the floors in the bundled UI; a list of withdrawn builds beside the floor; rotating
   the package key; whether a Managed Process's self-reported version should raise the mark; an
   operator command that lowers a mark on a host.
@@ -461,56 +469,136 @@ Client's signature check decides the rest
 Tests that carry `Verifies:` for this decision:
 
 - **fleet-core:** the SemVer predicate takes `1.2.3`, `1.19.0` and `1.2.3-rc.1+abc`. It refuses
-  `1.19`, `24.04.1`, `v1.2.3`, `1.0.0-01`, `nightly` and a value of 65 characters. The floor
-  statement is the three lines of clause 14.
+  `1.19`, `24.04.1`, `v1.2.3`, `1.0.0-01`, `nightly` and a value of 65 characters
+  (`a_package_version_is_semver`). An upstream number is written as SemVer in its own order
+  (`an_upstream_number_is_written_as_semver_in_its_own_order`), both in
+  [`version.rs`](../../crates/fleet-core/src/version.rs). The floor statement is the three lines
+  of clause 14 (`the_floor_statement_is_the_prefix_the_type_and_the_version` in
+  [`package.rs`](../../crates/fleet-core/src/package.rs)).
 - **Server routes:** `PUT /api/v1/packages/otelcol/1.19` is answered `400` with a text naming
-  SemVer, and `PUT /api/v1/packages/otelcol/1.19.0` creates the Package.
+  SemVer, and `PUT /api/v1/packages/otelcol/1.19.0` creates the Package
+  (`a_package_is_created_only_under_a_semver_version` in
+  [`tests/packages.rs`](../../crates/fleet-server/tests/packages.rs);
+  `a_write_takes_a_semver_version_and_a_load_any_token` in
+  [`packages.rs`](../../crates/fleet-server/src/packages.rs)).
 - **Server store:** a store holding a Package `otelcol@1.19` opens and warns, naming the Package.
-  That Package is no candidate for an Agent that reports nothing. An entry write, a signature
-  write and adding it to a Deployment are each answered `400`. Its `DELETE` succeeds while nothing
-  pins it. An Agent record whose assignment pins it loads, and that Agent is still offered the
-  Package.
-- **Server floors:** `PUT`, `GET` and `DELETE` of `/api/v1/package-floors` in both stores, a `PUT`
-  below the stored floor answered `409`, the check against `[packages] verification_key` reported
-  but never refused, a package signature reported as no floor, every change audited, the floors'
-  file part of the `data_dir` layout (clause 23), and `GET /v1/package-floors` admitted as
-  `/v1/opamp` is, refused to a revoked certificate and to an enrolling host.
-- **Server layout:** a `data_dir` holding `agents/` used with `store = "postgres"` fails startup
-  naming `server migrate-to-postgres` (clause 23).
+  That Package is no candidate for an Agent that reports nothing
+  (`a_stored_package_whose_version_is_not_semver_loads_and_is_no_candidate` in
+  [`packages.rs`](../../crates/fleet-server/src/packages.rs)). An entry write, a signature write
+  and adding it to a Deployment are each answered `400`, and its `DELETE` succeeds while nothing
+  pins it (`a_stored_package_whose_version_is_not_semver_takes_no_write_and_can_be_deleted` in
+  [`tests/packages.rs`](../../crates/fleet-server/tests/packages.rs)). An Agent record whose
+  assignment pins it loads, and that Agent is still offered the Package
+  (`an_assignment_pinning_a_non_semver_package_loads` in
+  [`fs/agents.rs`](../../crates/fleet-server/src/fs/agents.rs)).
+- **Server floors:** these tests show the following.
+  - `PUT`, `GET` and `DELETE` of `/api/v1/package-floors` work in both stores, and a `PUT` below
+    the stored floor is answered `409`.
+  - The check against `[packages] verification_key` is reported but never refused, and a package
+    signature is reported as no floor.
+  - Every change is audited, and the floors' file is part of the `data_dir` layout (clause 23).
+  - `GET /v1/package-floors` is admitted as `/v1/opamp` is, and refused to a revoked certificate
+    and to an enrolling host.
+
+  The tests: `a_floor_is_raised_and_never_lowered` and
+  `a_floor_signature_is_checked_and_never_refused` in
+  [`floors.rs`](../../crates/fleet-server/src/floors.rs);
+  `the_floor_port_contract_holds_on_postgres` and `the_floor_port_contract_holds_on_the_filesystem`
+  in [`postgres/floors.rs`](../../crates/fleet-server/src/postgres/floors.rs);
+  `a_floor_is_put_listed_raised_never_lowered_and_deleted` and `every_change_of_a_floor_is_audited`
+  in [`tests/packages.rs`](../../crates/fleet-server/tests/packages.rs);
+  `the_floors_file_is_part_of_the_layout` in [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs);
+  `the_floors_are_handed_to_a_member_and_refused_to_a_revoked_certificate` and
+  `the_floors_are_refused_to_an_enrolling_host` in
+  [`tests/mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs);
+  `a_floor_set_on_one_instance_is_served_by_the_other`,
+  `a_gateway_whose_instance_stopped_serves_the_list_and_the_floors_the_other_holds` and
+  `an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one` in
+  [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs);
+  `the_openapi_document_describes_the_contract` in
+  [`tests/rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs).
+- **Server layout:** a `data_dir` holding `agents/`, or `package-floors.json`, used with
+  `store = "postgres"` fails startup naming `server migrate-to-postgres` (clause 23):
+  `a_data_dir_beside_the_database_holds_the_blobs_alone` in
+  [`fs/mod.rs`](../../crates/fleet-server/src/fs/mod.rs).
 - **opamp-fleetctl:** `package sign --version 1.19`, and a signing file with an entry at `1.19`,
-  each fail naming the version, without reading the key file. `package fetch` turns upstream
-  `1.19` into the Package version `1.19.0` and fetches tag `1.19`. The `package` tree names
-  `floor`, and `opamp-fleetctl pki --help` lists `p12-extract` among exactly the commands clause
-  22 names.
+  each fail naming the version, without reading the key file
+  (`sign_refuses_a_version_that_is_not_semver_before_reading_the_key`). `package floor` signs the
+  floor statement and refuses a version that is not SemVer
+  (`floor_signs_the_floor_statement_and_refuses_a_version_that_is_not_semver`), both in
+  [`package.rs`](../../crates/fleet-tools/src/package.rs). `package fetch` turns upstream `1.19`
+  into the Package version `1.19.0` and fetches tag `1.19`
+  (`fetch_names_the_package_in_semver_and_fetches_upstreams_tag` in
+  [`fetch.rs`](../../crates/fleet-tools/src/fetch.rs)). The `package` tree names `floor`, and
+  `opamp-fleetctl pki --help` lists `p12-extract` among exactly the commands clause 22 names
+  (`the_program_has_two_trees_holding_the_operator_commands` in
+  [`main.rs`](../../crates/fleet-tools/src/main.rs)).
 - **Client, own type and older versions:**
   `a_package_for_another_type_or_an_older_version_is_refused` in
   [`supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs) (clause 7).
 - **Client, non-SemVer offer:** a Supervisor with no installed record and no mark refuses an offer
-  at `1.19`. Nothing is downloaded, and `error_message` names the version.
+  at `1.19`. Nothing is downloaded, and `error_message` names the version
+  (`a_supervisor_refuses_an_offer_whose_version_is_not_semver` in
+  [`supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs)).
 - **Client, purge and re-add:** a Supervisor `a` of type `otelcol` installs `0.110.0`. A set
   without `a` purges it. A set that adds `b` of type `otelcol` follows, and so does one that adds
   `a` again. Each re-added Supervisor refuses `0.109.0`, naming the mark, and takes
-  `0.110.0+other` and `0.111.0`.
+  `0.110.0+other` and `0.111.0`
+  (`a_purged_and_re_added_supervisor_is_held_to_its_types_mark` in
+  [`reconfigure.rs`](../../crates/fleet-agent/src/reconfigure.rs)).
 - **Client, when the mark rises:** a failed apply that rolls back to the predecessor leaves the
   mark where it was, and the predecessor runs. An `Installed` raises the mark and writes it
-  owner-only.
+  readable by the Client's account alone
+  (`the_mark_rises_only_when_a_package_is_installed` in
+  [`supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs)).
 - **Client, seeding:** with no mark file and an installed record at `0.110.0`, an offer at
-  `0.109.0` is refused after a restart.
+  `0.109.0` is refused after a restart (`the_start_seeds_the_mark_from_the_installed_records` in
+  [`supervisor/mod.rs`](../../crates/fleet-agent/src/supervisor/mod.rs)).
 - **Client, unreadable mark file:** with a mark file that does not parse, every Supervisor offer
-  is refused, naming the file, and the Client still connects.
-- **Client, lowering the mark on the host:** with the mark entry and the type's installed records
-  deleted while the Client is stopped, an offer at `0.109.0` is taken.
+  is refused, naming the file. The Client still connects
+  (`an_unreadable_mark_file_refuses_every_supervisor_package` in
+  [`supervisor/mod.rs`](../../crates/fleet-agent/src/supervisor/mod.rs)).
+- **Client, lowering the mark on the host:** the mark entry and the type's installed records are
+  deleted while the Client is stopped. An offer at `0.109.0` is then taken
+  (`the_host_lowers_the_mark_by_deleting_the_entry_and_the_records` in
+  [`supervisor/mod.rs`](../../crates/fleet-agent/src/supervisor/mod.rs)).
 - **Client, old record:** an installed record at `1.19` is dropped at load with a warning, and the
-  Agent reports no `agent_has_version`.
-- **Client, floors**, in `crates/fleet-agent/src/`: a floor that does not verify, a package
-  signature among them, or that is lower than the kept one, is ignored; a failed fetch keeps the
-  kept floors; an unreadable `package-floors.json` refuses every offer, the Client's own included;
-  a Supervisor refuses an offer below its type's floor before downloading and reports
-  `InstallFailed`, and answers an offer of what it runs as installed; a Managed Process below the
-  floor keeps running and its health says so; a rollback to a predecessor below the floor still
-  happens; the self-update refuses a version below its type's floor.
-- **Gateway floors**, in `crates/fleet-agent/tests/`: a host behind a Gateway receives the floors
-  the Gateway last fetched, behind the downstream admission, and an enrolling peer is refused them.
-- **Self-update:** `install_refuses_a_downgrade` and
-  `the_probe_refuses_an_offer_that_is_not_a_version` in `crates/fleet-agent/src/update/installer.rs`
-  (clause 21).
+  Agent reports no `agent_has_version`
+  (`an_installed_record_whose_version_is_not_semver_is_dropped_at_load` in
+  [`supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs)).
+- **Client, floors:** these tests show the following.
+  - A floor that does not verify, a package signature among them, is ignored. So is one lower
+    than the kept one.
+  - A failed fetch keeps the kept floors.
+  - An unreadable `package-floors.json` refuses every offer, the Client's own included.
+  - A Supervisor refuses an offer below its type's floor before downloading and reports
+    `InstallFailed`, and it answers an offer of what it runs as installed.
+  - A Managed Process below the floor keeps running and its health says so, and a rollback to a
+    predecessor below the floor still happens.
+  - The self-update refuses a version below its type's floor.
+
+  The tests: `a_floor_that_does_not_verify_or_orders_below_the_kept_one_is_ignored`,
+  `a_failed_fetch_keeps_the_kept_floors`, `a_kept_floor_is_not_verified_again_when_the_file_is_read`
+  and `an_unreadable_floors_file_answers_every_floor_with_its_name` in
+  [`floors.rs`](../../crates/fleet-agent/src/floors.rs);
+  `unreadable_floors_refuse_every_supervisor_offer`,
+  `a_supervisor_refuses_an_offer_below_its_floor_and_reports_install_failed`,
+  `an_offer_of_what_runs_below_the_floor_is_answered_as_installed`,
+  `a_managed_process_below_its_floor_keeps_running_and_its_health_says_so` and
+  `a_rollback_to_a_predecessor_below_the_floor_still_happens` in
+  [`supervisor/agent.rs`](../../crates/fleet-agent/src/supervisor/agent.rs);
+  `a_queued_download_below_a_floor_raised_since_is_refused` in
+  [`engine.rs`](../../crates/fleet-agent/src/engine.rs);
+  `the_self_update_refuses_a_version_below_its_types_floor` in
+  [`update/installer.rs`](../../crates/fleet-agent/src/update/installer.rs);
+  `a_signed_package_below_the_floor_the_server_serves_is_refused` in
+  [`tests/packages_e2e.rs`](../../crates/fleet-agent/tests/packages_e2e.rs).
+- **Gateway floors:** a host behind a Gateway receives the floors the Gateway last fetched, behind
+  the downstream admission. An enrolling peer is refused them
+  (`a_host_behind_the_gateway_is_handed_the_floors_it_fetched_behind_the_admission` in
+  [`tests/gateway_revocation_e2e.rs`](../../crates/fleet-agent/tests/gateway_revocation_e2e.rs);
+  `a_gateway_refuses_the_floors_to_an_enrolling_peer` in
+  [`tests/gateway_enrolment_e2e.rs`](../../crates/fleet-agent/tests/gateway_enrolment_e2e.rs)).
+- **Self-update:** `install_refuses_a_downgrade`, `install_refuses_a_version_that_is_not_semver`
+  and `the_probe_refuses_an_offer_that_is_not_a_version` in
+  [`update/installer.rs`](../../crates/fleet-agent/src/update/installer.rs) (clause 21).
