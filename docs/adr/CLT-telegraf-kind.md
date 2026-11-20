@@ -82,20 +82,21 @@ the way its platform allows, and deliver it as upstream's own archives, installe
      with `@shikijs/engine-javascript`, the grammars of clause 3 and Shiki's CSS-variables theme.
      It exposes one function on `window`. The file starts with a header naming the packages,
      their versions and the script that built it.
-   - `scripts/vendor-shiki.sh` rebuilds it. It runs only when the version is to change, on a
-     developer's machine. CI and the Dev Container do not need a JavaScript runtime; the bundled UI
-     keeps no frontend toolchain ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
+   - `scripts/vendor-shiki.sh` rebuilds it. A developer runs it on their own machine, and only
+     when the version is to change. CI and the Dev Container need no `node`; the bundled UI keeps
+     no frontend toolchain ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
    - The Server embeds the file and serves it from its own origin as `/shiki.js`, like the
      stylesheets. The CSP does not change: `script-src 'self'` covers it, and nothing needs
      WebAssembly or `eval`.
 
-2. **The version and the hash are pinned and checked.** The file's SHA-256 and the version are
-   written beside the build script. A test fails when the embedded file's hash differs from the
-   pinned one, so the file cannot change without the pin changing in the same commit. `NOTICE`
-   names Shiki and every package and grammar bundled, with their licences. Shiki and its
-   packages are MIT; the YAML and TOML grammars come from TextMate's bundles under TextMate's own
-   permissive notice, the INI grammar from VS Code under MIT. The bundle's header carries both
-   texts.
+2. **The version and the hash are pinned and checked.**
+   - The file's SHA-256 and the version are written beside the build script.
+   - A test fails when the embedded file's hash differs from the pinned one. The file therefore
+     cannot change without the pin changing in the same commit.
+   - `NOTICE` names Shiki and every package and grammar bundled, with their licences. Shiki and its
+     packages are MIT. The YAML and TOML grammars come from TextMate's bundles under TextMate's own
+     permissive notice, the INI grammar from VS Code under MIT.
+   - The bundle's header carries both licence texts.
 
 3. **The grammar follows the Agent type, and anything else stays plain.** The UI chooses the
    grammar from the Agent's reported `service.name`:
@@ -109,21 +110,22 @@ the way its platform allows, and deliver it as upstream's own archives, installe
    `telegraf` kind needs none: its TOML is the grammar the UI already bundles.
 
 4. **The colours are the look's.** The theme emits `var(--shiki-…)` colours. Each of `ui.css`,
-   `ui-carbon.css` and `ui-quiet.css` defines them for its light and dark theme, so a coloured
-   configuration follows the look and the theme the operator chose.
-   - The theme is Shiki's CSS-variables theme with token rules of this project's on top: the
-     CSS-variables theme alone leaves TOML table headers and keys and everything in INI but its
-     comments in the foreground colour. The added rules map the TOML and INI scopes for table
-     and section headers, keys, values and operators onto the same `--shiki-token-*` variables,
-     so no stylesheet needs a variable of its own for them.
+   `ui-carbon.css` and `ui-quiet.css` defines them for its light and dark theme. A coloured
+   configuration therefore follows the look and the theme the operator chose.
+   - The theme is Shiki's CSS-variables theme with token rules of this project's on top. The
+     CSS-variables theme alone leaves TOML table headers and keys, and everything in INI but its
+     comments, in the foreground colour. The added rules map the TOML and INI scopes for table and
+     section headers, keys, values and operators onto the same `--shiki-token-*` variables. No
+     stylesheet needs a variable of its own for them.
    - An unquoted INI value, and a `key: value` or Fluent Bit `Name cpu` line, stay in the
-     foreground colour: the bundled INI grammar gives them no scope of their own, and a rule on
+     foreground colour. The bundled INI grammar gives them no scope of their own, and a rule on
      the whole `source.ini` would colour every line alike.
 
-5. **Colouring is display only, and it never blocks.** The text is coloured after the table is
-   drawn, on the cell and in the dialog. If the script fails to load or a grammar throws, the
-   plain text stays. Text is escaped as for any other cell; Shiki builds its HTML from tokens of
-   the text, not from markup in it.
+5. **Colouring is display only, and it never blocks.**
+   - The UI colours the text after the table is drawn, on the cell and in the dialog.
+   - If the script fails to load or a grammar throws, the plain text stays.
+   - The UI escapes the text as for any other cell. Shiki builds its HTML from tokens of the text,
+     not from markup in it.
 
 6. **The `telegraf` kind knows the invocation and has no settings.** Program `telegraf` plus
    `EXE_SUFFIX`; arguments `--config ${config_dir}/telegraf-conf`; `--version` as version probe

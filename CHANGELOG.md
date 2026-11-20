@@ -17,8 +17,6 @@ carries a date once its tag exists.
 
 ## [0.8.7]
 
-## [0.8.6] - 2026-11-19
-
 ### Added
 
 - **Telegraf is managed by the fleet again** — the Supervisor kind `telegraf`, removed in 0.5.3, is
@@ -49,6 +47,8 @@ carries a date once its tag exists.
     upload also stores the default configuration `telegraf-conf` from `config/examples/`, left
     untouched where the Server already holds it. **What to do:** install `gpgv` (Debian and Ubuntu
     have it; on macOS install GnuPG) on the host that fetches Telegraf 1.34.4 or later.
+
+## [0.8.6] - 2026-11-19
 
 ### Fixed
 
