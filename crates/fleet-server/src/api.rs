@@ -1,6 +1,7 @@
 //! The REST API v1 — the Server's integration contract (DEV-six-crates-tokio-axum, SRV-configurations-compose-one-map) — and the bundled
 //! rudimentary UI. Both belong to the Operator plane and are served on its own listener
-//! (SEC-tls13-two-planes-bounded-input); the one exception, the Agent-facing artifact download, is [`download_router`].
+//! (SEC-tls13-two-planes-bounded-input); the Agent-facing artifact download is the Agent plane's, in
+//! `transport`.
 //!
 //! The OpenAPI document is generated code-first with `utoipa`: the same annotations that register
 //! a route describe it, so contract and behaviour cannot drift. Any external portal generates a
@@ -374,15 +375,6 @@ async fn security_headers(request: Request, next: Next) -> Response {
 /// which every offered Package's `download_url` names.
 ///
 /// Consequently it is not in the OpenAPI document: that document describes the Operator plane.
-pub fn download_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route(
-            "/api/v1/packages/{agent_type}/{version}/file",
-            get(download_package),
-        )
-        .with_state(state)
-}
-
 /// The bundled UI: one embedded page, no frontend toolchain (DEV-six-crates-tokio-axum).
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
@@ -1547,24 +1539,6 @@ impl PackageSetView {
     }
 }
 
-/// The Platform the download route names (PKG-signed-packages-and-delivery): the artifact endpoint serves bytes, and a
-/// request naming bytes names the Platform they are for.
-#[derive(Deserialize)]
-struct PlatformQuery {
-    /// The operating system, as `os.type`: `linux`, `darwin`, `windows`. Other spellings — `macos`
-    /// off a release file name — are accepted and answered canonically.
-    os: String,
-    /// The architecture, as `host.arch`: `amd64`, `arm64`. Other spellings — `x86_64`, `aarch64` —
-    /// are accepted and answered canonically.
-    arch: String,
-}
-
-impl PlatformQuery {
-    fn platform(&self) -> Result<Platform, String> {
-        Platform::new(&self.os, &self.arch)
-    }
-}
-
 /// The `(Package, Platform)` a route names in its path, or the `400` that says which half of it
 /// does not parse. `platform_prefix` leads the platform half's message.
 fn artifact_of(
@@ -2200,97 +2174,6 @@ async fn delete_package_floor(
     }
 }
 
-/// Serves an entry's artifact bytes — the `download_url` the Agent is offered points here.
-///
-/// `200` with the bytes, `400` for a missing or invalid platform or identity, `404` for a Package
-/// without an uploaded artifact for that platform.
-async fn download_package(
-    State(state): State<Arc<AppState>>,
-    Path((agent_type, version)): Path<(String, String)>,
-    Query(query): Query<PlatformQuery>,
-    request: Request,
-) -> Response {
-    // A read: a pinned Package an older Server stored under a non-SemVer version is still offered
-    // (PKG-versions-high-water-mark-floor §3), so its bytes are still served.
-    let id = match PackageId::load(&agent_type, &version) {
-        Ok(id) => id,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e),
-    };
-    let platform = match query.platform() {
-        Ok(platform) => platform,
-        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
-    };
-    // One answer for every artifact this requester may not fetch, whether or not the store holds
-    // it, so the store cannot be listed by probing (PKG-signed-packages-and-delivery §37).
-    let not_found = || {
-        error(
-            StatusCode::NOT_FOUND,
-            format!(
-                "no set {id} with an artifact for {}-{}",
-                platform.os, platform.arch
-            ),
-        )
-    };
-    // A member certificate fetches only what is offered to an Agent its host speaks for (PKG-signed-packages-and-delivery §2).
-    // The download guard admitted the certificate and hands over what it proves; a
-    // request without one exists only where no certificate is required, and is tested here no
-    // more than at admission.
-    if let Some(proofs) = request.extensions().get::<crate::transport::Proofs>() {
-        let host = proofs.host.as_deref();
-        if !host.is_some_and(|host| state.offers_artifact(host, &id, &platform)) {
-            state.audit_refusal(
-                crate::audit::Entry::new("download.refused", "refused")
-                    .peer(crate::transport::peer_ip(&request))
-                    .with("plane", "agent")
-                    .with("check", "not offered")
-                    .with("host", host.map(str::to_string))
-                    .with(
-                        "serial",
-                        proofs.certificate.as_ref().map(|(id, _)| id.serial.clone()),
-                    )
-                    .with("agent_type", id.agent_type.clone())
-                    .with("version", id.version.clone())
-                    .with("platform", platform.tag()),
-            );
-            return not_found();
-        }
-    }
-    let Some((sha256, size)) = state
-        .packages()
-        .and_then(|store| store.artifact(&id, &platform))
-    else {
-        return not_found();
-    };
-    // Streamed from the blob store, never buffered: a fleet updating at once means many concurrent
-    // downloads of the same artifact, and each one holding a copy of a program in memory is how a
-    // rollout takes the Server down with it.
-    let opened = state
-        .packages()
-        .map(|store| store.open_artifact(&sha256))
-        .unwrap_or_else(|| Err("package delivery is not configured".to_string()));
-    let bytes = match opened {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            warn!(package = %id, error = %e, "cannot open the stored artifact");
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("the artifact of {id} cannot be read"),
-            );
-        }
-    };
-    Response::builder()
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        // So the Agent can size the download, and a truncated transfer is detectable as one.
-        .header(header::CONTENT_LENGTH, size)
-        .body(Body::from_stream(read_chunks(bytes)))
-        .unwrap_or_else(|e| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("cannot serve the artifact of {id}: {e}"),
-            )
-        })
-}
-
 /// Why a streamed upload did not become an artifact.
 enum UploadError {
     /// The body grew past the configured package limit; the number is that limit.
@@ -2375,33 +2258,6 @@ async fn stream_upload(
         }
     }
     Ok(written)
-}
-
-/// A stream of an artifact's chunks, read on a thread of its own, so a response body never
-/// materialises whole and a slow disk never holds up the runtime.
-fn read_chunks(
-    mut bytes: Box<dyn std::io::Read + Send>,
-) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> {
-    let (sender, receiver) = tokio::sync::mpsc::channel(4);
-    tokio::task::spawn_blocking(move || loop {
-        let mut buffer = vec![0u8; 64 * 1024];
-        let next = match bytes.read(&mut buffer) {
-            Ok(0) => return,
-            Ok(read) => {
-                buffer.truncate(read);
-                Ok(buffer)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => Err(e),
-        };
-        let failed = next.is_err();
-        if sender.blocking_send(next).is_err() || failed {
-            return;
-        }
-    });
-    futures_util::stream::unfold(receiver, |mut receiver| async move {
-        receiver.recv().await.map(|chunk| (chunk, receiver))
-    })
 }
 
 // -------------------------------------------------------------------------------------------

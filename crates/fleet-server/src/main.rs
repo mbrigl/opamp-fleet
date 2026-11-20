@@ -1113,7 +1113,7 @@ async fn serve() {
     let (agent_tls, operator_tls, issuers, _) = planes;
     let agents = fleet_server::agent_app(
         state.clone(),
-        fleet_server::transport::Admission::new(true)
+        fleet_server::agent_cases::Admission::new(true)
             .with_enrolment(issuers, enrolment)
             .with_revocations(Some(revocations.clone()))
             .with_audit(Some(audit.clone()))

@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_cases;
 pub mod agent_rate;
 pub mod agent_store;
 pub mod api;
@@ -429,13 +430,12 @@ impl bootstrap::BootstrapCertificates {
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
 /// `download_url` is resolved against the Agent's own endpoint.
-pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Router {
-    let guard = admission
-        .download_guard()
-        .with_agent_rate(state.agent_rate().cloned());
-    transport::router(state.clone(), admission).merge(transport::guard_download(
-        api::download_router(state),
-        guard,
+pub fn agent_app(state: Arc<AppState>, admission: agent_cases::Admission) -> Router {
+    // The plane reaches state through its use cases alone (SRV-two-use-case-layers §5).
+    let cases = Arc::new(agent_cases::AgentCases::new(state, admission));
+    transport::router(cases.clone()).merge(transport::guard_download(
+        transport::download_router(cases.clone()),
+        cases,
     ))
 }
 

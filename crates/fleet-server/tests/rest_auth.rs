@@ -35,7 +35,7 @@ async fn spawn_guarded() -> TestServer {
     .expect("parse");
     let (addr, rest_addr) = support::serve_guarded(
         state.clone(),
-        fleet_server::transport::Admission::open(),
+        fleet_server::agent_cases::Admission::open(),
         Some(OperatorAuth::from_config(&auth).expect("auth")),
     )
     .await;

@@ -281,7 +281,7 @@ no module.
   ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)). `pki` is
   `server pki status` and the running Server's warnings before a certificate it depends on ends
   (OPS-operator-program-fleetctl).
-- **Server admission** — `transport::Admission` requires the client certificate on every request
+- **Server admission** — `agent_cases::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Behind
   the same admission it serves a Gateway its revocation list on `/v1/gateway/revocations` and

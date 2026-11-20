@@ -71,7 +71,7 @@ async fn spawn_watched_server() -> (SocketAddr, Arc<AppState>, Arc<Seen>, tempfi
     let state = Arc::new(AppState::new(dir.path().join("fleet-configs")).expect("state"));
     let seen = Arc::new(Seen::default());
     let recorder = seen.clone();
-    let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open())
+    let app = fleet_server::agent_app(state.clone(), fleet_server::agent_cases::Admission::open())
         .layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let seen = recorder.clone();
@@ -614,7 +614,7 @@ async fn the_gateway_serves_no_artifact_it_relayed_no_offer_for() {
                     .expect("deployments"),
             )),
     );
-    let app = fleet_server::agent_app(state, fleet_server::transport::Admission::open());
+    let app = fleet_server::agent_app(state, fleet_server::agent_cases::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");

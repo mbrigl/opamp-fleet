@@ -78,7 +78,7 @@ async fn spawn_server_with(
             ))
             .with_floors(floors.map(Arc::new)),
     );
-    let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
+    let app = fleet_server::agent_app(state.clone(), fleet_server::agent_cases::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");

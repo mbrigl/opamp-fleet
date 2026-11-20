@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
+use fleet_server::agent_cases::Admission;
 use fleet_server::ca::ClientCa;
 use fleet_server::fleet::AppState;
 use fleet_server::revocation::{CertId, Revocations};
-use fleet_server::transport::Admission;
 use opamp::proto::{
     AgentCapabilities, AgentToServer, CertificateRequest, ConnectionSettingsRequest,
     OpAmpConnectionSettingsRequest, ServerErrorResponseType, ServerToAgent,

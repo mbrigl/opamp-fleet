@@ -520,7 +520,7 @@ async fn a_shutdown_closes_the_websocket_sessions_before_serve_returns() {
         fleet_server::fleet::AppState::new(dir.path().join("fleet-configs"))
             .expect("open the configuration store"),
     );
-    let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
+    let app = fleet_server::agent_app(state.clone(), fleet_server::agent_cases::Admission::open());
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local addr");
     let handle = opamp::server::listen::Handle::new();

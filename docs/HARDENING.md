@@ -44,7 +44,7 @@ has:
 - TLS on both transports, on both ends, with a private CA supported on the Client
   (SEC-tls13-two-planes-bounded-input).
 - **One proof on the Agent plane, required in the handshake** (SEC-admission-by-client-certificate,
-  `transport::Admission`): a client certificate the client CA issued, valid and not revoked. No
+  `agent_cases::Admission`): a client certificate the client CA issued, valid and not revoked. No
   configuration admits a peer without one. The plane has no credential: `server.toml` refuses an
   `[auth]` section and a credential key in `[connection_offer]` at startup, and `/v1/opamp` and the
   download route read no `Authorization` header. The Client sends none, and nothing in

@@ -113,6 +113,10 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // What the binary runs as an instance: its lease, its planes and the revocations of
             // the other instances, wired together.
             ("instance", Root),
+            // The Agent plane's use cases (SRV-two-use-case-layers §1). It reads certificates and
+            // CSRs through `ca` and `tls` and waits on timers, as the code it took from `transport`
+            // did, so it is no core module; the plane-reach test gives the use-case layer its own.
+            ("agent_cases", Adapter),
             ("agent_rate", Core),
             ("agent_store", Core),
             ("audit", Core),
