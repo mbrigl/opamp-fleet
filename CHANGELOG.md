@@ -17,8 +17,6 @@ carries a date once its tag exists.
 
 ## [0.8.7]
 
-## [0.8.6] - 2026-11-19
-
 ### Added
 
 - **The GLPI Agent is managed by the fleet again** — the Supervisor kind `glpi` that 0.5.3 removed
@@ -53,6 +51,8 @@ carries a date once its tag exists.
     in two parts (`1.15`). The release is fetched under upstream's tag and uploaded as the SemVer
     Package version (`1.19` becomes `1.19.0`). The upload also stores the default configuration
     `glpi-agent-conf` from `config/examples/`, left untouched where the Server already holds it.
+
+## [0.8.6] - 2026-11-19
 
 ### Fixed
 
