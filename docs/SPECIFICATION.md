@@ -46,9 +46,9 @@ An operator rolls out a configuration from one place and knows, within seconds, 
 and which did not, and why — across OpAMP-native Collectors and foreign, non-OpAMP agents alike. A
 change can address the whole fleet or a chosen subset of it, so a configuration can be rolled out to
 part of the fleet before all of it. And what the Server distributes is not only configuration but
-the agents' software itself: it delivers a Package that the Agent verifies before it applies it, in
-place, and rolls back on failure. Agents that were never built for OpAMP are brought into the same
-control loop by purpose-built Custom Supervisor Plugins, so the whole fleet's real state is
+the agents' software itself: it delivers a Package, and the Agent verifies it before it applies it
+in place and rolls it back on failure. Agents that were never built for OpAMP are brought into the
+same control loop by purpose-built Custom Supervisor Plugins, so the whole fleet's real state is
 observable rather than assumed, and a rejected configuration or a failed update is a reported event,
 not a silent outage.
 
