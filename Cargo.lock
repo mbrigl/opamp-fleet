@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-agent"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-core"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "cryptoki",
  "der 0.8.3",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-server"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "argon2",
  "async-trait",
@@ -1096,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-tools"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "clap",
  "cryptoki",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-util"
-version = "0.8.6"
+version = "0.8.7"
 dependencies = [
  "base64 0.23.1",
  "flate2",

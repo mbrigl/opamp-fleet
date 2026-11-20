@@ -20,7 +20,7 @@ how it is doing. Three gaps keep it from managing a real fleet:
 
 - **No Server to run.** The protocol needs a Server on the other end. The reference
   implementations provide libraries and examples to build one, not a Server an operator
-  deploys to manage a fleet.
+  runs to manage a fleet.
 - **Heterogeneous fleets.** Beside OpenTelemetry Collectors, a fleet runs agents that do not
   speak OpAMP. A tool that sees only OpAMP-native agents manages a slice of the fleet, never all
   of it.
@@ -35,10 +35,10 @@ implements.
 
 ## Mission
 
-Give operators one place — reachable by any UI through a REST API — to decide what every agent
-in a heterogeneous fleet is running, and to see what each one is actually running, whether or not
-the agent itself speaks OpAMP — on an implementation of OpAMP that is as complete as the protocol
-allows and demonstrably in step with its upstream specification.
+Give operators one place to decide what every agent in a heterogeneous fleet runs, and to see
+what each one actually runs, whether or not the agent speaks OpAMP itself. Any UI reaches that
+place through a REST API. That place rests on an implementation of OpAMP as complete as the
+protocol allows and demonstrably in step with its upstream specification.
 
 ## Vision
 
@@ -46,11 +46,11 @@ An operator rolls out a configuration from one place and knows, within seconds, 
 and which did not, and why — across OpAMP-native Collectors and foreign, non-OpAMP agents alike. A
 change can address the whole fleet or a chosen subset of it, so a configuration can be rolled out to
 part of the fleet before all of it. And what the Server distributes is not only configuration but
-the agents' software itself: it can update an agent's binary in place, verified before it is applied
-and rolled back on failure. Agents that were never built for OpAMP are brought into the same control
-loop by purpose-built Custom Supervisor Plugins, so the whole fleet's real state is observable
-rather than assumed, and a rejected configuration or a failed update is a reported event, not a
-silent outage.
+the agents' software itself: it delivers a Package, and the Agent verifies it before it applies it
+in place and rolls it back on failure. Agents that were never built for OpAMP are brought into the
+same control loop by purpose-built Custom Supervisor Plugins, so the whole fleet's real state is
+observable rather than assumed, and a rejected configuration or a failed update is a reported event,
+not a silent outage.
 
 One Client binary covers the shapes a real deployment needs. It **supervises** local processes — and
 because every Supervisor also listens on loopback for OpAMP, a Collector carrying its own OpAMP
@@ -66,8 +66,10 @@ likes. The Client is one process that can supervise many Managed Processes at on
 native operating-system service that updates itself in place, and runs on Linux, macOS, and Windows;
 growing to a new kind of Managed Process means writing a new Plugin, not changing the core. Both
 ends carry a written record of which parts of the protocol they implement, kept in step with the
-upstream specification rather than drifting quietly behind it. The project grows from the smallest
-thing that closes the loop and widens only as the protocol and its agents actually allow.
+upstream specification rather than drifting quietly behind it. The Server keeps its state in stores
+the operator runs, so several Server instances serve one fleet and the loss of one leaves no Agent
+unmanaged. The project grows from the smallest thing that closes the loop and widens only as the
+protocol and its agents actually allow.
 
 ## Strategy
 
@@ -126,9 +128,9 @@ thing that closes the loop and widens only as the protocol and its agents actual
   vulnerability can be ruled out, so the project shrinks the chance of one and the damage it can
   do: every input from the network is bounded before it is parsed, the parsers are fuzzed, and the
   dependencies are checked before they are merged.
-- **Close the loop before widening it.** A working control loop — configure, apply, report back
-  — for one managed process comes first. Every capability that widens it builds on that loop
-  once it holds, not before it.
+- **Widen only a loop that holds.** The control loop — configure, apply, report back — holds for
+  every Managed Process the build carries. A new capability, kind or mode is built on that loop
+  and holds the same way, not beside it.
 - **Distribute software, not only configuration.** The Server can deliver and apply agent binaries,
   not just their configuration — verified before applying and rolled back on failure — but only
   as far as the managed processes actually support it, never pretending to a capability an agent
@@ -162,8 +164,7 @@ Only a normalization renumbers them
    rather than fail silently.
 5. **G-5** — **Any UI can drive the fleet.** The Server shall expose fleet state and
    configuration through an OpenAPI-described REST API as a stable contract, so that an external
-   UI or portal reads the fleet and changes what it runs through that API alone. The Server
-   bundles only a rudimentary UI of its own.
+   UI or portal reads the fleet and changes what it runs through that API alone.
 6. **G-6** — **One Client runs many Supervisors.** When one Client process runs several
    Supervisors, each shall appear to the Server as an independent Agent.
 7. **G-7** — **An agent the project was never built for is managed like any other.** When a
@@ -269,10 +270,11 @@ Only a normalization renumbers them
   for basic operation; a production-grade user interface is external and out of scope for this
   project to build.
 - **Authorization and multi-tenancy.** The Server authenticates *that* a peer belongs to the fleet
-  (G-17), but does not distinguish *which* operator may do *what*, nor separate one operator's fleet
-  from another's. Roles, permissions, and tenancy are real needs deferred rather than half-built. On
-  the Agent plane one bound holds: a host receives from the Server, directly or through a Gateway,
-  only the configurations and packages released to an Agent it speaks for (Q-4).
+  (G-17), and beyond the loopback *that* a request on the Operator plane carries the operator's
+  credential, but it does not distinguish *which* operator may do *what*, nor separate one
+  operator's fleet from another's. Roles, permissions, and tenancy are real needs deferred rather
+  than half-built. On the Agent plane one bound holds: a host receives from the Server, directly or
+  through a Gateway, only the configurations and packages released to an Agent it speaks for (Q-4).
 
 ## Constraints
 
@@ -291,8 +293,9 @@ Only a normalization renumbers them
 ## Threats & Forbidden Actions
 
 - **Assets:** every host the fleet reaches, since the Server causes code to run on each; the
-  operator's signing key; the fleet's client CA and bootstrap CA; each host's private key; the
-  host-side parameters and secrets of a Configuration; the Server's records and its audit record.
+  operator's signing key and the operator's credential on the Operator plane; the fleet's client CA
+  and bootstrap CA; each host's private key; the host-side parameters and secrets of a
+  Configuration; the Server's records and its audit record.
 - **Actors and trust boundaries:**
   - *The network* between a Client and the Server or a Gateway: untrusted. TLS 1.3 and a client
     certificate cross it; plaintext stays on the loopback.
@@ -307,7 +310,8 @@ Only a normalization renumbers them
   - *The database and the object store*: the operator's, trusted with the Server's state. The
     Server reaches them over TLS beyond the loopback (Q-1), and the fleet never reaches them
     (G-19).
-  - *The operator*: trusted. The project authenticates fleet membership, not who may do what.
+  - *The operator*: trusted once authenticated. The Server authenticates fleet membership, and
+    beyond the loopback the operator's credential, not who may do what.
   - *The supply chain*: dependencies and CI actions, checked before they merge.
 - The system shall never:
   - send a credential, a configuration, or a package unencrypted beyond the loopback (Q-1);
@@ -316,7 +320,8 @@ Only a normalization renumbers them
     (Q-6);
   - serve a host what is not released to an Agent it speaks for (Q-4);
   - let a remote configuration act outside the Supervisor it is for (Q-5);
-  - hand a host a private key: a host's key is made on the host;
+  - hand a host the private key of its client certificate: that key is made on the host, and the
+    bootstrap key is the one key the Server makes, good only to ask for enrolment;
   - let the fleet reach the Server's object store or database itself (G-19).
 
 ## Assumptions

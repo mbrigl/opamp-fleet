@@ -7,13 +7,6 @@
 
 ## Context
 
-The platform table of clause 6 folds the spellings of a 32-bit ARM build onto `arm32`. A Collector
-release names that build `linux_armv7`, and `opamp-fleetctl package fetch` reads its token through
-the same table. No Agent reports `armv7`: Go's `GOARCH` and Rust's `std::env::consts::ARCH` both
-say `arm`, and the semantic conventions' `host.arch` value is `arm32`. Without the fold, the
-artifact is uploaded, listed and never offered, and nothing says so. `armv6` is not folded: an
-`armv7` build does not run on an ARMv6 host.
-
 The [specification](../SPECIFICATION.md) puts security before convenience (Strategy *Security
 before convenience*, **Q-1** *Secure by default*): software is installed only when it is signed
 with a key the operator holds and fetched from the fleet itself, the Server or a Gateway relaying
@@ -39,7 +32,7 @@ The store, and which held artifact can be meant for an Agent:
 
 - **A release is one version across several artifacts.** The release pipeline
   ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)) publishes
-  five platform builds of one version, and upstream projects publish more. The store needs an object
+  five platform builds of one version, and upstream projects release more. The store needs an object
   that *is* that release, or "which version is this at" has one answer per platform and a
   half-finished upload looks like a rollout in progress.
 - **A mismatched binary is the worst mistake available.** A Windows artifact swapped over a Linux
@@ -51,9 +44,15 @@ The store, and which held artifact can be meant for an Agent:
   Collector's `opampextension` say `amd64`/`arm64`/`darwin`. With two spellings a host would report
   a different architecture depending on what runs on it, and a filter written against one spelling
   would stop matching.
+- **A 32-bit ARM build has spellings of its own.** A Collector release names it `linux_armv7`, and
+  `opamp-fleetctl package fetch` reads that token through the same table. No Agent reports
+  `armv7`: Go's `GOARCH` and Rust's `std::env::consts::ARCH` both say `arm`, and the semantic
+  conventions' `host.arch` value is `arm32`. An artifact stored under `armv7` would be uploaded,
+  listed and never offered, and nothing would say so. An `armv6` build is another matter: an
+  `armv7` build does not run on an ARMv6 host.
 - **Upstream publishes archives with a checksum.** `opentelemetry-collector-releases` publishes
   `.tar.gz`, `.deb`, `.rpm` and `.msi`, never a bare binary, with a `checksums.txt` of SHA-256
-  values. Some agents publish their portable Windows build as a `.zip`.
+  values. Some agents release their portable Windows build as a `.zip`.
 - **The Agent type is a fact the Server can read.** Every Agent this Client presents reports its
   type as `service.name` ([CLT-what-an-agent-reports](CLT-what-an-agent-reports.md)), which the
   Baseline defines as "a reverse FQDN that uniquely identifies the Agent type".
@@ -80,6 +79,10 @@ What identifies a Package and how it is released:
   key is best kept off the Server host, and the machine that holds it is the one least likely to
   hold hundreds of megabytes of artifacts. Signing from the hashes alone signs what the Server
   claims, which is weighed against Q-1 under Consequences.
+- **The Server's own UI is rudimentary.** A production UI is external to this project (the
+  Non-Goal *Shipping a production UI* of the [specification](../SPECIFICATION.md)). The Packages
+  tab is the operator's place to assemble and sign a Package, and it works through the REST API,
+  as any external UI can.
 
 The download route and the Gateway:
 
@@ -222,11 +225,11 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 9. **Two names are derived, and they answer different questions.** The **wire name** is the Agent
    type alone: the `PackagesAvailable` map key, the key an Agent reports its `PackageStatuses`
-   under, and the value the Client's `[self_update] package` is compared against
-   ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)). It must be stable across
-   versions. The **display name** is `<agent_type> <version>`, used in the UI and the log. Using
-   one name in both places would break the Client's self-update guard on every release or make the
-   fleet view unreadable.
+   under, and the value the Client compares an offer of its own update against, its compiled-in
+   Agent type ([CLT-self-update-signed-package §2](CLT-self-update-signed-package.md)). It must be
+   stable across versions. The **display name** is `<agent_type> <version>`, used in the UI and
+   the log. Using one name in both places would break the Client's self-update guard on every
+   release or make the fleet view unreadable.
 
 10. **The hashes are fixed constructions, and both are shown.** The per-package hash is SHA-256
     over the version's length (u64, little-endian), the version, and the entry's content hash; the
@@ -286,14 +289,14 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 15. **The Platform does not travel on the wire.** All Agents of one type are offered the Package
     under the same key, each with the download URL and content hash of the entry that fits it (two
     platforms' artifacts differ in content hash by construction), so the Client's package handling
-    is identical on every target and one `[self_update]` consent works across all five release
-    platforms.
+    is identical on every target and one `[packages] self_update` consent works across all five
+    release platforms.
 
 16. **The Server decides which artifact an Agent receives, never a file on the host.** A
     `[[supervisor]]` block names no package; one carrying `package` fails at startup with a message
     saying the Server decides. Type fit is also the second, independent guard on the Client's own
     binary: the Server does not offer a Package of another type to the Client's Agent, whatever it
-    is called, and the Client still refuses an offer outside its `[self_update]` consent
+    is called, and the Client still refuses an offer outside its `[packages] self_update` consent
     ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)). One side refuses to
     send, the other to install.
 
@@ -540,7 +543,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
       `/api/v1/packages/` and naming the route's `/file`. The Server sends nothing else
       (clause 33), and a downstream Client resolves the path against its own endpoint, the
       Gateway.
-    - An absolute `download_url`, which only a foreign Server could send, is neither fetched nor
+    - An absolute `download_url`, which only a foreign Server sends, is neither fetched nor
       served by the Gateway.
 
 43. **The Gateway stores and serves only bytes that match the offer's hash.** An artifact is the
@@ -565,7 +568,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 45. **The cache is bounded, and an artifact that does not fit is refused.**
     `[gateway] package_cache_bytes` bounds the bytes the cache holds, stages and is deleting
     together, default `10737418240` (10 GiB); `0` is refused at load. The cache lives in
-    `<state_dir>/gateway-packages`, owner-only on Unix, emptied when the Gateway starts. Every
+    `<state_dir>/gateway-packages`, mode `0700` on Unix, emptied when the Gateway starts. Every
     stored copy has a file name of its own, so deleting an old copy never touches a newer copy of
     the same artifact. Before a fetch stages a byte it reserves the artifact's `Content-Length`,
     or the per-artifact limit when the Server sends none, against `package_cache_bytes`. To make
@@ -654,7 +657,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     - The offered package name must be 1–64 characters of letters, digits, `.`, `_`, `+`, `-`,
       checked before anything is resolved or written: the staged file is named after it.
     - The artifact is streamed to `<supervisor_dir>/packages/<name>.staged` and hashed on the way;
-      peak memory is one chunk. The staging directory is owner-only (`0700` on Unix), so no other
+      peak memory is one chunk. The staging directory is mode `0700` on Unix, so no other
       local user can swap the file between verification and install. A failure leaves no partial
       file.
     - `max_artifact_size_bytes` (top level of `supervisor.toml`, default `1073741824`, `0` fails
@@ -816,8 +819,7 @@ Server keeps the bytes
 what a certificate speaks for ([SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md));
 what a host behind a Gateway receives from it ([CLT-modes-and-gateway](CLT-modes-and-gateway.md));
 verifying upstream sigstore/cosign signatures; a retention policy for superseded Packages;
-inequality in Selectors; refusing an overlapping Selector at write time; a new name
-for `[self_update] package`, since its value is an Agent type; addons, and installing
+inequality in Selectors; refusing an overlapping Selector at write time; addons, and installing
 them, until a Client can install one; a bound finer than the host; roles, permissions and tenancy on
 the Operator plane; keeping the Gateway's cache and the offers it serves across a restart of the
 Gateway, and the Gateway's own Supervisors fetching through the cache; resuming an interrupted
@@ -833,16 +835,14 @@ documented; a reproducible tree mode for `opamp-fleetctl package pack`.
 - **Fold `armv7` onto `arm`, the token an Agent reports.** The smallest change, and every Agent
   reporting `arm` would match. Rejected: clause 6 spells a Platform the semantic conventions' way,
   and their `host.arch` value for a 32-bit ARM build is `arm32`; `arm` is folded onto it as well.
-- **Leave the table without a fold for a 32-bit ARM build.** The table as it stood until
-  2026-11-15: an unknown token passes through, so a Collector's `linux_armv7` asset is stored under
-  `linux/armv7`. Rejected: it is uploaded, listed and never offered, since no Agent reports
-  `armv7`, and nothing says so.
+- **Leave the table without a fold for a 32-bit ARM build.** An unknown token passes through, so a
+  Collector's `linux_armv7` release file is stored under `linux/armv7`. Rejected: it is uploaded,
+  listed and never offered, since no Agent reports `armv7`, and nothing says so.
 - **Fold `armv6` onto `arm32` too.** One token for every 32-bit ARM build. Rejected: an `armv7`
   build does not run on an ARMv6 host, and an Agent reporting `arm` does not say which it is; an
   `armv6` artifact stays under its own token.
-- **Leave the table as it was, and have `package fetch` pass an `armv7` asset over.** As the tool
-  did before it read the shared table. Rejected: a 32-bit ARM host in the fleet could then never be
-  offered the Collector's build.
+- **No fold, and `package fetch` passes an `armv7` release file over.** Rejected: a 32-bit ARM host
+  in the fleet could then never be offered the Collector's build.
 - **Leave the platform or the type to the operator's aim.** `os.type`/`host.arch`/`service.name`
   pairs already filter at zero cost. Rejected: opt-in, and forgetting it installs a foreign binary
   on every host of every other platform or type. A rule that is only right when remembered is not
@@ -892,12 +892,10 @@ documented; a reproducible tree mode for `opamp-fleetctl package pack`.
   whose hosts cannot reach the internet needs, and it is the only way in.
 - **Derive the checksum by fetching once, or verify a source by downloading at set time.** Records
   what the Server happened to receive, from where it stands: trust on first use with no anchor.
-- **A base URL per Package from which entries and hashes are loaded.** A URL yields neither asset
-  names nor hashes, which differ for every upstream. That knowledge per agent lives in
-  `opamp-fleetctl package fetch`
-  ([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)),
-  which
-  uploads.
+- **A base URL per Package from which entries and hashes are loaded.** A URL yields neither the
+  names of release files nor hashes, which differ for every upstream. That knowledge per agent lives
+  in `opamp-fleetctl package fetch`
+  ([OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)), which uploads.
 - **An `advertised_url` for a mirror or another host in front of the download.** With the Client
   downloading only from its own Server's origin, an `advertised_url` naming another host reaches
   no Client, and one naming the same origin says what the path already says. With it set, an
@@ -1124,7 +1122,7 @@ documented; a reproducible tree mode for `opamp-fleetctl package pack`.
 - OpenTelemetry semantic conventions, attribute registry, `host.arch`
   (<https://opentelemetry.io/docs/specs/semconv/registry/attributes/host/>, read 2026-11-15): the
   well-known values `amd64`, `arm32`, `arm64`, `ia64`, `ppc32`, `ppc64`, `s390x`, `x86`.
-- `open-telemetry/opentelemetry-collector-releases` v0.165.0: the assets
+- `open-telemetry/opentelemetry-collector-releases` v0.165.0: the release files
   `otelcol_0.165.0_linux_armv7.tar.gz` beside `linux_arm64` and `linux_386`.
 - [OpAMP specification § Packages
   (`v0.19.0`)](https://github.com/open-telemetry/opamp-spec/blob/v0.19.0/specification.md),
@@ -1166,8 +1164,8 @@ documented; a reproducible tree mode for `opamp-fleetctl package pack`.
   what the software is; nothing carries a second identity beside it.
 - [`opentelemetry-collector-releases`
   v0.157.0](https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v0.157.0):
-  archives only, never a bare binary; `checksums.txt` with a SHA-256 per asset; sigstore keyless
-  `.sig`/`.pem` companions.
+  archives only, never a bare binary; `checksums.txt` with a SHA-256 per release file; sigstore
+  keyless `.sig`/`.pem` companions.
 - [Bindplane, Bring Your Own
   Collector](https://docs.bindplane.com/feature-guides/deployment-and-management/bring-your-own-collector):
   the Agent type as a first-class object reported by the collector, not a free-form tag.
@@ -1310,8 +1308,7 @@ documented; a reproducible tree mode for `opamp-fleetctl package pack`.
   Agent to carry the same channel value, and a fresh host belongs to no Deployment until labelled
   or provisioned with one.
 - Negative / trade-offs: two builds of one Agent type at one version cannot coexist; they must
-  differ in type or version. An operator who set `[self_update] package` to something other than
-  an Agent type sees that Client refuse the offer on its fleet row.
+  differ in type or version.
 - Negative / trade-offs: nothing reaches an Agent before it is signed: a trial rollout needs the
   signing key too, and a Platform entry uploaded after a rollout reaches no Agent until it is
   signed. A Package signed once may be released in any Deployment, which matches what the
@@ -1428,28 +1425,66 @@ marker citing this decision ([NUC-decisions-cite-tests §2](NUC-decisions-cite-t
   is).
 - `crates/fleet-server/src/fleet/rollout.rs`:
   `a_record_without_assignments_loads_assigned_to_nothing`.
-- The signatures on the entry and the Server's check (clauses 3, 4, 12, 18, 19, 33, 35, 42, 51):
-  tests that carry `Verifies:` for this decision show that a signature is written on an entry,
-  offered to an Agent of that Platform, and removed when new bytes are uploaded to the entry; that
-  a signature write on an assigned Package is `409` and on a missing entry `404`; that one Package
-  held by two Deployments is offered with the same signature through both; that with
-  `[packages] verification_key` set on the Server a valid signature reports `valid` and a wrong
-  one `invalid`, both stored, and without the key the state is `unchecked`; that a malformed
-  `verification_key` in `server.toml` fails startup; that the `…/source` route and the Deployment
-  signature routes answer `404`; that the offered `download_url` is always a path and a
-  `server.toml` naming `advertised_url` fails startup naming the key; that the Client refuses an
-  absolute `download_url` on another origin without fetching, and a `supervisor.toml` with
-  `[packages] allowed_sources` fails startup naming the key; that the Gateway caches an artifact
-  offered as the Server's path; and that the offer and the download agree on every combination of
-  capability, assignment, type, Platform and signature.
-- The signing file (clauses 20–24): `opamp-fleetctl`'s tests sign a signing file and verify every
-  written signature against `fleet_core::package::statement` with the public key, as the Client
-  does; they refuse a file whose `format` is not `opamp-fleet-signing-v1`, whose hash is not 64
-  lowercase hex characters, or that names a platform twice, and assert that nothing was signed
-  then. A Server test reads the bundled UI and asserts that the download writes
-  `opamp-fleet-signing-v1` and the fields the API serves, and that the import calls the signature
-  route; the OpenAPI document must still carry those fields. These tests carry `Verifies:` for
-  this decision.
+- The signatures on the entry and the Server's check (clauses 3, 4, 12, 18, 19, 33, 35, 42, 51).
+  Tests that carry `Verifies:` for this decision show each of the following:
+  - A signature is written on an entry and offered to an Agent of that Platform. New bytes
+    uploaded to the entry remove it (`a_signature_lives_on_its_entry_and_new_bytes_remove_it` and
+    `an_entry_without_a_signature_is_offered_to_nobody` in
+    [`packages.rs`](../../crates/fleet-server/src/packages.rs);
+    `new_bytes_on_an_entry_remove_its_signature` in
+    [`tests/packages.rs`](../../crates/fleet-server/tests/packages.rs)).
+  - A signature write on an assigned Package is `409`, and on a missing entry `404`
+    (`a_released_package_freezes_its_entries_and_not_the_ring` in
+    [`tests/packages.rs`](../../crates/fleet-server/tests/packages.rs);
+    `a_signature_needs_an_entry_and_the_shape_of_one` in
+    [`packages.rs`](../../crates/fleet-server/src/packages.rs)).
+  - One Package held by two Deployments is offered with the same signature through both
+    (`one_package_in_two_deployments_is_offered_with_the_same_signature` in
+    [`tests/packages.rs`](../../crates/fleet-server/tests/packages.rs)).
+  - With `[packages] verification_key` set on the Server, a valid signature reports `valid` and a
+    wrong one `invalid`, and both are stored. Without the key the state is `unchecked`
+    (`with_a_verification_key_the_server_reports_valid_and_invalid_and_stores_both` in
+    [`tests/packages.rs`](../../crates/fleet-server/tests/packages.rs);
+    `the_server_checks_a_signature_against_its_key_and_only_reports` in
+    [`packages.rs`](../../crates/fleet-server/src/packages.rs)).
+  - A malformed `verification_key` in `server.toml` fails startup
+    (`a_malformed_verification_key_fails_startup` in
+    [`config.rs`](../../crates/fleet-server/src/config.rs)).
+  - The `…/source` route and the Deployment signature routes answer `404`
+    (`the_source_route_and_the_deployment_signature_routes_are_gone` in
+    [`tests/packages.rs`](../../crates/fleet-server/tests/packages.rs)).
+  - The offered `download_url` is always a path
+    (`the_offer_carries_a_download_url_naming_the_identity` in
+    [`packages.rs`](../../crates/fleet-server/src/packages.rs)), and a `server.toml` naming
+    `advertised_url` fails startup naming the key
+    (`a_leftover_advertised_url_fails_startup_naming_it` in
+    [`config.rs`](../../crates/fleet-server/src/config.rs)).
+  - The Client refuses an absolute `download_url` on another origin without fetching
+    (`an_absolute_url_on_another_origin_is_refused_without_a_fetch` in
+    [`packages.rs`](../../crates/fleet-agent/src/packages.rs)). A `supervisor.toml` with
+    `[packages] allowed_sources` fails startup naming the key
+    (`allowed_sources_fails_the_load_naming_the_key_as_removed` in
+    [`config.rs`](../../crates/fleet-agent/src/config.rs)).
+  - The Gateway caches an artifact offered as the Server's path
+    (`the_servers_path_is_cached_and_an_absolute_url_is_neither_fetched_nor_served` in
+    [`tests/gateway_package_cache.rs`](../../crates/fleet-agent/tests/gateway_package_cache.rs)).
+  - The offer and the download agree on every combination of capability, assignment, type,
+    Platform and signature (`the_download_and_the_offer_test_one_predicate` in
+    [`packages.rs`](../../crates/fleet-server/src/packages.rs)).
+- The signing file (clauses 20–24). These tests carry `Verifies:` for this decision.
+  - `opamp-fleetctl`'s tests sign a signing file and verify every written signature against
+    `fleet_core::package::statement` with the public key, as the Client does
+    (`every_entry_is_signed_as_the_client_verifies_it` in
+    [`signing.rs`](../../crates/fleet-tools/src/signing.rs)).
+  - They refuse a file whose `format` is not `opamp-fleet-signing-v1`, whose hash is not 64
+    lowercase hex characters, or that names a platform twice. They assert that nothing was signed
+    then (`a_file_that_is_not_exactly_the_format_is_refused_before_anything_is_signed` in
+    [`signing.rs`](../../crates/fleet-tools/src/signing.rs)).
+  - A Server test reads the bundled UI. It asserts that the download writes
+    `opamp-fleet-signing-v1` and the fields the API serves, and that the import calls the signature
+    route. The OpenAPI document must still carry those fields
+    (`the_ui_shows_the_sha256_and_carries_the_signing_file_the_api_serves` in
+    [`tests/rest_api.rs`](../../crates/fleet-server/tests/rest_api.rs)).
 - The signature at rollout:
   `a_rollout_of_a_deployment_with_an_unsigned_package_is_refused_naming_it` and
   `the_per_agent_act_refuses_a_deployment_with_an_unsigned_package` in
