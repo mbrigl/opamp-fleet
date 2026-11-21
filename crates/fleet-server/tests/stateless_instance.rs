@@ -933,7 +933,7 @@ impl OnePlane {
 
     /// Waits for a line that holds `text`, answering whether one came within a minute.
     fn logs(&self, text: &str) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(60); // timed: a deadline, not a wait
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
             match self.logged.recv_timeout(left) {
                 Ok(line) if line.contains(text) => return true,

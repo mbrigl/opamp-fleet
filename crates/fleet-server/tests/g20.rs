@@ -1977,7 +1977,7 @@ fn g20_the_operator_plane_answers_within_2_s_while_a_killed_agent_plane_instance
         };
         let deadline = killed_at + CARRIED_WITHIN;
         while carried(&role) != killed_agents && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await; // timed: the poll of the database
         }
         let closed_at = Instant::now();
         window.store(false, Ordering::SeqCst);
@@ -2086,6 +2086,7 @@ fn g20_the_operator_plane_answers_within_2_s_while_a_killed_agent_plane_instance
 
 /// G-20's bound on each page and each revocation the Operator plane answers while the Agents of a
 /// lost Agent-plane instance reconnect.
+// timed: the bound G-20 sets on each answer, which the test measures and never waits for
 const OPERATOR_WITHIN: Duration = Duration::from_secs(2);
 
 /// One request to the Operator plane: when it was sent, how long its answer took, its status (none
@@ -2223,6 +2224,7 @@ async fn revoke_each_second(
             entries: 0,
             text,
         });
+        // timed: the pace of one revocation a second, the load G-20 names
         tokio::time::sleep_until((at + Duration::from_secs(1)).into()).await;
     }
     sent
