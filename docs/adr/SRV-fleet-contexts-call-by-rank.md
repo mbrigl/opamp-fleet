@@ -1,6 +1,6 @@
 # SRV-fleet-contexts-call-by-rank: The contexts of the Server's fleet core are ranked, and each names only those below it
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-21
 - **Deciders:** Markus Brigl
 - **Applies to:** the module root `crates/fleet-server/src/fleet.rs` and every submodule of `crates/fleet-server/src/fleet/` outside `#[cfg(test)]`, the order of the contexts in `docs/ARCHITECTURE.md`, the rank table in `crates/fleet-core/tests/dependency_direction.rs`
