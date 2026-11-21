@@ -5,8 +5,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_cases;
 pub mod agent_rate;
 pub mod agent_store;
+pub mod answers;
 pub mod api;
 pub mod audit;
 pub mod audit_export;
@@ -31,6 +33,7 @@ pub mod labels;
 pub mod listen;
 pub mod listing;
 pub mod migrate;
+pub mod operator_cases;
 pub mod packages;
 pub mod pkcs11;
 pub mod pki;
@@ -429,19 +432,19 @@ impl bootstrap::BootstrapCertificates {
 /// The download lives here rather than with the rest of `/api/v1` because the split between the
 /// two planes is by *audience*, not by path: this route is the one an Agent calls, and its
 /// `download_url` is resolved against the Agent's own endpoint.
-pub fn agent_app(state: Arc<AppState>, admission: transport::Admission) -> Router {
-    let guard = admission
-        .download_guard()
-        .with_agent_rate(state.agent_rate().cloned());
-    transport::router(state.clone(), admission).merge(transport::guard_download(
-        api::download_router(state),
-        guard,
+pub fn agent_app(state: Arc<AppState>, admission: agent_cases::Admission) -> Router {
+    // The plane reaches state through its use cases alone (SRV-two-use-case-layers §5).
+    let cases = Arc::new(agent_cases::AgentCases::new(state, admission));
+    transport::router(cases.clone()).merge(transport::guard_download(
+        transport::download_router(cases.clone()),
+        cases,
     ))
 }
 
 /// The **Operator plane** (SEC-tls13-two-planes-bounded-input): the REST API, its OpenAPI document and docs page, and the
 /// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
 /// (SEC-admission-by-client-certificate). Without it the plane is open, which is what its loopback default is for.
-pub fn operator_app(state: Arc<AppState>, auth: Option<api::OperatorAuth>) -> Router {
-    api::router(state, auth)
+pub fn operator_app(state: Arc<AppState>, auth: Option<operator_cases::OperatorAuth>) -> Router {
+    // The plane reaches state through its use cases alone (SRV-two-use-case-layers §5).
+    api::router(Arc::new(operator_cases::OperatorCases::new(state, auth)))
 }

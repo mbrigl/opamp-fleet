@@ -113,8 +113,18 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // What the binary runs as an instance: its lease, its planes and the revocations of
             // the other instances, wired together.
             ("instance", Root),
+            // The Agent plane's use cases (SRV-two-use-case-layers §1). It reads certificates and
+            // CSRs through `ca` and `tls` and waits on timers, as the code it took from `transport`
+            // did, so it is no core module; what it may not name is `PLANE_REACH`'s.
+            ("agent_cases", Adapter),
+            // The Operator plane's use cases (SRV-two-use-case-layers §1). It checks the plane's
+            // credential through `credentials` and reads the request's headers, as the guard it took
+            // from `api` did, so it is no core module either.
+            ("operator_cases", Adapter),
             ("agent_rate", Core),
             ("agent_store", Core),
+            // The HTTP answers and the peer's address both planes' endpoints share, with `axum`.
+            ("answers", Adapter),
             ("audit", Core),
             ("blobs", Core),
             ("bootstrap", Core),
@@ -1007,4 +1017,179 @@ fn no_adapter_names_the_composition_roots_kept_from_adapters() {
         found.is_empty(),
         "an adapter names a composition root: {found:#?}"
     );
+}
+
+/// What each module of a plane may not name in the Server (SRV-two-use-case-layers §2 and §4), by
+/// module, with its submodules: an endpoint module names neither the other plane's use cases nor the
+/// other plane's endpoints, a use-case module names neither the other plane's use cases nor an
+/// endpoint, and `answers`, which both endpoints use, names neither plane.
+const PLANE_REACH: &[(&str, &[&str])] = &[
+    ("transport", &["operator_cases", "api"]),
+    ("api", &["agent_cases", "transport"]),
+    ("agent_cases", &["operator_cases", "api", "transport"]),
+    ("operator_cases", &["agent_cases", "api", "transport"]),
+    (
+        "answers",
+        &["agent_cases", "operator_cases", "api", "transport"],
+    ),
+];
+
+/// The modules that reach no state, with their submodules: the endpoint modules, which reach it
+/// only through their own plane's use-case module (SRV-two-use-case-layers §2), and `answers`,
+/// which both endpoints use.
+const STATELESS: &[&str] = &["transport", "api", "answers"];
+
+/// The Server's types that hold state, and its ports, which no endpoint module names
+/// (SRV-two-use-case-layers §2). The list is kept by hand: a new type that holds state, or a new
+/// port, is added here when it is written.
+const STATE_HOLDERS: &[&str] = &[
+    "AppState",
+    "ConfigStore",
+    "DeploymentStore",
+    "PackageStore",
+    "PackageOffering",
+    "Enrolment",
+    "Revocations",
+    "BootstrapCertificates",
+    "Throttle",
+    "AgentRate",
+    "Audit",
+    "CertificateSigner",
+];
+
+/// Whether `module` is `parent` or lies beneath it.
+fn within(module: &str, parent: &str) -> bool {
+    module == parent || module.starts_with(&format!("{parent}::"))
+}
+
+/// What the shipped code `src` of the Server's module `module` reaches that its plane may not:
+/// a module of [`PLANE_REACH`], through any path or a re-export of the crate, and for an endpoint
+/// a type of [`STATE_HOLDERS`], by name.
+fn plane_reach(module: &str, src: &str, reexports: &Reexports) -> Vec<String> {
+    let krate = "fleet-server";
+    let tokens = tokenize(src);
+    let mut found = Vec::new();
+    let forbidden: Vec<&str> = PLANE_REACH
+        .iter()
+        .filter(|(m, _)| within(module, m))
+        .flat_map(|(_, names)| names.iter().copied())
+        .collect();
+    for Named { segments, line, .. } in paths(&tokens) {
+        let mut target = resolve(krate, module, &segments);
+        // A path through a re-export is judged by where the item really is.
+        for _ in 0..4 {
+            let Target::Internal(k, ref s) = target else {
+                break;
+            };
+            let Some((name, at)) = s.split_last() else {
+                break;
+            };
+            match reexports.get(&(k, at.join("::"), name.clone())) {
+                Some(next) => target = next.clone(),
+                None => break,
+            }
+        }
+        let Target::Internal(k, segments) = target else {
+            continue;
+        };
+        if k != krate {
+            continue;
+        }
+        let (reached, _) = module_of(k, &segments);
+        if let Some(name) = forbidden.iter().find(|name| within(reached, name)) {
+            found.push(format!(
+                "{module}:{line}: names {name} ({})",
+                segments.join("::")
+            ));
+        }
+    }
+    if STATELESS.iter().any(|stateless| within(module, stateless)) {
+        for (token, line) in &tokens {
+            if let Token::Ident(name) = token {
+                if STATE_HOLDERS.contains(&name.as_str()) {
+                    found.push(format!("{module}:{line}: names {name}, which holds state"));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Each plane reaches the core through its own use-case module alone: `transport` through
+/// `agent_cases`, `api` through `operator_cases`, neither names the other plane's modules nor a
+/// type that holds state, and the use-case modules do not name each other.
+///
+/// Verifies: SRV-two-use-case-layers
+#[test]
+fn each_plane_reaches_the_core_through_its_own_use_cases() {
+    let reexports = reexports();
+    let src = crates_dir().join("fleet-server").join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    files.sort();
+    let mut found = Vec::new();
+    let mut seen = BTreeSet::new();
+    for file in files {
+        let module = module_path(&src, &file);
+        if !PLANE_REACH.iter().any(|(m, _)| within(&module, m)) {
+            continue;
+        }
+        for (m, _) in PLANE_REACH {
+            if within(&module, m) {
+                seen.insert(*m);
+            }
+        }
+        found.extend(plane_reach(
+            &module,
+            &fs::read_to_string(&file).unwrap(),
+            &reexports,
+        ));
+    }
+    // A module of the table that is gone fails, so the table never names a module the tree lacks.
+    let missing: Vec<&str> = PLANE_REACH
+        .iter()
+        .map(|(m, _)| *m)
+        .filter(|m| !seen.contains(m))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "modules of PLANE_REACH without a source file: {missing:?}"
+    );
+    assert!(
+        found.is_empty(),
+        "a plane reaches past its own use-case module: {found:#?}"
+    );
+}
+
+/// The check the plane test stands on: a path to the other plane's modules, a type that holds
+/// state in an endpoint, and either one in test code or in a string, each judged as it should be.
+#[test]
+fn the_plane_check_finds_what_a_plane_may_not_name() {
+    let reexports = Reexports::new();
+    let endpoint = r##"
+        use crate::agent_cases::AgentCases;
+        fn f() -> Response { crate::transport::busy() }
+        fn g(state: &crate::fleet::AppState) {}
+        const S: &str = "Throttle";
+        #[cfg(test)]
+        mod tests { use crate::fleet::AppState; use crate::transport::busy; }
+    "##;
+    let found = plane_reach("api", endpoint, &reexports);
+    assert_eq!(found.len(), 3, "{found:#?}");
+    assert!(found[0].contains("names agent_cases"));
+    assert!(found[1].contains("names transport"));
+    assert!(found
+        .iter()
+        .any(|f| f.contains("names AppState, which holds state")));
+    // A use-case module may name the core's state; it may not name the other plane.
+    let cases = r##"
+        use crate::fleet::AppState;
+        use crate::operator_cases::OperatorCases;
+    "##;
+    let found = plane_reach("agent_cases", cases, &reexports);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(found[0].contains("names operator_cases"));
+    // A submodule of an endpoint is held to its rule.
+    let paging = "fn f() { let _ = crate::agent_cases::Proofs::default(); }";
+    assert_eq!(plane_reach("api::paging", paging, &reexports).len(), 1);
 }

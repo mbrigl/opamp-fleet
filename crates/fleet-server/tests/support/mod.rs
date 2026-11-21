@@ -84,7 +84,8 @@ async fn spawn_full(
             .with_max_message_size(limit)
             .with_stale_after(stale_after),
     );
-    let (addr, rest_addr) = serve(state.clone(), fleet_server::transport::Admission::open()).await;
+    let (addr, rest_addr) =
+        serve(state.clone(), fleet_server::agent_cases::Admission::open()).await;
     TestServer {
         addr,
         rest_addr,
@@ -98,7 +99,7 @@ async fn spawn_full(
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve(
     state: Arc<AppState>,
-    admission: fleet_server::transport::Admission,
+    admission: fleet_server::agent_cases::Admission,
 ) -> (SocketAddr, SocketAddr) {
     serve_guarded(state, admission, None).await
 }
@@ -107,8 +108,8 @@ pub async fn serve(
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve_guarded(
     state: Arc<AppState>,
-    admission: fleet_server::transport::Admission,
-    operator_auth: Option<fleet_server::api::OperatorAuth>,
+    admission: fleet_server::agent_cases::Admission,
+    operator_auth: Option<fleet_server::operator_cases::OperatorAuth>,
 ) -> (SocketAddr, SocketAddr) {
     let agents = fleet_server::agent_app(state.clone(), admission);
     let operators = fleet_server::operator_app(state, operator_auth);
@@ -324,7 +325,8 @@ pub async fn spawn_with_agent_rate(
     let state = Arc::new(state_on(dir.path()).with_agent_rate(Some(Arc::new(
         fleet_server::agent_rate::AgentRate::new(limits, 100, clock.clone()),
     ))));
-    let (addr, rest_addr) = serve(state.clone(), fleet_server::transport::Admission::open()).await;
+    let (addr, rest_addr) =
+        serve(state.clone(), fleet_server::agent_cases::Admission::open()).await;
     (
         TestServer {
             addr,
@@ -342,7 +344,8 @@ pub async fn spawn_with_telemetry(offer: fleet_server::fleet::TelemetryOffer) ->
     opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(state_on(dir.path()).with_telemetry_offer(offer));
-    let (addr, rest_addr) = serve(state.clone(), fleet_server::transport::Admission::open()).await;
+    let (addr, rest_addr) =
+        serve(state.clone(), fleet_server::agent_cases::Admission::open()).await;
     TestServer {
         addr,
         rest_addr,

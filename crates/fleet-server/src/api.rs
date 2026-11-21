@@ -1,6 +1,7 @@
 //! The REST API v1 — the Server's integration contract (DEV-six-crates-tokio-axum, SRV-configurations-compose-one-map) — and the bundled
 //! rudimentary UI. Both belong to the Operator plane and are served on its own listener
-//! (SEC-tls13-two-planes-bounded-input); the one exception, the Agent-facing artifact download, is [`download_router`].
+//! (SEC-tls13-two-planes-bounded-input); the Agent-facing artifact download is the Agent plane's, in
+//! `transport`.
 //!
 //! The OpenAPI document is generated code-first with `utoipa`: the same annotations that register
 //! a route describe it, so contract and behaviour cannot drift. Any external portal generates a
@@ -23,12 +24,11 @@ use utoipa::{IntoParams, OpenApi, ToSchema};
 use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouterExt};
 use utoipa_axum::routes;
 
-use crate::config::RestAuthConfig;
 use crate::configs::{self, Configuration, Revision};
-use crate::credentials::Credentials;
-use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
-use crate::fleet::{self, AppState, DeleteError, ForgetError, RestartError, RolloutError};
+use crate::deployments::{Deployment, DeploymentError};
+use crate::fleet::{self, DeleteError, ForgetError, RestartError, RolloutError};
 use crate::labels::LabelError;
+use crate::operator_cases::{OperatorCases, SignIn};
 use crate::packages::{PackageError, PackageId, PackageSummary, Platform, SignatureState};
 
 mod paging;
@@ -62,42 +62,10 @@ use paging::Asked;
 )]
 struct ApiDoc;
 
-/// The Operator plane's credential check (SEC-admission-by-client-certificate), precomputed from `[rest.auth]`. Basic only,
-/// and it guards the whole plane — the API, its document, the docs page, and the UI — because a
-/// browser answers a Basic challenge by itself, which is what spares the rudimentary UI a login
-/// page and a session.
-pub struct OperatorAuth(
-    Arc<Credentials>,
-    Option<Arc<crate::throttle::Throttle>>,
-    Option<Arc<dyn crate::audit::Audit>>,
-);
-
-impl OperatorAuth {
-    /// # Errors
-    /// Returns an error naming an entry of `[rest.auth]` that is not a hash this Server keeps.
-    pub fn from_config(auth: &RestAuthConfig) -> Result<Self, String> {
-        Ok(OperatorAuth(Arc::new(auth.credentials()?), None, None))
-    }
-
-    /// Records refused sign-ins in `audit` (SEC-append-only-audit-record §1).
-    #[must_use]
-    pub fn with_audit(mut self, audit: Option<Arc<dyn crate::audit::Audit>>) -> Self {
-        self.2 = audit;
-        self
-    }
-
-    /// Counts this plane's failures in a table of its own (SEC-admission-by-client-certificate §19).
-    #[must_use]
-    pub fn with_throttle(mut self, throttle: Arc<crate::throttle::Throttle>) -> Self {
-        self.1 = Some(throttle);
-        self
-    }
-}
-
 /// Records every mutating act on the Operator plane, before it runs and once it has run; an act
 /// that cannot be recorded is not run (SEC-append-only-audit-record §1 and §5).
 async fn record_act(
-    State(audit): State<Arc<dyn crate::audit::Audit>>,
+    State(cases): State<Arc<OperatorCases>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -109,7 +77,7 @@ async fn record_act(
     ) {
         return next.run(request).await;
     }
-    let peer = crate::transport::peer_ip(&request);
+    let peer = crate::answers::peer_ip(&request);
     let operator = basic_user(request.headers());
     let path = request.uri().path().to_string();
     let entry = |event: &str, outcome: &str| {
@@ -120,11 +88,11 @@ async fn record_act(
             .with("method", method.to_string())
             .with("path", path.clone())
     };
-    if audit.record(entry("operator.act", "requested")).is_err() {
-        return crate::transport::busy();
+    if cases.record(entry("operator.act", "requested")).is_err() {
+        return crate::answers::busy();
     }
     let response = next.run(request).await;
-    audit.refusal(entry("operator.act", "completed").with("status", response.status().as_u16()));
+    cases.note(entry("operator.act", "completed").with("status", response.status().as_u16()));
     response
 }
 
@@ -146,61 +114,27 @@ fn basic_user(headers: &axum::http::HeaderMap) -> Option<String> {
 /// Refuses every request that carries no configured credential, before any handler sees it, and
 /// a peer address that has failed too often before its credential is compared.
 async fn authenticate(
-    State(auth): State<Arc<OperatorAuth>>,
+    State(cases): State<Arc<OperatorCases>>,
     request: Request,
     next: Next,
 ) -> Response {
-    let peer = crate::transport::peer_ip(&request);
+    let peer = crate::answers::peer_ip(&request);
     let operator = basic_user(request.headers());
-    let refusal = |event: &str, outcome: &str| {
-        if let Some(audit) = &auth.2 {
-            audit.refusal(
-                crate::audit::Entry::new(event, outcome)
-                    .peer(peer)
-                    .with("plane", "operator")
-                    .with("operator", operator.clone()),
-            );
-        }
-    };
-    if let (Some(throttle), Some(peer)) = (&auth.1, peer) {
-        if let Some(wait) = throttle.retry_after(peer) {
-            refusal("operator.throttled", "throttled");
-            return crate::transport::throttled(wait);
-        }
-    }
-    // The attempt counts before the password is hashed, so attempts sent at once cannot all pass
-    // the back-off check first (SEC-admission-by-client-certificate §2).
-    let _attempt = match (&auth.1, peer) {
-        (Some(throttle), Some(peer)) => match throttle.begin(peer) {
-            Some(attempt) => Some(attempt),
-            None => {
-                refusal("operator.throttled", "throttled");
-                return crate::transport::throttled(throttle.retry_after(peer).unwrap_or(1));
-            }
-        },
-        _ => None,
-    };
-    let verdict = auth.0.check(peer, request.headers()).await;
-    if verdict == crate::credentials::Verdict::Busy {
-        return crate::transport::busy();
-    }
-    if verdict == crate::credentials::Verdict::Refused {
-        if let (Some(throttle), Some(peer)) = (&auth.1, peer) {
-            throttle.failed(peer);
-        }
-        refusal("operator.refused", "refused");
+    match cases.sign_in(peer, operator, request.headers()).await {
+        SignIn::Admitted => next.run(request).await,
+        SignIn::Throttled(wait) => crate::answers::throttled(wait),
+        SignIn::Busy => crate::answers::busy(),
         // The challenge is what turns this into a browser prompt rather than a dead end.
-        return (
+        SignIn::Refused(challenge) => (
             StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, auth.0.challenge().to_string())],
+            [(header::WWW_AUTHENTICATE, challenge)],
             "the REST API and the UI require authentication",
         )
-            .into_response();
+            .into_response(),
     }
-    next.run(request).await
 }
 
-pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
+pub fn router(state: Arc<OperatorCases>) -> Router {
     let (api, document) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(agents))
         .routes(routes!(reported_attributes))
@@ -282,15 +216,17 @@ pub fn router(state: Arc<AppState>, auth: Option<OperatorAuth>) -> Router {
         .with_state(state.clone());
     // Inside the guard, so an act is recorded only once it is authenticated, and named by the
     // operator who made it (SEC-append-only-audit-record §1).
-    let router = match state.audit().cloned() {
-        Some(audit) => router.layer(middleware::from_fn_with_state(audit, record_act)),
-        None => router,
+    let router = if state.audits() {
+        router.layer(middleware::from_fn_with_state(state.clone(), record_act))
+    } else {
+        router
     };
-    let router = match auth {
-        // Outside every route, so the guard covers every route on this listener — including the
-        // UI and the API docs, which are as much of the plane as `/api/v1` is (SEC-admission-by-client-certificate).
-        Some(auth) => router.layer(middleware::from_fn_with_state(Arc::new(auth), authenticate)),
-        None => router,
+    // Outside every route, so the guard covers every route on this listener — including the
+    // UI and the API docs, which are as much of the plane as `/api/v1` is (SEC-admission-by-client-certificate).
+    let router = if state.guarded() {
+        router.layer(middleware::from_fn_with_state(state.clone(), authenticate))
+    } else {
+        router
     };
     // Outermost, so a refusal of the guard carries the headers too.
     router.layer(middleware::from_fn(security_headers))
@@ -365,22 +301,6 @@ async fn security_headers(request: Request, next: Next) -> Response {
         );
     }
     response
-}
-
-/// The one route of `/api/v1` that is not the operator's: the artifact bytes an Agent downloads.
-/// It is served on the **Agent plane** (SEC-tls13-two-planes-bounded-input), because that is the audience — the
-/// `download_url` in a package offer is a path the Client resolves against its own OpAMP endpoint
-/// (PKG-signed-packages-and-delivery), so this listener is where the offer already points. It keeps its `/api/v1` path,
-/// which every offered Package's `download_url` names.
-///
-/// Consequently it is not in the OpenAPI document: that document describes the Operator plane.
-pub fn download_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route(
-            "/api/v1/packages/{agent_type}/{version}/file",
-            get(download_package),
-        )
-        .with_state(state)
 }
 
 /// The bundled UI: one embedded page, no frontend toolchain (DEV-six-crates-tokio-axum).
@@ -462,7 +382,7 @@ fn parse_instance_uid(text: &str) -> Result<InstanceUid, Refusal> {
 /// it was forgotten between the write and the read: the write stands, and the Agent is simply no
 /// longer in the view to return. `500` when the view cannot be read: the write stands then too,
 /// and the answer says so, so that a client does not repeat the act.
-fn agent_response(state: &AppState, uid: &InstanceUid) -> Response {
+fn agent_response(state: &OperatorCases, uid: &InstanceUid) -> Response {
     match state.agent_view(uid) {
         Ok(Some(view)) => Json(AgentResponse::from(view)).into_response(),
         Ok(None) => StatusCode::NO_CONTENT.into_response(),
@@ -877,7 +797,7 @@ const LIMIT_DOC: &str = "How many entries a page holds, 1 to 1000; a larger valu
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
-async fn agents(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
+async fn agents(State(state): State<Arc<OperatorCases>>, RawQuery(raw): RawQuery) -> Response {
     let asked = match Asked::parse(
         raw.as_deref(),
         &[
@@ -932,7 +852,7 @@ async fn agents(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> 
 }
 
 /// What a request of the list of Agents asks, or the `400` that says what is wrong with it.
-fn agent_query(state: &AppState, asked: &Asked) -> Result<fleet::AgentQuery, Refusal> {
+fn agent_query(state: &OperatorCases, asked: &Asked) -> Result<fleet::AgentQuery, Refusal> {
     use crate::listing::{AgentFilter, AgentSort, HolderFilter};
     let sort = match asked.params.get("sort") {
         None => AgentSort::Name,
@@ -1015,7 +935,7 @@ struct ReportedValuesResponse {
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
-async fn reported_attributes(State(state): State<Arc<AppState>>) -> Response {
+async fn reported_attributes(State(state): State<Arc<OperatorCases>>) -> Response {
     match state.reported_values() {
         Ok(values) => Json(ReportedValuesResponse {
             attributes: values.pairs,
@@ -1043,7 +963,7 @@ async fn reported_attributes(State(state): State<Arc<AppState>>) -> Response {
     )
 )]
 async fn restart_agent(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Path(instance_uid): Path<String>,
 ) -> Response {
@@ -1098,7 +1018,7 @@ struct LabelsBody {
     )
 )]
 async fn set_agent_labels(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(instance_uid): Path<String>,
     Json(body): Json<LabelsBody>,
 ) -> Response {
@@ -1159,7 +1079,7 @@ struct AgentRolloutSpec {
     )
 )]
 async fn rollout_to_agent(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Path(instance_uid): Path<String>,
     body: Option<Json<AgentRolloutSpec>>,
@@ -1205,7 +1125,7 @@ async fn rollout_to_agent(
     )
 )]
 async fn forget_agent(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(instance_uid): Path<String>,
 ) -> Response {
     let uid = match parse_instance_uid(&instance_uid) {
@@ -1276,7 +1196,7 @@ impl ConfigurationView {
 }
 
 /// One Configuration as the API answers with it, with the Deployments that hold it read now.
-fn configuration_view(state: &AppState, config: Configuration) -> ConfigurationView {
+fn configuration_view(state: &OperatorCases, config: Configuration) -> ConfigurationView {
     let deployments = state
         .deployments_holding_configurations()
         .remove(&config.name)
@@ -1299,12 +1219,13 @@ struct RolloutOutcome {
     tag = "configurations",
     responses((status = 200, description = "Every stored Configuration", body = [ConfigurationView]))
 )]
-async fn list_configurations(State(state): State<Arc<AppState>>) -> Json<Vec<ConfigurationView>> {
+async fn list_configurations(
+    State(state): State<Arc<OperatorCases>>,
+) -> Json<Vec<ConfigurationView>> {
     let mut holding = state.deployments_holding_configurations();
     Json(
         state
             .configurations()
-            .list()
             .into_iter()
             .map(|config| {
                 let deployments = holding.remove(&config.name).unwrap_or_default();
@@ -1326,10 +1247,10 @@ async fn list_configurations(State(state): State<Arc<AppState>>) -> Json<Vec<Con
     )
 )]
 async fn get_configuration(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(name): Path<String>,
 ) -> Response {
-    match state.configurations().get(&name) {
+    match state.configuration(&name) {
         Some(config) => Json(configuration_view(&state, config)).into_response(),
         None => error(StatusCode::NOT_FOUND, format!("no configuration {name:?}")),
     }
@@ -1355,7 +1276,7 @@ async fn get_configuration(
     )
 )]
 async fn put_configuration(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(name): Path<String>,
     Json(spec): Json<ConfigurationSpec>,
 ) -> Response {
@@ -1430,7 +1351,7 @@ fn rollout_error(e: RolloutError) -> Response {
     )
 )]
 async fn delete_configuration(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(name): Path<String>,
 ) -> Response {
     match state.delete_configuration(&name) {
@@ -1547,24 +1468,6 @@ impl PackageSetView {
     }
 }
 
-/// The Platform the download route names (PKG-signed-packages-and-delivery): the artifact endpoint serves bytes, and a
-/// request naming bytes names the Platform they are for.
-#[derive(Deserialize)]
-struct PlatformQuery {
-    /// The operating system, as `os.type`: `linux`, `darwin`, `windows`. Other spellings — `macos`
-    /// off a release file name — are accepted and answered canonically.
-    os: String,
-    /// The architecture, as `host.arch`: `amd64`, `arm64`. Other spellings — `x86_64`, `aarch64` —
-    /// are accepted and answered canonically.
-    arch: String,
-}
-
-impl PlatformQuery {
-    fn platform(&self) -> Result<Platform, String> {
-        Platform::new(&self.os, &self.arch)
-    }
-}
-
 /// The `(Package, Platform)` a route names in its path, or the `400` that says which half of it
 /// does not parse. `platform_prefix` leads the platform half's message.
 fn artifact_of(
@@ -1583,8 +1486,8 @@ fn artifact_of(
 /// A stored Package as the API answers with it, read back from the store rather than assembled
 /// from whatever the handler happened to be given — so every response describes the Package as it
 /// now is.
-fn set_response(state: &AppState, id: &PackageId) -> Response {
-    match state.packages().and_then(|store| store.summary(id)) {
+fn set_response(state: &OperatorCases, id: &PackageId) -> Response {
+    match state.package(id) {
         Some(summary) => {
             let deployments = state
                 .deployments_holding()
@@ -1619,10 +1522,9 @@ fn package_error(e: PackageError) -> Response {
         (status = 404, description = "Package delivery is not configured", body = ErrorBody)
     )
 )]
-async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
+async fn list_packages(State(state): State<Arc<OperatorCases>>) -> Response {
     match state.packages() {
-        Some(store) => {
-            let summaries = store.list();
+        Some(summaries) => {
             // One pass over the fleet for the whole list, rather than one per Package.
             let holding = state.deployments_holding();
             Json(
@@ -1662,7 +1564,7 @@ async fn list_packages(State(state): State<Arc<AppState>>) -> Response {
     )
 )]
 async fn get_package_set(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
     match PackageId::load(&agent_type, &version) {
@@ -1692,7 +1594,7 @@ async fn get_package_set(
     )
 )]
 async fn put_package_set(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
     let id = match PackageId::new(&agent_type, &version) {
@@ -1726,7 +1628,7 @@ async fn put_package_set(
     )
 )]
 async fn delete_package_set(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((agent_type, version)): Path<(String, String)>,
 ) -> Response {
     // A Package stored under a non-SemVer version is deleted like any other (PKG-versions-high-water-mark-floor §3).
@@ -1777,7 +1679,7 @@ async fn delete_package_set(
     )
 )]
 async fn put_package_entry(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
     body: Body,
 ) -> Response {
@@ -1879,7 +1781,7 @@ async fn put_package_entry(
     )
 )]
 async fn delete_package_entry(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
 ) -> Response {
     let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "invalid platform: ")
@@ -1934,7 +1836,7 @@ async fn delete_package_entry(
     )
 )]
 async fn put_entry_signature(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
     Json(spec): Json<SignatureSpec>,
 ) -> Response {
@@ -1982,7 +1884,7 @@ async fn put_entry_signature(
     )
 )]
 async fn delete_entry_signature(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((agent_type, version, os, arch)): Path<(String, String, String, String)>,
 ) -> Response {
     let (id, platform) = match artifact_of(&agent_type, &version, &os, &arch, "invalid platform: ")
@@ -2055,12 +1957,11 @@ fn floors_off() -> Response {
         (status = 404, description = "Package floors are not configured", body = ErrorBody)
     )
 )]
-async fn list_package_floors(State(state): State<Arc<AppState>>) -> Response {
+async fn list_package_floors(State(state): State<Arc<OperatorCases>>) -> Response {
     let Some(floors) = state.floors() else {
         return floors_off();
     };
     let list: Vec<FloorView> = floors
-        .list()
         .into_iter()
         .map(|(agent_type, floor, state)| FloorView::of(agent_type, floor, state))
         .collect();
@@ -2090,14 +1991,14 @@ async fn list_package_floors(State(state): State<Arc<AppState>>) -> Response {
     )
 )]
 async fn put_package_floor(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(agent_type): Path<String>,
     Json(spec): Json<FloorSpec>,
 ) -> Response {
     use crate::floors::FloorError;
-    let Some(floors) = state.floors() else {
+    if !state.has_floors() {
         return floors_off();
-    };
+    }
     let signature = match hex::decode(spec.signature.trim()) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -2111,15 +2012,18 @@ async fn put_package_floor(
     };
     // A floor is set only with its entry's place held, so a restore finds every floor raised;
     // only one known to have failed gives the place back unwritten.
-    let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+    let Ok(place) = state.hold_place() else {
+        return crate::answers::busy();
     };
     let floor_entry = |outcome: &str| {
         crate::audit::Entry::new("package_floor.set", outcome)
             .with("agent_type", agent_type.clone())
             .with("version", spec.version.clone())
     };
-    match floors.put(&agent_type, &spec.version, signature.clone()) {
+    let Some(outcome) = state.put_floor(&agent_type, &spec.version, signature.clone()) else {
+        return floors_off();
+    };
+    match outcome {
         Ok(signature_state) => {
             info!(
                 agent_type = %agent_type, version = %spec.version,
@@ -2172,18 +2076,17 @@ async fn put_package_floor(
     )
 )]
 async fn delete_package_floor(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Path(agent_type): Path<String>,
 ) -> Response {
-    let Some(floors) = state.floors() else {
+    let Some(outcome) = state.remove_floor(&agent_type) else {
         return floors_off();
     };
-    match floors.remove(&agent_type) {
+    match outcome {
         Ok(true) => {
             info!(agent_type = %agent_type, "package floor removed");
-            note(
-                &state,
+            state.note(
                 crate::audit::Entry::new("package_floor.removed", "removed")
                     .with("agent_type", agent_type.clone()),
             );
@@ -2198,97 +2101,6 @@ async fn delete_package_floor(
             format!("the floor could not be removed: {e}"),
         ),
     }
-}
-
-/// Serves an entry's artifact bytes — the `download_url` the Agent is offered points here.
-///
-/// `200` with the bytes, `400` for a missing or invalid platform or identity, `404` for a Package
-/// without an uploaded artifact for that platform.
-async fn download_package(
-    State(state): State<Arc<AppState>>,
-    Path((agent_type, version)): Path<(String, String)>,
-    Query(query): Query<PlatformQuery>,
-    request: Request,
-) -> Response {
-    // A read: a pinned Package an older Server stored under a non-SemVer version is still offered
-    // (PKG-versions-high-water-mark-floor §3), so its bytes are still served.
-    let id = match PackageId::load(&agent_type, &version) {
-        Ok(id) => id,
-        Err(e) => return error(StatusCode::BAD_REQUEST, e),
-    };
-    let platform = match query.platform() {
-        Ok(platform) => platform,
-        Err(e) => return error(StatusCode::BAD_REQUEST, format!("invalid platform: {e}")),
-    };
-    // One answer for every artifact this requester may not fetch, whether or not the store holds
-    // it, so the store cannot be listed by probing (PKG-signed-packages-and-delivery §37).
-    let not_found = || {
-        error(
-            StatusCode::NOT_FOUND,
-            format!(
-                "no set {id} with an artifact for {}-{}",
-                platform.os, platform.arch
-            ),
-        )
-    };
-    // A member certificate fetches only what is offered to an Agent its host speaks for (PKG-signed-packages-and-delivery §2).
-    // The download guard admitted the certificate and hands over what it proves; a
-    // request without one exists only where no certificate is required, and is tested here no
-    // more than at admission.
-    if let Some(proofs) = request.extensions().get::<crate::transport::Proofs>() {
-        let host = proofs.host.as_deref();
-        if !host.is_some_and(|host| state.offers_artifact(host, &id, &platform)) {
-            state.audit_refusal(
-                crate::audit::Entry::new("download.refused", "refused")
-                    .peer(crate::transport::peer_ip(&request))
-                    .with("plane", "agent")
-                    .with("check", "not offered")
-                    .with("host", host.map(str::to_string))
-                    .with(
-                        "serial",
-                        proofs.certificate.as_ref().map(|(id, _)| id.serial.clone()),
-                    )
-                    .with("agent_type", id.agent_type.clone())
-                    .with("version", id.version.clone())
-                    .with("platform", platform.tag()),
-            );
-            return not_found();
-        }
-    }
-    let Some((sha256, size)) = state
-        .packages()
-        .and_then(|store| store.artifact(&id, &platform))
-    else {
-        return not_found();
-    };
-    // Streamed from the blob store, never buffered: a fleet updating at once means many concurrent
-    // downloads of the same artifact, and each one holding a copy of a program in memory is how a
-    // rollout takes the Server down with it.
-    let opened = state
-        .packages()
-        .map(|store| store.open_artifact(&sha256))
-        .unwrap_or_else(|| Err("package delivery is not configured".to_string()));
-    let bytes = match opened {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            warn!(package = %id, error = %e, "cannot open the stored artifact");
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("the artifact of {id} cannot be read"),
-            );
-        }
-    };
-    Response::builder()
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        // So the Agent can size the download, and a truncated transfer is detectable as one.
-        .header(header::CONTENT_LENGTH, size)
-        .body(Body::from_stream(read_chunks(bytes)))
-        .unwrap_or_else(|e| {
-            error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("cannot serve the artifact of {id}: {e}"),
-            )
-        })
 }
 
 /// Why a streamed upload did not become an artifact.
@@ -2375,33 +2187,6 @@ async fn stream_upload(
         }
     }
     Ok(written)
-}
-
-/// A stream of an artifact's chunks, read on a thread of its own, so a response body never
-/// materialises whole and a slow disk never holds up the runtime.
-fn read_chunks(
-    mut bytes: Box<dyn std::io::Read + Send>,
-) -> impl futures_util::Stream<Item = std::io::Result<Vec<u8>>> {
-    let (sender, receiver) = tokio::sync::mpsc::channel(4);
-    tokio::task::spawn_blocking(move || loop {
-        let mut buffer = vec![0u8; 64 * 1024];
-        let next = match bytes.read(&mut buffer) {
-            Ok(0) => return,
-            Ok(read) => {
-                buffer.truncate(read);
-                Ok(buffer)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) => Err(e),
-        };
-        let failed = next.is_err();
-        if sender.blocking_send(next).is_err() || failed {
-            return;
-        }
-    });
-    futures_util::stream::unfold(receiver, |mut receiver| async move {
-        receiver.recv().await.map(|chunk| (chunk, receiver))
-    })
 }
 
 // -------------------------------------------------------------------------------------------
@@ -2504,14 +2289,12 @@ fn deployment_error(refusal: DeploymentError) -> Response {
     }
 }
 
-/// The Deployment store, or the `404` that says package delivery is not armed on this Server.
-fn deployments(state: &AppState) -> Result<&DeploymentStore, Refusal> {
-    state.deployment_store().ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            "package delivery is not configured on this Server".to_string(),
-        )
-    })
+/// The `404` that says package delivery is not armed on this Server.
+fn deployments_off() -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        "package delivery is not configured on this Server",
+    )
 }
 
 /// A status and what to say with it — carried instead of a whole `Response` so a helper's error
@@ -2529,27 +2312,23 @@ type Refusal = (StatusCode, String);
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
-async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
-    match deployments(&state) {
-        Ok(store) => {
-            let reach = match state.deployment_reach() {
-                Ok(reach) => reach,
-                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
-            };
-            Json(
-                store
-                    .list()
-                    .into_iter()
-                    .map(|deployment| {
-                        let counts = reach.get(&deployment.name).copied().unwrap_or_default();
-                        DeploymentView::of(deployment, counts)
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .into_response()
-        }
-        Err((status, why)) => error(status, why),
-    }
+async fn list_deployments(State(state): State<Arc<OperatorCases>>) -> Response {
+    let Some(all) = state.deployments() else {
+        return deployments_off();
+    };
+    let reach = match state.deployment_reach() {
+        Ok(reach) => reach,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    Json(
+        all.into_iter()
+            .map(|deployment| {
+                let counts = reach.get(&deployment.name).copied().unwrap_or_default();
+                DeploymentView::of(deployment, counts)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .into_response()
 }
 
 /// One Deployment.
@@ -2564,12 +2343,14 @@ async fn list_deployments(State(state): State<Arc<AppState>>) -> Response {
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
-async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
-    let store = match deployments(&state) {
-        Ok(store) => store,
-        Err((status, why)) => return error(status, why),
-    };
-    match store.get(&name) {
+async fn get_deployment(
+    State(state): State<Arc<OperatorCases>>,
+    Path(name): Path<String>,
+) -> Response {
+    if !state.has_deployments() {
+        return deployments_off();
+    }
+    match state.deployment(&name) {
         Some(deployment) => deployment_response(&state, deployment),
         None => error(StatusCode::NOT_FOUND, format!("no deployment {name:?}")),
     }
@@ -2600,17 +2381,14 @@ async fn get_deployment(State(state): State<Arc<AppState>>, Path(name): Path<Str
     )
 )]
 async fn put_deployment(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(name): Path<String>,
     Json(spec): Json<DeploymentSpec>,
 ) -> Response {
-    let store = match deployments(&state) {
-        Ok(store) => store,
-        Err((status, why)) => return error(status, why),
-    };
-    match store.put(&name, spec.selector) {
-        Ok(deployment) => deployment_response(&state, deployment),
-        Err(e) => deployment_error(e),
+    match state.put_deployment(&name, spec.selector) {
+        Some(Ok(deployment)) => deployment_response(&state, deployment),
+        Some(Err(e)) => deployment_error(e),
+        None => deployments_off(),
     }
 }
 
@@ -2630,11 +2408,11 @@ async fn put_deployment(
     )
 )]
 async fn delete_deployment(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(name): Path<String>,
 ) -> Response {
-    if let Err((status, why)) = deployments(&state) {
-        return error(status, why);
+    if !state.has_deployments() {
+        return deployments_off();
     }
     match state.delete_deployment(&name) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -2659,16 +2437,14 @@ async fn delete_deployment(
     )
 )]
 async fn put_deployment_selector(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(name): Path<String>,
     Json(spec): Json<DeploymentSpec>,
 ) -> Response {
     // The same write as `PUT /api/v1/deployments/{name}`, except that this route only re-aims:
     // it never creates.
-    if let Ok(store) = deployments(&state) {
-        if store.get(&name).is_none() {
-            return error(StatusCode::NOT_FOUND, format!("no deployment {name:?}"));
-        }
+    if state.has_deployments() && state.deployment(&name).is_none() {
+        return error(StatusCode::NOT_FOUND, format!("no deployment {name:?}"));
     }
     put_deployment(State(state), Path(name), Json(spec)).await
 }
@@ -2699,7 +2475,7 @@ async fn put_deployment_selector(
     )
 )]
 async fn put_deployment_package(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((name, agent_type, version)): Path<(String, String, String)>,
     Query(replace): Query<ReplaceQuery>,
 ) -> Response {
@@ -2709,8 +2485,8 @@ async fn put_deployment_package(
     };
     // A channel cannot offer what the store does not hold, so a reference to a Package that is not
     // there is a mistake, not a reservation for one uploaded later.
-    match state.packages() {
-        Some(packages) if packages.summary(&id).is_some() => {}
+    match state.package(&id) {
+        Some(_) => {}
         _ => {
             return error(
                 StatusCode::NOT_FOUND,
@@ -2744,7 +2520,7 @@ async fn put_deployment_package(
     )
 )]
 async fn delete_deployment_package(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((name, agent_type, version)): Path<(String, String, String)>,
 ) -> Response {
     // Taking a Package out writes nothing to it, so an older non-SemVer one may leave too.
@@ -2777,7 +2553,7 @@ async fn delete_deployment_package(
     )
 )]
 async fn put_deployment_configuration(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((name, configuration)): Path<(String, String)>,
 ) -> Response {
     match state.put_deployment_configuration(&name, &configuration) {
@@ -2805,7 +2581,7 @@ async fn put_deployment_configuration(
     )
 )]
 async fn delete_deployment_configuration(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path((name, configuration)): Path<(String, String)>,
 ) -> Response {
     match state.remove_deployment_configuration(&name, &configuration) {
@@ -2846,7 +2622,7 @@ struct ReplaceQuery {
     )
 )]
 async fn rollout_deployment(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Path(name): Path<String>,
 ) -> Response {
@@ -2862,7 +2638,7 @@ async fn rollout_deployment(
 /// One Deployment as the API answers with it, with the reach counts read from the fleet — so every
 /// response says whom this channel reaches as of now, and not as of whenever it was written.
 /// `500` when the reach cannot be read; a change the request made stands, and the answer says so.
-fn deployment_response(state: &AppState, deployment: Deployment) -> Response {
+fn deployment_response(state: &OperatorCases, deployment: Deployment) -> Response {
     let reach = match state.deployment_reach() {
         Ok(reach) => reach.get(&deployment.name).copied().unwrap_or_default(),
         Err(e) => {
@@ -3009,17 +2785,12 @@ struct BootstrapView {
         (status = 404, description = "Enrolment is not configured", body = ErrorBody)
     )
 )]
-async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Response {
-    let Some(bootstrap) = state.bootstrap() else {
+async fn list_bootstrap_certificates(State(state): State<Arc<OperatorCases>>) -> Response {
+    let Some(certificates) = state.bootstrap_certificates() else {
         return enrolment_off();
     };
-    let revoked = |id: &crate::revocation::CertId| {
-        state
-            .revocations()
-            .is_some_and(|revocations| revocations.is_certificate_revoked(id))
-    };
-    let list: Vec<BootstrapView> = bootstrap
-        .list()
+    let revoked = |id: &crate::revocation::CertId| state.is_certificate_revoked(id);
+    let list: Vec<BootstrapView> = certificates
         .into_iter()
         .map(|entry| BootstrapView {
             revoked: revoked(&entry.id),
@@ -3054,14 +2825,14 @@ async fn list_bootstrap_certificates(State(state): State<Arc<AppState>>) -> Resp
     )
 )]
 async fn issue_bootstrap_certificate(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     use crate::bootstrap::IssueError;
-    let Some(bootstrap) = state.bootstrap() else {
+    if !state.has_bootstrap() {
         return enrolment_off();
-    };
+    }
     let request = match serde_json::from_value::<IssueBootstrapRequest>(body) {
         Ok(request) => {
             let subject = request.subject.unwrap_or_default();
@@ -3082,31 +2853,30 @@ async fn issue_bootstrap_certificate(
     };
     // Off the async workers: sealing a PKCS#12 file takes the better part of a second, as
     // password hashing does (SEC-bootstrap-certificates-and-enrolment).
-    let issuer = bootstrap.clone();
-    let issued = match tokio::task::spawn_blocking(move || issuer.issue(&request)).await {
-        Ok(issued) => issued,
+    let issuer = state.clone();
+    let issued = match tokio::task::spawn_blocking(move || issuer.issue_bootstrap(&request)).await {
+        Ok(Some(issued)) => issued,
+        Ok(None) => return enrolment_off(),
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
     match issued {
         Ok(pair) => {
             // The key leaves only once the issuance is on the record (SEC-append-only-audit-record): a refused record
             // leaves a listed, revocable entry and no key in anyone's hands.
-            if let Some(audit) = state.audit() {
-                let recorded = audit.record(
-                    crate::audit::Entry::new("enrolment.bootstrap_issued", "issued")
-                        .with("serial", pair.serial.clone())
-                        .with("subject", pair.subject.clone())
-                        .with("not_after_ms", pair.not_after_ms)
-                        .with("p12", "true"),
+            let recorded = state.record(
+                crate::audit::Entry::new("enrolment.bootstrap_issued", "issued")
+                    .with("serial", pair.serial.clone())
+                    .with("subject", pair.subject.clone())
+                    .with("not_after_ms", pair.not_after_ms)
+                    .with("p12", "true"),
+            );
+            if recorded.is_err() {
+                // Nor later: an issuance that is not on the record keeps no file to download.
+                let _ = state.forget_bootstrap_p12(&pair.serial);
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the audit record cannot be written now; nothing was handed out",
                 );
-                if recorded.is_err() {
-                    // Nor later: an issuance that is not on the record keeps no file to download.
-                    let _ = bootstrap.forget_p12(&pair.serial);
-                    return error(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "the audit record cannot be written now; nothing was handed out",
-                    );
-                }
             }
             info!(serial = %pair.serial, subject = %pair.subject, "bootstrap certificate issued");
             (
@@ -3157,43 +2927,36 @@ async fn issue_bootstrap_certificate(
     )
 )]
 async fn download_bootstrap_p12(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Path(serial): Path<String>,
 ) -> Response {
-    let Some(bootstrap) = state.bootstrap() else {
-        return enrolment_off();
-    };
     let none = || {
         error(
             StatusCode::NOT_FOUND,
             format!("no PKCS#12 file for the bootstrap certificate {serial:?}"),
         )
     };
-    let (entry, file) = match bootstrap.p12(&serial) {
-        Ok(Some(found)) => found,
-        Ok(None) => return none(),
-        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    let (entry, file) = match state.bootstrap_p12(&serial) {
+        Some(Ok(Some(found))) => found,
+        Some(Ok(None)) => return none(),
+        Some(Err(e)) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        None => return enrolment_off(),
     };
     // A revocation removes the file before it is answered; one that could not is still no
     // licence to hand it out.
-    if state
-        .revocations()
-        .is_some_and(|revocations| revocations.is_certificate_revoked(&entry.id))
-    {
-        let _ = bootstrap.forget_p12(&entry.serial);
+    if state.is_certificate_revoked(&entry.id) {
+        let _ = state.forget_bootstrap_p12(&entry.serial);
         return none();
     }
-    if let Some(audit) = state.audit() {
-        let recorded = audit.record(
-            crate::audit::Entry::new("enrolment.bootstrap_p12_downloaded", "downloaded")
-                .with("serial", entry.serial.clone()),
+    let recorded = state.record(
+        crate::audit::Entry::new("enrolment.bootstrap_p12_downloaded", "downloaded")
+            .with("serial", entry.serial.clone()),
+    );
+    if recorded.is_err() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the audit record cannot be written now; nothing was handed out",
         );
-        if recorded.is_err() {
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "the audit record cannot be written now; nothing was handed out",
-            );
-        }
     }
     info!(serial = %entry.serial, "bootstrap PKCS#12 file downloaded");
     (
@@ -3227,31 +2990,25 @@ async fn download_bootstrap_p12(
     )
 )]
 async fn delete_bootstrap_certificate(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Path(serial): Path<String>,
 ) -> Response {
-    let Some(bootstrap) = state.bootstrap() else {
+    use crate::bootstrap::DeleteError;
+    let revoked = |entry: &crate::bootstrap::Entry| state.is_certificate_revoked(&entry.id);
+    let recorded = |entry: &crate::bootstrap::Entry| {
+        state
+            .record(
+                crate::audit::Entry::new("enrolment.bootstrap_deleted", "deleted")
+                    .with("serial", entry.serial.clone())
+                    .with("subject", entry.subject.clone()),
+            )
+            .is_ok()
+    };
+    let Some(outcome) = state.delete_bootstrap(&serial, revoked, recorded) else {
         return enrolment_off();
     };
-    use crate::bootstrap::DeleteError;
-    let revoked = |entry: &crate::bootstrap::Entry| {
-        state
-            .revocations()
-            .is_some_and(|revocations| revocations.is_certificate_revoked(&entry.id))
-    };
-    let recorded = |entry: &crate::bootstrap::Entry| {
-        state.audit().is_none_or(|audit| {
-            audit
-                .record(
-                    crate::audit::Entry::new("enrolment.bootstrap_deleted", "deleted")
-                        .with("serial", entry.serial.clone())
-                        .with("subject", entry.subject.clone()),
-                )
-                .is_ok()
-        })
-    };
-    match bootstrap.delete(&serial, revoked, recorded) {
+    match outcome {
         Ok(entry) => {
             info!(serial = %entry.serial, "revoked bootstrap certificate deleted from the record");
             StatusCode::NO_CONTENT.into_response()
@@ -3297,9 +3054,9 @@ fn window_view(until_ms: Option<u64>) -> Response {
         (status = 404, description = "Enrolment is not configured", body = ErrorBody)
     )
 )]
-async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
-    match state.enrolment() {
-        Some(enrolment) => window_view(enrolment.window()),
+async fn get_enrolment_window(State(state): State<Arc<OperatorCases>>) -> Response {
+    match state.enrolment_window() {
+        Some(until) => window_view(until),
         None => enrolment_off(),
     }
 }
@@ -3320,17 +3077,16 @@ async fn get_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
     )
 )]
 async fn open_enrolment_window(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     Json(spec): Json<OpenWindow>,
 ) -> Response {
-    let Some(enrolment) = state.enrolment() else {
+    let Some(opened) = state.open_enrolment_window(spec.open_for_secs) else {
         return enrolment_off();
     };
-    match enrolment.open(spec.open_for_secs) {
+    match opened {
         Ok(until) => {
             info!(secs = spec.open_for_secs, "enrolment window opened");
-            note(
-                &state,
+            state.note(
                 crate::audit::Entry::new("enrolment.window", "opened").with("until_ms", until),
             );
             window_view(Some(until))
@@ -3356,17 +3112,18 @@ async fn open_enrolment_window(
         (status = 503, description = "The audit record cannot be written; nothing was changed — retry after Retry-After", content_type = "text/plain", body = String, headers(("Retry-After" = u64, description = "Seconds to wait before asking again")))
     )
 )]
-async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response {
-    let Some(enrolment) = state.enrolment() else {
+async fn close_enrolment_window(State(state): State<Arc<OperatorCases>>) -> Response {
+    if !state.has_enrolment() {
         return enrolment_off();
-    };
+    }
     // The window is closed only with its entry's place held. It is closed here whatever the store
     // answers, so the entry says `closed` either way.
-    let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+    let Ok(place) = state.hold_place() else {
+        return crate::answers::busy();
     };
-    let expired = enrolment.pending().len();
-    let saved = enrolment.close();
+    let Some((expired, saved)) = state.close_enrolment_window() else {
+        return enrolment_off();
+    };
     info!("enrolment window closed");
     fill_place(
         place,
@@ -3394,12 +3151,11 @@ async fn close_enrolment_window(State(state): State<Arc<AppState>>) -> Response 
         (status = 404, description = "Enrolment is not configured", body = ErrorBody)
     )
 )]
-async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
-    let Some(enrolment) = state.enrolment() else {
+async fn list_enrolments(State(state): State<Arc<OperatorCases>>) -> Response {
+    let Some(pending) = state.enrolments() else {
         return enrolment_off();
     };
-    let pending: Vec<PendingEnrolment> = enrolment
-        .pending()
+    let pending: Vec<PendingEnrolment> = pending
         .into_iter()
         .map(|p| PendingEnrolment {
             id: p.id,
@@ -3414,18 +3170,6 @@ async fn list_enrolments(State(state): State<Arc<AppState>>) -> Response {
         })
         .collect();
     Json(pending).into_response()
-}
-
-/// The host of the Gateway a pending request came through, which every audit entry of it names
-/// (CLT-modes-and-gateway §25).
-fn through_gateway(state: &AppState, id: &str) -> Option<String> {
-    state
-        .enrolment()?
-        .pending()
-        .into_iter()
-        .find(|pending| pending.id == id)?
-        .requester
-        .gateway
 }
 
 /// Approves one enrolment request: the client CA signs it, and the host is handed its certificate.
@@ -3444,7 +3188,7 @@ fn through_gateway(state: &AppState, id: &str) -> Option<String> {
     )
 )]
 async fn approve_enrolment(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Path(id): Path<String>,
 ) -> Response {
@@ -3505,13 +3249,13 @@ fn deciding(id: &str) -> Response {
     )
 )]
 async fn reject_enrolment(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Path(id): Path<String>,
 ) -> Response {
-    let Some(enrolment) = state.enrolment() else {
+    if !state.has_enrolment() {
         return enrolment_off();
-    };
+    }
     if !crate::enrolment::is_key_id(&id) {
         return error(
             StatusCode::BAD_REQUEST,
@@ -3521,18 +3265,21 @@ async fn reject_enrolment(
             ),
         );
     }
-    let gateway = through_gateway(&state, &id);
+    let gateway = state.enrolment_gateway(&id);
     // A request is rejected only with its entry's place held, so a restore rejects it again; only
     // a rejection known to have failed gives the place back unwritten.
-    let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+    let Ok(place) = state.hold_place() else {
+        return crate::answers::busy();
     };
     let rejection = |outcome: &str| {
         crate::audit::Entry::new("enrolment.rejected", outcome)
             .with("id", id.clone())
             .with("gateway", gateway.clone())
     };
-    match enrolment.reject(&id) {
+    let Some(outcome) = state.reject_enrolment(&id) else {
+        return enrolment_off();
+    };
+    match outcome {
         Ok(rejected) => {
             let queued = rejected == crate::enrolment::Rejection::Queued;
             info!(request = %id, queued, "enrolment request rejected");
@@ -3708,25 +3455,7 @@ impl RevocationView {
     }
 }
 
-/// Records what an operator act did, beside the act itself (SEC-append-only-audit-record §1), and drops it where
-/// the record cannot take it by then: the act was recorded before it ran. What it still records
-/// grants trust, so a restore that misses it errs toward withdrawing. The acts a restore repeats,
-/// which withdraw trust, hold their entry's place before they run instead ([`hold_place`]).
-fn note(state: &AppState, entry: crate::audit::Entry) {
-    if let Some(audit) = state.audit() {
-        audit.refusal(entry);
-    }
-}
-
-/// Holds a place in the record for the entry of an act about to run, which says what the act did
-/// once it has (SEC-append-only-audit-record §5):
-/// without one the act does not run, and is answered `503`. `None` where the Server
-/// keeps no record.
-fn hold_place(state: &AppState) -> Result<Option<crate::audit::Permit>, crate::audit::Unavailable> {
-    state.audit().map(|audit| audit.reserve()).transpose()
-}
-
-/// Writes what an act did into the place [`hold_place`] held for it.
+/// Writes what an act did into the place [`OperatorCases::hold_place`] held for it.
 fn fill_place(place: Option<crate::audit::Permit>, entry: crate::audit::Entry) {
     if let Some(place) = place {
         place.write(entry);
@@ -3774,12 +3503,12 @@ fn revocation_off() -> Response {
     )
 )]
 async fn list_certificates(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     RawQuery(raw): RawQuery,
 ) -> Response {
-    let Some(revocations) = state.revocations() else {
+    if !state.has_revocations() {
         return revocation_off();
-    };
+    }
     let asked = match Asked::parse(raw.as_deref(), &["q"]) {
         Ok(asked) => asked,
         Err((status, message)) => return error(status, message),
@@ -3790,12 +3519,13 @@ async fn list_certificates(
     };
     let q = asked.q();
     let authority = |id: &crate::revocation::CertId| {
-        revocations
-            .authority_of(&id.issuer)
-            .map_or_else(|| "unknown".to_string(), |a| a.role.clone())
+        state
+            .authority_role(&id.issuer)
+            .unwrap_or_else(|| "unknown".to_string())
     };
-    let issued: Vec<(crate::listing::Position, CertificateView)> = revocations
-        .issued()
+    let issued: Vec<(crate::listing::Position, CertificateView)> = state
+        .issued_certificates()
+        .unwrap_or_default()
         .into_iter()
         .filter(|issued| {
             q.as_ref().is_none_or(|q| {
@@ -3858,10 +3588,10 @@ async fn list_certificates(
         (status = 500, description = "The fleet cannot be read from the store", body = ErrorBody)
     )
 )]
-async fn list_hosts(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
-    let Some(revocations) = state.revocations() else {
+async fn list_hosts(State(state): State<Arc<OperatorCases>>, RawQuery(raw): RawQuery) -> Response {
+    if !state.has_revocations() {
         return revocation_off();
-    };
+    }
     let asked = match Asked::parse(raw.as_deref(), &["q", "gateway"]) {
         Ok(asked) => asked,
         Err((status, message)) => return error(status, message),
@@ -3871,8 +3601,9 @@ async fn list_hosts(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery)
         (Err((status, message)), _) | (_, Err((status, message))) => return error(status, message),
     };
     let q = asked.q();
-    let matching: Vec<_> = revocations
+    let matching: Vec<_> = state
         .hosts()
+        .unwrap_or_default()
         .into_iter()
         .filter(|(host, entry, _)| {
             gateway.is_none_or(|gateway| gateway == entry.gateway)
@@ -3944,18 +3675,18 @@ async fn list_hosts(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery)
     )
 )]
 async fn set_gateway(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Path(host): Path<String>,
     Json(request): Json<GatewayRequest>,
 ) -> Response {
-    if state.revocations().is_none() {
+    if !state.has_revocations() {
         return revocation_off();
     }
     // A mark is set or cleared only with its entry's place held, so a restore finds every mark
     // cleared; only a change known to have failed gives the place back unwritten.
-    let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+    let Ok(place) = state.hold_place() else {
+        return crate::answers::busy();
     };
     let mark = |outcome: &str| {
         crate::audit::Entry::new("host.gateway", outcome)
@@ -4006,10 +3737,13 @@ async fn set_gateway(
         (status = 404, description = "Revocation is not configured", body = ErrorBody)
     )
 )]
-async fn list_revocations(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
-    let Some(revocations) = state.revocations() else {
+async fn list_revocations(
+    State(state): State<Arc<OperatorCases>>,
+    RawQuery(raw): RawQuery,
+) -> Response {
+    if !state.has_revocations() {
         return revocation_off();
-    };
+    }
     let asked = match Asked::parse(raw.as_deref(), &["q"]) {
         Ok(asked) => asked,
         Err((status, message)) => return error(status, message),
@@ -4022,8 +3756,9 @@ async fn list_revocations(State(state): State<Arc<AppState>>, RawQuery(raw): Raw
     // What the register says of a revoked certificate, while it holds it.
     let issued: BTreeMap<(String, String), (String, String)> = match &q {
         None => BTreeMap::new(),
-        Some(_) => revocations
-            .issued()
+        Some(_) => state
+            .issued_certificates()
+            .unwrap_or_default()
             .into_iter()
             .map(|issued| {
                 (
@@ -4033,8 +3768,9 @@ async fn list_revocations(State(state): State<Arc<AppState>>, RawQuery(raw): Raw
             })
             .collect(),
     };
-    let matching: Vec<(crate::listing::Position, RevocationView)> = revocations
-        .list()
+    let matching: Vec<(crate::listing::Position, RevocationView)> = state
+        .revocation_list()
+        .unwrap_or_default()
         .into_iter()
         .filter(|entry| {
             let Some(q) = &q else { return true };
@@ -4081,14 +3817,14 @@ async fn list_revocations(State(state): State<Arc<AppState>>, RawQuery(raw): Raw
     )
 )]
 async fn revoke(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     use crate::revocation::RevokeError;
-    let Some(revocations) = state.revocations() else {
+    if !state.has_revocations() {
         return revocation_off();
-    };
+    }
     // Named before the body is read as a request, so the answer says why rather than that the
     // field is unknown.
     if body.get("credential").is_some() {
@@ -4104,11 +3840,14 @@ async fn revoke(
     };
     // A revocation is made only with its entry's place held, so the record names every certificate
     // revoked; only one known to have failed gives the place back unwritten.
-    let Ok(place) = hold_place(&state) else {
-        return crate::transport::busy();
+    let Ok(place) = state.hold_place() else {
+        return crate::answers::busy();
     };
-    let outcome =
-        revocations.revoke_certificate(&request.certificate.authority, &request.certificate.serial);
+    let Some(outcome) =
+        state.revoke_certificate(&request.certificate.authority, &request.certificate.serial)
+    else {
+        return revocation_off();
+    };
     match outcome {
         Ok(entry) => {
             info!(revocation = %entry.id, "revoked");
@@ -4123,9 +3862,7 @@ async fn revoke(
             if authority == "bootstrap" {
                 // The requests it carried wait no longer, on every instance (SEC-admission-by-client-certificate §28);
                 // approving one is refused either way.
-                withdrawn = state
-                    .enrolment()
-                    .map_or(0, |enrolment| enrolment.withdraw_revoked(issuers, serial));
+                withdrawn = state.withdraw_revoked(issuers, serial);
             }
             // Written before anything after the revocation can fail: the revocation is made.
             fill_place(
@@ -4134,7 +3871,7 @@ async fn revoke(
                     .with("withdrawn_requests", withdrawn),
             );
             if authority == "bootstrap" {
-                if let Some(Err(e)) = state.bootstrap().map(|b| b.forget_p12(serial)) {
+                if let Some(Err(e)) = state.forget_bootstrap_p12(serial) {
                     // Said, not swallowed: lifting this revocation would make the file
                     // downloadable again.
                     warn!(serial = %serial, "cannot remove the revoked PKCS#12 file: {e}");
@@ -4186,18 +3923,17 @@ async fn revoke(
     )
 )]
 async fn lift_revocation(
-    State(state): State<Arc<AppState>>,
+    State(state): State<Arc<OperatorCases>>,
     _csrf: SameOrigin,
     Path(id): Path<String>,
 ) -> Response {
-    let Some(revocations) = state.revocations() else {
+    let Some(outcome) = state.lift_revocation(&id) else {
         return revocation_off();
     };
-    match revocations.lift(&id) {
+    match outcome {
         Ok(true) => {
             info!(revocation = %id, "revocation lifted");
-            note(
-                &state,
+            state.note(
                 crate::audit::Entry::new("revocation.lifted", "lifted").with("id", id.clone()),
             );
             StatusCode::NO_CONTENT.into_response()
@@ -4210,6 +3946,7 @@ async fn lift_revocation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fleet::AppState;
 
     /// A register whose revocation is written and whose answer is then lost, as a commit whose
     /// answer never arrived: the store holds what it was answered `Err` for.
@@ -4284,7 +4021,7 @@ mod tests {
             .with_revocations(Some(Arc::new(revocations)))
             .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>));
         let response = revoke(
-            State(Arc::new(state)),
+            State(Arc::new(OperatorCases::new(Arc::new(state), None))),
             SameOrigin,
             Json(serde_json::json!({
                 "certificate": { "authority": "client", "serial": "0ABC123" }
@@ -4409,14 +4146,17 @@ mod tests {
         store.1.store(true, std::sync::atomic::Ordering::SeqCst);
         let audit = Recorded::default();
         let entries = audit.0.clone();
-        let state = Arc::new(
-            AppState::new(dir.path().to_path_buf())
-                .expect("state")
-                .with_revocations(Some(Arc::new(revocations)))
-                .with_floors(Some(Arc::new(floors)))
-                .with_enrolment(Some(Arc::new(enrolment)))
-                .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>)),
-        );
+        let state = Arc::new(OperatorCases::new(
+            Arc::new(
+                AppState::new(dir.path().to_path_buf())
+                    .expect("state")
+                    .with_revocations(Some(Arc::new(revocations)))
+                    .with_floors(Some(Arc::new(floors)))
+                    .with_enrolment(Some(Arc::new(enrolment)))
+                    .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>)),
+            ),
+            None,
+        ));
 
         let cleared = set_gateway(
             State(state.clone()),
@@ -4482,12 +4222,15 @@ mod tests {
         )));
         let audit = Recorded::default();
         let entries = audit.0.clone();
-        let state = Arc::new(
-            AppState::new(dir.path().to_path_buf())
-                .expect("state")
-                .with_enrolment(Some(enrolment.clone()))
-                .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>)),
-        );
+        let state = Arc::new(OperatorCases::new(
+            Arc::new(
+                AppState::new(dir.path().to_path_buf())
+                    .expect("state")
+                    .with_enrolment(Some(enrolment.clone()))
+                    .with_audit(Some(Arc::new(audit) as Arc<dyn crate::audit::Audit>)),
+            ),
+            None,
+        ));
         let reject = |id: String| reject_enrolment(State(state.clone()), SameOrigin, Path(id));
 
         for malformed in [

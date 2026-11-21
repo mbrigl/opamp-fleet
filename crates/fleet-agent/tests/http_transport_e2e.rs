@@ -112,7 +112,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
 async fn a_configuration_rollout_reaches_a_polling_client() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(common::fleet_state(dir.path()));
-    let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
+    let app = fleet_server::agent_app(state.clone(), fleet_server::agent_cases::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -205,7 +205,7 @@ async fn a_package_rollout_reaches_a_polling_client() {
                 PackageOffering::new(store_dir.path(), store).expect("deployments"),
             )),
     );
-    let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
+    let app = fleet_server::agent_app(state.clone(), fleet_server::agent_cases::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");

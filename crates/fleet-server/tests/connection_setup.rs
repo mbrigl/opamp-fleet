@@ -8,8 +8,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use fleet_server::agent_cases::Admission;
 use fleet_server::fleet::AppState;
-use fleet_server::transport::Admission;
 use futures_util::{SinkExt, StreamExt};
 use opamp::frame;
 use opamp::proto::{AgentToServer, ServerToAgent};

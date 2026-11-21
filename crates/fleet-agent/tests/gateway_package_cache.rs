@@ -1205,7 +1205,7 @@ async fn a_client_behind_a_marked_gateway_receives_an_uploaded_artifact_through_
     ))
     .expect("tls config");
     let planes = fleet_server::tls::server_tls(&tls, None, None).expect("server material");
-    let admission = fleet_server::transport::Admission::new(true)
+    let admission = fleet_server::agent_cases::Admission::new(true)
         .with_enrolment(planes.issuers, None)
         .with_revocations(Some(revocations));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");

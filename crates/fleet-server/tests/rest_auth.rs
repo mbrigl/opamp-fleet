@@ -4,9 +4,9 @@
 mod support;
 
 use base64::Engine as _;
-use fleet_server::api::OperatorAuth;
 use fleet_server::config::RestAuthConfig;
 use fleet_server::fleet::{AppState, PackageOffering};
+use fleet_server::operator_cases::OperatorAuth;
 use fleet_server::packages::PackageStore;
 use opamp::uid::InstanceUid;
 use prost::Message as _;
@@ -35,7 +35,7 @@ async fn spawn_guarded() -> TestServer {
     .expect("parse");
     let (addr, rest_addr) = support::serve_guarded(
         state.clone(),
-        fleet_server::transport::Admission::open(),
+        fleet_server::agent_cases::Admission::open(),
         Some(OperatorAuth::from_config(&auth).expect("auth")),
     )
     .await;

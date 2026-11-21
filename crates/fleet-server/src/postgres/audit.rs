@@ -1079,7 +1079,7 @@ mod tests {
                 .expect("state")
                 .with_revocations(Some(Arc::new(revocations)))
                 .with_audit(Some(audit.clone() as Arc<dyn crate::audit::Audit>));
-            let router = crate::api::router(Arc::new(state), None);
+            let router = crate::operator_app(Arc::new(state), None);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind");

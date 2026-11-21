@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
+use fleet_server::agent_cases::Admission;
 use fleet_server::ca::ClientCa;
 use fleet_server::fleet::AppState;
 use fleet_server::revocation::{CertId, Revocations};
-use fleet_server::transport::Admission;
 use opamp::proto::{
     AgentCapabilities, AgentToServer, CertificateRequest, ConnectionSettingsRequest,
     OpAmpConnectionSettingsRequest, ServerErrorResponseType, ServerToAgent,
@@ -165,7 +165,7 @@ struct Setup<'a> {
     /// `[connection_offer]`.
     offer: Option<fleet_server::fleet::ConnectionOffer>,
     /// `[rest.auth]`, guarding the Operator plane.
-    operator_auth: Option<fleet_server::api::OperatorAuth>,
+    operator_auth: Option<fleet_server::operator_cases::OperatorAuth>,
     /// The register and the revocation list (SEC-admission-by-client-certificate).
     revocations: bool,
     /// The audit record (SEC-append-only-audit-record).
@@ -1177,7 +1177,7 @@ async fn the_operator_plane_counts_its_failures_in_a_table_of_its_own() {
         fleet_server::credentials::hash_basic("s3cret").expect("hash")
     ))
     .expect("rest auth config");
-    let operator_auth = fleet_server::api::OperatorAuth::from_config(&rest_auth)
+    let operator_auth = fleet_server::operator_cases::OperatorAuth::from_config(&rest_auth)
         .expect("operator auth")
         .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
             limits(),
@@ -2994,7 +2994,7 @@ async fn an_operator_act_names_the_operator() {
         Setup {
             audit: Some(audit.clone()),
             operator_auth: Some(
-                fleet_server::api::OperatorAuth::from_config(&rest_auth)
+                fleet_server::operator_cases::OperatorAuth::from_config(&rest_auth)
                     .expect("operator auth")
                     .with_audit(Some(audit)),
             ),

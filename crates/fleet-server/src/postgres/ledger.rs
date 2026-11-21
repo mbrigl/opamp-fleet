@@ -2028,11 +2028,11 @@ mod tests {
             (Some(1), 1),
             "a revocation held already moves nothing, and keeps the version held"
         );
-        let (_, fetched) = crate::transport::gateway_list_of(&a);
+        let (_, fetched) = crate::agent_cases::gateway_list_of(&a);
         a.record(issued("0c", None).facts, b"\x01", None)
             .expect("a register entry");
         assert_ne!(
-            crate::transport::gateway_list_of(&a).1,
+            crate::agent_cases::gateway_list_of(&a).1,
             fetched,
             "a Gateway holding the ETag from before the entry is not answered 304"
         );
@@ -2116,7 +2116,7 @@ mod tests {
 
         a.revoke_certificate("client", "0a")
             .expect("A revokes X, not holding X'");
-        let (before, fetched) = crate::transport::gateway_list_of(&a);
+        let (before, fetched) = crate::agent_cases::gateway_list_of(&a);
         assert!(
             !before.contains(r#""serial":"b""#),
             "A does not resolve X' yet: {before}"
@@ -2128,7 +2128,7 @@ mod tests {
             "A's write followed the version it held, so A holds the new one"
         );
         a.reload_ledger().expect("A takes up X'");
-        let (after, etag) = crate::transport::gateway_list_of(&a);
+        let (after, etag) = crate::agent_cases::gateway_list_of(&a);
         assert!(
             after.contains(r#""serial":"b""#),
             "A resolves X' now: {after}"
@@ -2140,7 +2140,7 @@ mod tests {
         );
         b.reload_ledger().expect("B takes up the revocation");
         assert_eq!(
-            crate::transport::gateway_list_of(&b).1,
+            crate::agent_cases::gateway_list_of(&b).1,
             etag,
             "B answers the ETag A gives once both hold the same list"
         );

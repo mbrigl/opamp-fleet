@@ -125,7 +125,7 @@ async fn spawn_server() -> (SocketAddr, Arc<AppState>, tempfile::TempDir) {
     opamp::tls::install_ring_provider();
     let dir = tempfile::tempdir().expect("tempdir");
     let state = Arc::new(AppState::new(dir.path().join("fleet-configs")).expect("state"));
-    let app = fleet_server::agent_app(state.clone(), fleet_server::transport::Admission::open());
+    let app = fleet_server::agent_app(state.clone(), fleet_server::agent_cases::Admission::open());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");

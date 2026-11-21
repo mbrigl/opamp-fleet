@@ -30,7 +30,7 @@ async fn spawn_with_packages() -> (TestServer, tempfile::TempDir) {
             )),
     );
     let (addr, rest_addr) =
-        support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
+        support::serve(state.clone(), fleet_server::agent_cases::Admission::open()).await;
     (
         TestServer {
             addr,
@@ -141,7 +141,7 @@ async fn spawn_with_packages_for_a_host() -> (TestServer, Member) {
                 PackageOffering::new(&dir.path().join("packages"), store).expect("deployments"),
             )),
     );
-    let admission = fleet_server::transport::Admission::new(true)
+    let admission = fleet_server::agent_cases::Admission::new(true)
         .with_enrolment(planes.issuers, None)
         .with_revocations(Some(revocations));
     let handle = opamp::server::listen::Handle::new();
@@ -651,7 +651,7 @@ async fn an_artifact_past_the_configured_limit_is_refused() {
             .with_max_package_size(4096),
     );
     let (addr, rest_addr) =
-        support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
+        support::serve(state.clone(), fleet_server::agent_cases::Admission::open()).await;
     let server = TestServer {
         addr,
         rest_addr,
@@ -1437,7 +1437,7 @@ async fn the_package_store_has_a_total_size_ceiling() {
             .with_max_total_package_bytes(10 * 1024),
     );
     let (addr, rest_addr) =
-        support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
+        support::serve(state.clone(), fleet_server::agent_cases::Admission::open()).await;
     let server = TestServer {
         addr,
         rest_addr,
@@ -1795,7 +1795,7 @@ async fn with_a_verification_key_the_server_reports_valid_and_invalid_and_stores
             )),
     );
     let (addr, rest_addr) =
-        support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
+        support::serve(state.clone(), fleet_server::agent_cases::Admission::open()).await;
     let server = TestServer {
         addr,
         rest_addr,
@@ -2877,7 +2877,7 @@ async fn a_download_past_the_limit_is_answered_429_after_thirty_seconds() {
     );
     let (addr, rest_addr) = support::serve(
         state.clone(),
-        fleet_server::transport::Admission::open().with_throttle(Arc::new(throttle)),
+        fleet_server::agent_cases::Admission::open().with_throttle(Arc::new(throttle)),
     )
     .await;
     let server = TestServer {
@@ -3053,7 +3053,7 @@ async fn spawn_with_floors(
             .with_audit(audit),
     );
     let (addr, rest_addr) =
-        support::serve(state.clone(), fleet_server::transport::Admission::open()).await;
+        support::serve(state.clone(), fleet_server::agent_cases::Admission::open()).await;
     TestServer {
         addr,
         rest_addr,

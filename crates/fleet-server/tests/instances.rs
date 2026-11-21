@@ -709,7 +709,7 @@ impl Instance {
             .expect("server material");
         let throttle = throttle
             .map(|limits| Arc::new(fleet_server::throttle::Throttle::new(limits, clock.clone())));
-        let mut admission = fleet_server::transport::Admission::new(true)
+        let mut admission = fleet_server::agent_cases::Admission::new(true)
             .with_revocations(Some(revocations.clone()));
         if signing.is_some() {
             admission = admission.with_enrolment(planes.issuers, Some(enrolment.clone()));

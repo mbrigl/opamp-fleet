@@ -271,6 +271,19 @@ no module.
   `fleet::fixtures`. Each context imports by name what it takes from the root, from its siblings and
   from the crate; `clippy::wildcard_imports`, denied in `fleet`, refuses a glob import in its
   production code.
+- **Server use cases** — each plane reaches the core through one use-case module
+  ([SRV-two-use-case-layers](adr/SRV-two-use-case-layers.md)). `transport`, the Agent plane's
+  endpoints, carries the protocol and calls `agent_cases::AgentCases`, whose methods are the
+  plane's operations: admission, a report, a certificate request, an enrolment, a download, and the
+  Gateways' read of the revocation list. `api`, the REST API and the bundled UI, calls
+  `operator_cases::OperatorCases`, whose methods are every read and change of the Operator plane,
+  with the guard of `[rest.auth]` (`OperatorAuth`) and the record of each act. Neither endpoint
+  module names the other plane's modules or a type of the core that holds state; the core's
+  values cross unchanged, and the plain answers and the peer's address both endpoints use are
+  `answers`. `lib.rs` builds both modules over one core. They are adapters in the table, since
+  they read certificates and credentials through adapters, and
+  [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs) also lists
+  what each plane's modules name of the other.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
@@ -281,17 +294,16 @@ no module.
   ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)). `pki` is
   `server pki status` and the running Server's warnings before a certificate it depends on ends
   (OPS-operator-program-fleetctl).
-- **Server admission** — `transport::Admission` requires the client certificate on every request
+- **Server admission** — `agent_cases::Admission` requires the client certificate on every request
   to `/v1/opamp` and reads no `Authorization` header, admits a bootstrap certificate only while the
   enrolment window is open, and guards the package download with the same certificate. Behind
   the same admission it serves a Gateway its revocation list on `/v1/gateway/revocations` and
   every member the floors on `/v1/package-floors`
   ([PKG-versions-high-water-mark-floor](adr/PKG-versions-high-water-mark-floor.md)). Two core
   modules hold the state behind it: `enrolment`, the operator-opened window, the queue of requests
-  an operator approves or rejects through `api`, and the rejected keys, refused beyond the window,
-  and `throttle`, the per-address back-off after
-  repeated failures, which both planes use
-  ([SEC-admission-by-client-certificate](adr/SEC-admission-by-client-certificate.md)).
+  an operator approves or rejects through `operator_cases`, and the rejected keys, refused beyond
+  the window, and `throttle`, the per-address back-off after repeated failures, which both planes
+  use ([SEC-admission-by-client-certificate](adr/SEC-admission-by-client-certificate.md)).
   `revocation` holds the register of issued certificates, the revocation list and the Hosts —
   each with the subject values of its certificate, its Gateway mark and the Agents bound to it —
   behind the `LedgerStore` port
@@ -299,8 +311,8 @@ no module.
   [SRV-fleet-record-agents-hosts](adr/SRV-fleet-record-agents-hosts.md)).
   `agent_rate` holds the token buckets that bound how often an admitted host, an Agent behind a
   marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
-  `fleet_core::rate`; `transport` takes a token for each
-  message before the handler does anything else and for each download in the guard
+  `fleet_core::rate`; `agent_cases` takes a token for each
+  message before anything else is done with it and for each download in its guard
   ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
   `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under `data_dir/audit/`
@@ -535,7 +547,7 @@ entry there — `packages` checks the signature against `[packages] verification
 Server holds one, and only reports — then puts the Package into a Deployment with a Selector and
 releases it, together with the Configurations the Deployment holds. The Agent is offered the package
 with its entry's signature; the Client downloads it
-from its own Server's origin and nowhere else, and `api` serves it only when `fleet` finds it
+from its own Server's origin and nowhere else, and `transport` serves it only when `fleet` finds it
 offered to an Agent the certificate's host speaks for, by the test `packages` shares with the
 offer
 ([PKG-signed-packages-and-delivery](adr/PKG-signed-packages-and-delivery.md));
