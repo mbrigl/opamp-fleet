@@ -20,8 +20,10 @@ services beside it directly: `api.rs` names `AppState` 63 times, `Enrolment`, `R
 what their code may do. A handler of one plane can reach any operation of the other, and a reviewer
 has to read `fleet` and every module of it to know what the Agent plane can change.
 
-On PostgreSQL several instances serve one fleet, and each serves both planes
-([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)). The planes
+On PostgreSQL several instances serve one fleet, and each serves both planes today
+([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)). The proposed
+[SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md) follows this ADR and lets
+each instance open the planes its configuration names. The planes
 already meet only through the database there: an operator's act on one instance reaches the
 sessions on another by a notification
 ([SRV-instances-share-one-postgresql §9](SRV-instances-share-one-postgresql.md)) or by the
