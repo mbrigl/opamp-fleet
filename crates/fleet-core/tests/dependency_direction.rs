@@ -1204,8 +1204,8 @@ const FLEET_RANKS: &[&str] = &[
     "fleet::delivery",
     "fleet::rollout",
     "fleet::views",
-    "fleet::session",
     "fleet::approval",
+    "fleet::session",
 ];
 
 /// The submodules of `fleet` that only the tests build, and so have no rank (§6).
@@ -1359,9 +1359,12 @@ fn fleet_root_imports(root: &[Located], reexports: &Reexports) -> BTreeMap<Strin
 /// What the shipped code `src` of `module`, a ranked module of `fleet`, names at or above its own
 /// context's rank (SRV-fleet-contexts-call-by-rank §2 and §3): a method of `methods`, by the
 /// context that defines it on `AppState`, called on `self`, `Self::` or `AppState::`; a path or a
-/// `use` that leads into such a context, through a re-export or not; and a name the root's
-/// `use` declarations bring in from one, in `imports`, reached by `use super::*` or, in the root,
-/// directly. The root's own `pub use` declarations are not its code.
+/// `use` that leads into such a context, through a re-export or not; and, in the root, a name its
+/// `use` declarations bring in from one, in `imports`. The root's own `pub use` declarations are
+/// not its code.
+///
+/// Its limit: it resolves `super::` from the file's module, so a `mod` with a body inside a
+/// context, outside the tests, would have its paths resolved one level off. No context has one.
 fn rank_breaches(
     module: &str,
     src: &str,
@@ -1380,7 +1383,9 @@ fn rank_breaches(
     }
     let mut found = Vec::new();
     // Calls of a method a context above defines: on `self` and `Self::` within an
-    // `impl AppState` block, where they are `AppState`, and on `AppState::` anywhere.
+    // `impl AppState` block, where they are `AppState`, and on `AppState::` anywhere. A method
+    // named as a function value (`Self::f`, `.map(AppState::f)`) counts; after `self.` only a
+    // call does, which tells a method from a field.
     let blocks = app_state_blocks(&tokens);
     for (i, w) in tokens.windows(4).enumerate() {
         let in_impl = || blocks.iter().any(|b| b.contains(&i));
@@ -1390,7 +1395,8 @@ fn rank_breaches(
             (Token::Ident(r), Token::PathSep) => r == "AppState",
             _ => false,
         };
-        let called = matches!(w[3].0, Token::Punct('(') | Token::PathSep);
+        let called =
+            w[1].0 != Token::Punct('.') || matches!(w[3].0, Token::Punct('(') | Token::PathSep);
         if let (true, true, Token::Ident(method)) = (receiver, called, &w[2].0) {
             if let Some(context) = methods.get(method).filter(|c| above(c)) {
                 found.push(format!("{module}:{}: calls {method} of {context}", w[2].1));
@@ -1408,15 +1414,10 @@ fn rank_breaches(
             ));
         }
     }
-    // Names of a context above, brought in by the root's `use` declarations.
-    let globbed = own == "fleet"
-        || tokens.windows(4).any(|w| {
-            w[0].0 == Token::Ident("use".into())
-                && w[1].0 == Token::Ident("super".into())
-                && w[2].0 == Token::PathSep
-                && w[3].0 == Token::Punct('*')
-        });
-    if globbed {
+    // Names of a context the root's `use` declarations bring in, named by the root's own code. A
+    // context could reach them only through `use super::*`, which `clippy::wildcard_imports`,
+    // denied in `fleet`, refuses; its named imports are paths, judged above.
+    if own == "fleet" {
         let declared = use_declarations(&tokens);
         for (i, (token, line)) in tokens.iter().enumerate() {
             let Token::Ident(name) = token else { continue };
@@ -1516,15 +1517,15 @@ fn the_rank_check_finds_a_context_naming_one_above_it() {
     .into_iter()
     .map(|(m, c)| (m.to_owned(), c.to_owned()))
     .collect();
-    let imports: BTreeMap<String, String> = [("Processed", "fleet::session")]
+    let imports: BTreeMap<String, String> = [("Placement", "fleet::placement")]
         .into_iter()
         .map(|(m, c)| (m.to_owned(), c.to_owned()))
         .collect();
     let held = r##"
-        use super::*;
         impl AppState {
-            fn f(&self) -> Processed { self.take_row(); Self::issue(); AppState::place_all(); }
+            fn f(&self) { self.take_row(); Self::issue(); AppState::place_all(); }
             fn g(&self) { let _ = super::session::bad_request(); let _ = "self.issue()"; }
+            fn h(&self) { let _ = xs.map(AppState::issue); let _ = self.issue; }
         }
         #[cfg(test)]
         mod tests { fn t(s: &AppState) { s.issue(); super::session::bad_request(); } }
@@ -1532,17 +1533,19 @@ fn the_rank_check_finds_a_context_naming_one_above_it() {
     let found = rank_breaches("fleet::held", held, &methods, &imports, &reexports);
     assert_eq!(found.len(), 3, "{found:#?}");
     assert!(found[0].contains("calls issue of fleet::approval"));
-    assert!(found[1].contains("names super::session::bad_request of fleet::session"));
-    assert!(found[2].contains("names Processed of fleet::session, through the root"));
+    assert!(found[1].contains("calls issue of fleet::approval"));
+    assert!(found[2].contains("names super::session::bad_request of fleet::session"));
     // The root names no context; its `pub use` of one keeps a public path.
     let root = r##"
         mod placement;
         pub use placement::Placement;
         use placement::Groups;
-        impl AppState { fn new() { Self::place_all(); } }
+        struct AgentRecord { placement: Placement }
+        impl AppState { fn new() { let _ = Self::place_all; } }
     "##;
     let found = rank_breaches("fleet", root, &methods, &imports, &reexports);
-    assert_eq!(found.len(), 2, "{found:#?}");
+    assert_eq!(found.len(), 3, "{found:#?}");
     assert!(found[0].contains("calls place_all of fleet::placement"));
     assert!(found[1].contains("names placement::Groups of fleet::placement"));
+    assert!(found[2].contains("names Placement of fleet::placement, through the root"));
 }
