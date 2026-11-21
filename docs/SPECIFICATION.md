@@ -230,14 +230,14 @@ Only a normalization renumbers them
     Where the Agent plane and the Operator plane run on Server instances of their own, the
     Operator plane shall stay usable while the Agents of a lost Agent-plane instance reconnect.
     Every page of up to 100 Agents of the list of the Agents, and every revocation, sent to the
-    Operator plane of an instance that did not stop shall then be answered within 2 seconds. A test
-    shows it for the same simulated fleet on three Agent-plane instances, one of them lost, and one
-    Operator-plane instance. A further test shows that the database carries the presence writes
-    and the notifications of 100 000 simulated Agents at the default heartbeat of 30 seconds, about
-    3 300 reports a second, across three instances, with no presence batch written later than its
-    interval after it was due and no notification left unread. The database and the object store
-    are what the instances share, and making them redundant is the operator's: G-20 holds while
-    they are.
+    Operator plane of an instance that did not stop shall then be answered successfully within 2
+    seconds. A test shows it for the same simulated fleet on three Agent-plane instances, one of
+    them lost, and one Operator-plane instance. A further test shows that the database carries the
+    presence writes and the notifications of 100 000 simulated Agents at the default heartbeat of 30
+    seconds, about 3 300 reports a second, across three instances, with no presence batch written
+    later than its interval after it was due and no notification left unread. The database and the
+    object store are what the instances share, and making them redundant is the operator's: G-20
+    holds while they are.
 
 ## Quality Goals
 
