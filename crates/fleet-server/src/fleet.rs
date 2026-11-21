@@ -39,10 +39,10 @@ pub use delivery::{PackageOffering, StoreFull, UploadReservation};
 use held::{Kept, AGENT_LOCKS};
 use placement::Groups;
 pub use placement::{Group, Placement};
+pub use rollout::{DeploymentReach, PendingConfigurationView, PendingPackageView};
 pub use session::{bad_request, unavailable, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER};
 pub use views::{
-    AgentListing, AgentQuery, AgentView, DeploymentReach, HostAgentView, HostAgents,
-    PackageStatusView, PendingConfigurationView, PendingPackageView,
+    AgentListing, AgentQuery, AgentView, HostAgentView, HostAgents, PackageStatusView,
 };
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent

@@ -15,7 +15,7 @@ use crate::listing::capability_names;
 use crate::packages::PackageId;
 
 use super::placement::{Group, Placement};
-use super::rollout::{waiting, Waiting};
+use super::rollout::{waiting, PendingConfigurationView, PendingPackageView, Waiting};
 use super::{is_stale, AgentRecord, AppState};
 
 impl AppState {
@@ -543,48 +543,6 @@ pub struct AgentView {
     /// (SRV-fleet-record-agents-hosts §20).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored_attributes: Vec<String>,
-}
-
-/// One Configuration waiting for a rollout act toward one Agent (SRV-deployments-and-pinned-rollouts).
-#[derive(Serialize)]
-pub struct PendingConfigurationView {
-    pub name: String,
-    /// `new` — held by the claiming Deployment and not yet assigned; `update` — the saved
-    /// revision differs from the assigned one; `remove` — assigned, and dropped by the next press,
-    /// which applies the smaller map; `kept` — assigned, and the next press leaves the Agent with no
-    /// assignment, so it keeps running it.
-    pub change: String,
-}
-
-/// Whom one Deployment reaches in the fleet as reported so far (PKG-signed-packages-and-delivery): the Agents it claims,
-/// the subset a rollout act would actually change, and those another Deployment also claims.
-#[derive(Clone, Copy, Default, Debug)]
-pub struct DeploymentReach {
-    /// Agents this Deployment claims — and no other does. Zero is the aim mistake worth hunting.
-    pub claiming: usize,
-    /// Of those, the Agents a press would actually move — what it would release differs from what
-    /// their assignment pins (SRV-deployments-and-pinned-rollouts §9). Zero with a non-zero `claiming` means everyone is
-    /// up to date.
-    pub targeted: usize,
-    /// Agents this Deployment matches that **another one matches too**. They are offered nothing
-    /// new until an operator narrows a Selector (PKG-signed-packages-and-delivery §28).
-    pub conflicting: usize,
-}
-
-/// The Package waiting for a rollout act toward one Agent (SRV-deployments-and-pinned-rollouts).
-#[derive(Serialize)]
-pub struct PendingPackageView {
-    /// The Deployment that would release it — the channel this Agent belongs to.
-    pub deployment: String,
-    /// The Agent type this Package is built for — its identity, and its wire name.
-    pub agent_type: String,
-    pub version: String,
-    /// What an operator reads: the Agent type and the version together.
-    pub display_name: String,
-    /// `new` — nothing is assigned for this Agent type; `update` — another version is; `remove` —
-    /// the assigned one, which the next press drops; `kept` — the assigned one, while the next
-    /// press leaves the Agent with no assignment.
-    pub change: String,
 }
 
 /// One package's installation state as the REST API and UI see it (PKG-signed-packages-and-delivery).
