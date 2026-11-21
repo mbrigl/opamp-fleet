@@ -1,19 +1,20 @@
 //! The round of an Agent's report (SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts): a report processed under the Agent's
 //! lock, its record created, taken or settled, the reply it is answered with, the connection
-//! settings it is offered, the persist path that writes what changed, a goodbye and a forget, and
-//! the answers every refused report gets. Its entry points are methods of `AppState`.
+//! settings it is offered, a goodbye and a forget. Its entry points are methods of `AppState`.
+//!
+//! The persist path that writes what changed, the end a report answers with (`Ending`), the
+//! connection settings offer, and the answers every refused report gets stand in the module root:
+//! `approval`, which issues a certificate within the round, uses them too and ranks below `session`
+//! (SRV-fleet-contexts-call-by-rank).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use opamp::proto::{
     AgentConfigMap, AgentIdentification, AgentToServer, AgentToServerFlags,
-    ConnectionSettingsOffers, OpAmpConnectionSettings, PackageStatuses, ServerErrorResponse,
-    ServerErrorResponseType, ServerToAgent, ServerToAgentFlags, TlsCertificate,
+    ConnectionSettingsOffers, PackageStatuses, ServerToAgent, ServerToAgentFlags, TlsCertificate,
 };
 use opamp::uid::InstanceUid;
-use prost::Message as _;
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -25,8 +26,8 @@ use super::held::{Carried, Settled, Taking, Took, UnsureRekey};
 use super::placement::Elsewhere;
 use super::rollout::{offer, restart_command};
 use super::{
-    is_silent, AgentRecord, AppState, ConnId, ForgetError, Group, PendingRekey, Placement,
-    Processed, TelemetryOffer, Transport, SERVER_CAPABILITIES,
+    bad_request, compose_settings_offer, is_silent, unavailable, AgentRecord, AppState, ConnId,
+    Ending, ForgetError, Group, PendingRekey, Placement, Processed, TelemetryOffer, Transport,
 };
 
 impl AppState {
@@ -136,69 +137,6 @@ impl AppState {
         self.push.send_modify(|rev| *rev += 1);
         info!(agent = %uid, "agent forgotten");
         Ok(())
-    }
-
-    /// Persists one record when — and only when — its durable content changed since it was last
-    /// written (SRV-fleet-record-agents-hosts). `last_seen_ms` and `sequence_num` are outside the comparison and ride
-    /// along on whatever write happens, so the common heartbeat reaches no storage backend at
-    /// all; [`flush_agents`](Self::flush_agents) is what makes them current on a graceful stop.
-    /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
-    /// one that refuses reports. Answers whether the record is still stored: on a shared store
-    /// one forgotten through another instance is not, and is not written again.
-    pub(super) fn persist_if_dirty(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> bool {
-        match self.persist(uid, persisted) {
-            Ok(stored) => stored,
-            Err(e) => {
-                warn!(agent = %uid, error = %e, "cannot persist the agent record");
-                true
-            }
-        }
-    }
-
-    /// Writes one record when its durable content changed since it was last written, and says
-    /// whether the write failed — for an operator's act that must not be answered unwritten — or
-    /// found no record to write, as of an Agent forgotten through another instance. The record was
-    /// created or read before (SRV-fleet-record-agents-hosts §14), so only what a report decides is written of
-    /// it, and nothing creates it again.
-    ///
-    /// `persisted` is what the record held when the report let the fleet lock go, and it is
-    /// written after: no other report waits for the write. Two writes of one record do not race,
-    /// so an older state never lands after a newer one, since the Agent's own lock, which every
-    /// report of it holds from its start to its answer, is held across the write; and a report is
-    /// answered only once its record is written (SRV-fleet-record-agents-hosts §4). What a store's write may take
-    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (SRV-state-stores-contract-pair §24).
-    ///
-    /// On a shared store, an Agent this instance was answered no count of takes for, its take not
-    /// written or its answer lost, has its record written at every report and no digest kept: a
-    /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
-    /// again, may have written over it, and the next report writes it again. Once a count is
-    /// answered, a report that changes nothing durable writes nothing again
-    /// (SRV-instance-opens-chosen-planes §8).
-    fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
-        let digest = persisted.durable_digest();
-        let counted = !self.agent_store.is_shared()
-            || self
-                .kept
-                .presence_written
-                .lock()
-                .expect("presence lock")
-                .counted(uid);
-        if counted && self.kept.written.lock().expect("written lock").get(uid) == Some(&digest) {
-            return Ok(true);
-        }
-        if !self.agent_store.write_report(uid, persisted)? {
-            return Ok(false);
-        }
-        if !counted {
-            self.kept.written.lock().expect("written lock").remove(uid);
-            return Ok(true);
-        }
-        self.kept
-            .written
-            .lock()
-            .expect("written lock")
-            .insert(*uid, digest);
-        Ok(true)
     }
 
     /// Drops one record from the store and the dirty-check ledger — the storage half of
@@ -1330,45 +1268,12 @@ impl Drop for Reservation<'_> {
     }
 }
 
-/// What a report's end answers with, once its record is taken into memory.
-pub(super) struct Ending {
-    /// The identity the Agent goes by after the report.
-    pub(super) uid: InstanceUid,
-    /// The identity it reported, which the reply is addressed to.
-    pub(super) reported: InstanceUid,
-    /// It said goodbye.
-    disconnected: bool,
-    /// It came on an older connection of the host whose newer one carries the Agent, which its
-    /// goodbye does not end and a queued restart is not sent on
-    /// (SRV-instance-opens-chosen-planes §8).
-    superseded: bool,
-    identification: Option<AgentIdentification>,
-    reply_flags: u64,
-}
-
 /// Where a report's end stands once its record is taken into memory.
 enum Pending {
     /// Its reply, or a restart to clear first.
     Settled(Settled),
     /// A certificate it asked for to sign first, with what its record held.
     Issue(Box<PersistedAgent>, Vec<u8>),
-}
-
-/// One `ConnectionSettingsOffers` message, with one hash over everything it carries: the Agent
-/// acknowledges the message, not its parts.
-pub(super) fn compose_settings_offer(
-    opamp: Option<OpAmpConnectionSettings>,
-    telemetry: TelemetryOffer,
-) -> ConnectionSettingsOffers {
-    let mut offer = ConnectionSettingsOffers {
-        opamp,
-        own_metrics: telemetry.own_metrics,
-        own_traces: telemetry.own_traces,
-        own_logs: telemetry.own_logs,
-        ..Default::default()
-    };
-    offer.hash = Sha256::digest(offer.encode_to_vec()).to_vec();
-    offer
 }
 
 /// The Baseline's gate: send the offer when the Agent's reported hash differs. An APPLYING echo of
@@ -1383,52 +1288,6 @@ fn gate(record: &AgentRecord, offer: ConnectionSettingsOffers) -> Option<Connect
         }
     }
     Some(offer)
-}
-
-/// The `ServerToAgent` for a report the Server cannot make sense of.
-pub fn bad_request(message: &str) -> ServerToAgent {
-    ServerToAgent {
-        capabilities: SERVER_CAPABILITIES,
-        error_response: Some(ServerErrorResponse {
-            r#type: ServerErrorResponseType::BadRequest as i32,
-            error_message: message.to_string(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-/// What a CSR with a bootstrap proof over a member's certificate is answered (CLT-modes-and-gateway §25).
-pub const MEMBER_DOES_NOT_ENROL: &str =
-    "a certificate signing request with a bootstrap proof is an enrolment, and a member does not \
-     enrol";
-
-/// What a CSR with neither proof over a Gateway's certificate is answered (CLT-modes-and-gateway §18).
-pub const NEEDS_A_PROOF: &str =
-    "a certificate requested through a Gateway needs a renewal proof or a bootstrap proof";
-
-/// How long an Agent told `Unavailable` waits before it asks again.
-pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
-/// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
-/// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
-/// field a Client and a Gateway route a reply by (SEC-tls13-bounded-input-chosen-planes §27).
-pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
-    ServerToAgent {
-        instance_uid: instance_uid.to_vec(),
-        capabilities: SERVER_CAPABILITIES,
-        error_response: Some(ServerErrorResponse {
-            r#type: ServerErrorResponseType::Unavailable as i32,
-            error_message: message.to_string(),
-            details: Some(opamp::proto::server_error_response::Details::RetryInfo(
-                opamp::proto::RetryInfo {
-                    retry_after_nanoseconds: RETRY_AFTER.as_nanos() as u64,
-                },
-            )),
-        }),
-        ..Default::default()
-    }
 }
 
 /// Renders a reported config map for the operator: single unnamed entry as-is, named entries with
@@ -1461,8 +1320,9 @@ mod tests {
     use crate::deployments::DeploymentError;
     use crate::fleet::fixtures::*;
     use crate::fleet::views::AgentView;
-    use crate::fleet::{is_stale, Assignment};
+    use crate::fleet::{is_stale, Assignment, RETRY_AFTER};
     use crate::revocation::{CertId, Revocations, SpeaksFor};
+    use opamp::proto::ServerErrorResponseType;
     use std::collections::HashSet;
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex, OnceLock};
