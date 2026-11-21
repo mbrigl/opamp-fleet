@@ -438,24 +438,6 @@ impl AppState {
         Ok(())
     }
 
-    /// Takes `labels` into the record of `uid` this Server holds, if it holds one, and places its
-    /// group again. What the store holds of it is no longer what was last written whole.
-    pub(super) fn take_labels(
-        &self,
-        fleet: &mut HashMap<InstanceUid, AgentRecord>,
-        uid: &InstanceUid,
-        labels: BTreeMap<String, String>,
-    ) {
-        let Some(record) = fleet.get_mut(uid) else {
-            return;
-        };
-        record.labels = labels;
-        self.kept.written.lock().expect("written lock").remove(uid);
-        if let Some(group) = record.placement.group.clone() {
-            self.place_group_now(fleet, &group);
-        }
-    }
-
     /// Which Deployments hold each Package, keyed by `<agent type>@<version>` — how a Package
     /// answers "whom would this reach", since it does not aim by itself (PKG-signed-packages-and-delivery).
     pub fn deployments_holding(&self) -> BTreeMap<String, Vec<String>> {
@@ -940,8 +922,8 @@ mod tests {
     use super::*;
     use crate::agent_store::AgentStore;
     use crate::fleet::fixtures::*;
-    use crate::fleet::session::Processed;
     use crate::fleet::views::AgentView;
+    use crate::fleet::Processed;
     use crate::fleet::Transport;
     use crate::packages::PackageId;
     use crate::revocation::{CertId, Presented};

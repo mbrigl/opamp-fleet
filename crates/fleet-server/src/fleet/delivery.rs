@@ -482,7 +482,7 @@ fn accepts_packages(record: &AgentRecord) -> bool {
 mod tests {
     use super::*;
     use crate::fleet::fixtures::*;
-    use crate::fleet::session::Processed;
+    use crate::fleet::Processed;
     use crate::fleet::Transport;
     use crate::revocation::{CertId, Presented};
     use opamp::proto::{AgentDescription, AgentToServer, PackageStatuses};

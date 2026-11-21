@@ -25,7 +25,7 @@ use super::held::{Carried, PendingRekey, Settled, Taking, Took, UnsureRekey};
 use super::placement::{Elsewhere, Group, Placement};
 use super::rollout::{offer, restart_command};
 use super::{
-    is_silent, AgentRecord, AppState, ConnId, ForgetError, TelemetryOffer, Transport,
+    is_silent, AgentRecord, AppState, ConnId, ForgetError, Processed, TelemetryOffer, Transport,
     SERVER_CAPABILITIES,
 };
 
@@ -208,19 +208,6 @@ impl AppState {
             warn!(agent = %uid, error = %e, "cannot remove the agent record from the store");
         }
         self.kept.written.lock().expect("written lock").remove(uid);
-    }
-
-    /// Notes that `record`, just forgotten as `uid`, was carried by a live WebSocket, whose loop
-    /// then ends its session.
-    pub(super) fn end_session(&self, uid: &InstanceUid, record: &AgentRecord) {
-        if let (true, Some(conn)) = (record.connected, record.owner) {
-            self.forgotten
-                .lock()
-                .expect("forgotten lock")
-                .entry(conn)
-                .or_default()
-                .push(*uid);
-        }
     }
 
     /// Writes every record's current state, timestamps and sequence numbers included — the
@@ -1254,16 +1241,6 @@ impl AppState {
         }
         self.forgotten.lock().expect("forgotten lock").remove(&conn);
     }
-}
-
-/// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
-/// what the transport layer needs to know for its own bookkeeping.
-pub struct Processed {
-    pub reply: ServerToAgent,
-    /// The identity the Agent goes by *after* this message (it may have been reassigned).
-    pub uid: Option<InstanceUid>,
-    /// The Agent said goodbye; a WebSocket loop drops it from its connection-local set.
-    pub disconnected: bool,
 }
 
 /// How often a report starts again where an Agent it went on from left memory while it read and

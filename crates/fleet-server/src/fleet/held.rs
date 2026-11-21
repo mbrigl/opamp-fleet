@@ -2,8 +2,12 @@
 //! take and the release of an Agent, the presence it writes, the re-keys whose
 //! answer was lost, the restarts kept for retry, the take-up of what other instances announced, and
 //! the per-Agent locks. Its entry points are methods of `AppState`.
+//!
+//! It also takes labels into a held record and notes the end of a forgotten Agent's session, which
+//! `rollout` and `session` call: `held` ranks below both, and its own take-up does the same
+//! (SRV-fleet-contexts-call-by-rank).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -15,8 +19,7 @@ use tracing::{debug, info, warn};
 use crate::agent_store::{PersistedAgent, Presence};
 
 use super::placement::Elsewhere;
-use super::session::Processed;
-use super::{placement, AgentRecord, AppState, ConnId};
+use super::{placement, AgentRecord, AppState, ConnId, Processed};
 
 /// How many locks the Agents' own locks are spread over: two Agents share one only by their
 /// `instance_uid`, and then one waits for the other's report.
@@ -511,6 +514,27 @@ impl AppState {
                 "cannot read back a re-key whose answer was lost: {e}"
             )),
             None => Ok(()),
+        }
+    }
+
+    /// Takes `labels` into the record of `uid` this Server holds, if it holds one, and places its
+    /// group again. What the store holds of it is no longer what was last written whole.
+    ///
+    /// Here, not in `rollout`, which sets labels, because the take-up of what another instance
+    /// wrote takes them too, and `held` ranks below `rollout` (SRV-fleet-contexts-call-by-rank).
+    pub(super) fn take_labels(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        uid: &InstanceUid,
+        labels: BTreeMap<String, String>,
+    ) {
+        let Some(record) = fleet.get_mut(uid) else {
+            return;
+        };
+        record.labels = labels;
+        self.kept.written.lock().expect("written lock").remove(uid);
+        if let Some(group) = record.placement.group.clone() {
+            self.place_group_now(fleet, &group);
         }
     }
 
@@ -1133,6 +1157,23 @@ impl AppState {
         self.unplace(fleet, uid, record.placement.group.clone(), elsewhere);
         info!(agent = %uid, "dropped an agent forgotten through another instance");
         Gone::Forgotten
+    }
+
+    /// Notes that `record`, just forgotten as `uid`, was carried by a live WebSocket, whose loop
+    /// then ends its session.
+    ///
+    /// Here, not in `session`, which forgets, because dropping an Agent forgotten through another
+    /// instance ends its session too, and `held` ranks below `session`
+    /// (SRV-fleet-contexts-call-by-rank).
+    pub(super) fn end_session(&self, uid: &InstanceUid, record: &AgentRecord) {
+        if let (true, Some(conn)) = (record.connected, record.owner) {
+            self.forgotten
+                .lock()
+                .expect("forgotten lock")
+                .entry(conn)
+                .or_default()
+                .push(*uid);
+        }
     }
 
     /// Writes the presence of the Agents this instance carries that moved since the last batch, in

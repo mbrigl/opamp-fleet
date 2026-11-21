@@ -13,7 +13,7 @@ use std::time::Duration;
 use opamp::proto::{
     AgentDescription, AvailableComponents, ComponentHealth, ConnectionSettingsStatus,
     OpAmpConnectionSettings, PackageStatuses, RemoteConfigStatus, ServerCapabilities,
-    TelemetryConnectionSettings,
+    ServerToAgent, TelemetryConnectionSettings,
 };
 use opamp::uid::InstanceUid;
 use tokio::sync::watch;
@@ -39,9 +39,7 @@ pub use delivery::{PackageOffering, StoreFull, UploadReservation};
 use held::{Kept, AGENT_LOCKS};
 use placement::Groups;
 pub use placement::{Group, Placement};
-pub use session::{
-    bad_request, unavailable, Processed, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER,
-};
+pub use session::{bad_request, unavailable, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER};
 pub use views::{
     AgentListing, AgentQuery, AgentView, DeploymentReach, HostAgentView, HostAgents,
     PackageStatusView, PendingConfigurationView, PendingPackageView,
@@ -78,6 +76,16 @@ pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
 /// Server. Never a routing key — Agents are routed by `instance_uid` alone (CLT-modes-and-gateway); this only
 /// answers "is this identity already alive on *another* connection?".
 pub type ConnId = u64;
+
+/// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
+/// what the transport layer needs to know for its own bookkeeping.
+pub struct Processed {
+    pub reply: ServerToAgent,
+    /// The identity the Agent goes by *after* this message (it may have been reassigned).
+    pub uid: Option<InstanceUid>,
+    /// The Agent said goodbye; a WebSocket loop drops it from its connection-local set.
+    pub disconnected: bool,
+}
 
 /// Which transport a report arrived on. Recorded for the operator; it never keys any state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

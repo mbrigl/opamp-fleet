@@ -14,10 +14,9 @@ use crate::enrolment::{DecisionError, Recorder, Registrar};
 use crate::revocation::{CertId, Facts, Presented, Signed, SubjectValues};
 
 use super::session::{
-    bad_request, compose_settings_offer, unavailable, Ending, Processed, MEMBER_DOES_NOT_ENROL,
-    NEEDS_A_PROOF,
+    bad_request, compose_settings_offer, unavailable, Ending, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF,
 };
-use super::{AppState, CertificateSigner, TelemetryOffer, UseCase};
+use super::{AppState, CertificateSigner, Processed, TelemetryOffer, UseCase};
 
 impl AppState {
     /// Records a certificate the client CA signed on a renewal, before it is offered (SRV-state-stores-contract-pair §9,
