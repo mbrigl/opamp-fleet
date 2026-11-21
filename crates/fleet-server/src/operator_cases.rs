@@ -175,15 +175,19 @@ impl OperatorCases {
     }
 
     /// Records what an operator act did, beside the act itself (SEC-append-only-audit-record §1), and drops it where
-    /// the record cannot take it by then: the act was recorded before it ran.
+    /// the record cannot take it by then: the act was recorded before it ran. What it still records
+    /// grants trust, so a restore that misses it errs toward withdrawing. The acts a restore repeats,
+    /// which withdraw trust, hold their entry's place before they run instead
+    /// ([`Self::hold_place`]).
     pub fn note(&self, entry: Entry) {
         if let Some(audit) = self.state.audit() {
             audit.refusal(entry);
         }
     }
 
-    /// Holds a place in the record for the entry of an act about to run (SEC-append-only-audit-record §5).
-    /// `None` where the Server keeps no record.
+    /// Holds a place in the record for the entry of an act about to run, which says what the act did
+    /// once it has (SEC-append-only-audit-record §5): without one the act does not run, and is
+    /// answered `503`. `None` where the Server keeps no record.
     ///
     /// # Errors
     /// [`Unavailable`] when the record cannot hold a place now; the act does not run.
@@ -548,7 +552,8 @@ impl OperatorCases {
         self.state.approve_enrolment(id)
     }
 
-    /// The Gateway a waiting enrolment request came through, where it came through one.
+    /// The Gateway a waiting enrolment request came through, where it came through one, which every
+    /// audit entry of the request names (CLT-modes-and-gateway §25).
     #[must_use]
     pub fn enrolment_gateway(&self, id: &str) -> Option<String> {
         self.state

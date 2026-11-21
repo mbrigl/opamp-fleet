@@ -302,10 +302,8 @@ no module.
   ([PKG-versions-high-water-mark-floor](adr/PKG-versions-high-water-mark-floor.md)). Two core
   modules hold the state behind it: `enrolment`, the operator-opened window, the queue of requests
   an operator approves or rejects through `operator_cases`, and the rejected keys, refused beyond
-  the window,
-  and `throttle`, the per-address back-off after
-  repeated failures, which both planes use
-  ([SEC-admission-by-client-certificate](adr/SEC-admission-by-client-certificate.md)).
+  the window, and `throttle`, the per-address back-off after repeated failures, which both planes
+  use ([SEC-admission-by-client-certificate](adr/SEC-admission-by-client-certificate.md)).
   `revocation` holds the register of issued certificates, the revocation list and the Hosts —
   each with the subject values of its certificate, its Gateway mark and the Agents bound to it —
   behind the `LedgerStore` port

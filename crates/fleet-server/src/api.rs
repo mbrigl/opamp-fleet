@@ -303,13 +303,6 @@ async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
-/// The one route of `/api/v1` that is not the operator's: the artifact bytes an Agent downloads.
-/// It is served on the **Agent plane** (SEC-tls13-two-planes-bounded-input), because that is the audience — the
-/// `download_url` in a package offer is a path the Client resolves against its own OpAMP endpoint
-/// (PKG-signed-packages-and-delivery), so this listener is where the offer already points. It keeps its `/api/v1` path,
-/// which every offered Package's `download_url` names.
-///
-/// Consequently it is not in the OpenAPI document: that document describes the Operator plane.
 /// The bundled UI: one embedded page, no frontend toolchain (DEV-six-crates-tokio-axum).
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
@@ -2019,7 +2012,7 @@ async fn put_package_floor(
     };
     // A floor is set only with its entry's place held, so a restore finds every floor raised;
     // only one known to have failed gives the place back unwritten.
-    let Ok(place) = hold_place(&state) else {
+    let Ok(place) = state.hold_place() else {
         return crate::answers::busy();
     };
     let floor_entry = |outcome: &str| {
@@ -2093,8 +2086,7 @@ async fn delete_package_floor(
     match outcome {
         Ok(true) => {
             info!(agent_type = %agent_type, "package floor removed");
-            note(
-                &state,
+            state.note(
                 crate::audit::Entry::new("package_floor.removed", "removed")
                     .with("agent_type", agent_type.clone()),
             );
@@ -2297,16 +2289,12 @@ fn deployment_error(refusal: DeploymentError) -> Response {
     }
 }
 
-/// Nothing, or the `404` that says package delivery is not armed on this Server.
-fn deployments(state: &OperatorCases) -> Result<(), Refusal> {
-    if state.has_deployments() {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            "package delivery is not configured on this Server".to_string(),
-        ))
-    }
+/// The `404` that says package delivery is not armed on this Server.
+fn deployments_off() -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        "package delivery is not configured on this Server",
+    )
 }
 
 /// A status and what to say with it — carried instead of a whole `Response` so a helper's error
@@ -2325,27 +2313,22 @@ type Refusal = (StatusCode, String);
     )
 )]
 async fn list_deployments(State(state): State<Arc<OperatorCases>>) -> Response {
-    match deployments(&state) {
-        Ok(()) => {
-            let reach = match state.deployment_reach() {
-                Ok(reach) => reach,
-                Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
-            };
-            Json(
-                state
-                    .deployments()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|deployment| {
-                        let counts = reach.get(&deployment.name).copied().unwrap_or_default();
-                        DeploymentView::of(deployment, counts)
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .into_response()
-        }
-        Err((status, why)) => error(status, why),
-    }
+    let Some(all) = state.deployments() else {
+        return deployments_off();
+    };
+    let reach = match state.deployment_reach() {
+        Ok(reach) => reach,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    };
+    Json(
+        all.into_iter()
+            .map(|deployment| {
+                let counts = reach.get(&deployment.name).copied().unwrap_or_default();
+                DeploymentView::of(deployment, counts)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .into_response()
 }
 
 /// One Deployment.
@@ -2364,8 +2347,8 @@ async fn get_deployment(
     State(state): State<Arc<OperatorCases>>,
     Path(name): Path<String>,
 ) -> Response {
-    if let Err((status, why)) = deployments(&state) {
-        return error(status, why);
+    if !state.has_deployments() {
+        return deployments_off();
     }
     match state.deployment(&name) {
         Some(deployment) => deployment_response(&state, deployment),
@@ -2402,16 +2385,10 @@ async fn put_deployment(
     Path(name): Path<String>,
     Json(spec): Json<DeploymentSpec>,
 ) -> Response {
-    if let Err((status, why)) = deployments(&state) {
-        return error(status, why);
-    }
     match state.put_deployment(&name, spec.selector) {
         Some(Ok(deployment)) => deployment_response(&state, deployment),
         Some(Err(e)) => deployment_error(e),
-        None => error(
-            StatusCode::NOT_FOUND,
-            "package delivery is not configured on this Server",
-        ),
+        None => deployments_off(),
     }
 }
 
@@ -2434,8 +2411,8 @@ async fn delete_deployment(
     State(state): State<Arc<OperatorCases>>,
     Path(name): Path<String>,
 ) -> Response {
-    if let Err((status, why)) = deployments(&state) {
-        return error(status, why);
+    if !state.has_deployments() {
+        return deployments_off();
     }
     match state.delete_deployment(&name) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
@@ -2466,7 +2443,7 @@ async fn put_deployment_selector(
 ) -> Response {
     // The same write as `PUT /api/v1/deployments/{name}`, except that this route only re-aims:
     // it never creates.
-    if deployments(&state).is_ok() && state.deployment(&name).is_none() {
+    if state.has_deployments() && state.deployment(&name).is_none() {
         return error(StatusCode::NOT_FOUND, format!("no deployment {name:?}"));
     }
     put_deployment(State(state), Path(name), Json(spec)).await
@@ -2953,9 +2930,6 @@ async fn download_bootstrap_p12(
     State(state): State<Arc<OperatorCases>>,
     Path(serial): Path<String>,
 ) -> Response {
-    if !state.has_bootstrap() {
-        return enrolment_off();
-    }
     let none = || {
         error(
             StatusCode::NOT_FOUND,
@@ -3020,9 +2994,6 @@ async fn delete_bootstrap_certificate(
     _csrf: SameOrigin,
     Path(serial): Path<String>,
 ) -> Response {
-    if !state.has_bootstrap() {
-        return enrolment_off();
-    }
     use crate::bootstrap::DeleteError;
     let revoked = |entry: &crate::bootstrap::Entry| state.is_certificate_revoked(&entry.id);
     let recorded = |entry: &crate::bootstrap::Entry| {
@@ -3115,8 +3086,7 @@ async fn open_enrolment_window(
     match opened {
         Ok(until) => {
             info!(secs = spec.open_for_secs, "enrolment window opened");
-            note(
-                &state,
+            state.note(
                 crate::audit::Entry::new("enrolment.window", "opened").with("until_ms", until),
             );
             window_view(Some(until))
@@ -3148,7 +3118,7 @@ async fn close_enrolment_window(State(state): State<Arc<OperatorCases>>) -> Resp
     }
     // The window is closed only with its entry's place held. It is closed here whatever the store
     // answers, so the entry says `closed` either way.
-    let Ok(place) = hold_place(&state) else {
+    let Ok(place) = state.hold_place() else {
         return crate::answers::busy();
     };
     let Some((expired, saved)) = state.close_enrolment_window() else {
@@ -3200,12 +3170,6 @@ async fn list_enrolments(State(state): State<Arc<OperatorCases>>) -> Response {
         })
         .collect();
     Json(pending).into_response()
-}
-
-/// The host of the Gateway a pending request came through, which every audit entry of it names
-/// (CLT-modes-and-gateway §25).
-fn through_gateway(state: &OperatorCases, id: &str) -> Option<String> {
-    state.enrolment_gateway(id)
 }
 
 /// Approves one enrolment request: the client CA signs it, and the host is handed its certificate.
@@ -3301,10 +3265,10 @@ async fn reject_enrolment(
             ),
         );
     }
-    let gateway = through_gateway(&state, &id);
+    let gateway = state.enrolment_gateway(&id);
     // A request is rejected only with its entry's place held, so a restore rejects it again; only
     // a rejection known to have failed gives the place back unwritten.
-    let Ok(place) = hold_place(&state) else {
+    let Ok(place) = state.hold_place() else {
         return crate::answers::busy();
     };
     let rejection = |outcome: &str| {
@@ -3491,25 +3455,7 @@ impl RevocationView {
     }
 }
 
-/// Records what an operator act did, beside the act itself (SEC-append-only-audit-record §1), and drops it where
-/// the record cannot take it by then: the act was recorded before it ran. What it still records
-/// grants trust, so a restore that misses it errs toward withdrawing. The acts a restore repeats,
-/// which withdraw trust, hold their entry's place before they run instead ([`hold_place`]).
-fn note(state: &OperatorCases, entry: crate::audit::Entry) {
-    state.note(entry);
-}
-
-/// Holds a place in the record for the entry of an act about to run, which says what the act did
-/// once it has (SEC-append-only-audit-record §5):
-/// without one the act does not run, and is answered `503`. `None` where the Server
-/// keeps no record.
-fn hold_place(
-    state: &OperatorCases,
-) -> Result<Option<crate::audit::Permit>, crate::audit::Unavailable> {
-    state.hold_place()
-}
-
-/// Writes what an act did into the place [`hold_place`] held for it.
+/// Writes what an act did into the place [`OperatorCases::hold_place`] held for it.
 fn fill_place(place: Option<crate::audit::Permit>, entry: crate::audit::Entry) {
     if let Some(place) = place {
         place.write(entry);
@@ -3739,7 +3685,7 @@ async fn set_gateway(
     }
     // A mark is set or cleared only with its entry's place held, so a restore finds every mark
     // cleared; only a change known to have failed gives the place back unwritten.
-    let Ok(place) = hold_place(&state) else {
+    let Ok(place) = state.hold_place() else {
         return crate::answers::busy();
     };
     let mark = |outcome: &str| {
@@ -3894,7 +3840,7 @@ async fn revoke(
     };
     // A revocation is made only with its entry's place held, so the record names every certificate
     // revoked; only one known to have failed gives the place back unwritten.
-    let Ok(place) = hold_place(&state) else {
+    let Ok(place) = state.hold_place() else {
         return crate::answers::busy();
     };
     let Some(outcome) =
@@ -3987,8 +3933,7 @@ async fn lift_revocation(
     match outcome {
         Ok(true) => {
             info!(revocation = %id, "revocation lifted");
-            note(
-                &state,
+            state.note(
                 crate::audit::Entry::new("revocation.lifted", "lifted").with("id", id.clone()),
             );
             StatusCode::NO_CONTENT.into_response()

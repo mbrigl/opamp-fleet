@@ -1021,18 +1021,23 @@ fn no_adapter_names_the_composition_roots_kept_from_adapters() {
 
 /// What each module of a plane may not name in the Server (SRV-two-use-case-layers §2 and §4), by
 /// module, with its submodules: an endpoint module names neither the other plane's use cases nor the
-/// other plane's endpoints, and a use-case module names neither the other plane's use cases nor an
-/// endpoint.
+/// other plane's endpoints, a use-case module names neither the other plane's use cases nor an
+/// endpoint, and `answers`, which both endpoints use, names neither plane.
 const PLANE_REACH: &[(&str, &[&str])] = &[
     ("transport", &["operator_cases", "api"]),
     ("api", &["agent_cases", "transport"]),
     ("agent_cases", &["operator_cases", "api", "transport"]),
     ("operator_cases", &["agent_cases", "api", "transport"]),
+    (
+        "answers",
+        &["agent_cases", "operator_cases", "api", "transport"],
+    ),
 ];
 
-/// The endpoint modules, with their submodules: they reach state only through their own plane's
-/// use-case module (SRV-two-use-case-layers §2).
-const ENDPOINTS: &[&str] = &["transport", "api"];
+/// The modules that reach no state, with their submodules: the endpoint modules, which reach it
+/// only through their own plane's use-case module (SRV-two-use-case-layers §2), and `answers`,
+/// which both endpoints use.
+const STATELESS: &[&str] = &["transport", "api", "answers"];
 
 /// The Server's types that hold state, and its ports, which no endpoint module names
 /// (SRV-two-use-case-layers §2). The list is kept by hand: a new type that holds state, or a new
@@ -1098,7 +1103,7 @@ fn plane_reach(module: &str, src: &str, reexports: &Reexports) -> Vec<String> {
             ));
         }
     }
-    if ENDPOINTS.iter().any(|endpoint| within(module, endpoint)) {
+    if STATELESS.iter().any(|stateless| within(module, stateless)) {
         for (token, line) in &tokens {
             if let Token::Ident(name) = token {
                 if STATE_HOLDERS.contains(&name.as_str()) {
