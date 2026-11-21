@@ -109,8 +109,8 @@ protocol and its agents actually allow.
   Server targets Linux only.
 - **Keep the Server's state in stores the operator runs.** The Server keeps its state under one
   data directory, or in PostgreSQL and an S3-compatible object store. On the shared stores,
-  several Server instances serve one fleet, and any instance takes over the Agents of one that is
-  lost. Making the stores redundant is the operator's.
+  several Server instances serve one fleet, and any instance that serves the Agent plane takes over
+  the Agents of one that is lost. Making the stores redundant is the operator's.
 - **Bring agents the project was never built for into OpAMP.** A Custom Supervisor plugin owns
   a foreign agent — one whose configuration format, lifecycle, and health nothing here already
   knows — and translates all three into OpAMP toward the Server, so heterogeneous agents share
@@ -226,12 +226,18 @@ Only a normalization renumbers them
     another instance within its lease time and two heartbeat intervals (90 seconds at the defaults),
     served from what the shared stores hold. A revocation committed on any instance shall end the
     sessions it concerns on every instance within one lease renewal interval (10 seconds at the
-    defaults). A test shows both for a simulated fleet of 10 000 Agents across three instances. A
-    second test shows that the database carries the presence writes and the notifications of 100 000
-    simulated Agents at the default heartbeat of 30 seconds, about 3 300 reports a second, across
-    three instances, with no presence batch written later than its interval after it was due and no
-    notification left unread. The database and the object store are what the instances share, and
-    making them redundant is the operator's: G-20 holds while they are.
+    defaults). A test shows both for a simulated fleet of 10 000 Agents across three instances.
+    Where the Agent plane and the Operator plane run on Server instances of their own, the
+    Operator plane shall stay usable while the Agents of a lost Agent-plane instance reconnect.
+    Every page of up to 100 Agents of the list of the Agents, and every revocation, sent to the
+    Operator plane of an instance that did not stop shall then be answered within 2 seconds. A test
+    shows it for the same simulated fleet on three Agent-plane instances, one of them lost, and one
+    Operator-plane instance. A further test shows that the database carries the presence writes
+    and the notifications of 100 000 simulated Agents at the default heartbeat of 30 seconds, about
+    3 300 reports a second, across three instances, with no presence batch written later than its
+    interval after it was due and no notification left unread. The database and the object store
+    are what the instances share, and making them redundant is the operator's: G-20 holds while
+    they are.
 
 ## Quality Goals
 
