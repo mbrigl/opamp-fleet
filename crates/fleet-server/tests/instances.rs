@@ -1316,11 +1316,19 @@ async fn a_revocation_through_the_operator_plane_instance_ends_the_session_on_th
         operator_plane,
     )
     .await;
+    // Listening, the Agent-plane instance hears the revocation's notification: a revocation
+    // committed before it listened would reach it only at a renewal.
+    assert!(
+        agents.has_read(1).await,
+        "the Agent-plane instance never listened"
+    );
     let (cert, key) = pki.issue("edge-01");
     let mut session = websocket(&agents, &pki, &cert, &key).await;
     exchange(&mut session).await;
     revoke_through(&operators, &pki, &cert).await;
     assert_eq!(
+        // One renewal interval holds the notification alone: the renewal that would catch a
+        // missed one comes up to an interval after the commit and reads the ledger after that.
         closed_within(&mut session, TIMES.renew).await,
         Some((1008, "revoked".to_string())),
         "the Agent-plane instance did not end the revoked session within one renewal interval"
