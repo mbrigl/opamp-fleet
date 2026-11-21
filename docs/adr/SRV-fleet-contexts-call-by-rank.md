@@ -179,10 +179,11 @@ decides; the structure of the other crates.
   longer private to the one context that works on them; clause 5 allows every context to reach
   them.
 - Negative / trade-offs: the test resolves calls on `self`, `Self::` and `AppState::` in `impl
-  AppState` blocks, and review covers what it does not see. It does not see a call on another
-  binding of `AppState`, nor a method of a type of the state that a context defines and another
-  calls through a field. It does not collect a block written as `impl super::AppState` or `impl
-  Trait for AppState`. It resolves `super::` one level off in an inline module inside a context.
+  AppState` and `impl Trait for AppState` blocks, and review covers what it does not see. It does
+  not see a call on another binding of `AppState`, nor a method of a type of the state that a
+  context defines and another calls through a field. It does not collect a block written as `impl
+  super::AppState` or `impl crate::fleet::AppState`. It resolves `super::` one level off in an
+  inline module inside a context.
 - Negative / trade-offs: accepted ADRs cite some moved items by the file they left, until the
   next normalization moves the citations.
   [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) cites
@@ -204,10 +205,11 @@ SRV-fleet-contexts-call-by-rank`:
 - A rank table of the module root and the submodules of `fleet`. A submodule of
   `crates/fleet-server/src/fleet/` outside `#[cfg(test)]` without a rank fails (clause 4).
 - Outside `#[cfg(test)]` and `fixtures`, it collects the methods each context defines in its `impl
-  AppState` blocks. It fails on a call on `self`, or a call or function value through `Self::` or
-  `AppState::`, of a method another context defines at or above the caller's rank (clause 2). It
-  fails on a path, a `use` or a name reached through the root's re-exports that resolves into such
-  a context (clauses 2, 3). It skips the root's own `pub use` lines and test code (clauses 3, 6).
+  AppState` and `impl Trait for AppState` blocks. It fails on a call on `self`, or a call or
+  function value through `Self::` or `AppState::`, of a method another context defines at or above
+  the caller's rank (clause 2). It fails on a path, a `use` or a name reached through the root's
+  re-exports that resolves into such a context (clauses 2, 3). It skips the root's own `pub use`
+  lines and test code (clauses 3, 6).
 - Review covers the order in `docs/ARCHITECTURE.md` and what the test does not see, as
   *Consequences* lists it.
 
