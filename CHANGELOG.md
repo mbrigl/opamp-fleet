@@ -30,7 +30,10 @@ carries a date once its tag exists.
   `planes`, an unknown or repeated name, or one plane on an instance that must be alone fails
   startup, naming the key. The startup log names the planes an instance opens. Each lease records
   its planes, in a column `planes` that the Server adds to `leases` at startup, and an instance
-  warns while no live lease serves a plane. **What to do:**
+  warns while no live lease serves a plane. An instance of the Operator plane alone has nothing
+  listening on `4320`: probe it on `4321`
+  ([OPS-releases-image-probed-by-plane §17](docs/adr/OPS-releases-image-probed-by-plane.md)).
+  **What to do:**
   nothing; without `planes` every instance opens both planes as before. Set `planes` only once
   every instance of the fleet runs this release, since an older one refuses the key.
 

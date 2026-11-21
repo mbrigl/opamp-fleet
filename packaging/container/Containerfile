@@ -55,7 +55,9 @@ ENV FLEET_SERVER__LISTEN=0.0.0.0:4320 \
     FLEET_SERVER__REST__LISTEN=0.0.0.0:4321
 
 # The Agent plane and the Operator plane. No HEALTHCHECK: there is no shell to run one and no health
-# endpoint to ask; an orchestrator probes 4320 over TCP.
+# endpoint to ask; an orchestrator probes a plane the instance opens over TCP, 4320 where it opens
+# the Agent plane and 4321 on an instance of the Operator plane alone
+# (OPS-releases-image-probed-by-plane).
 EXPOSE 4320 4321
 
 ENTRYPOINT ["/usr/local/bin/server"]

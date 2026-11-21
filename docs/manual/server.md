@@ -101,7 +101,8 @@ walks through it.
 
 There are **two listeners, split by audience**: the one
 the fleet talks to, and the one you talk to. Both serve TLS 1.3 and nothing older, with the same
-certificate.
+certificate. A Server opens both. Of several instances on one database, each may open one of them
+alone ([Planes on instances of their own](#planes-on-instances-of-their-own)).
 
 **The Agent plane** — `listen`, `127.0.0.1:4320` by default. Serving the fleet is one deliberate
 line, `listen = "0.0.0.0:4320"`.
@@ -169,7 +170,8 @@ not in it and are named by the `org.opencontainers.image.base.digest` annotation
 | Configuration, certificates, keys, secrets | none; you mount them as files |
 
 Because both planes listen off the loopback inside the container, the Server requires `[tls]` and
-`[rest.auth]` there. The image carries neither, so started with nothing mounted it names the
+`[rest.auth]` there, also in an instance that opens one plane alone: every instance checks the
+whole configuration. The image carries neither, so started with nothing mounted it names the
 missing key and stops — it never serves in the clear or without authentication. Mount the
 certificates, the keys and every password or credential file read-only, and name their paths in the
 configuration. The image works with a read-only root filesystem; the Server
@@ -196,9 +198,11 @@ $ docker run -d --name opamp-fleet-server --read-only --stop-timeout 30 \
 after it. Docker's own default of 10 seconds ends the Server with `SIGKILL` before it has written
 the fleet's records; an orchestrator's grace period needs the same room.
 
-A bind mount for the data directory must be writable by UID `65532`. There is no `HEALTHCHECK` —
-the image has no shell to run one and the Server has no health endpoint — so probe a TCP connection
-to `4320` for liveness and readiness. The `debug` variant of the base, which has a shell, is for
+A bind mount for the data directory must be writable by UID `65532`. There is no `HEALTHCHECK` — the
+image has no shell to run one and the Server has no health endpoint — so probe a TCP connection to
+`4320`, the Agent plane, for liveness and readiness. An instance that opens the Operator plane alone
+has nothing listening there: probe `4321` on it ([Planes on instances of their
+own](#planes-on-instances-of-their-own)). The `debug` variant of the base, which has a shell, is for
 inspecting a problem locally; it is not published.
 
 To build the image yourself from a checkout, on a system whose glibc is no newer than Debian 13's,
@@ -257,6 +261,7 @@ configures the Server.
 | `listen` | `"127.0.0.1:4320"` | The **Agent plane**, as `address:port`: the OpAMP endpoint and the package downloads. `4320` is the protocol's default port. Serve the fleet with `"0.0.0.0:4320"`. |
 | `max_connections` | `10000` | The connections the Agent plane holds at once. A connection past it is closed on accept. Raise it together with the process's file-descriptor limit for a larger fleet. `0` is refused at startup. |
 | `max_new_connections_per_sec` | `200` | The new Agent-plane connections taken a second, each a full TLS handshake and admission. A connection past it completes its handshake and is answered `503` with a `Retry-After` of 1 to 30 seconds, then closed. `0` is refused at startup. |
+| `planes` | `["agent", "operator"]` | The planes this instance opens: `"agent"`, `"operator"`, or both. An empty array, an unknown name or a name given twice is refused at startup. One plane alone is for an instance of several on one database, and only an instance that may share its database opens one alone: on the filesystem store, with `[blobs] store = "fs"`, or with a CA key in a file, a `planes` without both is refused at startup, naming that key. Set it only once every instance of the fleet runs a release that knows it; see [Planes on instances of their own](#planes-on-instances-of-their-own). |
 | `drain_secs` | `20` | How long a stop spreads the closing of the WebSocket sessions over, from `0` to `300`; `0` closes them all at once. What is still open 2 seconds after it is cut. An orchestrator's stop timeout must be longer, or the fleet's records are not written. |
 | `data_dir` | `"fleet-data"` | Where the Server keeps **all** of its state, one directory per domain: see [Where the Server keeps its state](#where-the-server-keeps-its-state). Created owner-only when missing. `config_dir` and `packages_dir` are gone: a file naming either fails startup and names `server migrate` ([Upgrading to one data directory](#upgrading-to-one-data-directory)). |
 | `max_message_size_bytes` | `67108864` (64 MiB) | The largest OpAMP message accepted or sent, in either direction and on either transport. The protocol requires a limit and recommends this value; a fleet of status reports needs far less. An oversized HTTP request is answered `413`, an oversized WebSocket message closes the connection with `1009`. A request or message that has begun and delivers less than 64 KiB in a minute is answered `408`, or closes its connection with `1008`. |
@@ -541,23 +546,23 @@ afterwards means restoring it. The Server creates tables and indexes, and the tr
 function, that keeps the count of the Agents' records `max_agents` is decided by, and nothing else:
 the database, the role, its rights and extensions, replication and backups are the operator's.
 
-Every Server on PostgreSQL is an instance: before it opens either listener it takes a lease in the
+Every Server on PostgreSQL is an instance: before it opens a listener it takes a lease in the
 database under an instance id of its own, renews it every `lease_renew_secs`, and keeps its
 listeners open only while it can prove it. One that cannot renew before its lease lapses ends every
-session, closes both listeners, and takes a new lease under a new instance id once the database
-answers again.
+session, closes the listeners it opens, and takes a new lease under a new instance id once the
+database answers again.
 
 An instance measures its lease on a clock that counts the time its host was suspended
-(`CLOCK_BOOTTIME`). Once it runs again after a suspend longer than its lease, it serves nothing:
-it answers `503` to a request on either plane and to a message of an Agent, within 100
-milliseconds it ends every session and closes both listeners, and it opens them again under a new
-lease and a new instance id, as after losing the database. A virtual machine that its hypervisor
-pauses without the guest's clocks counting the pause is not covered: such an instance serves on
-until its next renewal, at most `lease_renew_secs` later, finds its lease lapsed.
+(`CLOCK_BOOTTIME`). Once it runs again after a suspend longer than its lease, it serves nothing: it
+answers `503` to a request on a plane it opens and to a message of an Agent, within 100 milliseconds
+it ends every session and closes the listeners it opens, and it opens them again under a new lease
+and a new instance id, as after losing the database. A virtual machine that its hypervisor pauses
+without the guest's clocks counting the pause is not covered: such an instance serves on until its
+next renewal, at most `lease_renew_secs` later, finds its lease lapsed.
 
 A lease's expiry is the database's own time. A step forward of the database's clock past what is
-left of a lease lapses it: its instance can no longer renew it, so it ends every session, closes
-both listeners and takes a new lease under a new instance id, as after losing the database, and
+left of a lease lapses it: its instance can no longer renew it, so it ends every session, closes the
+listeners it opens and takes a new lease under a new instance id, as after losing the database, and
 another instance may take the lapsed lease over and close its audit chain. A step longer than
 `lease_secs` does this to every instance at once, so the database's clock is to be slewed, not
 stepped, while the Servers run.
@@ -833,14 +838,17 @@ carries it, and no instance keeps anything on its disk. Each instance needs:
   an instance runs alone
   ([A CA key in a file means a standby](#a-ca-key-in-a-file-means-a-standby));
 - the same `server.toml` as the others, so that `max_agents` and the rest agree, and the same
-  `[tls]` certificate, which names the address the Clients connect to.
+  `[tls]` certificate, which names the address the Clients connect to. Only `planes` may differ
+  between instances, set in each one's environment
+  ([Planes on instances of their own](#planes-on-instances-of-their-own)).
 
 In front of the Agent plane, that address is a TCP load balancer that passes the TLS connection
 through unopened, since the client certificate in its handshake is what admits an Agent, and keeps
 the peer's address, on which the [admission throttle](#repeated-failures-are-throttled) keys. It
 probes each instance with a TCP connection to the port `listen` names, `4320` by default: an
-instance without a lease has closed its listeners and is sent no Agent. The Operator plane of any
-instance shows the whole fleet and acts on it.
+instance without a lease has closed its listeners and is sent no Agent. Its pool holds the
+instances that open the Agent plane. The Operator plane of any instance that opens it shows the
+whole fleet and acts on it.
 
 Give the balancer **source-address affinity** on the Agent plane, so that it sends one peer
 address to one instance for as long as that instance is up:
@@ -858,6 +866,47 @@ address to one instance for as long as that instance is up:
 
 When an instance is lost, the balancer sends its addresses to the others.
 
+### Planes on instances of their own
+
+Every instance opens both planes unless `planes` names fewer. Where operators' requests must not
+wait for an instance busy with the fleet, as while the Agents of a lost instance reconnect to the
+others, give the planes instances of their own. One `server.toml` serves them all, and each
+instance's environment names its planes:
+
+```console
+# hosts a, b and c, behind the Agent plane's balancer
+FLEET_SERVER__PLANES='["agent"]'
+# hosts d and e, behind the Operator plane's balancer or named by the operators directly
+FLEET_SERVER__PLANES='["operator"]'
+```
+
+- **Each plane needs an instance that opens it, two to survive the loss of one.** Every instance
+  reads its database's leases at its start and at each renewal, and logs `no live lease serves
+  the Agent plane: no instance on the database opens it`, or the same of the Operator plane, once
+  while no live instance opens that plane. It refuses nothing.
+- **Probe each instance on a plane it opens.** On one that opens the Agent plane, probe `4320`,
+  the port `listen` names. On one that opens the Operator plane alone, nothing listens there:
+  probe `4321`, the port `[rest] listen` names. Either probe fails while the instance holds no
+  lease.
+- **The Operator plane needs no affinity.** Every instance that opens it reads the fleet from the
+  database, and a page's `Link` may be followed on any of them.
+- **Every instance checks the whole configuration**, whichever planes it opens: an instance of the
+  Agent plane alone still refuses to start without `[rest.auth]` when `[rest] listen` is off the
+  loopback, and still reads the `[rest.tls]` files. At startup it logs the planes it opens and the
+  one it leaves closed, such as `opening the Agent plane; the Operator plane stays closed`.
+- **An instance that must be alone opens both.** On the filesystem store, with `[blobs] store =
+  "fs"`, or with a CA key in a file, an instance serves alone, and a `planes` without both stops
+  it at startup, naming `planes` and the key that makes it alone.
+- **Set `planes` only once every instance runs a release that knows it.** An older release refuses
+  it as an unknown key. Until then every instance opens both planes: finish the
+  [rolling update](#a-rolling-update) to this release first, then give the instances their planes
+  one at a time, so that each plane keeps an instance that opens it throughout.
+
+What the Agent-plane instances do in a failover is unchanged. A test runs it: of three instances of
+the Agent plane alone, one is killed under 10 000 simulated Agents, and until its Agents are
+carried again, every page of 100 Agents and every revocation sent to an instance of the Operator
+plane alone has to be answered within 2 seconds.
+
 Each Agent's view names the instance that carries it: `holder`, the instance id of its lease, and
 `holder_host`, the host name that lease records. Both are empty while no instance with a live
 lease holds the Agent, as after its instance stopped and before it reconnected. The Agents tab
@@ -866,7 +915,7 @@ one instance carries, `holder=none` what none does: what a lost instance took wi
 
 ### What a failover does
 
-- **An instance stops in order** (`SIGTERM`). It closes both listeners at once and ends its
+- **An instance stops in order** (`SIGTERM`). It closes the listeners it opens at once and ends its
   WebSocket sessions spread over `drain_secs`. Then it writes where its Agents are, closes its
   audit chain and releases its lease, and every other instance reads its Agents as disconnected at
   once. Each WebSocket Client reconnects after a delay drawn over 30 seconds, a plain-HTTP Client
@@ -880,7 +929,7 @@ one instance carries, `holder=none` what none does: what a lost instance took wi
   lease's audit chain with `reason` `lease_lapsed`, and deletes that lease's staging objects in
   the bucket.
 - **An instance loses the database.** Once it cannot renew before its lease lapses, it ends every
-  session it carries and closes both listeners, so the balancer sends it no Agent. When the
+  session it carries and closes the listeners it opens, so the balancer sends it no Agent. When the
   database answers again, it takes a new lease under a new instance id and opens them again.
 
 A request in flight on an instance that ends without stopping is not answered: read through
@@ -888,9 +937,9 @@ another instance whether it took effect before making it again.
 
 ### Stopping an instance
 
-An instance stops on `SIGTERM`. It closes both listeners at once, answers the requests already in
-flight, and ends each WebSocket session at an instant drawn over `drain_secs`, 20 seconds by
-default; what is still open 2 seconds after that is cut. Each of its Agents then waits a delay
+An instance stops on `SIGTERM`. It closes the listeners it opens at once, answers the requests
+already in flight, and ends each WebSocket session at an instant drawn over `drain_secs`, 20 seconds
+by default; what is still open 2 seconds after that is cut. Each of its Agents then waits a delay
 drawn over 30 seconds before it reconnects, so the Agents of a stopped instance reach the others
 spread over `drain_secs` and 30 seconds more. Each instance takes at most
 `max_new_connections_per_sec` new connections a second and answers the rest `503` with a
@@ -1212,7 +1261,8 @@ two the one left takes them all. Size them so that one instance fewer still carr
   at most twice that, a Gateway counting once for each connection of its pool.
 - **New connections.** Each instance takes at most `max_new_connections_per_sec` new connections a
   second, 200 by default, which bounds how fast the Agents of a lost instance come back.
-- **The database's connections.** It must allow `pool_size` connections for each instance, one
+- **The database's connections.** It must allow `pool_size` connections for each instance,
+  whichever planes it opens, one
   more that listens for notifications, one for each sweep in progress, one for a prune of the
   audit record in progress, and, with `[audit] key_label`, one that holds the signer's lock of the
   audit record's checkpoints: 60 for three instances at the defaults with an audit key, counting
@@ -1223,13 +1273,15 @@ two the one left takes them all. Size them so that one instance fewer still carr
   every connection of a Gateway, to one instance, so such a group weighs on one instance alone.
 
 Two tests in `crates/fleet-server/tests/g20.rs` measure G-20, three instances on one host with 8
-CPUs. In the failover, 10 000 simulated hosts of one Agent each and a Gateway of ten connections
-carrying ten Agents each connect, and one instance is killed, in another run frozen: every Agent it
-carried was connected to another instance within `lease_secs` and two heartbeat intervals, at about
-435 new Agents a second. In the load test, three instances carry 100 000 Agents, ten on each
-connection, for ten minutes, with no presence batch written late and no notification left unread.
-`scripts/check-g20.sh` runs both on a machine with 8 CPUs and 8 GiB of memory, as does the *G-20*
-workflow on demand, which has not yet run on a hosted runner.
+CPUs, and a third runs the failover with the planes on instances of their own ([Planes on instances
+of their own](#planes-on-instances-of-their-own)). In the failover, 10 000 simulated hosts of one
+Agent each and a Gateway of ten connections carrying ten Agents each connect, and one instance is
+killed, in another run frozen: every Agent it carried was connected to another instance within
+`lease_secs` and two heartbeat intervals, at about 435 new Agents a second. In the load test, three
+instances carry 100 000 Agents, ten on each connection, for ten minutes, with no presence batch
+written late and no notification left unread. `scripts/check-g20.sh` runs them on a machine with 8
+CPUs and 8 GiB of memory, as does the *G-20* workflow on demand, which has not yet run on a hosted
+runner.
 
 ### A rolling update
 
@@ -1242,7 +1294,8 @@ time while the others serve the fleet:
 3. **Start the new release in its place**, with the same `server.toml`. The first instance of the
    new release migrates the schema, and an instance that starts meanwhile waits for it. Wait until
    it serves: it logs `serving the OpAMP endpoint and package downloads over TLS`, and the
-   balancer's probe connects.
+   balancer's probe connects. An instance of the Operator plane alone logs `serving the REST API,
+   the API docs, and the UI over TLS`, and its probe goes to `4321`.
 4. **Do the same with each other instance**, one at a time.
 
 An orchestrator's rolling update does this when it replaces one instance at a time and gives each
