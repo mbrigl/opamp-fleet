@@ -31,7 +31,8 @@ Decision, all calls and names between the contexts point down except these six:
 - `rollout` names three types of `views`: `DeploymentReach`, `PendingConfigurationView` and
   `PendingPackageView`;
 - `approval` reaches `session` through `persist_if_dirty`, the helpers of the round's answers
-  `bad_request`, `unavailable` and `compose_settings_offer`, the type `Ending` and two constants;
+  `bad_request`, `unavailable` and `compose_settings_offer`, the types `Ending` and `Processed`
+  and two constants;
 - the module root calls `placement`'s `place_all` in its construction and `placed` and
   `arrived_over` in its reads of the fleet;
 - the module root names context types as the types of the fields of `AppState` and `AgentRecord`:
@@ -46,8 +47,17 @@ call reaches the issuing of certificates, which four accepted ADRs bind by the f
 [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md),
 [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md),
 [CLT-modes-and-gateway](CLT-modes-and-gateway.md) and
-[SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md). Nothing holds the direction: a
-session that needs a method of another context calls it, and the cycles grow.
+[SRV-state-stores-contract-pair](SRV-state-stores-contract-pair.md). The helpers `approval` reaches
+are bound by file as well:
+[SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) binds every
+`Unavailable` reply in `fleet/session.rs` and `fleet/approval.rs`, CLT-modes-and-gateway binds the
+two constants of the enrolment's refusals by `fleet/approval.rs`,
+[SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md) binds the persist path by
+`fleet/held.rs`, and
+[SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md) binds the
+composition of the settings offer by `fleet/session.rs` and its capability declaration by
+`fleet.rs`, so that the composition stays in its scope in the module root. Nothing holds the
+direction: a session that needs a method of another context calls it, and the cycles grow.
 
 The architecture catalogue's *modular monolith* fits when several areas of the domain grow at
 different speeds, when parallel work needs boundaries a ticket can stay inside, or when a later
@@ -63,7 +73,8 @@ context finds boundaries without cycles.
 
 It is recorded because it binds every later change to `fleet`, and because a reader who finds a
 method moved down into a context that does not seem to own it, a type of a view kept in `rollout`,
-or the helpers of the round's answers in the module root, would take it for a mistake.
+or the helpers of the round's answers in `approval` and its persist path in `held`, would take it
+for a mistake.
 
 ## Decision
 
@@ -119,8 +130,11 @@ decides; the structure of the other crates.
 - **`approval` above `session`.** It leaves one name pointing up instead of eight, the round's call
   of `issue`. But resolving that edge moves the issuing of certificates out of `fleet/approval.rs`,
   and the four accepted ADRs that bind it by that file would no longer come into scope for a
-  change to the reading of a CSR until a normalization moved their paths. Rejected; the helpers of
-  the round's answers move to the module root instead.
+  change to the reading of a CSR until a normalization moved their paths. Rejected; the helpers
+  move down instead, each to a file that already binds it.
+- **The helpers of the round's answers in the module root.** One place for what `approval` and
+  `session` share, but the persist path calls `held`, which the root must not name, and the replies
+  would leave the files through which their ADRs bind them. Rejected.
 - **`views` below `rollout`.** `rollout` names three view types, but `views` reads what waits for an
   Agent through `rollout`; the view types are values `rollout` computes and move more easily.
   Rejected.
@@ -162,13 +176,14 @@ decides; the structure of the other crates.
 - Negative / trade-offs: the module root carries the types of the state, so their fields are no
   longer private to the one context that works on them; clause 5 allows every context to reach
   them.
-- Negative / trade-offs: the test resolves calls on `self`, `Self::` and `AppState::`; a call on
-  another binding of `AppState` is left to review.
-- Follow-ups: resolving the six edges of the Context that point up — the end of a session and
-  `Processed` reached from `held`, the take of labels from `held`, the three view types `rollout`
-  names, the helpers of the round's answers reached from `approval`, the root's construction and
-  reads that use `placement`, and the types of the root's fields defined in contexts; the order in
-  `docs/ARCHITECTURE.md`; state per context, when a requirement asks for it.
+- Negative / trade-offs: the test resolves calls on `self`, `Self::` and `AppState::` in `impl
+  AppState` blocks. A call on another binding of `AppState`, a method of a type of the state that a
+  context defines and another calls through a field, and a block written as `impl
+  super::AppState` are left to review.
+- Negative / trade-offs: a helper moved by this decision goes to a file that already binds it,
+  which can place it in a context a reader would not look in first.
+- Follow-ups: state per context, when a requirement asks for it. The six edges of the Context are
+  resolved with this decision's implementation.
 
 ## Enforcement
 
@@ -179,8 +194,8 @@ SRV-fleet-contexts-call-by-rank`:
   `crates/fleet-server/src/fleet/` outside `#[cfg(test)]` without a rank fails (clause 4).
 - Outside `#[cfg(test)]` and `fixtures`, it collects the methods each context defines in its `impl
   AppState` blocks and fails on a call on `self`, or a call or function value through `Self::` or
-  `AppState::`, of a method defined at or above the caller's rank, and on a path, a `use` or a name
-  reached through the root's re-exports that resolves into such a context (clauses 2, 3, 6). The
-  root's own `pub use` lines are skipped.
+  `AppState::`, of a method another context defines at or above the caller's rank, and on a path, a
+  `use` or a name reached through the root's re-exports that resolves into such a context (clauses
+  2, 3, 6). The root's own `pub use` lines are skipped.
 
 The existing tests of the Server stay unchanged and green, which is what clause 7 asks.
