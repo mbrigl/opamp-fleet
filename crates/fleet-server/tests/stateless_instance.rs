@@ -1011,7 +1011,7 @@ fn an_instance_of_one_plane_serves_that_plane_alone_and_runs_every_other_task() 
                  [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {cert:?}\n\
                  [rest]\nlisten = \"127.0.0.1:{operator}\"\n\
                  [database]\nstore = \"postgres\"\nlease_renew_secs = 1\nlease_secs = 3\n\
-                 presence_interval_secs = 1\n{database}{blobs}",
+                 presence_interval_secs = 10\n{database}{blobs}",
                 agent = ports::spare_port(),
                 operator = ports::spare_port(),
                 cert = files.path().join("cert.pem").display().to_string(),
@@ -1021,10 +1021,14 @@ fn an_instance_of_one_plane_serves_that_plane_alone_and_runs_every_other_task() 
             ),
         )
         .expect("write server.toml");
-        // A lease that lapsed, of an instance that is gone, for this one to take over.
+        // A first start migrates the fresh role's schema, so the table of leases exists; its
+        // lease goes with it, and a lease that lapsed, of an instance that is gone, takes its
+        // place for the next start to take over.
+        drop(OnePlane::start(files.path(), planes, served));
         let lapsed = instance_id();
         role.sql(&format!(
-            "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
+            "DELETE FROM leases; \
+             INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
              expires_at) VALUES ('{lapsed}', 'gone', false, now(), now(), now());"
         ));
         let (instance, seen) = OnePlane::start(files.path(), planes, served);
