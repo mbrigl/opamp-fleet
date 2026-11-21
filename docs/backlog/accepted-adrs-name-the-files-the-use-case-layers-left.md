@@ -19,8 +19,10 @@ accepted ADRs still names the old files for that code:
 in `agent_cases.rs` or `operator_cases.rs` alone is not shown the ADRs that bind it. An accepted
 ADR's text cannot be edited in place (NUC-decisions-are-proposed-then-accepted §6).
 
-**Idea.** The next normalization moves the five *Applies to* to the new files; or a superseding ADR
-does it earlier, if a change to admission, enrolment, sessions or downloads comes first. Until then
-a session that touches either file reads the five by hand.
+**Idea.** The next normalization moves the five *Applies to* to the new files. Until then a
+session that touches either file reads the five by hand.
+
+**Decided.** The human chose the next normalization on 2026-11-21, over a superseding ADR, which
+would restate five ADRs for their paths alone.
 
 **From.** The review of `refactor/use-case-layers` at e821d8d15 (2026-11-21).
