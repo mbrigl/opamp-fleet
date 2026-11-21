@@ -50,6 +50,16 @@ max_new_connections_per_sec = 200
 # timeout more than this.
 drain_secs = 20
 
+# The planes this instance opens: "agent", "operator", or both, which is the default. Several
+# instances on one PostgreSQL database may share this file and set it per instance, as
+# FLEET_SERVER__PLANES='["agent"]' does. Only an instance that may share its database opens one
+# plane alone: one with [database] store = "postgres", [blobs] store = "s3", and no CA key in a
+# file; any other refuses to start with one plane. Every instance checks the whole file, the
+# keys of a plane it leaves closed among them. Set it only once every instance of the fleet runs a
+# release that knows it: an older one refuses it as an unknown key. A Server whose instances leave
+# a plane unserved warns of it.
+# planes = ["agent", "operator"]
+
 # Where the Server keeps ALL of its state, one directory per domain, created owner-only (0700) when
 # missing, every file in it 0600. The layout is fixed; anything else in it stops the Server, named:
 #

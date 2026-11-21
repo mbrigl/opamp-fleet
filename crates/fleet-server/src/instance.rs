@@ -3,13 +3,14 @@
 //! the lease it holds while it serves, the planes it opens only while it
 //! holds one, and the changes of other instances it takes up.
 //!
-//! An instance takes its lease before it opens either listener and renews it while it serves. It
-//! measures the lease from the moment it sent the last renewal the database confirmed, on a clock
-//! that counts a suspend ([`Elapsed`]), so it deems it lapsed no later than the database and every
-//! other instance do. It reads that clock before each answer ([`Proof`]). Once it cannot prove
-//! one, it ends every session it carries and closes both listeners; it never serves on a lease it
-//! cannot prove, because it could not learn of a revocation. When the database answers again it
-//! takes a new lease under a new instance id and binds the same addresses again. On the filesystem
+//! An instance takes its lease before it opens a listener of the planes it opens, and renews it
+//! while it serves (SRV-instance-opens-chosen-planes §1). It measures the lease from the moment it
+//! sent the last renewal the database confirmed, on a clock that counts a suspend ([`Elapsed`]), so
+//! it deems it lapsed no later than the database and every other instance do. It reads that clock
+//! before each answer ([`Proof`]). Once it cannot prove one, it ends every session it carries and
+//! closes the listeners it opens (clause 3); it never serves on a lease it cannot prove, because
+//! it could not learn of a revocation. When the database answers again it takes a new lease under
+//! a new instance id and binds the same addresses again. On the filesystem
 //! store there is one Server, no lease, and the planes are served until the Server stops.
 
 use std::collections::{BTreeSet, HashSet};
@@ -472,7 +473,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
         proof.lost();
         error!(
             instance_id = %instance_id,
-            "lost the lease: ending every session and closing both listeners until a new lease is \
+            "lost the lease: ending every session and closing the listeners until a new lease is \
              held"
         );
         held.send_replace(None);
@@ -573,7 +574,7 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
     lease.proof.lost();
     error!(
         instance_id = %instance_id,
-        "lost the exclusive lock: ending every session, closing both listeners, and serving no more \
+        "lost the exclusive lock: ending every session, closing the listeners, and serving no more \
          until the Server is started again"
     );
     lease.held.send_replace(None);

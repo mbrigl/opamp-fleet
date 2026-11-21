@@ -864,6 +864,243 @@ fn an_instance_takes_its_lease_before_it_opens_a_listener() {
     assert!(takes(agent) && takes(operator), "both planes serve");
 }
 
+/// A Server of one plane, started on PostgreSQL and S3 as an operator starts it.
+struct OnePlane {
+    /// Killed when this is dropped.
+    _server: ServerUnderTest,
+    logged: mpsc::Receiver<String>,
+    agent: u16,
+    operator: u16,
+}
+
+impl OnePlane {
+    /// Starts the Server on the one `server.toml` of `files`, `planes` set in its environment,
+    /// with presence written at debug level, and waits for the line that says it serves.
+    fn start(files: &Path, planes: &str, served: &str) -> (Self, Vec<String>) {
+        let config = files.join("server.toml");
+        let text = std::fs::read_to_string(&config).expect("server.toml");
+        let port = |key: &str| -> u16 {
+            text.lines()
+                .filter(|line| line.starts_with("listen = "))
+                .nth(usize::from(key == "operator"))
+                .and_then(|line| line.rsplit(':').next())
+                .and_then(|port| port.trim_end_matches('"').parse().ok())
+                .expect("a port")
+        };
+        let mut server = ServerUnderTest(
+            Command::new(env!("CARGO_BIN_EXE_server"))
+                .arg("--config")
+                .arg(&config)
+                .current_dir(files)
+                .env("RUST_LOG", "info,fleet_server::instance=debug")
+                .env("FLEET_SERVER__PLANES", planes)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start the server"),
+        );
+        let (lines, logged) = mpsc::channel();
+        let stderr = server.0.stderr.take().expect("stderr");
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let _ = lines.send(line);
+            }
+        });
+        let mut seen = Vec::new();
+        let came_up = loop {
+            match logged.recv_timeout(Duration::from_secs(60)) {
+                Ok(line) if line.contains(served) => break true,
+                Ok(line) => seen.push(line),
+                Err(_) => break false,
+            }
+        };
+        assert!(
+            came_up,
+            "{planes}: the server never came up:\n{}",
+            seen.join("\n")
+        );
+        (
+            OnePlane {
+                _server: server,
+                logged,
+                agent: port("agent"),
+                operator: port("operator"),
+            },
+            seen,
+        )
+    }
+
+    /// Waits for a line that holds `text`, answering whether one came within a minute.
+    fn logs(&self, text: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match self.logged.recv_timeout(left) {
+                Ok(line) if line.contains(text) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+
+    /// Every line logged so far that holds `text`.
+    fn logged_so_far(&self, text: &str) -> Vec<String> {
+        self.logged
+            .try_iter()
+            .filter(|line| line.contains(text))
+            .collect()
+    }
+}
+
+/// Whether a TCP connection to the loopback's `port` is taken: what a probe sees.
+fn takes(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(500),
+    )
+    .is_ok()
+}
+
+/// A Server of one plane on PostgreSQL and S3, composed by the binary from one `server.toml` with
+/// `planes` set in its environment. Each kind names the plane it opens and the one it leaves
+/// closed, listens on its own plane's port alone, holds a lease, opens its audit chain, and takes
+/// over a lapsed lease. The instance of the Operator plane writes no
+/// presence batch while the instance of the Agent plane beside it writes them. A bind that fails
+/// names the plane
+/// (SRV-instance-opens-chosen-planes §1, §24 and §25,
+/// SEC-tls13-bounded-input-chosen-planes §14).
+// Verifies: SRV-instance-opens-chosen-planes, SEC-tls13-bounded-input-chosen-planes
+#[test]
+fn an_instance_of_one_plane_serves_that_plane_alone_and_runs_every_other_task() {
+    opamp::tls::install_ring_provider();
+    let mut started = Vec::new();
+    for (planes, served, opens, closed) in [
+        (
+            "[\"operator\"]",
+            "serving the REST API",
+            "opening the Operator plane; the Agent plane stays closed",
+            "agent",
+        ),
+        (
+            "[\"agent\"]",
+            "serving the OpAMP endpoint",
+            "opening the Agent plane; the Operator plane stays closed",
+            "operator",
+        ),
+    ] {
+        // Each kind on a database and a bucket prefix of its own, so the lapsed lease is taken
+        // over by it and no other.
+        let Some(role) = Role::named() else { return };
+        let Some(bucket) = Bucket::named() else {
+            return;
+        };
+        let files = tempfile::tempdir().expect("tempdir");
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+            .expect("a self-signed certificate");
+        std::fs::write(files.path().join("cert.pem"), cert.cert.pem()).expect("write cert");
+        std::fs::write(
+            files.path().join("key.pem"),
+            cert.signing_key.serialize_pem(),
+        )
+        .expect("write key");
+        std::fs::write(
+            files.path().join("server.toml"),
+            format!(
+                "listen = \"127.0.0.1:{agent}\"\n\
+                 [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {cert:?}\n\
+                 [rest]\nlisten = \"127.0.0.1:{operator}\"\n\
+                 [database]\nstore = \"postgres\"\nlease_renew_secs = 1\nlease_secs = 3\n\
+                 presence_interval_secs = 1\n{database}{blobs}",
+                agent = ports::spare_port(),
+                operator = ports::spare_port(),
+                cert = files.path().join("cert.pem").display().to_string(),
+                key = files.path().join("key.pem").display().to_string(),
+                database = role.section(files.path()),
+                blobs = bucket.section(),
+            ),
+        )
+        .expect("write server.toml");
+        // A lease that lapsed, of an instance that is gone, for this one to take over.
+        let lapsed = instance_id();
+        role.sql(&format!(
+            "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
+             expires_at) VALUES ('{lapsed}', 'gone', false, now(), now(), now());"
+        ));
+        let (instance, seen) = OnePlane::start(files.path(), planes, served);
+        assert!(
+            seen.iter().any(|line| line.contains(opens)),
+            "{planes}: the startup log names the planes:\n{}",
+            seen.join("\n")
+        );
+        let (open, shut) = if closed == "agent" {
+            (instance.operator, instance.agent)
+        } else {
+            (instance.agent, instance.operator)
+        };
+        assert!(takes(open), "{planes}: its plane takes a connection");
+        assert!(
+            !takes(shut),
+            "{planes}: nothing listens on the closed plane"
+        );
+        assert!(
+            seen.iter()
+                .any(|line| line.contains("took over the lease") && line.contains(&lapsed)),
+            "{planes}: its take takes over the lapsed lease:\n{}",
+            seen.join("\n")
+        );
+        assert_eq!(
+            role.count(&format!("leases WHERE instance_id = '{lapsed}'")),
+            0,
+            "{planes}: the lapsed lease is gone"
+        );
+        assert_eq!(
+            role.count(
+                "audit_chains WHERE closed_at IS NULL AND id IN \
+                 (SELECT instance_id FROM leases WHERE expires_at > now())"
+            ),
+            1,
+            "{planes}: it holds an open audit chain"
+        );
+        started.push((instance, files, role, bucket));
+    }
+    // The Agent-plane instance writes its presence batches; the Operator-plane instance, which
+    // started first, has written none by then.
+    let (operator, agent) = (&started[0].0, &started[1].0);
+    assert!(
+        agent.logs("wrote the presence of the agents"),
+        "the Agent-plane instance writes presence batches"
+    );
+    assert!(
+        agent.logs("wrote the presence of the agents"),
+        "the Agent-plane instance writes them on"
+    );
+    assert_eq!(
+        operator.logged_so_far("presence"),
+        Vec::<String>::new(),
+        "the Operator-plane instance writes no presence batch"
+    );
+    // A second instance of the Agent plane on the same `server.toml` finds its address taken: its
+    // start fails, naming the plane.
+    let output = Command::new(env!("CARGO_BIN_EXE_server"))
+        .arg("--config")
+        .arg(started[1].1.path().join("server.toml"))
+        .current_dir(started[1].1.path())
+        .env("FLEET_SERVER__PLANES", "[\"agent\"]")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run the server");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the start fails:\n{stderr}");
+    assert!(
+        stderr.contains("cannot bind the Agent plane"),
+        "names the plane:\n{stderr}"
+    );
+    drop(started);
+}
+
 /// A Server on PostgreSQL with its blobs in `data_dir` under `files`, both planes on the loopback
 /// over TLS with the certificate `files` holds, its lease lapsing three seconds after it stops:
 /// its `server.toml`, the port of its Operator plane, and the certificate's PEM.
