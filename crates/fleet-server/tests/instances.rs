@@ -769,16 +769,22 @@ impl Instance {
         tokio::spawn(async move {
             fleet_server::instance::serve(
                 fleet_server::instance::Planes {
-                    agents,
-                    operators,
-                    agent_tls: planes.agent.rustls_config().expect("agent plane"),
-                    operator_tls: planes.operator.rustls_config().expect("operator plane"),
-                    agent_max_connections: 64,
-                    agent_max_new_connections_per_sec: 200,
-                    operator_max_connections: 64,
+                    agent: Some(fleet_server::instance::Plane {
+                        router: agents,
+                        listener: agent_listener,
+                        tls: planes.agent.rustls_config().expect("agent plane"),
+                        max_connections: 64,
+                        max_new_connections_per_sec: Some(200),
+                    }),
+                    operator: Some(fleet_server::instance::Plane {
+                        router: operators,
+                        listener: operator_listener,
+                        tls: planes.operator.rustls_config().expect("operator plane"),
+                        max_connections: 64,
+                        max_new_connections_per_sec: None,
+                    }),
                     drain: Duration::from_secs(1),
                 },
-                (agent_listener, operator_listener),
                 Some(lease.held()),
                 Some(lease.proof()),
                 async move {

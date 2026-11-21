@@ -1178,16 +1178,22 @@ async fn serve() {
     // within a bounded window (SEC-tls13-two-planes-bounded-input).
     let served = fleet_server::instance::serve(
         fleet_server::instance::Planes {
-            agents,
-            operators,
-            agent_tls,
-            operator_tls,
-            agent_max_connections: config.max_connections,
-            agent_max_new_connections_per_sec: config.max_new_connections_per_sec,
-            operator_max_connections: config.rest.max_connections,
+            agent: Some(fleet_server::instance::Plane {
+                router: agents,
+                listener: agent_listener,
+                tls: agent_tls,
+                max_connections: config.max_connections,
+                max_new_connections_per_sec: Some(config.max_new_connections_per_sec),
+            }),
+            operator: Some(fleet_server::instance::Plane {
+                router: operators,
+                listener: operator_listener,
+                tls: operator_tls,
+                max_connections: config.rest.max_connections,
+                max_new_connections_per_sec: None,
+            }),
             drain: std::time::Duration::from_secs(config.drain_secs),
         },
-        (agent_listener, operator_listener),
         lease.as_ref().map(fleet_server::instance::Lease::held),
         lease.as_ref().map(fleet_server::instance::Lease::proof),
         shutdown,

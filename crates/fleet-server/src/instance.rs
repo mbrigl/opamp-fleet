@@ -1048,57 +1048,111 @@ const RELOAD_RETRY_FIRST: Duration = Duration::from_millis(250);
 /// The longest wait before a failed read is tried again.
 const RELOAD_RETRY_MAX: Duration = Duration::from_secs(10);
 
-/// The two planes as the binary builds them (SEC-tls13-two-planes-bounded-input): what each serves, its TLS and how many
-/// connections it holds at most.
+/// One plane as the binary builds it (SEC-tls13-bounded-input-chosen-planes §14 and §15): what it
+/// serves, the listener it was bound to, its TLS and how many connections it holds at most.
+pub struct Plane {
+    /// What it serves: on the Agent plane the OpAMP endpoint, the package downloads and the
+    /// Gateways' revocation list; on the Operator plane the REST API, its docs, and the UI.
+    pub router: Router,
+    /// The listener it serves on, bound before any plane serves.
+    pub listener: TcpListener,
+    /// Its TLS: on the Agent plane with a client certificate required in the handshake.
+    pub tls: Arc<ServerConfig>,
+    /// The connections it holds at most.
+    pub max_connections: usize,
+    /// The new connections it takes a second, where it bounds them: the Agent plane does.
+    pub max_new_connections_per_sec: Option<u32>,
+}
+
+/// The planes an instance opens, as the binary builds them: each one it opens, and none other
+/// (SEC-tls13-bounded-input-chosen-planes §14,
+/// SRV-instance-opens-chosen-planes §22).
 pub struct Planes {
-    /// The OpAMP endpoint and the package downloads.
-    pub agents: Router,
-    /// The REST API, its docs, and the UI.
-    pub operators: Router,
-    /// The Agent plane's TLS, a client certificate required in the handshake.
-    pub agent_tls: Arc<ServerConfig>,
-    /// The Operator plane's TLS.
-    pub operator_tls: Arc<ServerConfig>,
-    /// The connections the Agent plane holds at most.
-    pub agent_max_connections: usize,
-    /// The new connections the Agent plane takes a second.
-    pub agent_max_new_connections_per_sec: u32,
-    /// The connections the Operator plane holds at most.
-    pub operator_max_connections: usize,
+    /// The Agent plane, where the instance opens it.
+    pub agent: Option<Plane>,
+    /// The Operator plane, where the instance opens it.
+    pub operator: Option<Plane>,
     /// What a stop spreads the closing of the WebSocket sessions over.
     pub drain: Duration,
 }
 
-/// Serves both planes from `listeners` until `stop` resolves, then drains them over
-/// [`Planes::drain`].
+/// A plane [`serve`] opens: what it serves, gated by the lease, and the address it binds again
+/// after a lost lease.
+struct Opened {
+    name: &'static str,
+    router: Router,
+    address: SocketAddr,
+    tls: Arc<ServerConfig>,
+    max_connections: usize,
+    max_new_connections_per_sec: Option<u32>,
+}
+
+impl Opened {
+    /// Serves this plane on `listener` until `handle` shuts it down.
+    async fn serve(&self, listener: TcpListener, handle: Handle) -> Result<(), String> {
+        let mut plane = crate::listen::plane(
+            listener,
+            Some(self.tls.clone()),
+            self.max_connections,
+            handle,
+        );
+        if let Some(rate) = self.max_new_connections_per_sec {
+            plane = plane.with_max_new_connections_per_sec(rate);
+        }
+        plane
+            .serve(self.router.clone())
+            .await
+            .map_err(|e| format!("serving {}: {e}", self.name))
+    }
+}
+
+/// Serves the planes the instance opens until `stop` resolves, then drains them over
+/// [`Planes::drain`]. Every listener it opens is bound before any serves, and they share one
+/// handle, so one stop closes them all
+/// (SEC-tls13-bounded-input-chosen-planes §14 and §17).
 ///
 /// With a lease, the planes are open only while it is held: once it is lost, every connection is
-/// cut and both listeners are closed; once a new one is held, the same addresses are bound again.
-/// Each request on either plane is answered `503` while `proof` does not hold ([`gated`]).
+/// cut and the listeners of the planes it opens are closed; once a new one is held, the same
+/// addresses are bound again, and no other
+/// (SRV-instance-opens-chosen-planes §1 and §3).
+/// Each request on a plane it opens is answered `503` while `proof` does not hold ([`gated`]).
 ///
 /// # Errors
-/// Returns an error when a plane cannot be served.
+/// Returns an error when a plane cannot be served, or when `planes` opens none.
 pub async fn serve(
     planes: Planes,
-    listeners: (TcpListener, TcpListener),
     mut held: Option<Held>,
     proof: Option<Proof>,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    let (agents, operators) = (
-        gated(planes.agents.clone(), proof.clone()),
-        gated(planes.operators.clone(), proof),
-    );
-    let addresses = (
-        listeners.0.local_addr().map_err(|e| e.to_string())?,
-        listeners.1.local_addr().map_err(|e| e.to_string())?,
-    );
+    let drain = planes.drain;
+    let mut opened = Vec::new();
+    let mut bound = Vec::new();
+    for (name, plane) in [
+        ("the Agent plane", planes.agent),
+        ("the Operator plane", planes.operator),
+    ] {
+        let Some(plane) = plane else { continue };
+        opened.push(Opened {
+            name,
+            router: gated(plane.router, proof.clone()),
+            address: plane.listener.local_addr().map_err(|e| e.to_string())?,
+            tls: plane.tls,
+            max_connections: plane.max_connections,
+            max_new_connections_per_sec: plane.max_new_connections_per_sec,
+        });
+        bound.push(plane.listener);
+    }
+    if opened.is_empty() {
+        return Err("the instance opens no plane".to_string());
+    }
+    let addresses: Vec<SocketAddr> = opened.iter().map(|plane| plane.address).collect();
     let (stopping, stopped) = watch::channel(false);
     tokio::spawn(async move {
         stop.await;
         stopping.send_replace(true);
     });
-    let mut listeners = Some(listeners);
+    let mut listeners = Some(bound);
     loop {
         if let Some(held) = held.as_mut() {
             let mut stopped = stopped.clone();
@@ -1117,9 +1171,9 @@ pub async fn serve(
                 }
             }
         }
-        let (agent, operator) = match listeners.take() {
+        let bound = match listeners.take() {
             Some(bound) => bound,
-            None => match bind_again(addresses, stopped.clone()).await {
+            None => match bind_again(&addresses, stopped.clone()).await {
                 Some(bound) => bound,
                 None => return Ok(()),
             },
@@ -1129,7 +1183,6 @@ pub async fn serve(
         // another, every connection is cut, since none of them may outlive the lease it was
         // admitted under.
         let opened_under = held.as_ref().and_then(|held| held.borrow().clone());
-        let drain = planes.drain;
         let watching = tokio::spawn({
             let (handle, mut held, mut stopped) = (handle.clone(), held.clone(), stopped.clone());
             async move {
@@ -1161,26 +1214,15 @@ pub async fn serve(
                 }
             }
         });
-        let (agents, operators) = tokio::join!(
-            crate::listen::plane(
-                agent,
-                Some(planes.agent_tls.clone()),
-                planes.agent_max_connections,
-                handle.clone()
-            )
-            .with_max_new_connections_per_sec(planes.agent_max_new_connections_per_sec)
-            .serve(agents.clone()),
-            crate::listen::plane(
-                operator,
-                Some(planes.operator_tls.clone()),
-                planes.operator_max_connections,
-                handle
-            )
-            .serve(operators.clone()),
-        );
+        let served = futures_util::future::join_all(
+            opened
+                .iter()
+                .zip(bound)
+                .map(|(plane, listener)| plane.serve(listener, handle.clone())),
+        )
+        .await;
         watching.abort();
-        agents.map_err(|e| format!("serving the Agent plane: {e}"))?;
-        operators.map_err(|e| format!("serving the Operator plane: {e}"))?;
+        served.into_iter().collect::<Result<Vec<()>, String>>()?;
         if *stopped.borrow() {
             return Ok(());
         }
@@ -1195,18 +1237,23 @@ fn ended_for_good() -> String {
         .to_string()
 }
 
-/// Binds both addresses again, trying once a second until both are bound; `None` once stopped.
+/// Binds the addresses of the planes the instance opens again, trying once a second until every
+/// one is bound; `None` once stopped.
 async fn bind_again(
-    (agent, operator): (SocketAddr, SocketAddr),
+    addresses: &[SocketAddr],
     stopped: watch::Receiver<bool>,
-) -> Option<(TcpListener, TcpListener)> {
+) -> Option<Vec<TcpListener>> {
     loop {
         if *stopped.borrow() {
             return None;
         }
-        match (TcpListener::bind(agent), TcpListener::bind(operator)) {
-            (Ok(agent), Ok(operator)) => return Some((agent, operator)),
-            (Err(e), _) | (_, Err(e)) => {
+        match addresses
+            .iter()
+            .map(TcpListener::bind)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(bound) => return Some(bound),
+            Err(e) => {
                 warn!(error = %e, "could not bind the planes again; trying once a second");
                 let mut stopped = stopped.clone();
                 tokio::select! {
