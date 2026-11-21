@@ -46,6 +46,14 @@ inside a longer term of this glossary, such as "shape" in **Node shape**, is no 
   them serve one fleet from the shared database and object store; on the filesystem store there is
   one instance. One process of several is a Server instance, not the Server.
   _Avoid:_ node, replica.
+- **Agent plane** — the Server's listener for its Agents and Gateways: OpAMP at `/v1/opamp`, the
+  package download and the Gateways' revocation list, admitted by client certificate. A Server
+  instance that opens it alone is an Agent-plane instance.
+  _Avoid:_ OpAMP plane, data plane.
+- **Operator plane** — the Server's listener for its operators: the REST API, its OpenAPI document
+  and the bundled UI, guarded by `[rest.auth]`. A Server instance that opens it alone is an
+  Operator-plane instance.
+  _Avoid:_ control plane, admin plane.
 - **Lease** — a Server instance's claim, renewed in the database, that it is alive and may serve.
   An instance opens its listeners only while it holds a lease it can prove, and a lease that is not
   renewed lapses.
