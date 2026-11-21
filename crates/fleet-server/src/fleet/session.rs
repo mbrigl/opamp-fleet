@@ -4,8 +4,8 @@
 //!
 //! `approval`, which issues a certificate within the round, ranks below `session` and shares some of
 //! the round's parts (SRV-fleet-contexts-call-by-rank): the persist path that writes what changed
-//! stands in `held`; the end a report answers with (`Ending`), the connection settings offer, and
-//! the answers every refused report gets stand in the module root.
+//! stands in `held`, the answers every refused report gets in `approval`, and the end a report
+//! answers with (`Ending`) and the connection settings offer in the module root.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,12 +22,13 @@ use crate::agent_store::{Creation, PersistedAgent};
 use crate::audit::Entry;
 use crate::revocation::Presented;
 
+use super::approval::{bad_request, unavailable};
 use super::held::{Carried, Settled, Taking, Took, UnsureRekey};
 use super::placement::Elsewhere;
 use super::rollout::{offer, restart_command};
 use super::{
-    bad_request, compose_settings_offer, is_silent, unavailable, AgentRecord, AppState, ConnId,
-    Ending, ForgetError, Group, PendingRekey, Placement, Processed, TelemetryOffer, Transport,
+    compose_settings_offer, is_silent, AgentRecord, AppState, ConnId, Ending, ForgetError, Group,
+    PendingRekey, Placement, Processed, TelemetryOffer, Transport,
 };
 
 impl AppState {

@@ -13,8 +13,7 @@ use std::time::Duration;
 use opamp::proto::{
     AgentDescription, AgentIdentification, AvailableComponents, ComponentHealth,
     ConnectionSettingsOffers, ConnectionSettingsStatus, OpAmpConnectionSettings, PackageStatuses,
-    RemoteConfigStatus, ServerCapabilities, ServerErrorResponse, ServerErrorResponseType,
-    ServerToAgent, TelemetryConnectionSettings,
+    RemoteConfigStatus, ServerCapabilities, ServerToAgent, TelemetryConnectionSettings,
 };
 use opamp::uid::InstanceUid;
 use prost::Message as _;
@@ -38,6 +37,7 @@ pub(crate) mod placement;
 mod rollout;
 mod session;
 mod views;
+pub use approval::{bad_request, unavailable, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER};
 pub use delivery::{StoreFull, UploadReservation};
 pub use rollout::{DeploymentReach, PendingConfigurationView, PendingPackageView};
 pub use views::{
@@ -86,7 +86,7 @@ pub struct Processed {
     pub disconnected: bool,
 }
 
-// What a report is answered with, which `session` and `approval` share: the module root names
+// What a report's end answers with, which `session` and `approval` share: the module root names
 // no context, and `approval` ranks below `session` (SRV-fleet-contexts-call-by-rank).
 
 /// What a report's end answers with, once its record is taken into memory.
@@ -120,52 +120,6 @@ fn compose_settings_offer(
     };
     offer.hash = Sha256::digest(offer.encode_to_vec()).to_vec();
     offer
-}
-
-/// The `ServerToAgent` for a report the Server cannot make sense of.
-pub fn bad_request(message: &str) -> ServerToAgent {
-    ServerToAgent {
-        capabilities: SERVER_CAPABILITIES,
-        error_response: Some(ServerErrorResponse {
-            r#type: ServerErrorResponseType::BadRequest as i32,
-            error_message: message.to_string(),
-            ..Default::default()
-        }),
-        ..Default::default()
-    }
-}
-
-/// What a CSR with a bootstrap proof over a member's certificate is answered (CLT-modes-and-gateway §25).
-pub const MEMBER_DOES_NOT_ENROL: &str =
-    "a certificate signing request with a bootstrap proof is an enrolment, and a member does not \
-     enrol";
-
-/// What a CSR with neither proof over a Gateway's certificate is answered (CLT-modes-and-gateway §18).
-pub const NEEDS_A_PROOF: &str =
-    "a certificate requested through a Gateway needs a renewal proof or a bootstrap proof";
-
-/// How long an Agent told `Unavailable` waits before it asks again.
-pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
-/// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
-/// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
-/// field a Client and a Gateway route a reply by (SEC-tls13-bounded-input-chosen-planes §27).
-pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
-    ServerToAgent {
-        instance_uid: instance_uid.to_vec(),
-        capabilities: SERVER_CAPABILITIES,
-        error_response: Some(ServerErrorResponse {
-            r#type: ServerErrorResponseType::Unavailable as i32,
-            error_message: message.to_string(),
-            details: Some(opamp::proto::server_error_response::Details::RetryInfo(
-                opamp::proto::RetryInfo {
-                    retry_after_nanoseconds: RETRY_AFTER.as_nanos() as u64,
-                },
-            )),
-        }),
-        ..Default::default()
-    }
 }
 
 /// Which transport a report arrived on. Recorded for the operator; it never keys any state.
