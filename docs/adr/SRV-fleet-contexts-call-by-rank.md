@@ -24,7 +24,7 @@ calling their methods on `self` or naming their types by path. Its spec left ope
 context later gets state of its own, "once the boundaries can be seen in the code".
 
 Measured at ac31fc719, the boundaries are close to an order but not one. With the order of the
-Decision, all calls and names between the contexts point down except these:
+Decision, all calls and names between the contexts point down except these six:
 
 - `held` calls `session`'s `end_session` and names `session::Processed`;
 - `held` calls `rollout`'s `take_labels`;
@@ -32,7 +32,10 @@ Decision, all calls and names between the contexts point down except these:
   `PendingPackageView`;
 - `session` calls `approval`'s `issue`;
 - the module root calls `placement`'s `place_all` in its construction and `placed` and
-  `arrived_over` in its reads of the fleet.
+  `arrived_over` in its reads of the fleet;
+- the module root names context types as the types of the fields of `AppState` and `AgentRecord`:
+  `held`'s `Kept` and `AGENT_LOCKS`, `placement`'s `Groups` and `Placement`, and `delivery`'s
+  `PackageOffering`.
 
 The opposite direction carries more of each pair: `session` reaches `held` through some ten methods
 and six types, `approval` reaches `session` through `persist_if_dirty`, three functions, two types
@@ -89,9 +92,9 @@ it, while they keep sharing one state.
    entries and the persisted layout stay as they are. A change of behaviour must not ride on a move.
 
 **Out of scope:** state owned by one context, service types per context, and any change to the
-lock, the persist path or the push; the modules of `fleet-server` outside `fleet`; the use-case
-modules, which [SRV-two-use-case-layers](SRV-two-use-case-layers.md) decides; the structure of the
-other crates.
+lock, the persist path or the wake-up of the connections; the modules of `fleet-server` outside
+`fleet`; the use-case modules, which [SRV-two-use-case-layers](SRV-two-use-case-layers.md)
+decides; the structure of the other crates.
 
 ## Alternatives considered
 
@@ -149,11 +152,11 @@ other crates.
   which can put them in a context a reader would not look in first; the module comment names why.
 - Negative / trade-offs: the test resolves calls on `self`, `Self::` and `AppState::`; a call on
   another binding of `AppState` is left to review.
-- Follow-ups: resolving the five edges of the Context that point up — the end of a session and
+- Follow-ups: resolving the six edges of the Context that point up — the end of a session and
   `Processed` reached from `held`, the take of labels from `held`, the three view types `rollout`
-  names, the issue of a certificate from `session`, and the root's construction and reads that use
-  `placement`; the order in `docs/ARCHITECTURE.md`; state per context, when a requirement asks for
-  it.
+  names, the issue of a certificate from `session`, the root's construction and reads that use
+  `placement`, and the types of the root's fields defined in contexts; the order in
+  `docs/ARCHITECTURE.md`; state per context, when a requirement asks for it.
 
 ## Enforcement
 
