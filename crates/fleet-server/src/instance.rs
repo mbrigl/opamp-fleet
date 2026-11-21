@@ -1156,7 +1156,7 @@ impl Opened {
 /// Each request on a plane it opens is answered `503` while `proof` does not hold ([`gated`]).
 ///
 /// # Errors
-/// Returns an error when a plane cannot be served, or when `planes` opens none.
+/// Returns an error when a plane cannot be served.
 pub async fn serve(
     planes: Planes,
     mut held: Option<Held>,
@@ -1181,9 +1181,10 @@ pub async fn serve(
         });
         bound.push(plane.listener);
     }
-    if opened.is_empty() {
-        return Err("the instance opens no plane".to_string());
-    }
+    debug_assert!(
+        !opened.is_empty(),
+        "the load checks refuse an instance that opens no plane"
+    );
     let addresses: Vec<SocketAddr> = opened.iter().map(|plane| plane.address).collect();
     let (stopping, stopped) = watch::channel(false);
     tokio::spawn(async move {

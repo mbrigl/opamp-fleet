@@ -1345,15 +1345,6 @@ impl OpenPlanes {
         self.agent && self.operator
     }
 
-    /// The planes either names.
-    #[must_use]
-    pub fn and(self, other: OpenPlanes) -> OpenPlanes {
-        OpenPlanes {
-            agent: self.agent || other.agent,
-            operator: self.operator || other.operator,
-        }
-    }
-
     /// The names of the planes, as `planes` and a lease write them.
     #[must_use]
     pub fn names(self) -> Vec<&'static str> {
