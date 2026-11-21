@@ -1363,8 +1363,14 @@ fn fleet_root_imports(root: &[Located], reexports: &Reexports) -> BTreeMap<Strin
 /// `use` declarations bring in from one, in `imports`. The root's own `pub use` declarations are
 /// not its code.
 ///
-/// Its limit: it resolves `super::` from the file's module, so a `mod` with a body inside a
-/// context, outside the tests, would have its paths resolved one level off. No context has one.
+/// Its limits, which review covers (SRV-fleet-contexts-call-by-rank, *Consequences*):
+/// - it resolves `super::` from the file's module, so a `mod` with a body inside a context,
+///   outside the tests, would have its paths resolved one level off; no context has one;
+/// - it collects methods from blocks written `impl AppState` alone, not `impl super::AppState`
+///   or `impl crate::fleet::AppState`;
+/// - it resolves calls of `AppState`'s methods alone, so a method a context defines on another
+///   type of the state, called through a field (`self.kept.forget(..)`), is not seen; matching
+///   such calls by name would take every `lock` or `remove` of the standard library for one.
 fn rank_breaches(
     module: &str,
     src: &str,
