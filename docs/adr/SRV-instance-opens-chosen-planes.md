@@ -159,7 +159,7 @@ Operator plane or both, as the `planes` key of its configuration names.
      its configuration, its TLS files and its secret files, all of them read-only. With no CA key
      on the Server, any instance can take its place.
    - The Server's image names no data directory, so such an instance runs from it as it stands
-     ([OPS-releases-attestations-server-image §16](OPS-releases-attestations-server-image.md)).
+     ([OPS-releases-image-probed-by-plane §16](OPS-releases-image-probed-by-plane.md)).
 
 3. **The lease.**
    - Each instance renews its lease every `[database] lease_renew_secs` (default 10). The lease
