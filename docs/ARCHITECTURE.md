@@ -9,7 +9,7 @@
 > **Kept current by:** Markus Brigl. A document everyone may edit and nobody owns is
 > the one that goes stale.
 >
-> **Last design revision:** 2026-11-19, due after 20 changes. The revision that took the count
+> **Last design revision:** 2026-11-19, due after 50 changes. The revision that took the count
 > moves the date; the number is this project's to set; a sensor counts the changes outside
 > `docs/` since the commit that set the date and says when the next is due
 > ([NUC-design-is-revised §4](adr/NUC-design-is-revised.md)).
@@ -234,48 +234,59 @@ no module.
   holds only the Agents whose connections the instance carries: the holder of an Agent is its
   row's instance, the newest connection takes it in one transaction on its row, which raises the
   row's count of takes and announces the take where it replaced another holder, and an instance
-  writes the presence of what it carries in batches. What one instance holds of them — the take and
-  the release, the presence it writes, the re-keys whose answer was lost, the restarts kept for
-  retry, the take-up of what other instances announced of the Agents a notice names, the catch-up
-  after a missed notification (`catch_up`: one read of the records and one of the holders of every
-  Agent held, from which each kind of kept state and every group is taken up), and the per-Agent
-  locks — is the core module `fleet::held`, behind the same `AppState` entry points. What it keeps
-  of each Agent beside its record is one entry, `Kept`, which a forget drops and a re-key moves as
-  one. How the Agents of one Client are placed under its Client Agent
-  ([SRV-fleet-record-agents-hosts §19](adr/SRV-fleet-record-agents-hosts.md)) is the core module
-  `fleet::placement`, behind the same `AppState` entry points: the rule for one group, which the
-  fleet in memory and a page `postgres::agent_page` reads share; the index of the groups this
-  instance holds members of; whether the Client Agents of a group another instance carries are read
-  under the fleet lock or before it (`Elsewhere`); and the placing again after a notice or a
-  catch-up.
-  The views of the fleet — the Agents each Host carries, the view of an Agent and of the whole
-  fleet, and the list of Agents a page at a time
-  ([API-lists-paged-by-cursor](adr/API-lists-paged-by-cursor.md))
-  — are the core module `fleet::views`, behind the same `AppState` entry points.
-  Packages in the fleet — the Package Sets, their entries and signatures, the upload limit, the
-  offer of a Package to an Agent and of an artifact to a Host, and the Packages a Deployment holds
-  ([PKG-signed-packages-and-delivery](adr/PKG-signed-packages-and-delivery.md)) — are the core
-  module `fleet::delivery`, behind the same `AppState` entry points.
-  Configurations, Deployments and rollouts — the catalogue of Configurations, what a Deployment
-  releases, the rollout acts that assign it, what waits for an Agent's next press, labels, and the
-  restart an operator requests
-  ([SRV-deployments-and-pinned-rollouts](adr/SRV-deployments-and-pinned-rollouts.md)) — are the core
-  module `fleet::rollout`, behind the same `AppState` entry points. Enrolment and certificates — the
-  approval of an enrolment and its take-back, the answer an enrolling Agent is given, the issuing
-  and renewal of a host certificate with the records of what was issued and signed, and the mark of
-  a host as a Gateway, which places every Agent again
-  ([SEC-bootstrap-certificates-and-enrolment](adr/SEC-bootstrap-certificates-and-enrolment.md)) —
-  are the core module `fleet::approval`, behind the same `AppState` entry points. The round of an
-  Agent's report — a report processed under the Agent's lock, its record created, taken or settled,
-  the reply and the connection settings it is offered, the persist path, a goodbye and a forget, and
-  the answers a refused report gets — is the core module `fleet::session`, behind the same
-  `AppState` entry points. The module root of `fleet` keeps the state, its construction and limits,
-  the lease, the reads of the fleet, the audit helpers, the capabilities the Server declares, the
-  staleness rule, and the types the contexts share, with the tests of staleness, of the host a
-  register derives, and of label inheritance. The test helpers the contexts share are the test-only
-  `fleet::fixtures`. Each context imports by name what it takes from the root, from its siblings and
-  from the crate; `clippy::wildcard_imports`, denied in `fleet`, refuses a glob import in its
-  production code.
+  writes the presence of what it carries in batches. The contexts of `fleet` are ranked, and each
+  names only those below it, while all share the one state
+  ([SRV-fleet-contexts-call-by-rank](adr/SRV-fleet-contexts-call-by-rank.md)). From the bottom:
+  1. The module root of `fleet` keeps the state and the types of its parts (among them `Kept`, what
+     an instance keeps of each Agent beside its record, which a forget drops and a re-key moves as
+     one), the state's limits, the lease, the audit helpers, the capabilities the Server declares,
+     the staleness rule, and the types the contexts share, with the tests of staleness, of the host
+     a register derives, and of label inheritance. It also keeps what `approval` and `session` both
+     build a report's answer from: the end a report answers with, and `compose_settings_offer`,
+     which composes one connection settings offer message with its hash; `session` builds the offer.
+     It names no context but in its own `pub use` lines.
+  2. How the Agents of one Client are placed under its Client Agent
+     ([SRV-fleet-record-agents-hosts §19](adr/SRV-fleet-record-agents-hosts.md)) is the core module
+     `fleet::placement`, behind the same `AppState` entry points: the rule for one group, which the
+     fleet in memory and a page `postgres::agent_page` reads share; the index of the groups this
+     instance holds members of; whether the Client Agents of a group another instance carries are
+     read under the fleet lock or before it (`Elsewhere`); and the placing again after a notice or a
+     catch-up. Since each ends by placing the Agents, the construction of the state, the arming of
+     the host register and the reads of the fleet from a shared store stand here too.
+  3. What one instance holds of the Agents — the take and the release, the presence it writes, the
+     re-keys whose answer was lost, the restarts kept for retry, the take-up of what other instances
+     announced of the Agents a notice names, the catch-up after a missed notification (`catch_up`:
+     one read of the records and one of the holders of every Agent held, from which each kind of
+     kept state and every group is taken up), and the per-Agent locks — is the core module
+     `fleet::held`, behind the same `AppState` entry points. It also takes labels into a held
+     record, notes the end of a forgotten Agent's session, and keeps the persist path that writes a
+     record when its durable content changed, which `approval` and `session` call.
+  4. Packages in the fleet — the Package Sets, their entries and signatures, the upload limit, the
+     offer of a Package to an Agent and of an artifact to a Host, and the Packages a Deployment
+     holds ([PKG-signed-packages-and-delivery](adr/PKG-signed-packages-and-delivery.md)) — are the
+     core module `fleet::delivery`, behind the same `AppState` entry points.
+  5. Configurations, Deployments and rollouts — the catalogue of Configurations, what a Deployment
+     releases, the rollout acts that assign it, what waits for an Agent's next press and the types
+     the views show of it and of a Deployment's reach, labels, and the restart an operator requests
+     ([SRV-deployments-and-pinned-rollouts](adr/SRV-deployments-and-pinned-rollouts.md)) — are the
+     core module `fleet::rollout`, behind the same `AppState` entry points.
+  6. The views of the fleet — the Agents each Host carries, the view of an Agent and of the whole
+     fleet, and the list of Agents a page at a time
+     ([API-lists-paged-by-cursor](adr/API-lists-paged-by-cursor.md)) — are the core module
+     `fleet::views`, behind the same `AppState` entry points.
+  7. Enrolment and certificates — the approval of an enrolment and its take-back, the answer an
+     enrolling Agent is given, the issuing and renewal of a host certificate with the records of
+     what was issued and signed, the mark of a host as a Gateway, which places every Agent again,
+     and the answers a refused report gets, which `session` uses too
+     ([SEC-bootstrap-certificates-and-enrolment](adr/SEC-bootstrap-certificates-and-enrolment.md)) —
+     are the core module `fleet::approval`, behind the same `AppState` entry points.
+  8. The round of an Agent's report — a report processed under the Agent's lock, its record
+     created, taken or settled, the reply and the connection settings it is offered, a goodbye and a
+     forget — is the core module `fleet::session`, behind the same `AppState` entry points.
+
+  The test helpers the contexts share are the test-only `fleet::fixtures`, which has no rank. Each
+  context imports by name what it takes from the root, from its siblings and from the crate;
+  `clippy::wildcard_imports`, denied in `fleet`, refuses a glob import in its production code.
 - **Server use cases** — each plane reaches the core through one use-case module
   ([SRV-two-use-case-layers](adr/SRV-two-use-case-layers.md)). `transport`, the Agent plane's
   endpoints, carries the protocol and calls `agent_cases::AgentCases`, whose methods are the plane's

@@ -2,8 +2,19 @@
 //! take and the release of an Agent, the presence it writes, the re-keys whose
 //! answer was lost, the restarts kept for retry, the take-up of what other instances announced, and
 //! the per-Agent locks. Its entry points are methods of `AppState`.
+//!
+//! It also holds three helpers of the contexts ranked above it (SRV-fleet-contexts-call-by-rank):
+//! - `take_labels`, which takes labels into a held record, called by `rollout` and by `held`'s
+//!   own take-up;
+//! - `end_session`, which notes the end of a forgotten Agent's session, called by `session` and
+//!   by `held`'s own take-up;
+//! - `persist_if_dirty`, which writes a record when its durable content changed, called by
+//!   `approval` and `session`.
+//!
+//! What it keeps of each Agent (`Kept` and its parts) and the count of locks are parts of the
+//! state and stand in the module root, which names no context.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -15,12 +26,10 @@ use tracing::{debug, info, warn};
 use crate::agent_store::{PersistedAgent, Presence};
 
 use super::placement::Elsewhere;
-use super::session::Processed;
-use super::{placement, AgentRecord, AppState, ConnId};
-
-/// How many locks the Agents' own locks are spread over: two Agents share one only by their
-/// `instance_uid`, and then one waits for the other's report.
-pub(super) const AGENT_LOCKS: usize = 1024;
+use super::{
+    placement, AgentRecord, AppState, Backoff, ConnId, Kept, PendingRekey, PresenceWritten,
+    Processed, AGENT_LOCKS,
+};
 
 /// What became of an Agent found gone from the store: dropped as forgotten, or kept, as its row
 /// moved through a re-key of this instance's own whose answer was lost, or as that is not known.
@@ -119,14 +128,6 @@ pub(super) enum Settled {
     Restart(Option<TlsCertificate>),
 }
 
-/// A re-key of this instance whose answer was lost and whose read back failed: the identity it
-/// moved the record to, if it committed, and whether a read since found it did.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct PendingRekey {
-    pub(super) new: InstanceUid,
-    pub(super) moved: bool,
-}
-
 /// What became of a re-key of this instance whose answer was lost and whose read back failed, read
 /// back again at the Agent's next report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,28 +138,6 @@ pub(super) enum UnsureRekey {
     Moved(InstanceUid),
     /// It is still not known.
     Unknown,
-}
-
-/// What the last presence batch wrote: the holder it named, each Agent's presence, and the count of
-/// takes the store last answered for each Agent, which a disconnect is written only under and which
-/// outlives the holder it was answered under. The Agents whose take's answer was lost are unsure:
-/// their count is read before their disconnect is written, and the count they were answered before
-/// is kept apart, for the shutdown flush alone. Every change of what is kept of an Agent moves its
-/// generation, so a batch applies its answers only to what did not change meanwhile.
-#[derive(Default)]
-pub(super) struct PresenceWritten {
-    pub(super) holder: Option<String>,
-    pub(super) agents: HashMap<InstanceUid, Presence>,
-    pub(super) takes: HashMap<InstanceUid, u64>,
-    pub(super) unsure: HashSet<InstanceUid>,
-    /// The count of takes last answered for an Agent whose take since lost its answer, or 0 where
-    /// this instance created its record: still the count this instance was last answered, so the
-    /// shutdown flush writes the record under it, where the row names no holder and no take was
-    /// counted since (SRV-fleet-record-agents-hosts §2). No batch names this instance by it. A count answered since
-    /// in `takes` outranks it, so an answer leaves it as it is.
-    pub(super) before_lost: HashMap<InstanceUid, u64>,
-    pub(super) generations: HashMap<InstanceUid, u64>,
-    pub(super) generation: u64,
 }
 
 impl PresenceWritten {
@@ -292,37 +271,7 @@ impl PresenceWritten {
     }
 }
 
-/// What an instance keeps of each Agent beside its record and its group: one entry of four parts,
-/// each keyed by the Agent's `instance_uid`. A forget drops it ([`Kept::forget`]) and a re-key
-/// moves it ([`Kept::rekey`]) as one, each naming every part, so a part added later does not
-/// compile until both say what becomes of it. Each part keeps its own lock, every one taken
-/// strictly after `fleet`.
-pub(super) struct Kept {
-    /// Each persisted record's durable digest as last written — the dirty check that keeps a
-    /// heartbeat from reaching any storage backend (SRV-fleet-record-agents-hosts).
-    pub(super) written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
-    /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
-    /// batch writes only what moved since.
-    pub(super) presence_written: Mutex<PresenceWritten>,
-    /// The re-keys whose answer was lost and whose read back failed, by the old identity: the new
-    /// one each moved to, if it committed, which the Agent's next report reads back and assigns.
-    pub(super) unsure_rekeys: Mutex<HashMap<InstanceUid, PendingRekey>>,
-    /// The restarts whose command was not sent and whose put-back the store did not take, each
-    /// with when it is tried again ([`retry_restarts`](AppState::retry_restarts)).
-    pub(super) unput_restarts: Mutex<HashMap<InstanceUid, Backoff>>,
-}
-
 impl Kept {
-    /// Starts with `written`, the digests of the records restored, and nothing else.
-    pub(super) fn with_written(written: HashMap<InstanceUid, [u8; 32]>) -> Self {
-        Kept {
-            written: Mutex::new(written),
-            presence_written: Mutex::new(PresenceWritten::default()),
-            unsure_rekeys: Mutex::new(HashMap::new()),
-            unput_restarts: Mutex::new(HashMap::new()),
-        }
-    }
-
     /// Drops everything kept of `uid`, which left what this instance holds. That includes each
     /// pending re-key from `uid` and each pending re-key to `uid`.
     pub(super) fn forget(&self, uid: &InstanceUid) {
@@ -511,6 +460,27 @@ impl AppState {
                 "cannot read back a re-key whose answer was lost: {e}"
             )),
             None => Ok(()),
+        }
+    }
+
+    /// Takes `labels` into the record of `uid` this Server holds, if it holds one, and places its
+    /// group again. What the store holds of it is no longer what was last written whole.
+    ///
+    /// Here, not in `rollout`, which sets labels, because the take-up of what another instance
+    /// wrote takes them too, and `held` ranks below `rollout` (SRV-fleet-contexts-call-by-rank).
+    pub(super) fn take_labels(
+        &self,
+        fleet: &mut HashMap<InstanceUid, AgentRecord>,
+        uid: &InstanceUid,
+        labels: BTreeMap<String, String>,
+    ) {
+        let Some(record) = fleet.get_mut(uid) else {
+            return;
+        };
+        record.labels = labels;
+        self.kept.written.lock().expect("written lock").remove(uid);
+        if let Some(group) = record.placement.group.clone() {
+            self.place_group_now(fleet, &group);
         }
     }
 
@@ -1135,6 +1105,90 @@ impl AppState {
         Gone::Forgotten
     }
 
+    /// Persists one record when — and only when — its durable content changed since it was last
+    /// written (SRV-fleet-record-agents-hosts). `last_seen_ms` and `sequence_num` are outside the comparison and ride
+    /// along on whatever write happens, so the common heartbeat reaches no storage backend at
+    /// all; [`flush_agents`](Self::flush_agents) is what makes them current on a graceful stop.
+    /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
+    /// one that refuses reports. Answers whether the record is still stored: on a shared store
+    /// one forgotten through another instance is not, and is not written again.
+    ///
+    /// Here, not in `session`, whose round it ends, because `approval` persists a report whose
+    /// certificate it refused and ranks below `session`, and `held` ranks below both
+    /// (SRV-fleet-contexts-call-by-rank).
+    pub(super) fn persist_if_dirty(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> bool {
+        match self.persist(uid, persisted) {
+            Ok(stored) => stored,
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "cannot persist the agent record");
+                true
+            }
+        }
+    }
+
+    /// Writes one record when its durable content changed since it was last written, and says
+    /// whether the write failed — for an operator's act that must not be answered unwritten — or
+    /// found no record to write, as of an Agent forgotten through another instance. The record was
+    /// created or read before (SRV-fleet-record-agents-hosts §14), so only what a report decides is written of
+    /// it, and nothing creates it again.
+    ///
+    /// `persisted` is what the record held when the report let the fleet lock go, and it is
+    /// written after: no other report waits for the write. Two writes of one record do not race,
+    /// so an older state never lands after a newer one, since the Agent's own lock, which every
+    /// report of it holds from its start to its answer, is held across the write; and a report is
+    /// answered only once its record is written (SRV-fleet-record-agents-hosts §4). What a store's write may take
+    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (SRV-state-stores-contract-pair §24).
+    ///
+    /// On a shared store, an Agent this instance was answered no count of takes for, its take not
+    /// written or its answer lost, has its record written at every report and no digest kept: a
+    /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
+    /// again, may have written over it, and the next report writes it again. Once a count is
+    /// answered, a report that changes nothing durable writes nothing again
+    /// (SRV-instance-opens-chosen-planes §8).
+    fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
+        let digest = persisted.durable_digest();
+        let counted = !self.agent_store.is_shared()
+            || self
+                .kept
+                .presence_written
+                .lock()
+                .expect("presence lock")
+                .counted(uid);
+        if counted && self.kept.written.lock().expect("written lock").get(uid) == Some(&digest) {
+            return Ok(true);
+        }
+        if !self.agent_store.write_report(uid, persisted)? {
+            return Ok(false);
+        }
+        if !counted {
+            self.kept.written.lock().expect("written lock").remove(uid);
+            return Ok(true);
+        }
+        self.kept
+            .written
+            .lock()
+            .expect("written lock")
+            .insert(*uid, digest);
+        Ok(true)
+    }
+
+    /// Notes that `record`, just forgotten as `uid`, was carried by a live WebSocket, whose loop
+    /// then ends its session.
+    ///
+    /// Here, not in `session`, which forgets, because dropping an Agent forgotten through another
+    /// instance ends its session too, and `held` ranks below `session`
+    /// (SRV-fleet-contexts-call-by-rank).
+    pub(super) fn end_session(&self, uid: &InstanceUid, record: &AgentRecord) {
+        if let (true, Some(conn)) = (record.connected, record.owner) {
+            self.forgotten
+                .lock()
+                .expect("forgotten lock")
+                .entry(conn)
+                .or_default()
+                .push(*uid);
+        }
+    }
+
     /// Writes the presence of the Agents this instance carries that moved since the last batch, in
     /// one batch naming `holder`, the instance id of the lease it serves under
     /// (SRV-fleet-record-agents-hosts §4): a heartbeat reaches the store at
@@ -1451,16 +1505,6 @@ impl AppState {
     pub fn agent_lock_waits(&self) -> u64 {
         self.agent_lock_waits.load(Ordering::SeqCst)
     }
-}
-
-/// When a kept put-back of a restart is tried again, counted in calls of
-/// [`AppState::retry_restarts`].
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Backoff {
-    /// Calls until the next try.
-    left: u32,
-    /// Calls the next failure waits.
-    wait: u32,
 }
 
 impl Backoff {

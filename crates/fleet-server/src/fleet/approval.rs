@@ -3,8 +3,15 @@
 //! a host certificate on the connection the request arrived over, the records of what was issued
 //! and signed, each written with its decision, and the mark of a host as a Gateway (SEC-bootstrap-certificates-and-enrolment §11).
 //! Its entry points are methods of `AppState`.
+//!
+//! It also holds the answers every refused report gets (`bad_request`, `unavailable` and what a
+//! refused certificate request is told), which it answers with itself and which `session` uses:
+//! `approval` ranks below `session` (SRV-fleet-contexts-call-by-rank).
 
-use opamp::proto::{OpAmpConnectionSettings, ServerCapabilities, ServerToAgent, TlsCertificate};
+use opamp::proto::{
+    OpAmpConnectionSettings, ServerCapabilities, ServerErrorResponse, ServerErrorResponseType,
+    ServerToAgent, TlsCertificate,
+};
 use opamp::uid::InstanceUid;
 use tracing::{info, warn};
 
@@ -13,11 +20,10 @@ use crate::audit::Entry;
 use crate::enrolment::{DecisionError, Recorder, Registrar};
 use crate::revocation::{CertId, Facts, Presented, Signed, SubjectValues};
 
-use super::session::{
-    bad_request, compose_settings_offer, unavailable, Ending, Processed, MEMBER_DOES_NOT_ENROL,
-    NEEDS_A_PROOF,
+use super::{
+    compose_settings_offer, AppState, CertificateSigner, Ending, Processed, TelemetryOffer,
+    UseCase, SERVER_CAPABILITIES,
 };
-use super::{AppState, CertificateSigner, TelemetryOffer, UseCase};
 
 impl AppState {
     /// Records a certificate the client CA signed on a renewal, before it is offered (SRV-state-stores-contract-pair §9,
@@ -421,6 +427,52 @@ impl Recorder for Approving<'_> {
         if let Err(e) = self.0.audited(entry) {
             tracing::warn!(error = %e, request = %request, serial = %signed.facts.id.serial, "cannot record a signature whose decision was not written");
         }
+    }
+}
+
+/// The `ServerToAgent` for a report the Server cannot make sense of.
+pub fn bad_request(message: &str) -> ServerToAgent {
+    ServerToAgent {
+        capabilities: SERVER_CAPABILITIES,
+        error_response: Some(ServerErrorResponse {
+            r#type: ServerErrorResponseType::BadRequest as i32,
+            error_message: message.to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// What a CSR with a bootstrap proof over a member's certificate is answered (CLT-modes-and-gateway §25).
+pub const MEMBER_DOES_NOT_ENROL: &str =
+    "a certificate signing request with a bootstrap proof is an enrolment, and a member does not \
+     enrol";
+
+/// What a CSR with neither proof over a Gateway's certificate is answered (CLT-modes-and-gateway §18).
+pub const NEEDS_A_PROOF: &str =
+    "a certificate requested through a Gateway needs a renewal proof or a bootstrap proof";
+
+/// How long an Agent told `Unavailable` waits before it asks again.
+pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
+/// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
+/// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
+/// field a Client and a Gateway route a reply by (SEC-tls13-bounded-input-chosen-planes §27).
+pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
+    ServerToAgent {
+        instance_uid: instance_uid.to_vec(),
+        capabilities: SERVER_CAPABILITIES,
+        error_response: Some(ServerErrorResponse {
+            r#type: ServerErrorResponseType::Unavailable as i32,
+            error_message: message.to_string(),
+            details: Some(opamp::proto::server_error_response::Details::RetryInfo(
+                opamp::proto::RetryInfo {
+                    retry_after_nanoseconds: RETRY_AFTER.as_nanos() as u64,
+                },
+            )),
+        }),
+        ..Default::default()
     }
 }
 

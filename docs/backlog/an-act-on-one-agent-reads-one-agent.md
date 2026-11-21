@@ -4,9 +4,9 @@
 
 **Observed.** On PostgreSQL, operator acts on one Agent or one group read the whole fleet:
 
-- `deployment_reach` (`crates/fleet-server/src/fleet.rs`, near line 2078) reads every Agent through
-  `read_fleet` (near lines 1156 to 1163), on every `GET /deployments` and after every write that
-  answers with its reach;
+- `deployment_reach` (`crates/fleet-server/src/fleet/rollout.rs`, near line 497) reads every Agent
+  through `read_fleet` (`crates/fleet-server/src/fleet/placement.rs`, near lines 162 to 170), on
+  every `GET /deployments` and after every write that answers with its reach;
 - `put_entry_record` (`packages.rs`, near lines 945 to 959) holds the Package writes of one
   instance under the `writes` mutex across an upload's check that its blob exists.
 

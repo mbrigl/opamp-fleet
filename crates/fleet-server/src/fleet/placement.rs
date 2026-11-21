@@ -3,50 +3,24 @@
 //! store share, the index of the groups this instance holds members of, how the Client Agents of a
 //! group another instance carries are read, and the placing again after a notice or a catch-up.
 //! Its entry points are methods of `AppState`.
+//!
+//! It also builds the state, arms the host register, and reads the fleet from a shared store, since
+//! each ends by placing the Agents and the module root names no context
+//! (SRV-fleet-contexts-call-by-rank). For the same reason `Group`, `Placement` and the index
+//! `Groups`, parts of the state, stand in the root.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 
 use opamp::proto::AgentDescription;
 use opamp::uid::InstanceUid;
 use tracing::warn;
 
-use crate::agent_store::PersistedAgent;
-use crate::revocation::SpeaksFor;
+use crate::agent_store::{AgentStore, PersistedAgent};
+use crate::configs::ConfigBackend;
+use crate::revocation::{Revocations, SpeaksFor};
 
-use super::{parse_hex_uid, AgentRecord, AppState};
-
-/// The Agents one Client presents (SRV-fleet-record-agents-hosts §19), as far as the Server can tell them apart.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Group {
-    /// On a direct connection: the Agents arriving over the same Host.
-    Host(String),
-    /// Behind a Gateway: the Agents arriving over the same Gateway Host that report the same
-    /// machine — `host.id`, else `host.name` ([`crate::labels::machine`]).
-    Behind { gateway: String, machine: String },
-}
-
-/// What the Host an Agent arrived over and its Client Agent add to its effective description
-/// (SRV-fleet-record-agents-hosts §18 and §19). Derived from the records and the host register whenever either
-/// changes; never persisted.
-#[derive(Clone, Debug, Default)]
-pub struct Placement {
-    /// The `fleet.host.*` values of the Host it arrived over directly; empty behind a Gateway.
-    pub host_values: BTreeMap<String, String>,
-    /// The Client it belongs to, when the Server can tell.
-    pub group: Option<Group>,
-    /// Its Client Agent — itself, for the Client Agent — when its group holds exactly one.
-    pub client_agent: Option<InstanceUid>,
-    /// The labels of its Client Agent; empty for the Client Agent itself.
-    pub inherited: BTreeMap<String, String>,
-    /// Its group holds more than one Client Agent, so nothing is inherited.
-    pub ambiguous: bool,
-}
-
-/// Which Agents each [`Group`] holds (SRV-fleet-record-agents-hosts §19), so placing one Agent touches its group
-/// alone. Locked strictly after `fleet`, and only while it is held.
-#[derive(Default)]
-pub(super) struct Groups(Mutex<HashMap<Group, HashSet<InstanceUid>>>);
+use super::{parse_hex_uid, AgentRecord, AppState, Clock, Group, Groups, Placement};
 
 impl Groups {
     fn lock(&self) -> MutexGuard<'_, HashMap<Group, HashSet<InstanceUid>>> {
@@ -149,6 +123,113 @@ pub fn place_group(
             (uid, (client, ambiguous, inherited))
         })
         .collect()
+}
+
+/// The construction of the state, the arming of the host register, and the reads of the fleet
+/// from a shared store: each ends by placing the Agents, so each stands in `placement`, not in the
+/// module root, which names no context (SRV-fleet-contexts-call-by-rank).
+impl AppState {
+    /// Builds the state on any backend for the Agent records, their labels included (SRV-fleet-record-agents-hosts), and
+    /// the Configurations (SRV-deployments-and-pinned-rollouts). The ports are the only thing the fleet logic knows about that
+    /// persistence, so a database or an external store is an implementation of [`AgentStore`] or
+    /// [`ConfigBackend`] plus one wiring call.
+    pub fn with_stores(
+        agent_store: Box<dyn AgentStore>,
+        configs: Box<dyn ConfigBackend>,
+        clock: Box<dyn Clock>,
+    ) -> Result<Self, String> {
+        let state = Self::unplaced(agent_store, configs, clock)?;
+        state.place_all();
+        Ok(state)
+    }
+
+    /// Arms the register and the revocation list (SEC-admission-by-client-certificate).
+    #[must_use]
+    pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
+        self.revocations = revocations;
+        // The Hosts the records name are known now: their values and Gateway marks place them.
+        self.place_all();
+        self
+    }
+
+    /// The fleet as the Operator plane reads it
+    /// (SRV-state-stores-contract-pair §3): on a shared store every record as
+    /// stored, connected as its stored presence says, placed among the others, and nothing of what
+    /// this instance holds in memory; on a store this Server alone writes, what it holds.
+    ///
+    /// # Errors
+    /// Returns an error when the shared store cannot be read.
+    pub(super) fn read_fleet<T>(
+        &self,
+        read: impl FnOnce(&HashMap<InstanceUid, AgentRecord>) -> T,
+    ) -> Result<T, String> {
+        if !self.agent_store.is_shared() {
+            return Ok(read(&self.fleet.lock().expect("fleet lock")));
+        }
+        Ok(read(&self.stored_fleet()?))
+    }
+
+    /// The record of `uid` as the Operator plane reads it from the shared store, placed as
+    /// [`stored_fleet`](Self::stored_fleet) places it, without the whole fleet: one read of it and
+    /// of the Agents the host register binds to the same Host, which are the group its Client
+    /// Agent is found in. An Agent that arrived over a Gateway is placed among the Agents that
+    /// arrived over the same Host ([`arrived_over`](Self::arrived_over)), since the register knows
+    /// no group behind a Gateway, whatever Host it binds the Agent to.
+    pub(super) fn stored_agent(&self, uid: &InstanceUid) -> Result<Option<AgentRecord>, String> {
+        let bound = self.revocations.as_ref().and_then(|revocations| {
+            let host = revocations.bound_host(uid.as_bytes())?;
+            match revocations.speaks_for(&host) {
+                SpeaksFor::Agents(bound) => Some(bound),
+                SpeaksFor::Any => None,
+            }
+        });
+        let mut uids: Vec<InstanceUid> = bound
+            .iter()
+            .flatten()
+            .filter_map(|uid| parse_hex_uid(uid))
+            .collect();
+        if !uids.contains(uid) {
+            uids.push(*uid);
+        }
+        let mut read = self.records_of(self.agent_store.query(Some(&uids))?);
+        // What places it is the Host it arrived over, not the one it is bound to: an Agent bound to
+        // a direct Host may report over a Gateway since.
+        let behind_a_gateway = read.get(uid).is_some_and(|record| {
+            record.host.as_deref().is_some_and(|host| {
+                self.revocations
+                    .as_ref()
+                    .is_some_and(|revocations| revocations.is_gateway(host))
+            })
+        });
+        if let (true, Some(host)) = (
+            behind_a_gateway,
+            read.get(uid).and_then(|record| record.host.clone()),
+        ) {
+            return Ok(self.placed(self.arrived_over(&host)?).remove(uid));
+        }
+        Ok(self.placed(std::mem::take(&mut read)).remove(uid))
+    }
+
+    /// The records a query read, each connected as its stored presence says, not yet placed.
+    fn records_of(
+        &self,
+        read: Vec<(InstanceUid, crate::agent_store::StoredAgent)>,
+    ) -> HashMap<InstanceUid, AgentRecord> {
+        read.into_iter()
+            .map(|(uid, stored)| {
+                let mut record = AgentRecord::from_persisted(stored.record);
+                record.connected = stored.connected;
+                record.holder = stored.holder;
+                (uid, record)
+            })
+            .collect()
+    }
+
+    /// Every record the shared store holds, with its stored presence, placed among the others.
+    pub(super) fn stored_fleet(&self) -> Result<HashMap<InstanceUid, AgentRecord>, String> {
+        let records = self.records_of(self.agent_store.query(None)?);
+        Ok(self.placed(records))
+    }
 }
 
 impl AppState {

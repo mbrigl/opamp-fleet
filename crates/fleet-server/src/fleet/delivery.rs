@@ -1,7 +1,8 @@
 //! Packages in the fleet (PKG-signed-packages-and-delivery, PKG-versions-high-water-mark-floor): the Package Sets, their entries and signatures the
 //! Operator plane writes, the upload limit of the store, the offer of a Package to an Agent and of
 //! an artifact to a Host, and the Packages a Deployment holds. Its entry points are methods of
-//! `AppState`.
+//! `AppState`. `PackageOffering`, a part of the state, stands in the module root, which names no
+//! context (SRV-fleet-contexts-call-by-rank).
 
 use std::sync::atomic::Ordering;
 
@@ -10,11 +11,11 @@ use opamp::uid::InstanceUid;
 use tracing::{info, warn};
 
 use crate::agent_store::Pin;
-use crate::deployments::{Deployment, DeploymentError, DeploymentStore};
+use crate::deployments::{Deployment, DeploymentError};
 use crate::packages::{PackageError, PackageId, PackageStore, Platform, Refusal, SignatureState};
 use crate::revocation::SpeaksFor;
 
-use super::{parse_hex_uid, AgentRecord, AppState};
+use super::{parse_hex_uid, AgentRecord, AppState, PackageOffering};
 
 impl AppState {
     /// The total bytes of stored package artifacts right now, or `0` when package delivery is not
@@ -450,28 +451,6 @@ impl Drop for UploadReservation<'_> {
     }
 }
 
-/// The package store and the Deployments that release from it (PKG-signed-packages-and-delivery). Every `download_url`
-/// is a path the Client resolves against its own endpoint — the Agent plane, where the download
-/// is served behind the same handshake as `/v1/opamp` (PKG-signed-packages-and-delivery).
-pub struct PackageOffering {
-    pub(super) store: PackageStore,
-    deployments: DeploymentStore,
-}
-
-impl PackageOffering {
-    pub fn with_deployments(store: PackageStore, deployments: DeploymentStore) -> Self {
-        PackageOffering { store, deployments }
-    }
-
-    pub fn store(&self) -> &PackageStore {
-        &self.store
-    }
-
-    pub fn deployments(&self) -> &DeploymentStore {
-        &self.deployments
-    }
-}
-
 /// Whether this Agent declared that it accepts packages — the first condition of every offer
 /// (PKG-signed-packages-and-delivery §35).
 fn accepts_packages(record: &AgentRecord) -> bool {
@@ -482,7 +461,7 @@ fn accepts_packages(record: &AgentRecord) -> bool {
 mod tests {
     use super::*;
     use crate::fleet::fixtures::*;
-    use crate::fleet::session::Processed;
+    use crate::fleet::Processed;
     use crate::fleet::Transport;
     use crate::revocation::{CertId, Presented};
     use opamp::proto::{AgentDescription, AgentToServer, PackageStatuses};

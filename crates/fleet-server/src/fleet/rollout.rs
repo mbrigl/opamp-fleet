@@ -3,11 +3,15 @@
 //! assign them to an Agent, what waits for an Agent's next press, the offer of a remote
 //! configuration, labels, and the restart an operator requests. Its entry points are methods of
 //! `AppState`.
+//!
+//! It also holds the types of what waits for an Agent and of a Deployment's reach, which `views`
+//! shows: `rollout` computes them and ranks below `views` (SRV-fleet-contexts-call-by-rank).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use opamp::proto::{AgentConfigMap, AgentConfigObject, AgentRemoteConfig, ServerToAgent};
 use opamp::uid::InstanceUid;
+use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::agent_store::{PersistedAgent, Pin};
@@ -16,11 +20,9 @@ use crate::deployments::{self, deployment_for, Deployment, DeploymentError};
 use crate::labels::LabelError;
 use crate::packages::PackageStore;
 
-use super::delivery::PackageOffering;
-use super::views::{DeploymentReach, PendingConfigurationView, PendingPackageView};
 use super::{
-    AgentRecord, AppState, Assignment, ConnId, DeleteError, RestartError, RolloutError,
-    NO_CONFIGURATIONS,
+    AgentRecord, AppState, Assignment, ConnId, DeleteError, PackageOffering, RestartError,
+    RolloutError, NO_CONFIGURATIONS,
 };
 
 impl AppState {
@@ -438,24 +440,6 @@ impl AppState {
         Ok(())
     }
 
-    /// Takes `labels` into the record of `uid` this Server holds, if it holds one, and places its
-    /// group again. What the store holds of it is no longer what was last written whole.
-    pub(super) fn take_labels(
-        &self,
-        fleet: &mut HashMap<InstanceUid, AgentRecord>,
-        uid: &InstanceUid,
-        labels: BTreeMap<String, String>,
-    ) {
-        let Some(record) = fleet.get_mut(uid) else {
-            return;
-        };
-        record.labels = labels;
-        self.kept.written.lock().expect("written lock").remove(uid);
-        if let Some(group) = record.placement.group.clone() {
-            self.place_group_now(fleet, &group);
-        }
-    }
-
     /// Which Deployments hold each Package, keyed by `<agent type>@<version>` — how a Package
     /// answers "whom would this reach", since it does not aim by itself (PKG-signed-packages-and-delivery).
     pub fn deployments_holding(&self) -> BTreeMap<String, Vec<String>> {
@@ -747,6 +731,48 @@ impl AppState {
     }
 }
 
+/// One Configuration waiting for a rollout act toward one Agent (SRV-deployments-and-pinned-rollouts).
+#[derive(Serialize)]
+pub struct PendingConfigurationView {
+    pub name: String,
+    /// `new` — held by the claiming Deployment and not yet assigned; `update` — the saved
+    /// revision differs from the assigned one; `remove` — assigned, and dropped by the next press,
+    /// which applies the smaller map; `kept` — assigned, and the next press leaves the Agent with no
+    /// assignment, so it keeps running it.
+    pub change: String,
+}
+
+/// Whom one Deployment reaches in the fleet as reported so far (PKG-signed-packages-and-delivery): the Agents it claims,
+/// the subset a rollout act would actually change, and those another Deployment also claims.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct DeploymentReach {
+    /// Agents this Deployment claims — and no other does. Zero is the aim mistake worth hunting.
+    pub claiming: usize,
+    /// Of those, the Agents a press would actually move — what it would release differs from what
+    /// their assignment pins (SRV-deployments-and-pinned-rollouts §9). Zero with a non-zero `claiming` means everyone is
+    /// up to date.
+    pub targeted: usize,
+    /// Agents this Deployment matches that **another one matches too**. They are offered nothing
+    /// new until an operator narrows a Selector (PKG-signed-packages-and-delivery §28).
+    pub conflicting: usize,
+}
+
+/// The Package waiting for a rollout act toward one Agent (SRV-deployments-and-pinned-rollouts).
+#[derive(Serialize)]
+pub struct PendingPackageView {
+    /// The Deployment that would release it — the channel this Agent belongs to.
+    pub deployment: String,
+    /// The Agent type this Package is built for — its identity, and its wire name.
+    pub agent_type: String,
+    pub version: String,
+    /// What an operator reads: the Agent type and the version together.
+    pub display_name: String,
+    /// `new` — nothing is assigned for this Agent type; `update` — another version is; `remove` —
+    /// the assigned one, which the next press drops; `kept` — the assigned one, while the next
+    /// press leaves the Agent with no assignment.
+    pub change: String,
+}
+
 /// What waits for one Agent's next press — every part in which what the claiming Deployment
 /// would release differs from what the assignment pins.
 #[derive(Default)]
@@ -940,8 +966,8 @@ mod tests {
     use super::*;
     use crate::agent_store::AgentStore;
     use crate::fleet::fixtures::*;
-    use crate::fleet::session::Processed;
     use crate::fleet::views::AgentView;
+    use crate::fleet::Processed;
     use crate::fleet::Transport;
     use crate::packages::PackageId;
     use crate::revocation::{CertId, Presented};

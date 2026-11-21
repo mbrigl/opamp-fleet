@@ -1,6 +1,7 @@
 //! In-memory fleet state, keyed by Instance UID — never by the connection that carried a message
 //! (CLT-modes-and-gateway). Each context that changes it is a submodule, which imports by name what it takes
-//! from the root, its siblings and the crate.
+//! from the root, the siblings ranked below it, and the crate; the root names no context but in
+//! its own `pub use` lines (SRV-fleet-contexts-call-by-rank).
 
 #![deny(clippy::wildcard_imports)]
 
@@ -11,11 +12,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use opamp::proto::{
-    AgentDescription, AvailableComponents, ComponentHealth, ConnectionSettingsStatus,
-    OpAmpConnectionSettings, PackageStatuses, RemoteConfigStatus, ServerCapabilities,
-    TelemetryConnectionSettings,
+    AgentDescription, AgentIdentification, AvailableComponents, ComponentHealth,
+    ConnectionSettingsOffers, ConnectionSettingsStatus, OpAmpConnectionSettings, PackageStatuses,
+    RemoteConfigStatus, ServerCapabilities, ServerToAgent, TelemetryConnectionSettings,
 };
 use opamp::uid::InstanceUid;
+use prost::Message as _;
+use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use tracing::info;
 
@@ -26,7 +29,7 @@ use crate::deployments::DeploymentStore;
 use crate::enrolment::Enrolment;
 use crate::labels::Sources;
 use crate::packages::{InstalledVersions, PackageId, PackageStore};
-use crate::revocation::{CertId, Facts, Revocations, Signed, SpeaksFor, SubjectValues};
+use crate::revocation::{CertId, Facts, Revocations, Signed, SubjectValues};
 
 mod approval;
 mod delivery;
@@ -35,16 +38,11 @@ pub(crate) mod placement;
 mod rollout;
 mod session;
 mod views;
-pub use delivery::{PackageOffering, StoreFull, UploadReservation};
-use held::{Kept, AGENT_LOCKS};
-use placement::Groups;
-pub use placement::{Group, Placement};
-pub use session::{
-    bad_request, unavailable, Processed, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER,
-};
+pub use approval::{bad_request, unavailable, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER};
+pub use delivery::{StoreFull, UploadReservation};
+pub use rollout::{DeploymentReach, PendingConfigurationView, PendingPackageView};
 pub use views::{
-    AgentListing, AgentQuery, AgentView, DeploymentReach, HostAgentView, HostAgents,
-    PackageStatusView, PendingConfigurationView, PendingPackageView,
+    AgentListing, AgentQuery, AgentView, HostAgentView, HostAgents, PackageStatusView,
 };
 
 /// The package upload limit in force when nothing configures one — roomy, because a real agent
@@ -78,6 +76,52 @@ pub const SERVER_CAPABILITIES: u64 = ServerCapabilities::AcceptsStatus as u64
 /// Server. Never a routing key — Agents are routed by `instance_uid` alone (CLT-modes-and-gateway); this only
 /// answers "is this identity already alive on *another* connection?".
 pub type ConnId = u64;
+
+/// The result of processing one `AgentToServer`: the reply to send back on the same transport, and
+/// what the transport layer needs to know for its own bookkeeping.
+pub struct Processed {
+    pub reply: ServerToAgent,
+    /// The identity the Agent goes by *after* this message (it may have been reassigned).
+    pub uid: Option<InstanceUid>,
+    /// The Agent said goodbye; a WebSocket loop drops it from its connection-local set.
+    pub disconnected: bool,
+}
+
+// What a report's end answers with, which `session` and `approval` share: the module root names
+// no context, and `approval` ranks below `session` (SRV-fleet-contexts-call-by-rank).
+
+/// What a report's end answers with, once its record is taken into memory.
+struct Ending {
+    /// The identity the Agent goes by after the report.
+    uid: InstanceUid,
+    /// The identity it reported, which the reply is addressed to.
+    reported: InstanceUid,
+    /// It said goodbye.
+    disconnected: bool,
+    /// It came on an older connection of the host whose newer one carries the Agent, which its
+    /// goodbye does not end and a queued restart is not sent on
+    /// (SRV-instance-opens-chosen-planes §8).
+    superseded: bool,
+    identification: Option<AgentIdentification>,
+    reply_flags: u64,
+}
+
+/// One `ConnectionSettingsOffers` message, with one hash over everything it carries: the Agent
+/// acknowledges the message, not its parts.
+fn compose_settings_offer(
+    opamp: Option<OpAmpConnectionSettings>,
+    telemetry: TelemetryOffer,
+) -> ConnectionSettingsOffers {
+    let mut offer = ConnectionSettingsOffers {
+        opamp,
+        own_metrics: telemetry.own_metrics,
+        own_traces: telemetry.own_traces,
+        own_logs: telemetry.own_logs,
+        ..Default::default()
+    };
+    offer.hash = Sha256::digest(offer.encode_to_vec()).to_vec();
+    offer
+}
 
 /// Which transport a report arrived on. Recorded for the operator; it never keys any state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,6 +563,140 @@ pub trait CertificateSigner: Send + Sync {
     fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String>;
 }
 
+// The types of the state the contexts keep in `AppState` and its records: the module root names
+// no context (SRV-fleet-contexts-call-by-rank), so each stands here, and its methods stay with the
+// context that owns it.
+
+/// The Agents one Client presents (SRV-fleet-record-agents-hosts §19), as far as the Server can tell them apart.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Group {
+    /// On a direct connection: the Agents arriving over the same Host.
+    Host(String),
+    /// Behind a Gateway: the Agents arriving over the same Gateway Host that report the same
+    /// machine — `host.id`, else `host.name` ([`crate::labels::machine`]).
+    Behind { gateway: String, machine: String },
+}
+
+/// What the Host an Agent arrived over and its Client Agent add to its effective description
+/// (SRV-fleet-record-agents-hosts §18 and §19). Derived from the records and the host register whenever either
+/// changes; never persisted.
+#[derive(Clone, Debug, Default)]
+pub struct Placement {
+    /// The `fleet.host.*` values of the Host it arrived over directly; empty behind a Gateway.
+    pub host_values: BTreeMap<String, String>,
+    /// The Client it belongs to, when the Server can tell.
+    pub group: Option<Group>,
+    /// Its Client Agent — itself, for the Client Agent — when its group holds exactly one.
+    pub client_agent: Option<InstanceUid>,
+    /// The labels of its Client Agent; empty for the Client Agent itself.
+    pub inherited: BTreeMap<String, String>,
+    /// Its group holds more than one Client Agent, so nothing is inherited.
+    pub ambiguous: bool,
+}
+
+/// Which Agents each [`Group`] holds (SRV-fleet-record-agents-hosts §19), so placing one Agent touches its group
+/// alone. Locked strictly after `fleet`, and only while it is held.
+#[derive(Default)]
+struct Groups(Mutex<HashMap<Group, HashSet<InstanceUid>>>);
+
+/// How many locks the Agents' own locks are spread over: two Agents share one only by their
+/// `instance_uid`, and then one waits for the other's report.
+const AGENT_LOCKS: usize = 1024;
+
+/// A re-key of this instance whose answer was lost and whose read back failed: the identity it
+/// moved the record to, if it committed, and whether a read since found it did.
+#[derive(Clone, Copy, Debug)]
+struct PendingRekey {
+    new: InstanceUid,
+    moved: bool,
+}
+
+/// What the last presence batch wrote: the holder it named, each Agent's presence, and the count of
+/// takes the store last answered for each Agent, which a disconnect is written only under and which
+/// outlives the holder it was answered under. The Agents whose take's answer was lost are unsure:
+/// their count is read before their disconnect is written, and the count they were answered before
+/// is kept apart, for the shutdown flush alone. Every change of what is kept of an Agent moves its
+/// generation, so a batch applies its answers only to what did not change meanwhile.
+#[derive(Default)]
+struct PresenceWritten {
+    holder: Option<String>,
+    agents: HashMap<InstanceUid, Presence>,
+    takes: HashMap<InstanceUid, u64>,
+    unsure: HashSet<InstanceUid>,
+    /// The count of takes last answered for an Agent whose take since lost its answer, or 0 where
+    /// this instance created its record: still the count this instance was last answered, so the
+    /// shutdown flush writes the record under it, where the row names no holder and no take was
+    /// counted since (SRV-fleet-record-agents-hosts §2). No batch names this instance by it. A count answered since
+    /// in `takes` outranks it, so an answer leaves it as it is.
+    before_lost: HashMap<InstanceUid, u64>,
+    generations: HashMap<InstanceUid, u64>,
+    generation: u64,
+}
+
+/// What an instance keeps of each Agent beside its record and its group: one entry of four parts,
+/// each keyed by the Agent's `instance_uid`. A forget drops it (`held`'s `Kept::forget`) and a
+/// re-key moves it (`Kept::rekey`) as one, each naming every part, so a part added later does not
+/// compile until both say what becomes of it. Each part keeps its own lock, every one taken
+/// strictly after `fleet`.
+struct Kept {
+    /// Each persisted record's durable digest as last written — the dirty check that keeps a
+    /// heartbeat from reaching any storage backend (SRV-fleet-record-agents-hosts).
+    written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
+    /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
+    /// batch writes only what moved since.
+    presence_written: Mutex<PresenceWritten>,
+    /// The re-keys whose answer was lost and whose read back failed, by the old identity: the new
+    /// one each moved to, if it committed, which the Agent's next report reads back and assigns.
+    unsure_rekeys: Mutex<HashMap<InstanceUid, PendingRekey>>,
+    /// The restarts whose command was not sent and whose put-back the store did not take, each
+    /// with when it is tried again (`held`'s `retry_restarts`).
+    unput_restarts: Mutex<HashMap<InstanceUid, Backoff>>,
+}
+
+impl Kept {
+    /// Starts with `written`, the digests of the records restored, and nothing else.
+    fn with_written(written: HashMap<InstanceUid, [u8; 32]>) -> Self {
+        Kept {
+            written: Mutex::new(written),
+            presence_written: Mutex::new(PresenceWritten::default()),
+            unsure_rekeys: Mutex::new(HashMap::new()),
+            unput_restarts: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+/// When a kept put-back of a restart is tried again, counted in calls of
+/// `held`'s `retry_restarts`.
+#[derive(Debug, Clone, Copy)]
+struct Backoff {
+    /// Calls until the next try.
+    left: u32,
+    /// Calls the next failure waits.
+    wait: u32,
+}
+
+/// The package store and the Deployments that release from it (PKG-signed-packages-and-delivery). Every `download_url`
+/// is a path the Client resolves against its own endpoint — the Agent plane, where the download
+/// is served behind the same handshake as `/v1/opamp` (PKG-signed-packages-and-delivery).
+pub struct PackageOffering {
+    store: PackageStore,
+    deployments: DeploymentStore,
+}
+
+impl PackageOffering {
+    pub fn with_deployments(store: PackageStore, deployments: DeploymentStore) -> Self {
+        PackageOffering { store, deployments }
+    }
+
+    pub fn store(&self) -> &PackageStore {
+        &self.store
+    }
+
+    pub fn deployments(&self) -> &DeploymentStore {
+        &self.deployments
+    }
+}
+
 /// Shared state behind every handler: the fleet, the Configuration store, and the push channel
 /// WebSocket loops subscribe to.
 pub struct AppState {
@@ -530,7 +708,7 @@ pub struct AppState {
     /// and moved by a re-key as one entry. Its parts are locked strictly after `fleet`.
     kept: Kept,
     configs: ConfigStore,
-    /// Which Agents each [`Group`] holds, owned by [`placement`].
+    /// Which Agents each [`Group`] holds, owned by `placement`.
     groups: Groups,
     push: watch::Sender<u64>,
     /// Hands every WebSocket connection its identity for the duplicate detection.
@@ -609,7 +787,7 @@ pub struct AppState {
     /// How often an Agent's lock was found taken and waited for.
     agent_lock_waits: AtomicU64,
     /// The Agents whose take a report of this instance is making, from before it is written until
-    /// the report holds the Agent in memory, which [`release_taken`](Self::release_taken) waits
+    /// the report holds the Agent in memory, which `held`'s `release_taken` waits
     /// for. Locked after an Agent's own lock, and alone.
     taking: Mutex<HashSet<InstanceUid>>,
     /// The new Agents a report on a store this Server alone writes has counted against
@@ -618,11 +796,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Builds the state on any backend for the Agent records, their labels included (SRV-fleet-record-agents-hosts), and
-    /// the Configurations (SRV-deployments-and-pinned-rollouts). The ports are the only thing the fleet logic knows about that
-    /// persistence, so a database or an external store is an implementation of [`AgentStore`] or
-    /// [`ConfigBackend`] plus one wiring call.
-    pub fn with_stores(
+    /// The state on these stores, built as `placement`'s `with_stores` builds it but with no
+    /// Agent placed yet.
+    fn unplaced(
         agent_store: Box<dyn AgentStore>,
         configs: Box<dyn ConfigBackend>,
         clock: Box<dyn Clock>,
@@ -667,7 +843,7 @@ impl AppState {
                 &agent_store.referenced_revisions(&config.name),
             )?;
         }
-        let state = AppState {
+        Ok(AppState {
             fleet: Mutex::new(fleet),
             agent_store,
             kept: Kept::with_written(written),
@@ -700,9 +876,7 @@ impl AppState {
             agent_lock_waits: AtomicU64::new(0),
             taking: Mutex::new(HashSet::new()),
             reserved_new: AtomicUsize::new(0),
-        };
-        state.place_all();
-        Ok(state)
+        })
     }
 
     /// Sets the message size limit both transports enforce (the Baseline recommends the default
@@ -867,94 +1041,6 @@ impl AppState {
     /// The bootstrap certificates the Server issued, while `[enrolment]` is set.
     pub fn bootstrap(&self) -> Option<&Arc<crate::bootstrap::BootstrapCertificates>> {
         self.bootstrap.as_ref()
-    }
-
-    /// Arms the register and the revocation list (SEC-admission-by-client-certificate).
-    #[must_use]
-    pub fn with_revocations(mut self, revocations: Option<Arc<Revocations>>) -> Self {
-        self.revocations = revocations;
-        // The Hosts the records name are known now: their values and Gateway marks place them.
-        self.place_all();
-        self
-    }
-
-    /// The fleet as the Operator plane reads it
-    /// (SRV-state-stores-contract-pair §3): on a shared store every record as
-    /// stored, connected as its stored presence says, placed among the others, and nothing of what
-    /// this instance holds in memory; on a store this Server alone writes, what it holds.
-    ///
-    /// # Errors
-    /// Returns an error when the shared store cannot be read.
-    fn read_fleet<T>(
-        &self,
-        read: impl FnOnce(&HashMap<InstanceUid, AgentRecord>) -> T,
-    ) -> Result<T, String> {
-        if !self.agent_store.is_shared() {
-            return Ok(read(&self.fleet.lock().expect("fleet lock")));
-        }
-        Ok(read(&self.stored_fleet()?))
-    }
-
-    /// The record of `uid` as the Operator plane reads it from the shared store, placed as
-    /// [`stored_fleet`](Self::stored_fleet) places it, without the whole fleet: one read of it and
-    /// of the Agents the host register binds to the same Host, which are the group its Client
-    /// Agent is found in. An Agent that arrived over a Gateway is placed among the Agents that
-    /// arrived over the same Host ([`arrived_over`](Self::arrived_over)), since the register knows
-    /// no group behind a Gateway, whatever Host it binds the Agent to.
-    fn stored_agent(&self, uid: &InstanceUid) -> Result<Option<AgentRecord>, String> {
-        let bound = self.revocations.as_ref().and_then(|revocations| {
-            let host = revocations.bound_host(uid.as_bytes())?;
-            match revocations.speaks_for(&host) {
-                SpeaksFor::Agents(bound) => Some(bound),
-                SpeaksFor::Any => None,
-            }
-        });
-        let mut uids: Vec<InstanceUid> = bound
-            .iter()
-            .flatten()
-            .filter_map(|uid| parse_hex_uid(uid))
-            .collect();
-        if !uids.contains(uid) {
-            uids.push(*uid);
-        }
-        let mut read = self.records_of(self.agent_store.query(Some(&uids))?);
-        // What places it is the Host it arrived over, not the one it is bound to: an Agent bound to
-        // a direct Host may report over a Gateway since.
-        let behind_a_gateway = read.get(uid).is_some_and(|record| {
-            record.host.as_deref().is_some_and(|host| {
-                self.revocations
-                    .as_ref()
-                    .is_some_and(|revocations| revocations.is_gateway(host))
-            })
-        });
-        if let (true, Some(host)) = (
-            behind_a_gateway,
-            read.get(uid).and_then(|record| record.host.clone()),
-        ) {
-            return Ok(self.placed(self.arrived_over(&host)?).remove(uid));
-        }
-        Ok(self.placed(std::mem::take(&mut read)).remove(uid))
-    }
-
-    /// The records a query read, each connected as its stored presence says, not yet placed.
-    fn records_of(
-        &self,
-        read: Vec<(InstanceUid, crate::agent_store::StoredAgent)>,
-    ) -> HashMap<InstanceUid, AgentRecord> {
-        read.into_iter()
-            .map(|(uid, stored)| {
-                let mut record = AgentRecord::from_persisted(stored.record);
-                record.connected = stored.connected;
-                record.holder = stored.holder;
-                (uid, record)
-            })
-            .collect()
-    }
-
-    /// Every record the shared store holds, with its stored presence, placed among the others.
-    fn stored_fleet(&self) -> Result<HashMap<InstanceUid, AgentRecord>, String> {
-        let records = self.records_of(self.agent_store.query(None)?);
-        Ok(self.placed(records))
     }
 
     /// The register and the revocation list.
