@@ -14,9 +14,8 @@ use crate::deployments::{deployment_for, Deployment, DeploymentStore};
 use crate::listing::capability_names;
 use crate::packages::PackageId;
 
-use super::placement::{Group, Placement};
 use super::rollout::{waiting, PendingConfigurationView, PendingPackageView, Waiting};
-use super::{is_stale, AgentRecord, AppState};
+use super::{is_stale, AgentRecord, AppState, Group, Placement};
 
 impl AppState {
     /// The Agents each Host carries (SRV-fleet-record-agents-hosts §24) — those whose record names it as the Host

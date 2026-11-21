@@ -20,10 +20,9 @@ use crate::deployments::{self, deployment_for, Deployment, DeploymentError};
 use crate::labels::LabelError;
 use crate::packages::PackageStore;
 
-use super::delivery::PackageOffering;
 use super::{
-    AgentRecord, AppState, Assignment, ConnId, DeleteError, RestartError, RolloutError,
-    NO_CONFIGURATIONS,
+    AgentRecord, AppState, Assignment, ConnId, DeleteError, PackageOffering, RestartError,
+    RolloutError, NO_CONFIGURATIONS,
 };
 
 impl AppState {

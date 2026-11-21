@@ -6,10 +6,11 @@
 //!
 //! It also builds the state, arms the host register, and reads the fleet from a shared store, since
 //! each ends by placing the Agents and the module root names no context
-//! (SRV-fleet-contexts-call-by-rank).
+//! (SRV-fleet-contexts-call-by-rank). For the same reason `Group`, `Placement` and the index
+//! `Groups`, parts of the state, stand in the root.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, MutexGuard};
 
 use opamp::proto::AgentDescription;
 use opamp::uid::InstanceUid;
@@ -19,39 +20,7 @@ use crate::agent_store::{AgentStore, PersistedAgent};
 use crate::configs::ConfigBackend;
 use crate::revocation::{Revocations, SpeaksFor};
 
-use super::{parse_hex_uid, AgentRecord, AppState, Clock};
-
-/// The Agents one Client presents (SRV-fleet-record-agents-hosts §19), as far as the Server can tell them apart.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Group {
-    /// On a direct connection: the Agents arriving over the same Host.
-    Host(String),
-    /// Behind a Gateway: the Agents arriving over the same Gateway Host that report the same
-    /// machine — `host.id`, else `host.name` ([`crate::labels::machine`]).
-    Behind { gateway: String, machine: String },
-}
-
-/// What the Host an Agent arrived over and its Client Agent add to its effective description
-/// (SRV-fleet-record-agents-hosts §18 and §19). Derived from the records and the host register whenever either
-/// changes; never persisted.
-#[derive(Clone, Debug, Default)]
-pub struct Placement {
-    /// The `fleet.host.*` values of the Host it arrived over directly; empty behind a Gateway.
-    pub host_values: BTreeMap<String, String>,
-    /// The Client it belongs to, when the Server can tell.
-    pub group: Option<Group>,
-    /// Its Client Agent — itself, for the Client Agent — when its group holds exactly one.
-    pub client_agent: Option<InstanceUid>,
-    /// The labels of its Client Agent; empty for the Client Agent itself.
-    pub inherited: BTreeMap<String, String>,
-    /// Its group holds more than one Client Agent, so nothing is inherited.
-    pub ambiguous: bool,
-}
-
-/// Which Agents each [`Group`] holds (SRV-fleet-record-agents-hosts §19), so placing one Agent touches its group
-/// alone. Locked strictly after `fleet`, and only while it is held.
-#[derive(Default)]
-pub(super) struct Groups(Mutex<HashMap<Group, HashSet<InstanceUid>>>);
+use super::{parse_hex_uid, AgentRecord, AppState, Clock, Group, Groups, Placement};
 
 impl Groups {
     fn lock(&self) -> MutexGuard<'_, HashMap<Group, HashSet<InstanceUid>>> {

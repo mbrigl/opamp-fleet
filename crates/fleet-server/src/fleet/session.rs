@@ -22,12 +22,12 @@ use crate::agent_store::{Creation, PersistedAgent};
 use crate::audit::Entry;
 use crate::revocation::{CertId, Presented, Signed, SubjectValues};
 
-use super::held::{Carried, PendingRekey, Settled, Taking, Took, UnsureRekey};
-use super::placement::{Elsewhere, Group, Placement};
+use super::held::{Carried, Settled, Taking, Took, UnsureRekey};
+use super::placement::Elsewhere;
 use super::rollout::{offer, restart_command};
 use super::{
-    is_silent, AgentRecord, AppState, CertificateSigner, ConnId, ForgetError, Processed,
-    TelemetryOffer, Transport, UseCase, SERVER_CAPABILITIES,
+    is_silent, AgentRecord, AppState, CertificateSigner, ConnId, ForgetError, Group, PendingRekey,
+    Placement, Processed, TelemetryOffer, Transport, UseCase, SERVER_CAPABILITIES,
 };
 
 impl AppState {

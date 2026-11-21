@@ -35,10 +35,7 @@ pub(crate) mod placement;
 mod rollout;
 mod session;
 mod views;
-pub use delivery::{PackageOffering, StoreFull, UploadReservation};
-use held::{Kept, AGENT_LOCKS};
-use placement::Groups;
-pub use placement::{Group, Placement};
+pub use delivery::{StoreFull, UploadReservation};
 pub use rollout::{DeploymentReach, PendingConfigurationView, PendingPackageView};
 pub use session::{bad_request, unavailable, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF, RETRY_AFTER};
 pub use views::{
@@ -525,6 +522,140 @@ pub trait CertificateSigner: Send + Sync {
     /// # Errors
     /// Returns the `BadRequest` text for a request that claims another identity.
     fn check_claims(&self, csr_pem: &str, sender: &[u8]) -> Result<(), String>;
+}
+
+// The types of the state the contexts keep in `AppState` and its records: the module root names
+// no context (SRV-fleet-contexts-call-by-rank), so each stands here, and its methods stay with the
+// context that owns it.
+
+/// The Agents one Client presents (SRV-fleet-record-agents-hosts §19), as far as the Server can tell them apart.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Group {
+    /// On a direct connection: the Agents arriving over the same Host.
+    Host(String),
+    /// Behind a Gateway: the Agents arriving over the same Gateway Host that report the same
+    /// machine — `host.id`, else `host.name` ([`crate::labels::machine`]).
+    Behind { gateway: String, machine: String },
+}
+
+/// What the Host an Agent arrived over and its Client Agent add to its effective description
+/// (SRV-fleet-record-agents-hosts §18 and §19). Derived from the records and the host register whenever either
+/// changes; never persisted.
+#[derive(Clone, Debug, Default)]
+pub struct Placement {
+    /// The `fleet.host.*` values of the Host it arrived over directly; empty behind a Gateway.
+    pub host_values: BTreeMap<String, String>,
+    /// The Client it belongs to, when the Server can tell.
+    pub group: Option<Group>,
+    /// Its Client Agent — itself, for the Client Agent — when its group holds exactly one.
+    pub client_agent: Option<InstanceUid>,
+    /// The labels of its Client Agent; empty for the Client Agent itself.
+    pub inherited: BTreeMap<String, String>,
+    /// Its group holds more than one Client Agent, so nothing is inherited.
+    pub ambiguous: bool,
+}
+
+/// Which Agents each [`Group`] holds (SRV-fleet-record-agents-hosts §19), so placing one Agent touches its group
+/// alone. Locked strictly after `fleet`, and only while it is held.
+#[derive(Default)]
+struct Groups(Mutex<HashMap<Group, HashSet<InstanceUid>>>);
+
+/// How many locks the Agents' own locks are spread over: two Agents share one only by their
+/// `instance_uid`, and then one waits for the other's report.
+const AGENT_LOCKS: usize = 1024;
+
+/// A re-key of this instance whose answer was lost and whose read back failed: the identity it
+/// moved the record to, if it committed, and whether a read since found it did.
+#[derive(Clone, Copy, Debug)]
+struct PendingRekey {
+    new: InstanceUid,
+    moved: bool,
+}
+
+/// What the last presence batch wrote: the holder it named, each Agent's presence, and the count of
+/// takes the store last answered for each Agent, which a disconnect is written only under and which
+/// outlives the holder it was answered under. The Agents whose take's answer was lost are unsure:
+/// their count is read before their disconnect is written, and the count they were answered before
+/// is kept apart, for the shutdown flush alone. Every change of what is kept of an Agent moves its
+/// generation, so a batch applies its answers only to what did not change meanwhile.
+#[derive(Default)]
+struct PresenceWritten {
+    holder: Option<String>,
+    agents: HashMap<InstanceUid, Presence>,
+    takes: HashMap<InstanceUid, u64>,
+    unsure: HashSet<InstanceUid>,
+    /// The count of takes last answered for an Agent whose take since lost its answer, or 0 where
+    /// this instance created its record: still the count this instance was last answered, so the
+    /// shutdown flush writes the record under it, where the row names no holder and no take was
+    /// counted since (SRV-fleet-record-agents-hosts §2). No batch names this instance by it. A count answered since
+    /// in `takes` outranks it, so an answer leaves it as it is.
+    before_lost: HashMap<InstanceUid, u64>,
+    generations: HashMap<InstanceUid, u64>,
+    generation: u64,
+}
+
+/// What an instance keeps of each Agent beside its record and its group: one entry of four parts,
+/// each keyed by the Agent's `instance_uid`. A forget drops it ([`Kept::forget`]) and a re-key
+/// moves it ([`Kept::rekey`]) as one, each naming every part, so a part added later does not
+/// compile until both say what becomes of it. Each part keeps its own lock, every one taken
+/// strictly after `fleet`.
+struct Kept {
+    /// Each persisted record's durable digest as last written — the dirty check that keeps a
+    /// heartbeat from reaching any storage backend (SRV-fleet-record-agents-hosts).
+    written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
+    /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
+    /// batch writes only what moved since.
+    presence_written: Mutex<PresenceWritten>,
+    /// The re-keys whose answer was lost and whose read back failed, by the old identity: the new
+    /// one each moved to, if it committed, which the Agent's next report reads back and assigns.
+    unsure_rekeys: Mutex<HashMap<InstanceUid, PendingRekey>>,
+    /// The restarts whose command was not sent and whose put-back the store did not take, each
+    /// with when it is tried again ([`retry_restarts`](AppState::retry_restarts)).
+    unput_restarts: Mutex<HashMap<InstanceUid, Backoff>>,
+}
+
+impl Kept {
+    /// Starts with `written`, the digests of the records restored, and nothing else.
+    fn with_written(written: HashMap<InstanceUid, [u8; 32]>) -> Self {
+        Kept {
+            written: Mutex::new(written),
+            presence_written: Mutex::new(PresenceWritten::default()),
+            unsure_rekeys: Mutex::new(HashMap::new()),
+            unput_restarts: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+/// When a kept put-back of a restart is tried again, counted in calls of
+/// [`AppState::retry_restarts`].
+#[derive(Debug, Clone, Copy)]
+struct Backoff {
+    /// Calls until the next try.
+    left: u32,
+    /// Calls the next failure waits.
+    wait: u32,
+}
+
+/// The package store and the Deployments that release from it (PKG-signed-packages-and-delivery). Every `download_url`
+/// is a path the Client resolves against its own endpoint — the Agent plane, where the download
+/// is served behind the same handshake as `/v1/opamp` (PKG-signed-packages-and-delivery).
+pub struct PackageOffering {
+    store: PackageStore,
+    deployments: DeploymentStore,
+}
+
+impl PackageOffering {
+    pub fn with_deployments(store: PackageStore, deployments: DeploymentStore) -> Self {
+        PackageOffering { store, deployments }
+    }
+
+    pub fn store(&self) -> &PackageStore {
+        &self.store
+    }
+
+    pub fn deployments(&self) -> &DeploymentStore {
+        &self.deployments
+    }
 }
 
 /// Shared state behind every handler: the fleet, the Configuration store, and the push channel

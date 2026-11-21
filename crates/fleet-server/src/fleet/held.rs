@@ -5,7 +5,8 @@
 //!
 //! It also takes labels into a held record and notes the end of a forgotten Agent's session, which
 //! `rollout` and `session` call: `held` ranks below both, and its own take-up does the same
-//! (SRV-fleet-contexts-call-by-rank).
+//! (SRV-fleet-contexts-call-by-rank). What it keeps of each Agent (`Kept` and its parts) and the
+//! count of locks are parts of the state and stand in the module root, which names no context.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -19,11 +20,10 @@ use tracing::{debug, info, warn};
 use crate::agent_store::{PersistedAgent, Presence};
 
 use super::placement::Elsewhere;
-use super::{placement, AgentRecord, AppState, ConnId, Processed};
-
-/// How many locks the Agents' own locks are spread over: two Agents share one only by their
-/// `instance_uid`, and then one waits for the other's report.
-pub(super) const AGENT_LOCKS: usize = 1024;
+use super::{
+    placement, AgentRecord, AppState, Backoff, ConnId, Kept, PendingRekey, PresenceWritten,
+    Processed, AGENT_LOCKS,
+};
 
 /// What became of an Agent found gone from the store: dropped as forgotten, or kept, as its row
 /// moved through a re-key of this instance's own whose answer was lost, or as that is not known.
@@ -122,14 +122,6 @@ pub(super) enum Settled {
     Restart(Option<TlsCertificate>),
 }
 
-/// A re-key of this instance whose answer was lost and whose read back failed: the identity it
-/// moved the record to, if it committed, and whether a read since found it did.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct PendingRekey {
-    pub(super) new: InstanceUid,
-    pub(super) moved: bool,
-}
-
 /// What became of a re-key of this instance whose answer was lost and whose read back failed, read
 /// back again at the Agent's next report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,28 +132,6 @@ pub(super) enum UnsureRekey {
     Moved(InstanceUid),
     /// It is still not known.
     Unknown,
-}
-
-/// What the last presence batch wrote: the holder it named, each Agent's presence, and the count of
-/// takes the store last answered for each Agent, which a disconnect is written only under and which
-/// outlives the holder it was answered under. The Agents whose take's answer was lost are unsure:
-/// their count is read before their disconnect is written, and the count they were answered before
-/// is kept apart, for the shutdown flush alone. Every change of what is kept of an Agent moves its
-/// generation, so a batch applies its answers only to what did not change meanwhile.
-#[derive(Default)]
-pub(super) struct PresenceWritten {
-    pub(super) holder: Option<String>,
-    pub(super) agents: HashMap<InstanceUid, Presence>,
-    pub(super) takes: HashMap<InstanceUid, u64>,
-    pub(super) unsure: HashSet<InstanceUid>,
-    /// The count of takes last answered for an Agent whose take since lost its answer, or 0 where
-    /// this instance created its record: still the count this instance was last answered, so the
-    /// shutdown flush writes the record under it, where the row names no holder and no take was
-    /// counted since (SRV-fleet-record-agents-hosts §2). No batch names this instance by it. A count answered since
-    /// in `takes` outranks it, so an answer leaves it as it is.
-    pub(super) before_lost: HashMap<InstanceUid, u64>,
-    pub(super) generations: HashMap<InstanceUid, u64>,
-    pub(super) generation: u64,
 }
 
 impl PresenceWritten {
@@ -295,37 +265,7 @@ impl PresenceWritten {
     }
 }
 
-/// What an instance keeps of each Agent beside its record and its group: one entry of four parts,
-/// each keyed by the Agent's `instance_uid`. A forget drops it ([`Kept::forget`]) and a re-key
-/// moves it ([`Kept::rekey`]) as one, each naming every part, so a part added later does not
-/// compile until both say what becomes of it. Each part keeps its own lock, every one taken
-/// strictly after `fleet`.
-pub(super) struct Kept {
-    /// Each persisted record's durable digest as last written — the dirty check that keeps a
-    /// heartbeat from reaching any storage backend (SRV-fleet-record-agents-hosts).
-    pub(super) written: Mutex<HashMap<InstanceUid, [u8; 32]>>,
-    /// The presence of each held Agent as the last batch wrote it, and the holder it named, so a
-    /// batch writes only what moved since.
-    pub(super) presence_written: Mutex<PresenceWritten>,
-    /// The re-keys whose answer was lost and whose read back failed, by the old identity: the new
-    /// one each moved to, if it committed, which the Agent's next report reads back and assigns.
-    pub(super) unsure_rekeys: Mutex<HashMap<InstanceUid, PendingRekey>>,
-    /// The restarts whose command was not sent and whose put-back the store did not take, each
-    /// with when it is tried again ([`retry_restarts`](AppState::retry_restarts)).
-    pub(super) unput_restarts: Mutex<HashMap<InstanceUid, Backoff>>,
-}
-
 impl Kept {
-    /// Starts with `written`, the digests of the records restored, and nothing else.
-    pub(super) fn with_written(written: HashMap<InstanceUid, [u8; 32]>) -> Self {
-        Kept {
-            written: Mutex::new(written),
-            presence_written: Mutex::new(PresenceWritten::default()),
-            unsure_rekeys: Mutex::new(HashMap::new()),
-            unput_restarts: Mutex::new(HashMap::new()),
-        }
-    }
-
     /// Drops everything kept of `uid`, which left what this instance holds. That includes each
     /// pending re-key from `uid` and each pending re-key to `uid`.
     pub(super) fn forget(&self, uid: &InstanceUid) {
@@ -1492,16 +1432,6 @@ impl AppState {
     pub fn agent_lock_waits(&self) -> u64 {
         self.agent_lock_waits.load(Ordering::SeqCst)
     }
-}
-
-/// When a kept put-back of a restart is tried again, counted in calls of
-/// [`AppState::retry_restarts`].
-#[derive(Debug, Clone, Copy)]
-pub(super) struct Backoff {
-    /// Calls until the next try.
-    left: u32,
-    /// Calls the next failure waits.
-    wait: u32,
 }
 
 impl Backoff {
