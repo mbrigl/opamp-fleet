@@ -1,4 +1,4 @@
-//! The WebSocket transport end to end (SEC-tls13-two-planes-bounded-input): framed exchange, the pushed offer on a config
+//! The WebSocket transport end to end (SEC-tls13-bounded-input-chosen-planes): framed exchange, the pushed offer on a config
 //! change, and disconnect handling.
 
 mod support;
@@ -55,7 +55,7 @@ async fn recv(socket: &mut Socket) -> ServerToAgent {
     }
 }
 
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_framed_report_is_answered() {
     let server = spawn().await;
@@ -411,7 +411,7 @@ async fn two_agents_share_one_connection() {
 
 /// The Baseline (message size limits): a WebSocket message past the receive limit is malformed,
 /// and the Server closes the connection with status code 1009 rather than acting on it.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn an_oversized_frame_closes_the_connection_with_1009() {
     let server = support::spawn_with_limit(1024).await;
@@ -458,7 +458,7 @@ const SMALL: fleet_server::agent_rate::Limits = fleet_server::agent_rate::Limits
 /// A member past its burst is answered `Unavailable` with a `retry_info` of exactly 30 s, addressed
 /// to the Agent that sent the message; the session stays open, the Agent's record is untouched, and
 /// once the bucket refills the next message is processed and asked for a full report.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_session_past_its_burst_is_answered_unavailable_with_retry_info() {
     use opamp::proto::server_error_response::Details;
@@ -509,7 +509,7 @@ async fn a_session_past_its_burst_is_answered_unavailable_with_retry_info() {
 /// work. A session is told why it ends — the close code for a server going away — and it is over,
 /// its Agent marked disconnected, by the time `serve` returns.
 ///
-/// Verifies: SEC-tls13-two-planes-bounded-input, SRV-fleet-record-agents-hosts
+/// Verifies: SEC-tls13-bounded-input-chosen-planes, SRV-fleet-record-agents-hosts
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shutdown_closes_the_websocket_sessions_before_serve_returns() {
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -619,7 +619,7 @@ async fn forgetting_an_agent_ends_its_session() {
 
 /// A message that arrives while the instance's lease is lapsed by its clock — after a suspend of
 /// its host, before it has closed its listeners — is not answered; the one before was.
-/// Verifies: SRV-instances-share-one-postgresql
+/// Verifies: SRV-instance-opens-chosen-planes
 #[tokio::test]
 async fn a_message_is_not_answered_while_the_lease_is_lapsed_by_its_clock() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -658,7 +658,7 @@ async fn a_message_is_not_answered_while_the_lease_is_lapsed_by_its_clock() {
 
 /// A push that falls due while the instance's lease is lapsed by its clock is not sent: a restart
 /// requested then stays queued for an instance that holds a lease.
-/// Verifies: SRV-instances-share-one-postgresql
+/// Verifies: SRV-instance-opens-chosen-planes
 #[tokio::test]
 async fn nothing_is_pushed_while_the_lease_is_lapsed_by_its_clock() {
     use std::sync::atomic::{AtomicU64, Ordering};

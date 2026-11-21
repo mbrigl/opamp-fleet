@@ -7,7 +7,7 @@
 //! line goes into a queue of [`QUEUE`] entries, and one that finds the queue full is counted as
 //! dropped. A thread of its own takes the lines out, encodes them with `opentelemetry-otlp`, the
 //! crate the Client's own telemetry uses (CLT-what-an-agent-reports), and sends them through a `reqwest` client on
-//! the TLS 1.3 *ring* configuration (SEC-tls13-two-planes-bounded-input §5 and §21); a batch the receiver does not take
+//! the TLS 1.3 *ring* configuration (SEC-tls13-bounded-input-chosen-planes §5 and §21); a batch the receiver does not take
 //! is tried again, until it does, while the queue fills behind it. The count of what was dropped is
 //! written into the record itself as `audit.export_dropped` ([`AuditExport::report_dropped`]),
 //! about every [`DROPPED_EVERY`] while it is not zero and once at shutdown.

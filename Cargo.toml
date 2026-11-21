@@ -46,12 +46,12 @@ tracing-appender = "0.2"
 sha2 = "0.11"
 hex = "0.4"
 uuid = { version = "1", features = ["v7"] }
-# Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (SEC-tls13-two-planes-bounded-input) — and,
+# Decoding gzip request bodies on the plain-HTTP transport — a Baseline MUST (SEC-tls13-bounded-input-chosen-planes) — and,
 # on the Client, the gzip layer of a `.tar.gz` package artifact (PKG-signed-packages-and-delivery).
 flate2 = "1"
 # Opening a `.7z` package artifact, encrypted or not (PKG-signed-packages-and-delivery). Pure Rust; default features are
 # off because they pull `bzip2`, which links a *system* library — `aes256` is the RustCrypto AES
-# this needs, and LZMA/LZMA2 decoding is in the base. That keeps what API-protocol-pinned-interop-checked and SEC-tls13-two-planes-bounded-input
+# this needs, and LZMA/LZMA2 decoding is in the base. That keeps what API-protocol-pinned-interop-checked and SEC-tls13-bounded-input-chosen-planes
 # actually secured: no system dependency, no cmake, no `protoc`. This build is not free of C —
 # `ring` compiles C and assembly in its build script, so a C compiler is required either way
 # (SEC-admission-by-client-certificate).
@@ -63,11 +63,11 @@ sevenz-rust2 = { version = "0.25", default-features = false, features = ["aes256
 # Reading a `.zip` package artifact (PKG-signed-packages-and-delivery §62) — the container some agents publish their
 # portable Windows build in. Default features pull C-binding codecs (bzip2, xz, zstd), so only
 # `deflate` is taken, which decompresses on the `flate2`/`miniz_oxide` chain already present;
-# reading stays pure Rust (API-protocol-pinned-interop-checked, SEC-tls13-two-planes-bounded-input). Read-only and unencrypted: the Client never
+# reading stays pure Rust (API-protocol-pinned-interop-checked, SEC-tls13-bounded-input-chosen-planes). Read-only and unencrypted: the Client never
 # writes a zip, and a confidential artifact is a `.7z` (PKG-signed-packages-and-delivery).
 zip = { version = "9", default-features = false, features = ["deflate"] }
 # Reading the tar inside a `.tar.gz` package artifact (PKG-signed-packages-and-delivery). Pure Rust and no system library,
-# which is what API-protocol-pinned-interop-checked and SEC-tls13-two-planes-bounded-input keep this build free of; the Client extracts one member and
+# which is what API-protocol-pinned-interop-checked and SEC-tls13-bounded-input-chosen-planes keep this build free of; the Client extracts one member and
 # never writes a path the archive chose.
 tar = "0.4"
 # The secrets the application crates hold in memory — private keys, passwords, a `bootstrap.p12`
@@ -76,7 +76,7 @@ tar = "0.4"
 # of memory about to be freed cannot promise. The default `alloc` feature and no derive. At least
 # 1.9.1, the first whose `Zeroizing` `Debug` shows no content. Already in the tree through
 # `dialoguer`, `der`, `pkcs8`, `pkcs12`, `rustls` and `rustls-pki-types`; it pulls no TLS or crypto
-# backend, so SEC-tls13-two-planes-bounded-input holds. `opamp` does not name it (DEV-six-crates-tokio-axum §3).
+# backend, so SEC-tls13-bounded-input-chosen-planes holds. `opamp` does not name it (DEV-six-crates-tokio-axum §3).
 zeroize = "1.9.1"
 # Encoding Basic credentials into their Authorization header value (SEC-admission-by-client-certificate).
 base64 = "0.23"
@@ -84,11 +84,11 @@ base64 = "0.23"
 constant_time_eq = "0.6"
 # kill(2) for the graceful SIGTERM stop of Managed Processes (CLT-supervisor-mode-and-kinds). Unix-only.
 libc = "0.2"
-# The Client's WebSocket transport; rustls enables `wss://` (SEC-tls13-two-planes-bounded-input).
+# The Client's WebSocket transport; rustls enables `wss://` (SEC-tls13-bounded-input-chosen-planes).
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
-# The Client's plain-HTTP(S) polling transport (SEC-tls13-two-planes-bounded-input); `json` serves the REST-API tests.
+# The Client's plain-HTTP(S) polling transport (SEC-tls13-bounded-input-chosen-planes); `json` serves the REST-API tests.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "gzip", "json"] }
-# TLS via rustls with the *ring* provider — no system OpenSSL and no cmake/aws-lc build (SEC-tls13-two-planes-bounded-input).
+# TLS via rustls with the *ring* provider — no system OpenSSL and no cmake/aws-lc build (SEC-tls13-bounded-input-chosen-planes).
 # The provider is installed once at each binary's startup.
 # `tls12` stays enabled because reqwest requires it; TLS 1.3 alone is enforced where the provider and
 # every configuration are built (`opamp::tls`, DEV-six-crates-tokio-axum).
@@ -100,7 +100,7 @@ ring = "0.17"
 # RustCrypto implementation, pure Rust, no system library.
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
 # The client-certificate CSR flow (SEC-admission-by-client-certificate): the Client produces the request, the Server signs it
-# as a local CA. Pinned to the `ring` backend — the provider SEC-tls13-two-planes-bounded-input already installs, whose C is
+# as a local CA. Pinned to the `ring` backend — the provider SEC-tls13-bounded-input-chosen-planes already installs, whose C is
 # already compiled in this build — rather than `aws_lc_rs`, which would add cmake and more C.
 # `x509-parser` is what reads a CSR back, and a certificate's validity for the renewal window.
 # The Server's signing keys on a PKCS#11 token, and `opamp-fleetctl pki token-init` making them
@@ -165,20 +165,20 @@ sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 # a rustls config built by hand. Data, not code — and already in the tree via the TLS stack.
 webpki-roots = "1"
 # Artifact bytes in an S3-compatible bucket (SRV-state-stores-contract-pair). `aws-base`, `ring` and `reqwest` build the
-# S3 client on *ring*; the `aws` feature would pull `aws-lc-rs` (SEC-tls13-two-planes-bounded-input), and so would the
+# S3 client on *ring*; the `aws` feature would pull `aws-lc-rs` (SEC-tls13-bounded-input-chosen-planes), and so would the
 # default `fs`, which nothing here needs. The HTTP client is the Server's own, handed in.
 object_store = { version = "0.14.2", default-features = false, features = ["aws-base", "ring", "reqwest"] }
 # The Server's records in PostgreSQL (SRV-state-stores-contract-pair). `tokio-postgres` speaks the protocol in plain SQL
 # and reads no `PG*` variable; `with-serde_json-1` maps `jsonb` to `serde_json::Value`, already in
 # the tree. `deadpool-postgres` pools the connections on the Tokio runtime. `tokio-postgres-rustls`
 # carries them over the TLS 1.3, *ring*-only client of `opamp::tls`: its `ring` feature, never
-# `aws-lc-rs` (SEC-tls13-two-planes-bounded-input).
+# `aws-lc-rs` (SEC-tls13-bounded-input-chosen-planes).
 tokio-postgres = { version = "0.7.18", default-features = false, features = ["runtime", "with-serde_json-1"] }
 deadpool-postgres = { version = "0.14.2", default-features = false, features = ["rt_tokio_1"] }
 tokio-postgres-rustls = { version = "0.14.0", default-features = false, features = ["ring"] }
 # Server-side TLS listener; `-no-provider` so it uses the ring provider we install, not aws-lc-rs.
 axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
-# The hyper timer the HTTP/1 header-read timeout needs to exist at all (SEC-tls13-two-planes-bounded-input): hyper defaults
+# The hyper timer the HTTP/1 header-read timeout needs to exist at all (SEC-tls13-bounded-input-chosen-planes): hyper defaults
 # that timeout to 30 seconds but resolves it to *nothing* while no `Timer` is installed; axum
 # installs none, and axum-server 0.9 installs one but turns the timeout off, so the listener sets
 # both itself. `tokio` is the only feature asked for — it is what `rt::TokioTimer` sits behind. The
@@ -200,12 +200,12 @@ git2 = { version = "0.21", default-features = false }
 # (SRV-configuration-toml-and-environment), never configured through environment variables.
 clap = { version = "4", features = ["derive"] }
 # Cross-platform service lifecycle — systemd, launchd, and the Windows SCM behind one API
-# (CLT-installed-service-and-state). Pulls no TLS/crypto backends, so the rustls/ring-only constraint (SEC-tls13-two-planes-bounded-input) holds.
+# (CLT-installed-service-and-state). Pulls no TLS/crypto backends, so the rustls/ring-only constraint (SEC-tls13-bounded-input-chosen-planes) holds.
 service-manager = "0.11"
 # The questionnaire of `service install --interactive` and `service config` (CLT-installed-service-and-state §28): validated answers, defaults and a yes/no confirmation, the same on three operating systems.
 # `password` is the one feature: the password of a `bootstrap.p12` is asked with input hidden
 # (SEC-bootstrap-certificates-and-enrolment), and its one dependency, `zeroize`, is already in the tree. It pulls no TLS/crypto
-# backend, so SEC-tls13-two-planes-bounded-input holds.
+# backend, so SEC-tls13-bounded-input-chosen-planes holds.
 dialoguer = { version = "0.12", default-features = false, features = ["password"] }
 # The Windows-only SCM runtime shim (CLT-installed-service-and-state): status reporting and the stop control handler,
 # without which the SCM kills the service with error 1053. Compiled on Windows targets only.

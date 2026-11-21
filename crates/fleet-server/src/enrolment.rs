@@ -319,7 +319,7 @@ pub enum Took {
 /// filesystem adapter ([`FsEnrolmentStore`](crate::fs::FsEnrolmentStore)) keeps them in
 /// `enrolment.json`. Each act is one write that decides from what is stored, so the queue's bounds
 /// hold for every instance on one database
-/// (SRV-instances-share-one-postgresql §19).
+/// (SRV-instance-opens-chosen-planes §19).
 /// The acts' bodies here read and write the whole, for a store that is its only
 /// writer; a store that is shared answers each in one transaction of its own.
 pub trait EnrolmentStore: Send + Sync {
@@ -411,7 +411,7 @@ pub trait EnrolmentStore: Send + Sync {
     /// prepared (SRV-state-stores-contract-pair §9). A request the store holds no longer waiting, or whose key it
     /// holds rejected, is answered [`Approval::NotWaiting`] before anything is signed, so of two
     /// instances approving one request one signs and records it and the other nothing
-    /// (SRV-instances-share-one-postgresql §19).
+    /// (SRV-instance-opens-chosen-planes §19).
     /// A store other instances share also refuses a request whose bootstrap
     /// certificate, `bootstrap`, the list names, and withdraws it; a store that is its only writer
     /// leaves that to the list in memory. Such a store answers [`Approval::Deciding`] for a
@@ -1255,7 +1255,7 @@ impl Enrolment {
     }
 
     /// Reads the window and its queue again from the store, as another instance changed them
-    /// (SRV-instances-share-one-postgresql §9 and §10),
+    /// (SRV-instance-opens-chosen-planes §9 and §10),
     /// and wakes every connection waiting on them, so a request another instance
     /// approved is handed to the connection that asked. It reads under the lock, so no act of this
     /// instance's own lands between the read and the swap; the queue is bounded, so the read is
@@ -1565,7 +1565,7 @@ pub(crate) mod tests {
     /// Two instances on one store answer a request as the store holds it: one the other approved
     /// is handed out with its certificate, and one the other decided or withdrew is not found,
     /// however the first held it, and signs nothing.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn two_instances_on_one_store_answer_a_request_as_the_store_holds_it() {
         let clock = Arc::new(Manual(AtomicU64::new(1_000_000)));
@@ -1785,7 +1785,7 @@ pub(crate) mod tests {
 
     /// A decision on a request another instance is deciding at this moment is answered so, and
     /// decides nothing: the request still waits here, to be decided once asked again.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_decision_on_a_request_another_instance_is_deciding_is_answered_so() {
         #[derive(Clone, Default)]

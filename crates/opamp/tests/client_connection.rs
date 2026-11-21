@@ -277,7 +277,7 @@ async fn a_run_carries_the_session_over_the_transport_the_scheme_names() {
 /// A server that speaks TLS 1.2 alone never completes the handshake with this client, on either
 /// transport: the client offers TLS 1.3 and nothing older. The server is built from the full ring
 /// provider, so the refusal is the client's.
-/// Verifies: SEC-tls13-two-planes-bounded-input, Q-3
+/// Verifies: SEC-tls13-bounded-input-chosen-planes, Q-3
 #[tokio::test]
 async fn a_tls12_only_server_fails_the_handshake() {
     opamp::tls::install_ring_provider();
@@ -341,7 +341,7 @@ impl Handler for Mirror {
 /// Both ends read into a buffer far smaller than the limit; a message many times that buffer, and
 /// one just under the limit, still cross the Client's socket and the Server's endpoint whole, in
 /// both directions, while one past the limit is still refused.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_websocket_message_larger_than_the_read_buffer_arrives_whole() {
     const LIMIT: usize = 1 << 20;

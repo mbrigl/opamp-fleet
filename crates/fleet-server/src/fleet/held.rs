@@ -1,4 +1,4 @@
-//! What one instance holds of the Agents it carries on a shared store (SRV-instances-share-one-postgresql §8): the
+//! What one instance holds of the Agents it carries on a shared store (SRV-instance-opens-chosen-planes §8): the
 //! take and the release of an Agent, the presence it writes, the re-keys whose
 //! answer was lost, the restarts kept for retry, the take-up of what other instances announced, and
 //! the per-Agent locks. Its entry points are methods of `AppState`.
@@ -44,7 +44,7 @@ pub(super) enum Took {
 
 /// Which connection carries an Agent a WebSocket report arrives for, as the duplicate detection
 /// sees it
-/// (SRV-instances-share-one-postgresql §8).
+/// (SRV-instance-opens-chosen-planes §8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Carried {
     /// None, or the connection the report arrived on.
@@ -343,7 +343,7 @@ impl Kept {
 
     /// Moves what is kept of `old` to `new`, as a re-key moves the stored row whole: what was
     /// written of its presence and a restart kept for retry move, so the retry queues the restart
-    /// on the new identity (SRV-instances-share-one-postgresql §8). The digest does not: the record is written whole
+    /// on the new identity (SRV-instance-opens-chosen-planes §8). The digest does not: the record is written whole
     /// under `new` at the report's end. A pending re-key of `old` is the caller's, which knows
     /// whether this re-key is the one it names: the report that made it drops it, and the read
     /// back that found it moved marks it so.
@@ -414,7 +414,7 @@ impl Kept {
 
 impl AppState {
     /// Takes up what another instance wrote to the records of Agents this one holds
-    /// (SRV-instances-share-one-postgresql §8 and §9):
+    /// (SRV-instance-opens-chosen-planes §8 and §9):
     /// the record of each Agent of `uids` this instance holds is read again from
     /// the store. Its assignment, its labels and
     /// its queued restart are taken into what is held, its group is placed again for its labels,
@@ -515,7 +515,7 @@ impl AppState {
     }
 
     /// Catches up after a missed notification, which counts as every notification
-    /// (SRV-instances-share-one-postgresql §10):
+    /// (SRV-instance-opens-chosen-planes §10):
     /// what other instances changed of the Agents this instance holds is taken up from
     /// one read of their records and one of their holders, whatever kinds of state it keeps of
     /// them. From these two reads:
@@ -701,7 +701,7 @@ impl AppState {
     /// Re-keys the stored record of `old` to `new`. Where the store answers an error, the move may
     /// have committed all the same, so it is read back before the Agent is answered: moved, it
     /// stands. A read back that fails leaves the pair for the Agent's next report to read back
-    /// (SRV-instances-share-one-postgresql §10).
+    /// (SRV-instance-opens-chosen-planes §10).
     pub(super) fn rekey_reading_back(
         &self,
         old: &InstanceUid,
@@ -850,7 +850,7 @@ impl AppState {
     /// labels go with it (SRV-fleet-record-agents-hosts §21), the old identity leaves its group, and what was
     /// written of its presence moves with the row. A put-back of its restart kept for retry moves
     /// too, so the retry queues the restart on the row's new identity
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     pub(super) fn rekey_held(
         &self,
         fleet: &mut HashMap<InstanceUid, AgentRecord>,
@@ -871,7 +871,7 @@ impl AppState {
     /// wherever the send is seen to fail. That holds on a lease that lapsed meanwhile too, since
     /// setting it again only restores what the Operator asked for. A put-back the store does not
     /// take is kept and tried again by [`retry_restarts`](Self::retry_restarts)
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     pub fn unsent(&self, message: &ServerToAgent) {
         let restart = opamp::proto::CommandType::Restart as i32;
         if message.command.as_ref().map(|c| c.r#type) != Some(restart) {
@@ -889,7 +889,7 @@ impl AppState {
     /// instance, with a warning naming the Agent. One whose row moved through a re-key of this
     /// instance's own not read back yet waits for the read back. The composition root calls this every second, so
     /// the intervals grow to a minute; a process that ends first loses the restarts still kept
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     pub fn retry_restarts(&self) -> usize {
         for uid in self.due_restarts() {
             self.put_back(&uid, true);
@@ -919,7 +919,7 @@ impl AppState {
     /// restart; one whose record the store does not hold, forgotten or re-keyed through another
     /// instance, is logged and dropped, and one whose record a re-key of this instance's own whose
     /// answer was lost may have moved stays kept, for the read back to move it
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     pub(super) fn put_back(&self, uid: &InstanceUid, retry: bool) {
         let _agent = self.agent_lock(uid);
         let mut fleet = self.fleet.lock().expect("fleet lock");
@@ -981,7 +981,7 @@ impl AppState {
 
     /// Takes up what another instance announced of the restarts of `uids`: a request there is this
     /// restart now, so a put-back still kept is dropped
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     ///
     /// A request of an Agent held here is read under the Agent's own lock and held: a delivery
     /// clears a restart in the store under that lock before it takes the clear into memory, and a
@@ -1027,7 +1027,7 @@ impl AppState {
 
     /// Drops the put-backs kept for retry of the Agents of `uids`, whose restart another instance
     /// requested: that request is the restart now, whether or not its record still queues it
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     pub(crate) fn drop_kept_restarts(&self, uids: &HashSet<InstanceUid>) {
         let _fleet = self.fleet.lock().expect("fleet lock");
         self.kept
@@ -1039,7 +1039,7 @@ impl AppState {
 
     /// Drops the put-back of `uid`'s restart kept for retry, if one is: what a request, a delivery
     /// and a forget of the Agent do
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     pub(super) fn drop_kept_restart(&self, uid: &InstanceUid) {
         self.kept
             .unput_restarts
@@ -1144,7 +1144,7 @@ impl AppState {
     /// are written again. An Agent whose take's answer was lost and that disconnected since has its
     /// holder and count of takes read first, and its disconnect is written under that count where
     /// the row names `holder` and the Agent was not taken here again since it was looked at
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     /// Read under the fleet lock and written after it is released, so no report waits
     /// for the batch; its answers are kept only of the Agents nothing was kept of anew meanwhile. A
     /// batch that fails is written again with the next one. Answers how many it wrote.
@@ -1240,7 +1240,7 @@ impl AppState {
     /// holder, so that no other instance forgets it as not connected while the next batch is due
     /// (SRV-fleet-record-agents-hosts §11), and so that an instance that
     /// carried it before stops carrying it
-    /// (SRV-instances-share-one-postgresql §8):
+    /// (SRV-instance-opens-chosen-planes §8):
     /// one write per connect, never per heartbeat. A take that makes the Agent's holder
     /// change more than ten times within a minute is logged as a likely duplicate. Without a lease
     /// nothing is written. One that fails is logged, and the next batch writes it, where no other
@@ -1308,7 +1308,7 @@ impl AppState {
 
     /// Stops carrying each Agent of `uids` this instance carries whose
     /// stored presence no longer names this instance as its holder: another instance took it
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     /// It is held as on a closed connection, and its disconnect is not written, since
     /// the row is the other instance's. An Agent the row still names is kept, so of two instances
     /// that take one Agent at once only the one the row does not name stops carrying it. The
@@ -1577,7 +1577,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_restart_whose_send_failed_is_queued_again_on_files() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1586,7 +1586,7 @@ mod tests {
         a_restart_whose_send_failed_is_queued_again(&state, &stored);
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_restart_whose_send_failed_is_queued_again_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -1637,7 +1637,7 @@ mod tests {
     /// A kept put-back is one restart with a request made meanwhile, and with a delivery of a
     /// restart another instance queued meanwhile: once that one is delivered, retrying queues no
     /// second.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_kept_put_back_is_dropped_by_a_request_or_a_delivery_meanwhile() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -1686,7 +1686,7 @@ mod tests {
 
     /// A kept put-back goes with its Agent's forget, through this instance or one heard of from
     /// another: an Agent that comes back under the same identity is not restarted for it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_kept_put_back_goes_with_its_agents_forget() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -1717,7 +1717,7 @@ mod tests {
     /// put-back though the record no longer queues it, delivered through the other instance
     /// meanwhile: the catch-up keeps such a put-back, and the named request still drops it, so
     /// the Agent is not restarted twice.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_request_announced_with_a_missed_notification_drops_a_put_back_its_delivery_left() {
         use crate::changed::Changed;
@@ -1751,7 +1751,7 @@ mod tests {
 
     /// A try found due is not made once a request and its delivery dropped the put-back before
     /// the try took the fleet lock, so the Agent is not restarted a second time.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_try_found_due_is_not_made_once_a_request_and_its_delivery_dropped_it() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -1779,7 +1779,7 @@ mod tests {
     /// A request through another instance, taken up from its announcement, drops a put-back kept
     /// here, so its delivery there is the one restart; after a missed notification one whose
     /// record shows a restart queued is dropped, and one whose record shows none is kept.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_request_announced_by_another_instance_drops_a_kept_put_back() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -1840,7 +1840,7 @@ mod tests {
     /// On PostgreSQL the announcement of a request through another instance is what drops a
     /// put-back kept here: once it is taken up, the request's delivery there leaves nothing for a
     /// retry here to restart again.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_request_announced_by_another_instance_drops_a_kept_put_back_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -1887,7 +1887,7 @@ mod tests {
     /// A put-back the store does not take is kept and tried again, at intervals that double, until
     /// it holds; the Agent's next connection is then sent the restart. One whose Agent is
     /// forgotten meanwhile is dropped.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_put_back_the_store_refuses_is_tried_again_until_it_holds() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1970,7 +1970,7 @@ mod tests {
     /// nothing of them stays with the old. The digest goes with neither, so the record is written
     /// whole under the new identity, and a pending re-key of the old one is left to the caller,
     /// which knows whether this re-key is the one it names.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn what_is_kept_of_an_agent_moves_whole_with_a_rekey() {
         let (old, new, pending) = (
@@ -2061,7 +2061,7 @@ mod tests {
         assert_eq!(queued(stored, &new), Some(true), "on the new identity");
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_rekey_on_the_same_instance_leaves_nothing_under_the_old_identity_on_files() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -2070,7 +2070,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_rekey_on_the_same_instance_leaves_nothing_under_the_old_identity_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2125,7 +2125,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_forgotten_agent_leaves_nothing_behind_on_files() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2146,7 +2146,7 @@ mod tests {
         a_forgotten_agent_leaves_nothing_behind(&state, [&hooks.0, &hooks.1, &hooks.2], false);
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_forgotten_agent_leaves_nothing_behind_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2199,14 +2199,14 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_files() {
         let (state, failing, stored, _dir) = with_failing_restarts();
         a_kept_put_back_follows_a_rekey_the_agent_asks_for(&state, &failing, &stored);
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_kept_put_back_follows_a_rekey_the_agent_asks_for_on_postgres() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2226,7 +2226,7 @@ mod tests {
     /// A kept put-back follows a re-key whose answer was lost and whose read back failed, once a
     /// read again of what is held reads it back as moved: the retry queues the restart on the new
     /// identity.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_kept_put_back_follows_a_rekey_read_back_as_moved() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2238,7 +2238,7 @@ mod tests {
     /// A try of a kept put-back that finds the row gone while a re-key of this instance's own is
     /// not read back yet keeps it, and the read back moves it: the restart is queued on the new
     /// identity, not dropped.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_kept_put_back_tried_before_its_rekey_is_read_back_follows_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2299,7 +2299,7 @@ mod tests {
 
     /// A put-back whose Agent was re-keyed through another instance while this one retried finds
     /// its record gone: the restart is not tried again, and a warning names the Agent.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_kept_put_back_whose_row_another_instance_rekeyed_is_logged() {
         crate::test_support::logged();
@@ -2327,7 +2327,7 @@ mod tests {
 
     /// The re-key of a duplicate newcomer moves no row: a put-back kept for the Agent stays with
     /// it, the retry queues the restart on its identity, and the newcomer is sent none.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_kept_put_back_stays_with_its_agent_when_a_duplicate_is_rekeyed() {
         let (state, failing, stored, _dir) = with_failing_restarts();
@@ -2598,7 +2598,7 @@ mod tests {
 
     /// An instance on PostgreSQL loads no Agent record when it starts, holds none until one
     /// reports to it, and reads again only the ones it holds when it reads everything again.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-state-stores-contract-pair
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-state-stores-contract-pair
     #[test]
     fn an_instance_on_postgres_loads_no_fleet_and_reads_again_only_what_it_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2644,7 +2644,7 @@ mod tests {
     /// connection carries it and the move is logged; a report of the older connection is taken up
     /// and leaves it there, so the older one's close leaves it connected. On a connection of
     /// another host the same identity is a duplicate, re-keyed.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_agent_on_a_new_connection_of_its_host_is_carried_by_it_and_not_rekeyed() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2745,7 +2745,7 @@ mod tests {
 
     /// A goodbye the older connection of a host delivers while a newer one carries the Agent does
     /// not end the Agent's connection: it stays connected on the newer one.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_goodbye_on_an_older_connection_of_the_host_leaves_the_agent_with_the_newer() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2779,7 +2779,7 @@ mod tests {
 
     /// A queued restart is not sent on an older connection of the host while a newer one carries
     /// the Agent: it stays queued, and the newer connection's next report is sent it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_queued_restart_is_not_sent_on_an_older_connection_of_the_host() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2810,7 +2810,7 @@ mod tests {
 
     /// A report of an older connection of the host does not use up the demand for the component
     /// map: the newer connection is asked for it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_older_connection_of_the_host_is_not_asked_for_the_component_map() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2879,7 +2879,7 @@ mod tests {
     /// older one is taken by its report there once the newer one has carried none of its reports
     /// for a heartbeat interval: it is asked for its component map there, and its goodbye there
     /// ends it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_gateway_s_agent_moved_to_an_older_connection_is_taken_there_after_an_interval() {
         crate::test_support::logged();
@@ -2930,7 +2930,7 @@ mod tests {
 
     /// Within a heartbeat interval of the newer connection's last report of an Agent, a report on
     /// an older connection of the same Gateway does not take the Agent back.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn within_an_interval_an_older_connection_of_a_gateway_does_not_take_the_agent_back() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2972,7 +2972,7 @@ mod tests {
     /// The interval this Server offers decides when a Gateway's newer connection is stale: at an
     /// offered 60 seconds, a report on the older connection 30 seconds after the newer one's last
     /// does not take the Agent, and one 60 seconds after does.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn the_offered_heartbeat_interval_decides_when_a_carrier_is_stale() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3020,7 +3020,7 @@ mod tests {
     /// A newer connection whose report waited on the store for a heartbeat interval is as fresh as
     /// its report once it took the Agent: the older connection's next report does not take the
     /// Agent back.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_carrier_whose_report_waited_an_interval_is_not_stale_once_it_took_the_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3092,7 +3092,7 @@ mod tests {
 
     /// A report of an older connection of the host whose newer connection closes while the report
     /// is taken up is not left without a connection: the older one carries the Agent again.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_older_connection_takes_the_agent_back_when_the_newer_closes_meanwhile() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3214,7 +3214,7 @@ mod tests {
     /// An instance that heard another took an Agent reads its holder under the Agent's own lock: a
     /// take of its own by the Agent's new connection here, made while the holder is read, waits
     /// for the read and keeps the Agent carried.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_agent_taken_back_here_while_its_holder_is_read_stays_carried() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3264,7 +3264,7 @@ mod tests {
     /// On PostgreSQL a first report here whose read of the stored record failed goes on from the
     /// record another instance created, as it is stored: its labels are held, and a report the
     /// binding then refuses leaves it stored and its Agent carried where it is.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_record_another_instance_created_is_taken_as_stored_and_never_removed() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3319,7 +3319,7 @@ mod tests {
     /// A label change made on A after A's take-up read the records, before it took the fleet lock,
     /// is not undone by what that read found: what differs is read again under the lock. A never
     /// hears its own announcement, so nothing else would correct it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_take_up_never_undoes_a_newer_act_of_its_own_instance() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3364,7 +3364,7 @@ mod tests {
     /// A take-up reads the records of the Agents it holds in one read before the fleet lock, and
     /// what differs again under the lock in one read, however many records differ: neither read
     /// takes one round trip per record.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_take_up_reads_again_what_differs_in_one_read() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3419,7 +3419,7 @@ mod tests {
     /// carries, which the group inherits, of a Host and behind a Gateway, a requested restart, a
     /// put-back kept for retry, and a take. The Agents behind the Gateway are read once, before the
     /// fleet lock.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_catch_up_reads_the_records_once_and_the_holders_once() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3618,7 +3618,7 @@ mod tests {
     /// An Agent whose connecting take was written and whose answer was lost, and that disconnects
     /// before the next batch, has its row name no holder after that batch: the batch reads the
     /// row's holder and count first and writes the disconnect under the count it read, once.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn the_goodbye_of_an_agent_whose_take_lost_its_answer_is_written() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3642,7 +3642,7 @@ mod tests {
     /// Of two Agents whose takes lost their answers, one B took since is not written by A's batch,
     /// and one A took again after the batch first looked at it and before it read the rows is left
     /// as that take wrote it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_lost_take_whose_row_was_taken_since_writes_no_goodbye() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3681,7 +3681,7 @@ mod tests {
 
     /// An Agent re-keyed on A that disconnects before A's next batch has the row under its new
     /// identity name no holder after that batch: what A wrote of its presence moves with it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn the_goodbye_of_an_agent_rekeyed_is_written_under_its_new_identity() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3806,7 +3806,7 @@ mod tests {
     /// A label set whose commit lands after its call lost its answer is held in the memory of the
     /// instance that carries the Agent once it lands, though its own notification is otherwise
     /// passed over.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_label_whose_answer_was_lost_is_taken_up_once_it_commits() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3838,7 +3838,7 @@ mod tests {
 
     /// A floor set whose commit lands after its call lost its answer is served by the instance
     /// that set it once it lands.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_floor_whose_answer_was_lost_is_taken_up_once_it_commits() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3868,7 +3868,7 @@ mod tests {
 
     /// A revocation whose commit lands after its call lost its answer is in the list of the
     /// instance that made it once it lands, renewals aside.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_revocation_whose_answer_was_lost_is_taken_up_once_it_commits() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3891,7 +3891,7 @@ mod tests {
     /// A re-key whose commit lands after its call lost its answer is read back under a lock that
     /// waits for it: the Agent is assigned the identity its record moved to, one row names it,
     /// under that identity, and no record is created for the old one when it reports again.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_rekey_whose_answer_was_lost_is_read_back_and_stands() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -3962,7 +3962,7 @@ mod tests {
     /// A re-key whose answer was lost and whose read back failed is read back at the Agent's next
     /// report, whether it asks again or not, and assigns the identity the record moved to; no other
     /// is minted and no record is created for the old one.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_rekey_whose_read_back_failed_is_read_back_at_the_next_report() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4034,7 +4034,7 @@ mod tests {
     /// holds moves to the new identity, the Agent's session not ended. A disconnect on that session
     /// under the old identity is written to the new row, and a report under the old identity, on a
     /// new connection, is assigned the new one; one row names the Agent throughout.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_rekey_whose_read_back_failed_is_taken_up_when_its_commit_lands() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4173,7 +4173,7 @@ mod tests {
     /// meanwhile has its disconnect written to the row the move landed in, though a batch wrote
     /// it to the old row before, and the next report
     /// under the old identity is assigned the new one.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_rekey_whose_read_back_fails_at_its_notification_keeps_the_agent_until_it_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4213,7 +4213,7 @@ mod tests {
     /// A report whose write finds the old row gone, while the re-key that moved it is not known,
     /// keeps the Agent and its session and the pending re-key, and creates nothing; once the
     /// store answers, the next report is assigned the new identity.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_report_that_finds_the_old_row_gone_keeps_a_rekey_not_known() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4247,7 +4247,7 @@ mod tests {
     /// The read back of a take still in flight waits for it: an Agent whose take's answer was lost
     /// and that disconnected has its disconnect written under the count that take commits, so the
     /// row names no holder once the batch ran.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn the_read_back_of_a_take_waits_for_a_take_still_in_flight() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4295,7 +4295,7 @@ mod tests {
     /// comes back through B and reconnects to A, which takes it again, leaves the newer take's count kept, though
     /// the record counts from the start again and the batch answered a greater one: the Agent's
     /// goodbye is then written.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_batch_answered_after_a_newer_take_keeps_that_takes_count() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4333,7 +4333,7 @@ mod tests {
     /// An Agent that A took and that B took since does not name A after A's batch: neither once B
     /// wrote its disconnect, before A heard of the take, nor while B, whose lease is not live,
     /// still names itself; A stops carrying both when it hears of the takes.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_batch_names_its_instance_over_no_take_counted_since_its_own() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4376,7 +4376,7 @@ mod tests {
     /// An Agent that disconnected under a lease A then lost has its record flushed at A's
     /// shutdown, whether or not A wrote a batch under its new lease: the count of takes outlives
     /// the lease it was answered under.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_agent_disconnected_under_a_lost_lease_is_flushed_at_shutdown() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4425,7 +4425,7 @@ mod tests {
     /// An Agent whose row named another holder when A's batch read it, and that connected to A
     /// again before the batch went on, with that take's answer lost too, and disconnected, stays
     /// unsure: A's next batch reads it again and writes its goodbye.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_agent_taken_again_after_the_batch_read_its_row_is_read_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4462,7 +4462,7 @@ mod tests {
     /// not written, is named by A's next batch: a take that failed leaves A no count, so the batch
     /// takes back a row no instance holds whatever its count, and A, which carries the Agent, is
     /// named.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_connect_whose_take_was_not_written_is_named_by_the_next_batch() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4494,7 +4494,7 @@ mod tests {
     /// An Agent whose take on A was not written, and that disconnected before A's next batch, has
     /// its last record written by A's shutdown flush: the batch read a row that names no holder
     /// and no take since, so what A heard of it last is the newest.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn the_shutdown_flush_writes_an_agent_whose_take_was_not_written() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4533,7 +4533,7 @@ mod tests {
     /// An Agent whose take on A was not written, that B took and let go before A's next batch
     /// read the row, keeps what B flushed of it at A's shutdown flush: the row names no holder,
     /// but B's take counted since the one A was answered.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn the_shutdown_flush_of_a_lost_take_keeps_a_take_counted_since() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4568,7 +4568,7 @@ mod tests {
     /// An Agent first heard on A, whose record A created and whose take was not written, and that
     /// disconnected before A's next batch, has its last record written by A's shutdown flush: the
     /// record counted no take when A created it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn the_shutdown_flush_writes_an_agent_created_here_whose_take_was_not_written() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4653,7 +4653,7 @@ mod tests {
     /// An Agent another instance with a live lease holds is not taken by a report of A, whose take
     /// was not written: the report is written, and the holder and its count stay. The holder's
     /// shutdown flush, as it stops, writes no lower sequence number over A's report.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_report_whose_take_was_not_written_takes_no_agent_a_live_instance_holds() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4713,7 +4713,7 @@ mod tests {
     /// started again and is carried by A with a take that was not written, has A's record again at
     /// A's next report, though B's shutdown flush wrote its older record over A's: A, answered no
     /// count for the Agent, writes every report of it.
-    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instance-opens-chosen-planes
     #[test]
     fn a_record_an_older_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4777,7 +4777,7 @@ mod tests {
     /// An Agent that B, stopping, still holds with a live lease, that started again and is carried
     /// by A with a take that was not written, has A's record again at A's next report, though B's
     /// shutdown flush wrote its older record over A's.
-    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instance-opens-chosen-planes
     #[test]
     fn a_record_a_stopping_holders_flush_wrote_over_a_restarted_agent_heals_at_its_next_report() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4810,7 +4810,7 @@ mod tests {
     /// carries with a take that was not written, keeps what A wrote of it at B's shutdown flush:
     /// the count B was answered of the record created again is the one stored, but the row holds
     /// the higher sequence number of A's report.
-    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instance-opens-chosen-planes
     #[test]
     fn the_shutdown_flush_keeps_a_newer_carriers_record_after_a_record_created_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4853,7 +4853,7 @@ mod tests {
 
     /// An Agent whose take was written under A's old lease and whose answer was lost is named by
     /// A's batch under its new lease: A keeps no count from before the lost take to refuse it with.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_lost_take_under_an_old_lease_is_named_by_the_batch_under_the_new_one() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4886,7 +4886,7 @@ mod tests {
     /// A batch never names its instance over a live take whose count equals its own: an Agent
     /// forgotten through B and created again there counts its takes from the start, and A, which
     /// has not heard of the forget, writes nothing of it.
-    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instance-opens-chosen-planes
     #[test]
     fn a_batch_never_names_its_instance_over_a_live_take_of_a_record_created_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4911,7 +4911,7 @@ mod tests {
     /// it was answered: the Agent it named anew under the lease before is named again under the
     /// next one. Each batch takes back the row its instance's previous lease, now not live, holds
     /// under the count it was answered.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_batch_that_meets_a_change_of_lease_keeps_the_counts_it_was_answered() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -4952,7 +4952,7 @@ mod tests {
     /// Agent in memory stops carrying it once it hears of that take: hearing of it waits for the
     /// report under way here, so it reads the holder after this instance holds the Agent, and the
     /// newest connection keeps the Agent.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_instance_whose_take_is_overtaken_before_it_holds_the_agent_stops_carrying_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -5017,7 +5017,7 @@ mod tests {
     /// a rollout then releases nothing and a restart is refused, since the record names neither a
     /// description nor a capability before the report that created it is written, and what is
     /// held agrees with the store on all three.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn what_another_instance_commits_to_a_new_agent_while_its_report_runs_is_held() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -5078,7 +5078,7 @@ mod tests {
     /// A new Agent's record is held from its creation on but not carried until its report holds
     /// it: a presence batch run meanwhile writes nothing of it, and the Agent is not connected
     /// here until the report ends.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_new_agents_record_is_held_from_its_creation_but_not_carried_before_its_report_ends() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -5115,7 +5115,7 @@ mod tests {
 
     /// A new Agent's report that the host register refuses leaves no record, neither stored nor
     /// held: the record its creation made goes from both.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_new_agents_report_the_register_refuses_leaves_no_record_held_or_stored() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -5168,7 +5168,7 @@ mod tests {
     /// A re-key an Agent asked for that a read again finds made before the report holds the Agent
     /// under its new identity keeps the Agent: the move is pending until then, so the read again
     /// reads it back and moves what is held, and the session goes on, its labels with it.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts
     #[test]
     fn a_rekey_a_read_again_finds_before_the_report_holds_it_keeps_the_agent() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -5223,7 +5223,7 @@ mod tests {
     /// What another Server wrote to a held record is taken up from the store: a Client Agent's
     /// labels place its Client's other Agent again, so it inherits them, a queued restart is held,
     /// and a record the store no longer holds is dropped.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn what_another_server_wrote_is_taken_up_and_places_the_group_again() {
         let dir = tempfile::tempdir().expect("tempdir");

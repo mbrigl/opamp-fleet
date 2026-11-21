@@ -1054,7 +1054,7 @@ pub(crate) mod tests {
     /// first, and each sweep deletes the blob its act let go (SRV-state-stores-contract-pair §13, §14 and §16). Which
     /// sweep found staging objects to delete is counted where it asks which leases are live, which
     /// a sweep does only once its listing found one.
-    /// Verifies: SRV-state-stores-contract-pair, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-state-stores-contract-pair, SRV-instance-opens-chosen-planes
     #[test]
     fn the_next_sweep_on_any_instance_deletes_a_released_leases_staging_object_once() {
         use crate::packages::{PackageId, PackageStore, Platform};
@@ -1195,7 +1195,7 @@ pub(crate) mod tests {
     /// Two instances whose staging cleanups, the ones each runs when it takes over a lapsed lease,
     /// run at once delete a staging object of a released lease once: the second waits for the
     /// first's hold on the blob store's lock and then finds nothing (SRV-state-stores-contract-pair §14 and §16).
-    /// Verifies: SRV-state-stores-contract-pair, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-state-stores-contract-pair, SRV-instance-opens-chosen-planes
     #[test]
     fn two_staging_cleanups_at_once_delete_a_released_leases_staging_object_once() {
         use crate::postgres::testing::TestDatabase;

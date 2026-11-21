@@ -926,7 +926,7 @@ fn our_client_against_go_tls_server(scheme: &str) {
     );
 }
 
-// Verifies: API-protocol-pinned-interop-checked, SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate
+// Verifies: API-protocol-pinned-interop-checked, SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 async fn opamp_go_client_against_our_tls_and_admission() {
@@ -934,7 +934,7 @@ async fn opamp_go_client_against_our_tls_and_admission() {
     go_client_against_our_tls_server("https").await;
 }
 
-// Verifies: API-protocol-pinned-interop-checked, SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate
+// Verifies: API-protocol-pinned-interop-checked, SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate
 #[test]
 #[ignore = "needs a Go toolchain; run with --ignored in the interop job"]
 fn our_client_against_opamp_go_server_requiring_a_client_certificate() {

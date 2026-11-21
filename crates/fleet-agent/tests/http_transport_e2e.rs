@@ -1,4 +1,4 @@
-//! End to end over **plain HTTP polling** (SEC-tls13-two-planes-bounded-input) — the same two things `e2e.rs` and
+//! End to end over **plain HTTP polling** (SEC-tls13-bounded-input-chosen-planes) — the same two things `e2e.rs` and
 //! `packages_e2e.rs` prove over a WebSocket: a Configuration rollout is applied, and a signed
 //! package is downloaded, verified, swapped and reported `Installed`.
 //!
@@ -107,7 +107,7 @@ fn spawn_client(config_path: &Path) -> ClientUnderTest {
 /// A Configuration rollout reaches a poller and is applied — `APPLIED`, in sync, and the managed
 /// process restarted on the written file. No Server push is involved: the offer rides the reply to
 /// the Client's own next poll, which is the whole of how this transport learns anything.
-/// Verifies: SEC-tls13-two-planes-bounded-input, G-1
+/// Verifies: SEC-tls13-bounded-input-chosen-planes, G-1
 #[tokio::test(flavor = "multi_thread")]
 async fn a_configuration_rollout_reaches_a_polling_client() {
     let dir = tempfile::tempdir().expect("tempdir");

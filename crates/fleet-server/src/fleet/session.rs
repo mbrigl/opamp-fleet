@@ -1,4 +1,4 @@
-//! The round of an Agent's report (SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts): a report processed under the Agent's
+//! The round of an Agent's report (SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts): a report processed under the Agent's
 //! lock, its record created, taken or settled, the reply it is answered with, the connection
 //! settings it is offered, the persist path that writes what changed, a goodbye and a forget, and
 //! the answers every refused report gets. Its entry points are methods of `AppState`.
@@ -173,7 +173,7 @@ impl AppState {
     /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
     /// again, may have written over it, and the next report writes it again. Once a count is
     /// answered, a report that changes nothing durable writes nothing again
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
         let digest = persisted.durable_digest();
         let counted = !self.agent_store.is_shared()
@@ -265,7 +265,7 @@ impl AppState {
         }
     }
 
-    /// The control loop for one report, shared by both transports (SEC-tls13-two-planes-bounded-input): update what we know,
+    /// The control loop for one report, shared by both transports (SEC-tls13-bounded-input-chosen-planes): update what we know,
     /// then answer with what the Agent still lacks — the config offer gated by the hash comparison.
     /// `conn` identifies the WebSocket connection that carried the report; `None` for plain HTTP.
     ///
@@ -493,7 +493,7 @@ impl AppState {
         // comes back on a new connection of the host whose certificate its old connection
         // presented is not a duplicate of itself: the newest connection takes it, and the older
         // one's reports no longer take it back
-        // (SRV-instances-share-one-postgresql §8).
+        // (SRV-instance-opens-chosen-planes §8).
         let arrived_over = self
             .revocations
             .as_ref()
@@ -1139,7 +1139,7 @@ impl AppState {
     /// On a shared store, loads the record of `uid` from it when this Server does not hold one, as
     /// at an Agent's first report here: another instance may have written it, and its labels, its
     /// assignment and its queued restart are what this report goes on from
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     /// Read before the fleet lock is taken, so no other report waits for it. Answers
     /// whether it loaded one; one that cannot be read is logged, and the report goes on as an
     /// Agent's first.
@@ -1363,7 +1363,7 @@ pub(super) struct Ending {
     disconnected: bool,
     /// It came on an older connection of the host whose newer one carries the Agent, which its
     /// goodbye does not end and a queued restart is not sent on
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     superseded: bool,
     identification: Option<AgentIdentification>,
     reply_flags: u64,
@@ -1436,7 +1436,7 @@ pub const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 /// The `ServerToAgent` for a report the Server is momentarily unable to accept — the Baseline's
 /// `Unavailable`, which unlike `BadRequest` tells the Agent to **retry later** rather than give up,
 /// and with `retry_info` says when. It carries the `instance_uid` of the message it answers, the
-/// field a Client and a Gateway route a reply by (SEC-tls13-two-planes-bounded-input §27).
+/// field a Client and a Gateway route a reply by (SEC-tls13-bounded-input-chosen-planes §27).
 pub fn unavailable(instance_uid: &[u8], message: &str) -> ServerToAgent {
     ServerToAgent {
         instance_uid: instance_uid.to_vec(),
@@ -1598,7 +1598,7 @@ mod tests {
     /// Every `Unavailable` — a full enrolment queue, the record ceiling, an audit record that cannot
     /// be written — tells the Agent when to ask again, so it retries instead of giving up or
     /// hammering (SEC-bootstrap-certificates-and-enrolment §9, SEC-append-only-audit-record §5).
-    /// Verifies: SEC-admission-by-client-certificate, SEC-append-only-audit-record, SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-admission-by-client-certificate, SEC-append-only-audit-record, SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn unavailable_tells_the_agent_when_to_retry() {
         let reply = unavailable(&[7; 16], "busy");
@@ -1948,7 +1948,7 @@ mod tests {
     /// An Agent bound to a direct Host that reports over a Gateway since is placed by the Gateway
     /// it arrived over: the list, its view and a rollout to it all inherit the labels of the
     /// Client Agent behind that Gateway.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts
     #[test]
     fn an_agent_bound_to_a_direct_host_and_arriving_over_a_gateway_is_placed_by_the_gateway() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2115,7 +2115,7 @@ mod tests {
     /// A queued restart pushed to every connection that named the Agent goes out only on the one
     /// that carries it: an older connection of its host that still names it, its peer likely
     /// gone, is handed none, and the restart stays queued for the newer one.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_pushed_restart_goes_out_only_on_the_connection_that_carries_the_agent() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2186,7 +2186,7 @@ mod tests {
     /// marked closed meanwhile, goes on under the identity it assigned rather than start again
     /// from the message: a next round would mint a second identity and leave the first record
     /// behind. The Agent stays disconnected, as the closed connection left it.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts
     #[test]
     fn a_report_that_rekeyed_its_agent_does_not_start_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2276,7 +2276,7 @@ mod tests {
     /// its group's Client Agents another instance carries, the write of what it reported, and a
     /// re-key it asks for with the move of its binding are each made with the lock free, so no
     /// other report waits for them.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts
     #[test]
     fn a_report_holds_the_fleet_lock_across_no_call_to_the_database() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2360,7 +2360,7 @@ mod tests {
 
     /// While one Agent's report waits for a call to its store, another Agent's report is answered:
     /// what the fleet lock guards is applied before and after the call, never across it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn another_agents_report_is_answered_while_one_agents_write_waits() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2416,7 +2416,7 @@ mod tests {
     /// A new Agent forgotten through another instance between its creation here and the end of
     /// the report that created it is created anew by a next round of that report, so what is held
     /// is stored.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts
     #[test]
     fn a_new_agent_forgotten_while_its_report_runs_is_created_anew() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2458,7 +2458,7 @@ mod tests {
     /// A restart requested while a delivery of the one queued before clears it is not lost: the
     /// request waits for the delivery, which holds the Agent's own lock across its clear, and is
     /// queued after it, so the Agent is sent it next.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_restart_requested_while_a_delivery_clears_one_stays_queued() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2521,7 +2521,7 @@ mod tests {
     /// delivers, but before it took the clear into memory, is not lost: the take-up of its
     /// announcement waits for the delivery, which holds the Agent's own lock, and then holds the
     /// request, which is sent next.
-    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instance-opens-chosen-planes
     #[test]
     fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_next() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2582,7 +2582,7 @@ mod tests {
     /// The same request taken up after a missed notification, which names no Agent, is not lost
     /// either: the catch-up reads the restart the store queues under the Agent's own lock, waits
     /// for the delivery, and holds the request, which is sent next.
-    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instance-opens-chosen-planes
     #[test]
     fn a_restart_requested_between_a_deliverys_clear_and_its_end_is_sent_after_a_missed_notification(
     ) {
@@ -2643,7 +2643,7 @@ mod tests {
     /// delivers the one queued before is not lost, however the two meet: where the request came
     /// before the delivery's clear, the restart sent is both; where it came after, it stays queued
     /// and is sent next, once the carrying instance takes the announcement up.
-    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-fleet-record-agents-hosts, SRV-instance-opens-chosen-planes
     #[test]
     fn a_restart_requested_through_one_instance_while_another_delivers_one_stays_until_sent() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2723,7 +2723,7 @@ mod tests {
     /// A label set while a report reads the Agent's record from the store, before it holds it, is
     /// not undone by what the read found: the label waits for the report, which holds the Agent's
     /// own lock, and is then taken into the record held.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_label_set_while_a_report_reads_the_record_is_not_undone() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2771,7 +2771,7 @@ mod tests {
     /// A report whose Agent leaves memory while it reads and writes the store — forgotten through
     /// another instance — starts again from what the store holds then, and the Agent is held
     /// under a record created anew.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts
     #[test]
     fn a_report_whose_agent_leaves_memory_meanwhile_starts_again() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -2814,7 +2814,7 @@ mod tests {
 
     /// A report whose Agent leaves memory in each of its rounds is answered `Unavailable`, so the
     /// Agent retries, rather than starting again without end.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_report_whose_agent_leaves_memory_in_every_round_is_answered_unavailable() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

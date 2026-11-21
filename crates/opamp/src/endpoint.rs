@@ -233,7 +233,7 @@ mod tests {
         );
     }
 
-    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input
+    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn only_the_loopback_literals_are_loopback() {
         for host in ["127.0.0.1", "::1", "[::1]"] {

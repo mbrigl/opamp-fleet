@@ -42,7 +42,7 @@ Stated first so the list below is not read as a list of absences. On this link t
 has:
 
 - TLS on both transports, on both ends, with a private CA supported on the Client
-  (SEC-tls13-two-planes-bounded-input).
+  (SEC-tls13-bounded-input-chosen-planes).
 - **One proof on the Agent plane, required in the handshake** (SEC-admission-by-client-certificate,
   `agent_cases::Admission`): a client certificate the client CA issued, valid and not revoked. No
   configuration admits a peer without one. The plane has no credential: `server.toml` refuses an
@@ -51,8 +51,9 @@ has:
   `supervisor.toml` admits a host; its only secret on the Agent plane is its private key.
 - Basic authentication over the **whole** Operator plane, the UI included (`[rest.auth]`,
   SEC-admission-by-client-certificate), required beyond the loopback, on a listener that is loopback
-  until an operator publishes it (SEC-tls13-two-planes-bounded-input). A verification that succeeded
-  is remembered by the SHA-256 of the header and compared in constant time (`credentials.rs`).
+  until an operator publishes it (SEC-tls13-bounded-input-chosen-planes). A verification that
+  succeeded is remembered by the SHA-256 of the header and compared in constant time
+  (`credentials.rs`).
 - Client certificates the Server issues itself through the Baseline's CSR flow, with the Agent
   keeping its private key — and with the request's `basicConstraints`, `keyUsage`,
   `extendedKeyUsage`, and SANs **overwritten** rather than carried over, so a CSR cannot ask for the
@@ -64,7 +65,7 @@ has:
   Endpoint.
 - **TLS 1.3 alone, on every connection of both ends**
   (DEV-six-crates-tokio-axum,
-  SEC-tls13-two-planes-bounded-input): the process-wide
+  SEC-tls13-bounded-input-chosen-planes): the process-wide
   provider carries the three TLS 1.3 suites and no other, every configuration pins TLS 1.3, and a
   peer offering only TLS 1.2 fails the handshake. Plaintext is accepted on `127.0.0.1` and `::1`
   alone and refused at startup anywhere else.
@@ -84,14 +85,15 @@ has:
   that carries no signature, and every download hop is held to `https://` and the Client's own
   Server origin before a request is sent. Every artifact is uploaded: the Server sends no request
   for a package anywhere and holds no source credential.
-- **A connection cap per plane and bounded HTTP/2** (SEC-tls13-two-planes-bounded-input):
+- **A connection cap per plane and bounded HTTP/2** (SEC-tls13-bounded-input-chosen-planes):
   `max_connections` closes a connection past the cap on accept, before any handshake, while the held
   ones keep working; HTTP/2 allows 100 concurrent streams per connection and drops a peer that
   leaves a ping unanswered.
-- **Connection setup bounded on both of the Server's planes** (SEC-tls13-two-planes-bounded-input):
-  a peer has 30 seconds to send its request line and headers, and 10 seconds to complete the TLS
-  handshake, before it is hung up on — enforced below every other limit in this list, because it
-  applies before a request exists and therefore before Admission ever runs.
+- **Connection setup bounded on both of the Server's planes**
+  (SEC-tls13-bounded-input-chosen-planes): a peer has 30 seconds to send its request line and
+  headers, and 10 seconds to complete the TLS handshake, before it is hung up on — enforced below
+  every other limit in this list, because it applies before a request exists and therefore before
+  Admission ever runs.
 - Package content hashed and Ed25519-verified always, with no unsigned posture: without a
   verification key, or for an offer without a signature, nothing is downloaded. Archive members are
   validated before anything is written.
@@ -292,19 +294,19 @@ one listener and not on its neighbour is the failure mode worth seeing at a glan
 ⚠️ partial, ❌ absent.
 
 - **Every listener below that serves OpAMP or the REST API** (`opamp::server::listen`,
-  SEC-tls13-two-planes-bounded-input §18): ✅ a body or WebSocket message that has begun delivers 64
-  KiB in every 60 s or is cut off — `408`, or a `1008` close — while nothing has a deadline and an
-  idle connection is left alone.
+  SEC-tls13-bounded-input-chosen-planes §18): ✅ a body or WebSocket message that has begun delivers
+  64 KiB in every 60 s or is cut off — `408`, or a `1008` close — while nothing has a deadline and
+  an idle connection is left alone.
 - **Agent plane** — `127.0.0.1:4320` until an operator publishes it
-  (SEC-tls13-two-planes-bounded-input).
+  (SEC-tls13-bounded-input-chosen-planes).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s (HTTP/1) · ✅ message size, in both directions ·
     ✅ gzip bounded *after* decompression · ✅ Admission by client certificate
   - ✅ connections capped (`max_connections`) · ✅ HTTP/2 streams and pings bounded
   - ✅ failed admissions throttled per address · ✅ admitted members rate-limited per host, and
-    per Agent within a Gateway's aggregate (SEC-tls13-two-planes-bounded-input), an enrolment
+    per Agent within a Gateway's aggregate (SEC-tls13-bounded-input-chosen-planes), an enrolment
     through a Gateway per bootstrap certificate (CLT-modes-and-gateway)
 - **Operator plane** — `127.0.0.1:4321` until an operator publishes it
-  (SEC-tls13-two-planes-bounded-input).
+  (SEC-tls13-bounded-input-chosen-planes).
   - ✅ TLS handshake ≤ 10 s · ✅ headers ≤ 30 s · ✅ Basic over the whole plane, required beyond the
     loopback (SEC-admission-by-client-certificate) ·
     ✅ Fetch-Metadata CSRF guard on the body-less `POST` routes, by `Origin` where a browser sends
@@ -361,8 +363,8 @@ which a revoked certificate still works**, **shrink the surface that sits beside
 
 **Status of each measure below:** 🔴 not taken · 🟡 partly in force · 🟢 in force. Nothing is 🟢 here by
 construction: a measure that reaches it moves up into [What already holds](#what-already-holds), the
-way the connection-setup bound did when SEC-tls13-two-planes-bounded-input took it. The ✅/⚠️/❌ marks
-in that section are the same three states seen per *surface* rather than per measure.
+way the connection-setup bound did when SEC-tls13-bounded-input-chosen-planes took it. The ✅/⚠️/❌
+marks in that section are the same three states seen per *surface* rather than per measure.
 
 ## Post-quantum cryptography
 
@@ -385,13 +387,13 @@ several kilobytes where an Ed25519 one is 64 bytes, in every package entry and e
 formats and bounds are sized for Ed25519 today.
 **To work out:** the TLS provider — ring offers no ML-KEM and no ML-DSA, rustls offers the hybrid
 key exchange with aws-lc-rs, which
-[SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md) rejects and
+[SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md) rejects and
 `deny.toml` bans, and a pure-Rust ML-KEM in a key-exchange group built here would be unaudited; how
 a Client that knows only Ed25519 keeps verifying a package and a floor while the signature grows;
 where the Client's second verification key lives; and what has to be true before the certificates
 move — ML-DSA in TLS 1.3 as a standard, issuance through rcgen, verification in the other OpAMP
 implementations, and a browser on the Operator plane. It would supersede
-SEC-tls13-two-planes-bounded-input (the TLS provider),
+SEC-tls13-bounded-input-chosen-planes (the TLS provider),
 [PKG-signed-packages-and-delivery](adr/PKG-signed-packages-and-delivery.md) (the package
 signature), [PKG-versions-high-water-mark-floor](adr/PKG-versions-high-water-mark-floor.md) (the
 floor's signature) and

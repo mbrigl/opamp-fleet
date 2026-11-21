@@ -1,4 +1,4 @@
-//! OpAMP WebSocket message framing (API-protocol-pinned-interop-checked, SEC-tls13-two-planes-bounded-input).
+//! OpAMP WebSocket message framing (API-protocol-pinned-interop-checked, SEC-tls13-bounded-input-chosen-planes).
 //!
 //! The OpAMP specification defines every WebSocket message as a *header* — a varint-encoded
 //! unsigned 64-bit integer, 1–10 bytes long — followed by the protobuf-encoded message. In this

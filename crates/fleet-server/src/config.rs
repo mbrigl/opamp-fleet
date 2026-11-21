@@ -12,11 +12,11 @@ use serde::Deserialize;
 
 use crate::fleet::{ConnectionOffer, TelemetryOffer};
 
-/// The default Agent-plane address: the Baseline's port, on the loopback (SEC-tls13-two-planes-bounded-input). Serving the
+/// The default Agent-plane address: the Baseline's port, on the loopback (SEC-tls13-bounded-input-chosen-planes). Serving the
 /// estate is a line an operator writes deliberately, together with the TLS it needs.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:4320";
 
-/// The default Operator-plane address (SEC-tls13-two-planes-bounded-input): the port above the protocol's, on loopback.
+/// The default Operator-plane address (SEC-tls13-bounded-input-chosen-planes): the port above the protocol's, on loopback.
 /// Loopback because that plane is open until `[rest.auth]` guards it (SEC-admission-by-client-certificate) — until then its
 /// reachability *is* its protection, so publishing it is a line an operator writes deliberately.
 pub const DEFAULT_REST_LISTEN: &str = "127.0.0.1:4321";
@@ -27,11 +27,11 @@ pub const DEFAULT_REST_LISTEN: &str = "127.0.0.1:4321";
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Address and port the **Agent plane** binds: the OpAMP endpoint and the package download
-    /// route the offers point at (SEC-tls13-two-planes-bounded-input).
+    /// route the offers point at (SEC-tls13-bounded-input-chosen-planes).
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
     /// The **Operator plane** — REST API, API docs, and the bundled UI — on its own listener
-    /// (SEC-tls13-two-planes-bounded-input). Absent means the default, which is loopback.
+    /// (SEC-tls13-bounded-input-chosen-planes). Absent means the default, which is loopback.
     #[serde(default)]
     pub rest: RestConfig,
     /// Where the Server keeps what it keeps on its own disk, one subdirectory per domain
@@ -44,7 +44,7 @@ pub struct ServerConfig {
     /// an older installation there. Read only so that a leftover key can be named.
     pub config_dir: Option<IgnoredAny>,
     /// TLS for the Agent plane, and for the Operator plane unless `[rest.tls]` names its own
-    /// (SEC-tls13-two-planes-bounded-input). Required: a Server without it is refused at startup. It is an
+    /// (SEC-tls13-bounded-input-chosen-planes). Required: a Server without it is refused at startup. It is an
     /// `Option` only so that its absence can be named.
     pub tls: Option<TlsConfig>,
     /// Refused at startup: the Agent plane admits by client certificate alone and has no credential
@@ -105,19 +105,19 @@ pub struct ServerConfig {
     /// limit.
     #[serde(default = "default_max_agents")]
     pub max_agents: usize,
-    /// The connections the Agent plane holds at once (SEC-tls13-two-planes-bounded-input). Past it a connection is closed on
+    /// The connections the Agent plane holds at once (SEC-tls13-bounded-input-chosen-planes). Past it a connection is closed on
     /// accept; the ones held keep working. A fleet larger than the default raises this together
     /// with the process's file-descriptor limit. `0` is refused at load.
     #[serde(default = "default_agent_max_connections")]
     pub max_connections: usize,
     /// The new Agent-plane connections taken a second; one past it is answered `503` with a
-    /// spread `Retry-After` (SEC-tls13-two-planes-bounded-input §4). `0` is
+    /// spread `Retry-After` (SEC-tls13-bounded-input-chosen-planes §4). `0` is
     /// refused at load.
     #[serde(default = "default_max_new_connections_per_sec")]
     pub max_new_connections_per_sec: u32,
     /// How long an orderly shutdown spreads the closing of the WebSocket sessions over, in seconds,
     /// from 0 to 300; 0 closes them all at once
-    /// (SRV-instances-share-one-postgresql §3).
+    /// (SRV-instance-opens-chosen-planes §3).
     #[serde(default = "default_drain_secs")]
     pub drain_secs: u64,
     /// The planes this instance opens, `"agent"` and `"operator"`, both by default
@@ -139,12 +139,12 @@ pub struct ServerConfig {
     /// (SEC-admission-by-client-certificate);
     /// absent, every CA key is a file and there is no audit key.
     pub pkcs11: Option<Pkcs11Config>,
-    /// How often an admitted peer may be heard on the Agent plane (SEC-tls13-two-planes-bounded-input).
+    /// How often an admitted peer may be heard on the Agent plane (SEC-tls13-bounded-input-chosen-planes).
     #[serde(default)]
     pub agent_rate_limit: AgentRateLimitConfig,
 }
 
-/// The `[agent_rate_limit]` section (SEC-tls13-two-planes-bounded-input §22). Every key has a default, and none is `0`:
+/// The `[agent_rate_limit]` section (SEC-tls13-bounded-input-chosen-planes §22). Every key has a default, and none is `0`:
 /// no value switches the limit off.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -202,7 +202,7 @@ impl AgentRateLimitConfig {
 }
 
 /// The Agents a host may speak for at most (SEC-bootstrap-certificates-and-enrolment §11), which the limit has to carry at
-/// the fleet's heartbeat (SEC-tls13-two-planes-bounded-input §23).
+/// the fleet's heartbeat (SEC-tls13-bounded-input-chosen-planes §23).
 const AGENTS_PER_HOST: u64 = 256;
 
 /// The heartbeat the Baseline uses when none is offered.
@@ -568,7 +568,7 @@ pub struct DatabaseConfig {
     /// The database, when `store = "postgres"`; refused beside `store = "fs"`.
     pub postgres: Option<PostgresConfig>,
     /// How often an instance renews its lease, in seconds; PostgreSQL only
-    /// (SRV-instances-share-one-postgresql §3).
+    /// (SRV-instance-opens-chosen-planes §3).
     pub lease_renew_secs: Option<u64>,
     /// How long after its last renewal a lease lapses, in seconds, at least three renewals;
     /// PostgreSQL only.
@@ -611,7 +611,7 @@ const DEFAULT_PRESENCE_INTERVAL_SECS: u64 = 30;
 const PRESENCE_INTERVAL_SECS: std::ops::RangeInclusive<u64> = 10..=60;
 
 /// The lease every instance on PostgreSQL holds while it serves
-/// (SRV-instances-share-one-postgresql §3).
+/// (SRV-instance-opens-chosen-planes §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseTimes {
     /// How often it is renewed.
@@ -959,7 +959,7 @@ impl AdmissionThrottleConfig {
     }
 }
 
-/// The `[rest]` section (SEC-tls13-two-planes-bounded-input): the Operator plane's own listener. It is a section rather than
+/// The `[rest]` section (SEC-tls13-bounded-input-chosen-planes): the Operator plane's own listener. It is a section rather than
 /// a bare key because the plane is what grows next — an authentication decision belongs inside it,
 /// not beside it.
 #[derive(Debug, Deserialize)]
@@ -970,14 +970,14 @@ pub struct RestConfig {
     pub listen: SocketAddr,
     /// Optional Basic authentication over the whole plane (SEC-admission-by-client-certificate); required off the loopback.
     pub auth: Option<RestAuthConfig>,
-    /// The connections the Operator plane holds at once (SEC-tls13-two-planes-bounded-input). `0` is refused at load.
+    /// The connections the Operator plane holds at once (SEC-tls13-bounded-input-chosen-planes). `0` is refused at load.
     #[serde(default = "default_rest_max_connections")]
     pub max_connections: usize,
-    /// The Operator plane's own certificate and key (SEC-tls13-two-planes-bounded-input); without it, `[tls]`'s.
+    /// The Operator plane's own certificate and key (SEC-tls13-bounded-input-chosen-planes); without it, `[tls]`'s.
     pub tls: Option<RestTlsConfig>,
 }
 
-/// The `[rest.tls]` section (SEC-tls13-two-planes-bounded-input): the certificate the Operator plane serves in place of
+/// The `[rest.tls]` section (SEC-tls13-bounded-input-chosen-planes): the certificate the Operator plane serves in place of
 /// `[tls]`'s, typically from the operator's own PKI so that browsers trust it as they are. Nothing
 /// else: the Operator plane asks for no client certificate, so a `client_ca_file` here is refused.
 #[derive(Debug, Deserialize)]
@@ -1673,7 +1673,7 @@ impl ServerConfig {
                     .to_string(),
             );
         }
-        // The two planes are two listeners (SEC-tls13-two-planes-bounded-input). Addresses that collide would surface as the
+        // The two planes are two listeners (SEC-tls13-bounded-input-chosen-planes). Addresses that collide would surface as the
         // second bind failing with "address already in use" — a message about sockets for what is
         // really a configuration mistake, so it is refused here, by name.
         if listeners_collide(self.listen, self.rest.listen) {
@@ -1820,7 +1820,7 @@ impl ServerConfig {
     }
 
     /// A warning when one host cannot report for all the Agents it may speak for at the fleet's
-    /// heartbeat (SEC-tls13-two-planes-bounded-input §23): `messages_per_sec` times the offered heartbeat interval, or
+    /// heartbeat (SEC-tls13-bounded-input-chosen-planes §23): `messages_per_sec` times the offered heartbeat interval, or
     /// the Baseline's 30 s, below 256. A limit set too low costs availability, not security, so
     /// the Server starts.
     #[must_use]
@@ -1843,7 +1843,7 @@ impl ServerConfig {
         })
     }
 
-    /// The transport rules of the specification's Q-1 (SEC-tls13-two-planes-bounded-input): the Agent plane always serves
+    /// The transport rules of the specification's Q-1 (SEC-tls13-bounded-input-chosen-planes): the Agent plane always serves
     /// TLS, and the Operator plane off the loopback requires authentication.
     fn check_secure(&self) -> Result<(), String> {
         let Some(tls) = &self.tls else {
@@ -2227,9 +2227,9 @@ mod tests {
         assert!(cfg.tls.is_none());
     }
 
-    /// SEC-tls13-two-planes-bounded-input: the Operator plane is a second listener, and by default it is on loopback — the
+    /// SEC-tls13-bounded-input-chosen-planes: the Operator plane is a second listener, and by default it is on loopback — the
     /// only protection it has while nothing authenticates it.
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn the_operator_plane_defaults_to_loopback_and_is_configurable() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
@@ -2245,7 +2245,7 @@ mod tests {
 
     /// `[rest.tls]` takes a certificate and its key and nothing else: the Operator plane asks for
     /// no client certificate, so a `client_ca_file` there is refused, and so is a missing key.
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn rest_tls_takes_a_certificate_and_its_key_and_nothing_else() {
         let cfg: ServerConfig =
@@ -2267,8 +2267,8 @@ mod tests {
     }
 
     /// Two planes, two sockets: an address that cannot be bound twice is a configuration mistake,
-    /// and it is named as one rather than surfacing as "address already in use" (SEC-tls13-two-planes-bounded-input).
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// and it is named as one rather than surfacing as "address already in use" (SEC-tls13-bounded-input-chosen-planes).
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn two_planes_on_one_address_are_refused() {
         assert!(listeners_collide(
@@ -2732,7 +2732,7 @@ mod tests {
         }
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn max_connections_defaults_per_plane_and_zero_is_refused() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
@@ -2747,7 +2747,7 @@ mod tests {
         }
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn the_agent_rate_limit_defaults_and_refuses_zero() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
@@ -2789,7 +2789,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn a_limit_below_the_heartbeat_for_256_agents_warns_naming_both_keys() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2815,14 +2815,14 @@ mod tests {
         assert_eq!(config.rate_limit_warning(), None, "10 times 30 carries 300");
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn the_agent_plane_defaults_to_the_loopback() {
         let cfg: ServerConfig = toml::from_str("").expect("parse");
         assert_eq!(cfg.listen, "127.0.0.1:4320".parse().expect("address"));
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate, Q-1
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate, Q-1
     #[test]
     fn a_server_without_tls_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2835,7 +2835,7 @@ mod tests {
         assert!(err.contains("[tls] is required"), "{err}");
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate
     #[test]
     fn the_operator_plane_requires_authentication_off_the_loopback() {
         let tls = TLS;
@@ -3437,7 +3437,7 @@ mod tests {
 
     /// The rate of new Agent-plane connections defaults to 200 a second and the drain to 20
     /// seconds; a rate of zero and a drain past 300 seconds fail startup naming the key.
-    /// Verifies: SEC-tls13-two-planes-bounded-input, SRV-instances-share-one-postgresql
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes, SRV-instance-opens-chosen-planes
     #[test]
     fn the_new_connection_rate_and_the_drain_are_bounded() {
         let load = |keys: &str| {
@@ -3562,7 +3562,7 @@ mod tests {
 
     /// An instance must be alone on its database while it keeps its blobs as files or a CA key in a
     /// file, and names the key; with the blobs in S3 and no CA key on the Server it shares it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_instance_with_files_of_its_own_must_be_alone() {
         let s3 = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
@@ -3886,7 +3886,7 @@ mod tests {
     /// each one set fails startup naming it; with PostgreSQL they default to 10, 30 and 30 seconds,
     /// and a lease shorter than three renewals, a renewal of zero, or a presence interval outside 10
     /// to 60 seconds fails naming the key.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts
     #[test]
     fn the_lease_keys_apply_to_postgresql_alone() {
         let load = |database: &str| {
@@ -4031,7 +4031,7 @@ mod tests {
     /// `[audit.export]` is off unless named; it names an `https://` endpoint, or an `http://` one
     /// on a loopback IP literal, and a `ca_file`. Plaintext elsewhere, another scheme and any other
     /// key fail startup naming the section.
-    /// Verifies: SEC-append-only-audit-record, SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-append-only-audit-record, SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn the_audit_export_is_off_unless_named_and_never_plaintext_off_the_loopback() {
         let load = |text: &str| {
@@ -4125,11 +4125,11 @@ mod tests {
     }
 
     /// A Server on files given a data directory it cannot create fails startup naming `data_dir`
-    /// and the directory (OPS-releases-attestations-server-image §16). The
+    /// and the directory (OPS-releases-image-probed-by-plane §16). The
     /// image's case is the default `fleet-data` under `/`, which the account cannot write; the test
     /// names the directory under an unwritable one instead, as the working directory is the whole
     /// test process's.
-    /// Verifies: OPS-releases-attestations-server-image
+    /// Verifies: OPS-releases-image-probed-by-plane
     #[cfg(unix)]
     #[test]
     fn a_data_dir_the_account_cannot_write_fails_startup_naming_it() {

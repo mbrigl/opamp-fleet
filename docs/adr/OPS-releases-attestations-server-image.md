@@ -1,7 +1,7 @@
 # OPS-releases-attestations-server-image: Releases, attestations and the Server's image
 
-- **Status:** 🟢 accepted
-- **Date:** 2026-11-02
+- **Status:** ⚪ superseded by OPS-releases-image-probed-by-plane
+- **Date:** 2026-11-21
 - **Deciders:** Markus Brigl
 - **Applies to:** `.github/workflows/release.yml` (the `version`, `build`, `sbom`, `image` and `publish` jobs, their permissions, the release files they attach and the release notes), `packaging/container/Containerfile`, the image `ghcr.io/mbrigl/opamp-fleet-server`, `.github/dependabot.yml`, `crates/fleet-tools/tests/release_workflow.rs`, the names of every release file, the fleet view's reading of an artifact's file name, and every document that tells an operator how to download, check or run a release file or the Server's image (`README.md`, `docs/manual/`, `CHANGELOG.md`)
 

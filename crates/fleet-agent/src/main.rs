@@ -1,6 +1,6 @@
 //! Entry point: parse the CLI (CLT-installed-service-and-state) and hand off — `run` to the daemon runtime, the
 //! `service` verbs to the cross-platform lifecycle. The daemon loads `supervisor.toml`, restores the
-//! Agent's identity, and runs the transport the endpoint selects (SEC-tls13-two-planes-bounded-input) until stopped.
+//! Agent's identity, and runs the transport the endpoint selects (SEC-tls13-bounded-input-chosen-planes) until stopped.
 
 use std::path::{Path, PathBuf};
 
@@ -67,7 +67,7 @@ fn main() {
         )
         .init();
 
-    // One TLS provider for the whole process (SEC-tls13-two-planes-bounded-input): ring, never a system library.
+    // One TLS provider for the whole process (SEC-tls13-bounded-input-chosen-planes): ring, never a system library.
     opamp::tls::install_ring_provider();
 
     let cli::Parsed { cli, config_named } = cli::parse();

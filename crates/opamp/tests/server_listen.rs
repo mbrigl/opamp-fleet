@@ -117,7 +117,7 @@ async fn get_text(client: &reqwest::Client, port: u16) -> reqwest::Result<String
 
 /// A peer that sends a request line and then falls silent is hung up on, rather than holding the
 /// connection for as long as it likes.
-/// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input
+/// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_connection_that_never_finishes_its_headers_is_hung_up_on() {
     let bound = Duration::from_secs(1);
@@ -140,7 +140,7 @@ async fn a_connection_that_never_finishes_its_headers_is_hung_up_on() {
 /// freed: with a cap of one, a request after it is served. hyper's reading of the first bytes,
 /// which tells HTTP/1 from HTTP/2, has no timer of its own, and the header-read bound starts only
 /// after it.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_peer_silent_before_its_first_request_is_hung_up_on() {
     opamp::tls::install_ring_provider();
@@ -174,7 +174,7 @@ async fn a_peer_silent_before_its_first_request_is_hung_up_on() {
 
 /// The same holds after a completed TLS handshake: a peer that then sends nothing is hung up on,
 /// and the listener holds no connection after it.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_peer_silent_after_the_tls_handshake_is_hung_up_on() {
     use rustls::pki_types::pem::PemObject as _;
@@ -312,7 +312,7 @@ fn unusable_material_names_the_part() {
 /// A client that offers TLS 1.2 alone never completes the handshake: the listener speaks TLS 1.3
 /// and nothing older. The client is built from the full ring provider, which still has its TLS 1.2
 /// suites, so the refusal is the listener's.
-/// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input, CLT-modes-and-gateway, Q-3
+/// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-bounded-input-chosen-planes, CLT-modes-and-gateway, Q-3
 #[tokio::test]
 async fn a_client_offering_only_tls_1_2_is_refused() {
     let pki = Pki::new();
@@ -348,7 +348,7 @@ async fn a_client_offering_only_tls_1_2_is_refused() {
 
 /// A listener at its cap closes the next connection on accept, keeps the ones it holds, and takes
 /// a new one once a held one has gone.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn connections_past_the_cap_are_refused_while_established_ones_keep_working() {
     opamp::tls::install_ring_provider();
@@ -401,7 +401,7 @@ async fn connections_past_the_cap_are_refused_while_established_ones_keep_workin
 /// seconds and closes the connection: of 30 new connections at a rate of 2, the burst is served
 /// and the rest are told when to come back. The exact count is the bucket's own unit test; this
 /// one is small enough to fit any listen queue.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn new_connections_past_the_rate_are_answered_503_with_a_spread_retry_after() {
     let (listener, port) = bind();
@@ -452,7 +452,7 @@ async fn new_connections_past_the_rate_are_answered_503_with_a_spread_retry_afte
 /// Over TLS, a connection past the rate completes its handshake and is answered `503` with a
 /// `Retry-After`, over HTTP/1.1 alone, so its connection closes after the answer; one within the
 /// rate is offered HTTP/2 as before.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tls_connection_past_the_rate_is_answered_503_over_http_1_1() {
     use std::io::{Read as _, Write as _};
@@ -519,7 +519,7 @@ async fn a_tls_connection_past_the_rate_is_answered_503_over_http_1_1() {
 
 /// A listener without TLS on an address other than the loopback literals is refused before it
 /// accepts anything: plaintext is for the loopback alone.
-/// Verifies: SEC-tls13-two-planes-bounded-input, Q-1
+/// Verifies: SEC-tls13-bounded-input-chosen-planes, Q-1
 #[tokio::test]
 async fn a_plaintext_listener_off_the_loopback_is_refused() {
     let listener = std::net::TcpListener::bind("0.0.0.0:0").expect("bind");
@@ -631,7 +631,7 @@ async fn status_of(socket: &mut TcpStream) -> String {
 }
 
 /// A body announced in the headers and never sent is answered `408`, not waited for.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_body_that_never_arrives_is_answered_408() {
     let port = spawn_paced();
@@ -640,7 +640,7 @@ async fn a_body_that_never_arrives_is_answered_408() {
 }
 
 /// A body that keeps arriving, but below the floor, is answered `408` the same way.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_body_that_trickles_is_answered_408() {
     let port = spawn_paced();
@@ -661,7 +661,7 @@ async fn a_body_that_trickles_is_answered_408() {
 }
 
 /// A slow body that keeps above the floor is taken whole, however many windows it spans.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_slow_body_above_the_floor_is_taken_whole() {
     // Over three one-second windows, chunks of sixteen times the floor four to a window: each
@@ -723,7 +723,7 @@ async fn close_code(socket: &mut TcpStream, within: Duration) -> Option<u16> {
 
 /// A WebSocket message that has begun and trickles below the floor closes its connection with
 /// `1008`.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_websocket_message_that_trickles_closes_with_1008() {
     let port = spawn_paced();
@@ -755,7 +755,7 @@ async fn a_websocket_message_that_trickles_closes_with_1008() {
 }
 
 /// A WebSocket with nothing in flight is left open, however many windows pass.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn an_idle_websocket_stays_open() {
     let port = spawn_paced();
@@ -772,7 +772,7 @@ fn full_ping() -> Vec<u8> {
 
 /// A message whose fragments are interleaved with Pings, which RFC 6455 allows, is judged by its
 /// data alone: the Pings are no progress on it, and it closes its connection with `1008`.
-/// Verifies: SEC-tls13-two-planes-bounded-input, DEV-six-crates-tokio-axum
+/// Verifies: SEC-tls13-bounded-input-chosen-planes, DEV-six-crates-tokio-axum
 #[tokio::test]
 async fn a_message_kept_open_by_pings_between_its_fragments_closes_with_1008() {
     let port = spawn_paced();
@@ -892,7 +892,7 @@ impl opamp::server::Handler for Stuck {
 /// it separately: one stuck in its handler is cut at the drain's deadline, and `serve` returns only
 /// once it is — whatever follows a listener's shutdown sees no session still at work.
 ///
-/// Verifies: SEC-tls13-two-planes-bounded-input, DEV-six-crates-tokio-axum
+/// Verifies: SEC-tls13-bounded-input-chosen-planes, DEV-six-crates-tokio-axum
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_drain_cuts_a_stuck_websocket_session_at_its_deadline() {
     use futures_util::SinkExt;
@@ -954,7 +954,7 @@ async fn a_drain_cuts_a_stuck_websocket_session_at_its_deadline() {
 /// window, so the peers do not all come back at once; a session that keeps sending closes at its
 /// instant all the same, and `serve` returns within the window and its grace.
 ///
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_spread_drain_closes_the_sessions_over_its_window() {
     use futures_util::{SinkExt, StreamExt};

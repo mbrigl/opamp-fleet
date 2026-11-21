@@ -756,7 +756,7 @@ impl PackageStore {
 
     /// Reads every Package again from the backend, as another instance created, deleted or
     /// changed one
-    /// (SRV-instances-share-one-postgresql §12):
+    /// (SRV-instance-opens-chosen-planes §12):
     /// what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap. The blobs
     /// are not read: they are the blob store's, which every instance shares.
@@ -2072,7 +2072,7 @@ mod tests {
     /// entry as stored, so the Package read again through it shows the new bytes, and a signature
     /// written again through it is stored. Two stores on one data directory stand in for two
     /// instances.
-    /// Verifies: SRV-instances-share-one-postgresql, PKG-signed-packages-and-delivery
+    /// Verifies: SRV-instance-opens-chosen-planes, PKG-signed-packages-and-delivery
     #[test]
     fn a_signature_on_bytes_another_instance_replaced_is_refused_and_signed_anew() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -141,7 +141,7 @@ pub const MIGRATIONS: &[Migration] = &[
     },
     // A column only added, with a default. A Server of 0.8.0 writes no release into it, and every
     // lease taken before it is one of 0.8.0, which the default names
-    // (SRV-instances-share-one-postgresql §16).
+    // (SRV-instance-opens-chosen-planes §16).
     Migration {
         version: 12,
         oldest_server: "0.8.0",
@@ -200,7 +200,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // contract pair in its `INSERT`s and reads each Host's array only to discard it, so it serves
     // on what this leaves; a release before it does not serve beside this one
     // (SRV-state-stores-contract-pair §22,
-    // SRV-instances-share-one-postgresql §16).
+    // SRV-instance-opens-chosen-planes §16).
     Migration {
         version: 19,
         oldest_server: "0.8.4",
@@ -210,7 +210,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // runs while serving, so it serves on what this leaves; a Server of 0.8.4 still names them and
     // does not serve beside this one
     // (SRV-state-stores-contract-pair §22,
-    // SRV-instances-share-one-postgresql §16).
+    // SRV-instance-opens-chosen-planes §16).
     Migration {
         version: 20,
         oldest_server: "0.8.5",
@@ -219,7 +219,7 @@ pub const MIGRATIONS: &[Migration] = &[
     // A column with a default only added. A Server of 0.8.5 names it in no statement, and the
     // leases it writes take the default, both planes, so it serves on what this leaves
     // (SRV-instance-opens-chosen-planes §26,
-    // SRV-instances-share-one-postgresql §16).
+    // SRV-instance-opens-chosen-planes §16).
     Migration {
         version: 21,
         oldest_server: "0.8.5",
@@ -362,7 +362,7 @@ CREATE INDEX blob_deletions_sweep ON blob_deletions (sweep);
 ";
 
 /// The release of the instance that holds each lease
-/// (SRV-instances-share-one-postgresql §16):
+/// (SRV-instance-opens-chosen-planes §16):
 /// what an instance compares with the oldest Server its migrations leave before it
 /// migrates.
 const LEASE_RELEASE: &str = "
@@ -510,7 +510,7 @@ CREATE TABLE package_floors (
 ";
 
 /// The lease of every instance on this database
-/// (SRV-instances-share-one-postgresql §1–§3).
+/// (SRV-instance-opens-chosen-planes §1–§3).
 /// The times are the database's own, so every instance reads the same clock. A
 /// lease whose `expires_at` has passed is lapsed, whatever its row still says.
 const LEASES: &str = r"
@@ -526,7 +526,7 @@ CREATE TABLE leases (
 
 /// Which Host each `instance_uid` is bound to: one row per binding, the `instance_uid` its key, so
 /// no two Hosts hold one
-/// (SRV-instances-share-one-postgresql §19).
+/// (SRV-instance-opens-chosen-planes §19).
 /// It is filled from the arrays of the Hosts not marked as Gateways, as a Gateway's
 /// Host is bound none (SRV-fleet-record-agents-hosts §16); an `instance_uid` two such Hosts' arrays hold fails the
 /// migration, naming it and the Hosts, and changes nothing, for the operator to decide. A renewal's
@@ -554,7 +554,7 @@ CREATE INDEX certificates_predecessor ON certificates (predecessor_issuer, prede
 ";
 
 /// The members of each Deployment, one row each
-/// (SRV-instances-share-one-postgresql §19):
+/// (SRV-instance-opens-chosen-planes §19):
 /// its Packages keyed by Agent type, so it holds at most one of each, and its
 /// Configurations by name. They are filled from the `packages` and `configurations` columns of
 /// `deployments`, which stay and are written from these rows. A Deployment it cannot split fails
@@ -649,7 +649,7 @@ ALTER TABLE agents ADD COLUMN holder uuid;
 ";
 
 /// How each Agent was taken
-/// (SRV-instances-share-one-postgresql §8):
+/// (SRV-instance-opens-chosen-planes §8):
 /// `takes` counts every take and every batch that names a holder anew, so an instance
 /// writes a disconnect only where the row still holds the count it was answered, with no clock
 /// compared; `holder_changes` holds when the holder changed, the latest eleven times, by the
@@ -800,7 +800,7 @@ fn needs_newer(needs: &str, ours: &str) -> String {
 /// Refuses the schema when it names an oldest Server newer than `ours`, naming both versions: what
 /// an instance checks under the migrations' lock before it migrates and in the transaction that
 /// takes each lease
-/// (SRV-instances-share-one-postgresql §16).
+/// (SRV-instance-opens-chosen-planes §16).
 ///
 /// # Errors
 /// Returns the refusal, or an error when a statement fails.
@@ -832,7 +832,7 @@ async fn leases_record_releases(client: &impl GenericClient) -> Result<bool, Str
 /// `None` when there is none. A lease of an instance that had to be alone counts as none: the
 /// caller holds the exclusive lock or found it free, so that lease's process is gone, and the
 /// next lease taken takes it over
-/// (SRV-instances-share-one-postgresql §2 and §16).
+/// (SRV-instance-opens-chosen-planes §2 and §16).
 async fn lease_older_than(
     client: &impl GenericClient,
     oldest: &str,
@@ -885,7 +885,7 @@ async fn lease_older_than(
 /// refused before anything is written, naming both versions, and so is every schema while a live
 /// lease names a release older than the oldest Server the schema names once `migrations` are
 /// applied, naming both releases, whether they are applied already or not
-/// (SRV-instances-share-one-postgresql §16).
+/// (SRV-instance-opens-chosen-planes §16).
 ///
 /// # Errors
 /// Returns an error when the schema needs a newer Server, a live lease is of an older one, or a
@@ -961,7 +961,7 @@ mod tests {
     /// 0.8.0, migration 19, the contract pair's defaults, names 0.8.4, and migration 20, which
     /// drops the pair, names 0.8.5.
     /// Verifies: SRV-state-stores-contract-pair
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn the_migrations_are_numbered_and_this_server_understands_them() {
         for (index, migration) in MIGRATIONS.iter().enumerate() {
@@ -984,7 +984,7 @@ mod tests {
         }
         // The first release to run beside another serves beside 0.8.0: its migrations name it, so
         // the instances of 0.8.0 that still run serve on the schema they leave
-        // (SRV-instances-share-one-postgresql §16).
+        // (SRV-instance-opens-chosen-planes §16).
         for migration in &MIGRATIONS[10..18] {
             assert_eq!(
                 migration.oldest_server, "0.8.0",

@@ -1,6 +1,6 @@
 //! The tests that decide G-20: a fleet is served on when one of three Server instances is lost,
 //! killed or frozen; the database carries the presence and the notifications of 100 000 Agents
-//! (SRV-instances-share-one-postgresql §20 and the Enforcement); and where the planes run on
+//! (SRV-instance-opens-chosen-planes §20 and the Enforcement); and where the planes run on
 //! instances of their own, the Operator plane answers each page of the Agents and each revocation
 //! within 2 seconds while the Agents of a killed Agent-plane instance reconnect
 //! (SRV-instance-opens-chosen-planes and its Enforcement).
@@ -1476,7 +1476,7 @@ fn in_list(uids: impl IntoIterator<Item = InstanceUid>) -> String {
 /// drew; a revocation committed meanwhile ends its session on either instance within
 /// `lease_renew_secs`; no notification is left unread; and a Gateway's ten pool connections from
 /// one address are refused by neither the admission throttle nor the bound on new connections.
-/// Verifies: SRV-instances-share-one-postgresql
+/// Verifies: SRV-instance-opens-chosen-planes
 /// Verifies: G-20
 #[test]
 fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() {
@@ -1487,7 +1487,7 @@ fn g20_a_killed_instance_s_agents_are_carried_by_the_others_within_the_bounds() 
 /// kernel keeps the connections, and its Agents notice it only by the silence of one heartbeat
 /// interval. The same bounds hold as for a killed instance.
 /// Verifies: API-silent-websocket-is-ended
-/// Verifies: SRV-instances-share-one-postgresql
+/// Verifies: SRV-instance-opens-chosen-planes
 /// Verifies: G-20
 #[test]
 fn g20_a_frozen_instance_s_agents_are_carried_by_the_others_within_the_bounds() {
@@ -2237,7 +2237,7 @@ async fn revoke_each_second(
 /// minute, and a page of the Agents is read every ten seconds: no presence batch is written later
 /// than its interval after it was due, and no notification is left unread. No Agent is re-keyed
 /// as a duplicate, while the fleet connects or after.
-/// Verifies: SRV-instances-share-one-postgresql
+/// Verifies: SRV-instance-opens-chosen-planes
 /// Verifies: G-20
 #[test]
 fn g20_three_instances_carry_the_presence_and_notifications_of_100_000_agents() {

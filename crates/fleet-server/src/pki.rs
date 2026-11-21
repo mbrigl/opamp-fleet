@@ -27,7 +27,7 @@ pub fn read_ending(file: &Path) -> Result<Ending, String> {
 }
 
 /// The certificates a running Server depends on (OPS-operator-program-fleetctl §21): its own on each plane
-/// (SEC-tls13-two-planes-bounded-input), the client CA as both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each
+/// (SEC-tls13-bounded-input-chosen-planes), the client CA as both `[tls]` and `[client_ca]` name it, and the bootstrap CA. Each
 /// file once.
 #[must_use]
 pub fn depended_on(config: &ServerConfig) -> Vec<PathBuf> {
@@ -278,8 +278,8 @@ mod tests {
     }
 
     /// The Operator plane's own certificate is one the Server depends on, and a file both
-    /// sections name is watched once (SEC-tls13-two-planes-bounded-input §13).
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// sections name is watched once (SEC-tls13-bounded-input-chosen-planes §13).
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn the_operator_planes_certificate_is_watched_once() {
         let config: ServerConfig = toml::from_str(

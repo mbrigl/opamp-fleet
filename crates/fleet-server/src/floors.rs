@@ -32,7 +32,7 @@ pub trait FloorStore: Send + Sync {
 
     /// Stores `floor` for `agent_type` unless its version orders below the one stored, deciding
     /// from what the store holds, as another instance may have raised it since this one read it
-    /// (SRV-instances-share-one-postgresql §19).
+    /// (SRV-instance-opens-chosen-planes §19).
     ///
     /// # Errors
     /// Returns an error when the floor cannot be persisted; the store is then as it was.
@@ -147,7 +147,7 @@ impl PackageFloors {
     }
 
     /// Reads the floors again from the store, as another instance set or removed one
-    /// (SRV-instances-share-one-postgresql §9 and §12),
+    /// (SRV-instance-opens-chosen-planes §9 and §12),
     /// so what this instance serves is what is stored. It reads under the lock,
     /// so no write of this instance's own lands between the read and the swap.
     ///

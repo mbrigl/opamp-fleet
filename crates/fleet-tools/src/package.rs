@@ -382,7 +382,7 @@ fn pack_7z(
     //
     // Only off Windows, which is 7-Zip's own rule: bit 15 means `FILE_ATTRIBUTE_INTEGRITY_STREAM`
     // there, and the Windows build neither writes nor expects the Unix extension. It costs the
-    // release nothing — each artifact is packed on a runner of its own platform (OPS-releases-attestations-server-image), so the
+    // release nothing — each artifact is packed on a runner of its own platform (OPS-releases-image-probed-by-plane), so the
     // Linux and macOS ones carry the mode and `client.exe`, which has no use for it, does not.
     #[cfg(unix)]
     {
@@ -632,7 +632,7 @@ mod tests {
     }
 
     /// An operator who unpacks a published artifact by hand must get a file that runs — the release
-    /// ships `.tar.gz` (OPS-releases-attestations-server-image), and `.7z` stays the container an artifact may be encrypted in
+    /// ships `.tar.gz` (OPS-releases-image-probed-by-plane), and `.7z` stays the container an artifact may be encrypted in
     /// (PKG-signed-packages-and-delivery). Both therefore carry an executable mode of their own — the tar in its header,
     /// the 7z in 7-Zip's Unix-attribute convention — rather than relying on the Client, which sets
     /// the mode itself but only on the path where *it* installs the package.

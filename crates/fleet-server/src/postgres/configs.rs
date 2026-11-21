@@ -1,7 +1,7 @@
 //! Configurations in PostgreSQL (SRV-state-stores-contract-pair §5): the PostgreSQL adapter behind
 //! [`ConfigBackend`](crate::configs::ConfigBackend) — one row per Configuration, its retained
 //! revisions in rows of their own, each call one transaction on the rows it names
-//! (SRV-instances-share-one-postgresql §19).
+//! (SRV-instance-opens-chosen-planes §19).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -422,7 +422,7 @@ mod tests {
     /// A Configuration deleted through another instance between the two statements of `load` is
     /// held with all of its retained revisions or not at all: the read is of the state before the
     /// deletion.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_configuration_deleted_between_the_reads_of_load_is_held_whole_or_not_at_all() {
         let Some(test) = TestDatabase::named() else {
@@ -469,7 +469,7 @@ mod tests {
     /// A Configuration created and released through another instance between the two statements
     /// of `load` is read whole or not at all: the revisions are read in the snapshot the
     /// Configurations were, so none names a Configuration the read did not see.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_configuration_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
         let Some(test) = TestDatabase::named() else {
@@ -517,7 +517,7 @@ mod tests {
         });
     }
 
-    /// Verifies: SRV-state-stores-contract-pair, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-state-stores-contract-pair, SRV-instance-opens-chosen-planes
     #[test]
     fn the_configuration_port_contract_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -593,7 +593,7 @@ mod tests {
     /// A collection on PostgreSQL keeps every revision a stored assignment pins, whatever the
     /// caller names: the assignments are reckoned in its own transaction, so a revision another
     /// instance pinned is not collected by one that never heard of it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_collection_on_postgres_keeps_what_a_stored_assignment_pins() {
         let Some(test) = TestDatabase::named() else {
@@ -628,7 +628,7 @@ mod tests {
     /// committed. The rollout is held at a gate in the database between its revision and its
     /// record, so the collection runs exactly then; the gate opens once the collection waits, or
     /// once it has finished, which only a collection that took no hold does.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_collection_keeps_a_stored_revision_a_rollout_pins_meanwhile() {
         use opamp::uid::InstanceUid;
@@ -737,7 +737,7 @@ mod tests {
     /// A deletion of a Configuration through B while a rollout through A that pins one of its
     /// revisions has not yet committed waits for the rollout, and then refuses it from the
     /// assignment the rollout stored: the rollout holds the Configuration's row until it commits.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_configuration_and_is_refused() {
         use crate::agent_store::tests::record;

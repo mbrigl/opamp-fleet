@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Creates the certificates a development Server and Client need, since both refuse to run without
-# them (SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate), with the operator tool's `opamp-fleetctl pki init`
+# them (SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate), with the operator tool's `opamp-fleetctl pki init`
 # (OPS-operator-program-fleetctl) — no openssl. Every certificate of the set says it is a development one:
 # `OpAMP Fleet Dev … CA`, `O=Development` (OPS-operator-program-fleetctl §20).
 # Everything lands in one directory, gitignored, and is for a development machine only: the keys

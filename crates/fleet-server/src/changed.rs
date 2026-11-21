@@ -1,5 +1,5 @@
 //! The kinds of change one Server instance tells the others of
-//! (SRV-instances-share-one-postgresql §9).
+//! (SRV-instance-opens-chosen-planes §9).
 //! A store that shares its state among instances announces each change it commits as
 //! one of these, with the identifier it concerns; an instance that hears one maps it once to what
 //! it reads again. How a kind travels is the adapter's: this type names none of it.

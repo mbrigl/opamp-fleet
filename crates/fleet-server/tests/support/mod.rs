@@ -11,9 +11,9 @@ use opamp::uid::InstanceUid;
 
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub struct TestServer {
-    /// The Agent plane (SEC-tls13-two-planes-bounded-input): `/v1/opamp` and the package download.
+    /// The Agent plane (SEC-tls13-bounded-input-chosen-planes): `/v1/opamp` and the package download.
     pub addr: SocketAddr,
-    /// The Operator plane (SEC-tls13-two-planes-bounded-input): the REST API, its docs, and the UI — a second listener, as
+    /// The Operator plane (SEC-tls13-bounded-input-chosen-planes): the REST API, its docs, and the UI — a second listener, as
     /// in a real deployment, so a test that calls the wrong one finds out.
     pub rest_addr: SocketAddr,
     pub state: Arc<AppState>,
@@ -94,7 +94,7 @@ async fn spawn_full(
     }
 }
 
-/// Serves the two planes on ephemeral ports, exactly as the binary serves them (SEC-tls13-two-planes-bounded-input), and
+/// Serves the two planes on ephemeral ports, exactly as the binary serves them (SEC-tls13-bounded-input-chosen-planes), and
 /// answers with the address of each. The Operator plane is open, as it is without `[rest.auth]`.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn serve(
@@ -118,7 +118,7 @@ pub async fn serve_guarded(
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind the Operator plane");
     let addr = agent_listener.local_addr().expect("local addr");
     let rest_addr = operator_listener.local_addr().expect("local addr");
-    // Through `listen::plane`, as the binary serves them (SEC-tls13-two-planes-bounded-input), so the whole suite runs
+    // Through `listen::plane`, as the binary serves them (SEC-tls13-bounded-input-chosen-planes), so the whole suite runs
     // against a Server whose connection setup is bounded the way a real one's is.
     let handle = opamp::server::listen::Handle::new();
     tokio::spawn(
@@ -289,7 +289,7 @@ pub async fn deploy(
     assert_eq!(response.status(), 200, "the deployment is rolled out");
 }
 
-/// A clock a test moves by hand, so a rate limit refills when the test says (SEC-tls13-two-planes-bounded-input).
+/// A clock a test moves by hand, so a rate limit refills when the test says (SEC-tls13-bounded-input-chosen-planes).
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub struct ManualClock(pub std::sync::atomic::AtomicU64);
 
@@ -313,7 +313,7 @@ impl ManualClock {
     }
 }
 
-/// The same real router with the Agent plane's rate limit armed (SEC-tls13-two-planes-bounded-input), its buckets on a clock
+/// The same real router with the Agent plane's rate limit armed (SEC-tls13-bounded-input-chosen-planes), its buckets on a clock
 /// the test moves.
 #[allow(dead_code)] // each integration-test binary uses a different subset of this scaffolding
 pub async fn spawn_with_agent_rate(

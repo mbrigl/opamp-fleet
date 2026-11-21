@@ -1,7 +1,7 @@
 //! One Agent's state machine: builds `AgentToServer` reports and reacts to `ServerToAgent`
 //! replies.
 //!
-//! Transport-agnostic on purpose (SEC-tls13-two-planes-bounded-input): the WebSocket and plain-HTTP loops feed the same
+//! Transport-agnostic on purpose (SEC-tls13-bounded-input-chosen-planes): the WebSocket and plain-HTTP loops feed the same
 //! state machine, so transport is carriage, never semantics. The [`Engine`](crate::engine)
 //! carries n of these over one connection (CLT-modes-and-gateway, CLT-supervisor-mode-and-kinds) — a Supervisor-backed Agent and
 //! the self-Agent fallback are the same state machine.

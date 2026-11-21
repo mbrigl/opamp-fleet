@@ -180,7 +180,7 @@ pub async fn run_from<S: Session, X: StopSignal>(
                     "admission failed: the server refused this client (HTTP 401)"
                 );
             }
-            // Throttled (SEC-tls13-two-planes-bounded-input §4): the Server asked
+            // Throttled (SEC-tls13-bounded-input-chosen-planes §4): the Server asked
             // to be given this long, and is given at least that.
             Err(Connect::Refused(WsError::Http(response)))
                 if response.status() == StatusCode::SERVICE_UNAVAILABLE
@@ -536,7 +536,7 @@ async fn serve<S: Session, X: StopSignal>(
                         };
                         if let Some(delay) = session.on_reply(&reply) {
                             // The server is throttling: drop the connection and come back after
-                            // the wait it named (SEC-tls13-two-planes-bounded-input's *Context*).
+                            // the wait it named (SEC-tls13-bounded-input-chosen-planes's *Context*).
                             let _ = socket.close(None).await;
                             return Served::Throttled {
                                 wait: delay,
@@ -555,7 +555,7 @@ async fn serve<S: Session, X: StopSignal>(
                                 // The Server's close, its frame or the connection's end, before
                                 // the next connection reports: else the Server may still hold the
                                 // Agents carried here and take the next one for another peer
-                                // (SRV-instances-share-one-postgresql §8). A Server that does not answer within the
+                                // (SRV-instance-opens-chosen-planes §8). A Server that does not answer within the
                                 // bound does not hold the Client back.
                                 let _ = tokio::time::timeout(CLOSE_ANSWER, async {
                                     while let Some(Ok(message)) = socket.next().await {
@@ -681,7 +681,7 @@ mod tests {
     /// A refused upgrade waits its `Retry-After` or the next exponential step, whichever is
     /// longer, and one of zero or without the header waits the step; a connection that stood and
     /// was lost draws its first reconnect over `[0, 30 s)`.
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn a_refused_upgrade_waits_its_retry_after_or_the_next_step() {
         let mut backoff = Backoff::new();
@@ -744,8 +744,8 @@ mod tests {
     }
 
     /// A connection opened from a named local address reaches the server from that address
-    /// (SRV-instances-share-one-postgresql §20).
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// (SRV-instance-opens-chosen-planes §20).
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn a_connection_from_a_named_address_reaches_the_server_from_it() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -789,8 +789,8 @@ mod tests {
     }
 
     /// A lost connection logs the delay it drew, and the next connection comes no earlier
-    /// (SRV-instances-share-one-postgresql §20).
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// (SRV-instance-opens-chosen-planes §20).
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn a_lost_connection_logs_the_delay_it_drew_and_waits_it() {
         let written = Written::default();
@@ -930,7 +930,7 @@ mod tests {
     /// On verified connection settings the Client leaves the connection only once the Server
     /// answered its close, here 300 ms after it: the next connection is dialled after that, so the
     /// Server has ended the session before the next one reports.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn a_reconnect_on_verified_settings_waits_for_the_servers_close() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -952,7 +952,7 @@ mod tests {
     }
 
     /// A Server that never answers the close holds the Client back no longer than the bound.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn a_reconnect_waits_no_longer_than_the_bound_for_a_silent_server() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1008,10 +1008,10 @@ mod tests {
     /// An `Unavailable` the Client honours keeps it away the wait the Server named, or the next
     /// backoff step when that is longer, and no draw over the window after a lost connection is
     /// added on top: the Client closed the connection itself, the Server did not lose it, so the
-    /// wait is the one a refused upgrade waits (SEC-tls13-two-planes-bounded-input's *Context* and clause 4's refused upgrade). Twice in a
+    /// wait is the one a refused upgrade waits (SEC-tls13-bounded-input-chosen-planes's *Context* and clause 4's refused upgrade). Twice in a
     /// row, so a draw over `[0, 30 s)` on top cannot pass by landing low; each connection handles
     /// a reply first, so each starts the steps again.
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[tokio::test]
     async fn an_honoured_unavailable_waits_the_named_wait_and_draws_nothing_on_top() {
         const WAIT: Duration = Duration::from_secs(1);
@@ -1080,8 +1080,8 @@ mod tests {
     /// Consecutive `Unavailable`s grow along the backoff: a named wait of zero, as a Server that
     /// leaves `retry_after_nanoseconds` unset sends, is not a reconnect a second for ever. A named
     /// wait longer than the step is waited, not added to it. A connection whose reply was handled
-    /// before the next `Unavailable` starts the steps again (SEC-tls13-two-planes-bounded-input §4).
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// before the next `Unavailable` starts the steps again (SEC-tls13-bounded-input-chosen-planes §4).
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[tokio::test]
     async fn consecutive_unavailables_grow_along_the_backoff_until_a_reply_is_handled() {
         const NAMED: Duration = Duration::from_millis(2500);

@@ -376,7 +376,7 @@ mod tests {
         assert!(Scheme::of("h/v1/opamp").is_err());
     }
 
-    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input
+    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn plaintext_is_refused_off_the_loopback_literals() {
         let allowed = |endpoint| connection(endpoint, Some("Bearer t")).scheme();
@@ -405,7 +405,7 @@ mod tests {
             .is_err());
     }
 
-    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input
+    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-bounded-input-chosen-planes
     /// The probe of an offered endpoint that accepts the TCP connection and never answers fails
     /// once the bound has passed, rather than holding the session that asked for it
     /// (API-silent-websocket-is-ended §3).
@@ -441,7 +441,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[tokio::test]
     async fn plaintext_off_the_loopback_is_refused_before_connecting() {
         let refused = connection("ws://192.0.2.1:9/v1/opamp", None);

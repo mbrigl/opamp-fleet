@@ -1445,7 +1445,7 @@ fn store_unreadable() -> Response {
     (StatusCode::SERVICE_UNAVAILABLE, STORE_UNREADABLE).into_response()
 }
 
-/// The answer to a download past the host's rate limit, as the Server gives it (SEC-tls13-two-planes-bounded-input §26,
+/// The answer to a download past the host's rate limit, as the Server gives it (SEC-tls13-bounded-input-chosen-planes §26,
 /// CLT-gateway-rate-limits-hosts §4).
 fn over_rate() -> Response {
     (

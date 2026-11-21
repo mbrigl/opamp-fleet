@@ -27,7 +27,7 @@ entries.
 Any such change must keep the guarantee that no write of the instance's own is lost between the
 read and the swap. `retain_only` collects outside the lock, and the list is shared rather than
 copied. Reading the register by what a notice names contradicts
-SRV-instances-share-one-postgresql §12 ("Caches are read again, not updated"), so that part needs a
+SRV-instance-opens-chosen-planes §12 ("Caches are read again, not updated"), so that part needs a
 superseding ADR through `propose-adr` first.
 
 **Not now.** The human deferred it on 2026-11-19: no criterion asks for it, and the G-20 load test

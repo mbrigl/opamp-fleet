@@ -1,4 +1,4 @@
-//! The floor on the pace of every request body and every WebSocket message (SEC-tls13-two-planes-bounded-input §18).
+//! The floor on the pace of every request body and every WebSocket message (SEC-tls13-bounded-input-chosen-planes §18).
 //!
 //! Nothing a listener serves has a deadline: a large upload over a slow link and a long-lived
 //! session are both legitimate. What is not is a body or a message that has begun and then stalls

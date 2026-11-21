@@ -245,7 +245,7 @@ impl ConfigStore {
 
     /// Reads every Configuration again from the backend, as another instance saved, pinned,
     /// collected or deleted one
-    /// (SRV-instances-share-one-postgresql §12):
+    /// (SRV-instance-opens-chosen-planes §12):
     /// what is held is dropped and what is stored taken in its place. It reads under
     /// the lock, so no write of this instance's own lands between the read and the swap.
     ///

@@ -1,5 +1,5 @@
 //! The configuration of every WebSocket the Server's endpoint and the Client's socket open, with
-//! `tungstenite` (DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input): one place, so the two ends cannot drift apart.
+//! `tungstenite` (DEV-six-crates-tokio-axum, SEC-tls13-bounded-input-chosen-planes): one place, so the two ends cannot drift apart.
 
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
@@ -33,7 +33,7 @@ mod tests {
     /// while the receive limit and the per-frame cap stay the configured limit, and the write side
     /// stays at its defaults. The Server's endpoint and the Client's socket build their
     /// configuration nowhere else.
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn every_websocket_reads_into_a_small_buffer_under_the_configured_limit() {
         let default = WebSocketConfig::default();

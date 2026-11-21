@@ -78,7 +78,7 @@ impl Fleet {
         Fleet::start_with(mark, None).await
     }
 
-    /// The same, with the Server's rate limit on the Agent plane armed (SEC-tls13-two-planes-bounded-input).
+    /// The same, with the Server's rate limit on the Agent plane armed (SEC-tls13-bounded-input-chosen-planes).
     async fn start_with(mark: bool, agent_rate: Option<fleet_server::agent_rate::Limits>) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -514,7 +514,7 @@ async fn a_gateway_whose_list_goes_stale_admits_nobody() {
 /// `Unavailable`, routed back to it by its `instance_uid`; its neighbour's reports keep being
 /// processed, because behind a marked Gateway each Agent has a bucket of its own inside the
 /// Gateway's aggregate.
-/// Verifies: SEC-tls13-two-planes-bounded-input, CLT-modes-and-gateway
+/// Verifies: SEC-tls13-bounded-input-chosen-planes, CLT-modes-and-gateway
 #[tokio::test]
 async fn a_throttled_agent_behind_a_gateway_hears_unavailable_and_its_neighbour_does_not() {
     let unavailable = |reply: &opamp::proto::ServerToAgent| {

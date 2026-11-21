@@ -1,4 +1,4 @@
-//! Which TLS material the Client uses (SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate), read from disk and handed to `opamp` as
+//! Which TLS material the Client uses (SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate), read from disk and handed to `opamp` as
 //! [`ClientTls`] (DEV-six-crates-tokio-axum).
 //!
 //! The decisions are the Client's: an optional CA file that *replaces* the built-in roots, and the

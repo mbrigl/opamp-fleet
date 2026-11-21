@@ -1,4 +1,4 @@
-//! The OpAMP Fleet Server (DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input): the control plane that tells Agents which
+//! The OpAMP Fleet Server (DEV-six-crates-tokio-axum, SEC-tls13-bounded-input-chosen-planes): the control plane that tells Agents which
 //! configuration they should run and records what they report back.
 //!
 //! A library crate so integration tests can assemble the exact router the binary serves.
@@ -57,7 +57,7 @@ use fs::{FsAgentStore, FsBlobStore, FsConfigBackend, FsDeploymentBackend, FsPack
 /// Whether an instance on PostgreSQL must be alone on its database, and the key that makes it so:
 /// blobs kept as files, or a CA key in a file. A CA key named by its label on a token makes it
 /// alone no more
-/// (SRV-instances-share-one-postgresql §2,
+/// (SRV-instance-opens-chosen-planes §2,
 /// SEC-admission-by-client-certificate §41).
 #[must_use]
 pub fn exclusive(config: &config::ServerConfig) -> postgres::Exclusive {
@@ -425,7 +425,7 @@ impl bootstrap::BootstrapCertificates {
     }
 }
 
-/// The **Agent plane** (SEC-tls13-two-planes-bounded-input): the OpAMP endpoint, guarded by Admission (SEC-admission-by-client-certificate), and the
+/// The **Agent plane** (SEC-tls13-bounded-input-chosen-planes): the OpAMP endpoint, guarded by Admission (SEC-admission-by-client-certificate), and the
 /// package download route beside it — behind the same handshake, and reached only with a
 /// certificate of the fleet (SEC-admission-by-client-certificate §18).
 ///
@@ -441,7 +441,7 @@ pub fn agent_app(state: Arc<AppState>, admission: agent_cases::Admission) -> Rou
     ))
 }
 
-/// The **Operator plane** (SEC-tls13-two-planes-bounded-input): the REST API, its OpenAPI document and docs page, and the
+/// The **Operator plane** (SEC-tls13-bounded-input-chosen-planes): the REST API, its OpenAPI document and docs page, and the
 /// bundled UI — on their own listener, guarded as a whole by `[rest.auth]` when one is configured
 /// (SEC-admission-by-client-certificate). Without it the plane is open, which is what its loopback default is for.
 pub fn operator_app(state: Arc<AppState>, auth: Option<operator_cases::OperatorAuth>) -> Router {
