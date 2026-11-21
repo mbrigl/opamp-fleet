@@ -910,6 +910,7 @@ async fn serve() {
                 audit_key_label: config.audit.key_label.clone(),
                 archive,
                 export: export.as_ref().map(|export| export.sink()),
+                planes: opens,
             };
             let made = instance_id.clone().map_or_else(
                 fleet_server::postgres::lease::new_instance_id,

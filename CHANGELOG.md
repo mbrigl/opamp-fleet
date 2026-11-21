@@ -20,7 +20,7 @@ carries a date once its tag exists.
 ### Added
 
 - **An instance opens the planes `planes` names**
-  ([SRV-instance-opens-chosen-planes §22–§25](docs/adr/SRV-instance-opens-chosen-planes.md),
+  ([SRV-instance-opens-chosen-planes §22–§26](docs/adr/SRV-instance-opens-chosen-planes.md),
   [SEC-tls13-bounded-input-chosen-planes §14](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)).
   The new key `planes` in `server.toml`, `["agent", "operator"]` by default, lets an instance on
   PostgreSQL with its blobs in S3 and no CA key in a file open the Agent plane or the Operator
@@ -28,7 +28,9 @@ carries a date once its tag exists.
   nothing of the other plane. It still takes its lease, keeps its audit chain and runs every task
   of the database. It checks the whole configuration as an instance of both planes does. An empty
   `planes`, an unknown or repeated name, or one plane on an instance that must be alone fails
-  startup, naming the key. The startup log names the planes an instance opens. **What to do:**
+  startup, naming the key. The startup log names the planes an instance opens. Each lease records
+  its planes, in a column `planes` that the Server adds to `leases` at startup, and an instance
+  warns while no live lease serves a plane. **What to do:**
   nothing; without `planes` every instance opens both planes as before. Set `planes` only once
   every instance of the fleet runs this release, since an older one refuses the key.
 

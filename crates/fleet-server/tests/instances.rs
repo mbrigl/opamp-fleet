@@ -779,7 +779,10 @@ impl Instance {
                 "test-host",
                 fleet_server::postgres::lease::new_instance_id().expect("id"),
                 clock,
-                fleet_server::postgres::lease::Terms::default(),
+                fleet_server::postgres::lease::Terms {
+                    planes,
+                    ..fleet_server::postgres::lease::Terms::default()
+                },
             )
             .expect("lease")
         };
@@ -6352,11 +6355,29 @@ fn two_releases_on() -> &'static [Migration] {
     Box::leak(migrations.into_boxed_slice())
 }
 
+/// The schema an instance of 0.8.1 runs on in a test of this build: migrations 1 to 18, which name
+/// 0.8.0, and the column of the lease's planes, which this build writes with every lease
+/// (SRV-instance-opens-chosen-planes §26), as step 19 that names 0.8.0 too. The steps 19 and 20 of
+/// the real schema name 0.8.4 and 0.8.5, so 0.8.1 does not apply them.
+fn as_0_8_1() -> &'static [Migration] {
+    let mut migrations = MIGRATIONS[..18].to_vec();
+    let planes = MIGRATIONS
+        .iter()
+        .find(|migration| migration.sql.contains("ADD COLUMN planes"))
+        .expect("the column of the lease's planes");
+    migrations.push(Migration {
+        version: 19,
+        oldest_server: "0.8.0",
+        sql: planes.sql,
+    });
+    Box::leak(migrations.into_boxed_slice())
+}
+
 /// The upgrade from 0.8.0 itself: on the schema 0.8.0 leaves, migrations 1 to 11, with a live lease
 /// as an instance of 0.8.0 takes one, writing no release, two instances of 0.8.1 that start at
 /// once apply migration 12 once beside it and both serve, and that lease reads 0.8.0. They apply
-/// the migrations up to 18, which name 0.8.0; migration 19 names 0.8.4, and migration 20 names
-/// 0.8.5 (SRV-instances-share-one-postgresql §16).
+/// the migrations up to 18, which name 0.8.0, and the lease's planes ([`as_0_8_1`]); migration 19
+/// names 0.8.4, and migration 20 names 0.8.5 (SRV-instances-share-one-postgresql §16).
 /// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
@@ -6387,9 +6408,10 @@ async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
         "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at) \
          VALUES ('{old}', 'host-0.8.0', false, now(), now(), now() + interval '1 hour')"
     ));
+    let as_0_8_1 = as_0_8_1();
     let (newer, other) = tokio::join!(
-        Instance::start_as(&pki, &schema, config(), "0.8.1", &MIGRATIONS[..18]),
-        Instance::start_as(&pki, &schema, config(), "0.8.1", &MIGRATIONS[..18]),
+        Instance::start_as(&pki, &schema, config(), "0.8.1", as_0_8_1),
+        Instance::start_as(&pki, &schema, config(), "0.8.1", as_0_8_1),
     );
     assert_eq!(
         schema.query("SELECT count(*)::text FROM fleet_schema WHERE version = 12"),

@@ -11,6 +11,13 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use super::{client, schema, sql, Database, Exclusive, EXCLUSIVE_LOCK, MIGRATION_LOCK};
+use crate::config::OpenPlanes;
+
+/// The planes every live lease serves, read in the statement that asks: the names of each lease's
+/// `planes`, which a lease of a release that records none holds as both, by the column's default
+/// (SRV-instance-opens-chosen-planes §26).
+const SERVED: &str = "SELECT coalesce(array_agg(DISTINCT plane), '{}') FROM leases, \
+                      unnest(planes) AS plane WHERE expires_at > now()";
 
 /// The lock a lease is taken under.
 const LEASES_LOCK: &str = "hashtextextended('opamp-fleet-server-leases:' || \
@@ -24,6 +31,9 @@ pub struct Taken {
     /// The leases of instances that were gone, which this one took over: every lease that had
     /// lapsed, and the live lease of an instance that had to be alone and whose lock is free.
     pub taken_over: Vec<String>,
+    /// The planes the live leases serve once this one is taken, this one's among them
+    /// (SRV-instance-opens-chosen-planes §26).
+    pub served: OpenPlanes,
 }
 
 /// What a lease records of its instance beyond its holder and its release, and where the lines
@@ -45,6 +55,9 @@ pub struct Terms {
     /// `[audit.export]` names a receiver
     /// (SEC-append-only-audit-record §15).
     pub export: Option<crate::audit_export::Sink>,
+    /// The planes this instance opens, which its lease records
+    /// (SRV-instance-opens-chosen-planes §26).
+    pub planes: OpenPlanes,
 }
 
 /// A lease this instance renewed.
@@ -53,6 +66,9 @@ pub struct Renewal {
     /// The revocation list's version as the database held it at the renewal
     /// (SRV-instances-share-one-postgresql §10).
     pub list_version: u64,
+    /// The planes the live leases serve at the renewal, this one's among them
+    /// (SRV-instance-opens-chosen-planes §26).
+    pub served: OpenPlanes,
 }
 
 /// A new instance id: a random UUID (version 4), as text. The Server makes one at startup, before
@@ -118,6 +134,12 @@ impl Database {
         let release = self.release();
         let audit_key = terms.audit_key_label.clone();
         let export = terms.export.clone();
+        let planes: Vec<String> = terms
+            .planes
+            .names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         let taking = self.run_within(bound, move |pool| async move {
             let mut client = client(&pool).await?;
             let transaction = client.transaction().await.map_err(sql)?;
@@ -243,9 +265,9 @@ impl Database {
                 .execute(
                     "INSERT INTO leases \
                      (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at, release, \
-                     audit_key_label) \
+                     audit_key_label, planes) \
                      VALUES ($1::text::uuid, $2, $3, now(), now(), \
-                     now() + make_interval(secs => $4), $5, $6)",
+                     now() + make_interval(secs => $4), $5, $6, $7)",
                     &[
                         &instance_id,
                         &host,
@@ -253,17 +275,23 @@ impl Database {
                         &lapse.as_secs_f64(),
                         &release,
                         &audit_key,
+                        &planes,
                     ],
                 )
                 .await
                 .map_err(sql)?;
+            let served: Vec<String> = transaction
+                .query_one(SERVED, &[])
+                .await
+                .map_err(sql)?
+                .get(0);
             transaction.commit().await.map_err(sql)?;
             for line in &written {
                 line.emit(export.as_ref());
             }
-            Ok(Ok((instance_id, taken_over)))
+            Ok(Ok((instance_id, taken_over, OpenPlanes::recorded(&served))))
         })?;
-        let (id, taken_over) = taking.map_err(|refusal| {
+        let (id, taken_over, served) = taking.map_err(|refusal| {
             let refusal = format!("{}: {refusal}", self.name());
             self.set_outdated(&refusal);
             refusal
@@ -274,11 +302,13 @@ impl Database {
         Ok(Taken {
             instance_id: id,
             taken_over,
+            served,
         })
     }
 
     /// Renews the lease of `instance_id` to lapse `lapse` after now, waiting at most `bound` for
-    /// the answer. Answers the revocation list's version, read in the same statement, or `None`
+    /// the answer. Answers the revocation list's version and the planes the live leases serve,
+    /// read in the same statement, or `None`
     /// when the lease is no longer live, lapsed or taken over. The instance measures its lease from
     /// before it asked.
     ///
@@ -291,23 +321,33 @@ impl Database {
         bound: Duration,
     ) -> Result<Option<Renewal>, String> {
         let id = instance_id.to_string();
-        let (renewed, version) = self.run_within(bound, move |pool| async move {
+        let (renewed, version, served) = self.run_within(bound, move |pool| async move {
             let client = client(&pool).await?;
+            // The planes are read in the renewal's snapshot, which does not see the renewal
+            // itself: a lease that is still live serves as it did, and this one is live, or the
+            // renewal answers `None`.
             let row = client
                 .query_one(
-                    "WITH renewed AS (UPDATE leases SET renewed_at = now(), \
-                     expires_at = now() + make_interval(secs => $2) \
-                     WHERE instance_id = $1::text::uuid AND expires_at > now() RETURNING 1) \
-                     SELECT (SELECT count(*) FROM renewed), \
-                     (SELECT version FROM revocation_list_version)",
+                    &format!(
+                        "WITH renewed AS (UPDATE leases SET renewed_at = now(), \
+                         expires_at = now() + make_interval(secs => $2) \
+                         WHERE instance_id = $1::text::uuid AND expires_at > now() RETURNING 1) \
+                         SELECT (SELECT count(*) FROM renewed), \
+                         (SELECT version FROM revocation_list_version), ({SERVED})"
+                    ),
                     &[&id, &lapse.as_secs_f64()],
                 )
                 .await
                 .map_err(sql)?;
-            Ok((row.get::<_, i64>(0), row.get::<_, i64>(1)))
+            Ok((
+                row.get::<_, i64>(0),
+                row.get::<_, i64>(1),
+                row.get::<_, Vec<String>>(2),
+            ))
         })?;
         Ok((renewed == 1).then_some(Renewal {
             list_version: super::unsigned(version),
+            served: OpenPlanes::recorded(&served),
         }))
     }
 
@@ -523,6 +563,71 @@ mod tests {
                 first.instance_id
             ))
             .is_empty());
+    }
+
+    /// A lease records the planes its instance opens, and its take and each renewal read the
+    /// planes the live leases serve. A lease of a release that records no planes counts as
+    /// serving both; a lapsed lease serves none.
+    /// Verifies: SRV-instance-opens-chosen-planes
+    #[test]
+    fn a_lease_records_its_planes_and_reads_the_planes_the_live_leases_serve() {
+        let Some(test) = TestDatabase::named() else {
+            return;
+        };
+        let database = test.shared();
+        let agent = OpenPlanes {
+            agent: true,
+            operator: false,
+        };
+        let terms = Terms {
+            planes: agent,
+            ..Terms::default()
+        };
+        let taken = database
+            .take_lease("host-a", LAPSE, &terms)
+            .expect("a's lease");
+        assert_eq!(taken.served, agent, "the Operator plane goes unserved");
+        assert_eq!(
+            test.rows(&format!(
+                "SELECT array_to_string(planes, ',') FROM leases WHERE instance_id = '{}'",
+                taken.instance_id
+            )),
+            vec![vec![Some("agent".to_string())]]
+        );
+        let renewed = |database: &Database| {
+            database
+                .renew_lease(&taken.instance_id, LAPSE, LAPSE)
+                .expect("renew")
+                .expect("live")
+                .served
+        };
+        assert_eq!(renewed(&database), agent);
+        // A lease as a release that records no planes writes it.
+        let older = "00000000-0000-4000-8000-000000000085";
+        test.sql(&format!(
+            "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, \
+             expires_at, release) VALUES ('{older}', 'host-0.8.5', false, now(), now(), \
+             now() + interval '1 hour', '0.8.5')"
+        ));
+        assert_eq!(renewed(&database), OpenPlanes::BOTH);
+        test.sql(&format!(
+            "UPDATE leases SET expires_at = now() WHERE instance_id = '{older}'"
+        ));
+        assert_eq!(renewed(&database), agent, "a lapsed lease serves no plane");
+        let operator = database
+            .take_lease(
+                "host-b",
+                LAPSE,
+                &Terms {
+                    planes: OpenPlanes {
+                        agent: false,
+                        operator: true,
+                    },
+                    ..Terms::default()
+                },
+            )
+            .expect("b's lease");
+        assert_eq!(operator.served, OpenPlanes::BOTH);
     }
 
     /// The leases that are live are those not lapsed and not released: what the cleanup of the

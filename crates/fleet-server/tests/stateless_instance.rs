@@ -964,11 +964,11 @@ fn takes(port: u16) -> bool {
 
 /// A Server of one plane on PostgreSQL and S3, composed by the binary from one `server.toml` with
 /// `planes` set in its environment. Each kind names the plane it opens and the one it leaves
-/// closed, listens on its own plane's port alone, holds a lease, opens its audit chain, and takes
-/// over a lapsed lease. The instance of the Operator plane writes no
-/// presence batch while the instance of the Agent plane beside it writes them. A bind that fails
-/// names the plane
-/// (SRV-instance-opens-chosen-planes §1, §24 and §25,
+/// closed, listens on its own plane's port alone, holds a lease that records its plane, opens its
+/// audit chain, takes over a lapsed lease, and warns of the plane no live lease serves. The
+/// instance of the Operator plane writes no presence batch while the instance of the Agent plane
+/// beside it writes them. A bind that fails names the plane
+/// (SRV-instance-opens-chosen-planes §1, §24, §25 and §26,
 /// SEC-tls13-bounded-input-chosen-planes §14).
 // Verifies: SRV-instance-opens-chosen-planes, SEC-tls13-bounded-input-chosen-planes
 #[test]
@@ -1061,6 +1061,26 @@ fn an_instance_of_one_plane_serves_that_plane_alone_and_runs_every_other_task() 
             ),
             1,
             "{planes}: it holds an open audit chain"
+        );
+        let own = planes.trim_matches(['[', ']', '"']);
+        assert_eq!(
+            role.count(&format!(
+                "leases WHERE expires_at > now() AND planes = ARRAY['{own}']"
+            )),
+            1,
+            "{planes}: its lease records its plane"
+        );
+        let unserved = format!(
+            "no live lease serves the {} plane",
+            if closed == "agent" {
+                "Agent"
+            } else {
+                "Operator"
+            }
+        );
+        assert!(
+            seen.iter().any(|line| line.contains(&unserved)) || instance.logs(&unserved),
+            "{planes}: it warns of the plane no live lease serves"
         );
         started.push((instance, files, role, bucket));
     }

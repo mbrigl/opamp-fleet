@@ -29,7 +29,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::changed::Changed;
 use crate::clock::Elapsed;
-use crate::config::LeaseTimes;
+use crate::config::{LeaseTimes, OpenPlanes};
 use crate::fleet::AppState;
 use crate::postgres::lease::Terms;
 use crate::postgres::notify::{Heard, Notice};
@@ -334,15 +334,48 @@ pub(crate) fn take_in_time(
         instance_id: taken.instance_id,
         sent,
         taken_over: taken.taken_over,
+        served: taken.served,
     })
 }
 
-/// A lease taken: under which instance id, when its request was sent on the lease's clock, and the
-/// leases it took over.
+/// A lease taken: under which instance id, when its request was sent on the lease's clock, the
+/// leases it took over, and the planes the live leases serve once it is taken.
 pub(crate) struct Taken {
     pub(crate) instance_id: String,
     pub(crate) sent: Duration,
     pub(crate) taken_over: Vec<String>,
+    pub(crate) served: OpenPlanes,
+}
+
+/// The planes no live lease served when the instance last read them, each warned of once until
+/// a live lease serves it again (SRV-instance-opens-chosen-planes §26). Nothing is refused.
+#[derive(Default)]
+struct Unserved {
+    agent: bool,
+    operator: bool,
+}
+
+impl Unserved {
+    /// Takes up the planes the live leases serve, as the lease of `instance_id` read them, and
+    /// warns of each plane none serves that it has not warned of since a live lease served it.
+    fn heard(&mut self, served: OpenPlanes, instance_id: &str) {
+        for ((serves, plane), warned) in served
+            .each()
+            .into_iter()
+            .zip([&mut self.agent, &mut self.operator])
+        {
+            if serves {
+                *warned = false;
+            } else if !*warned {
+                *warned = true;
+                warn!(
+                    instance_id = %instance_id,
+                    plane,
+                    "no live lease serves {plane}: no instance on the database opens it"
+                );
+            }
+        }
+    }
 }
 
 /// What the lease thread renews with, and what it tells.
@@ -417,6 +450,8 @@ async fn renew(lease: &Renewing, taken: Taken) {
     } = lease;
     let times = *times;
     let (mut instance_id, mut sent) = (taken.instance_id, taken.sent);
+    let mut unserved = Unserved::default();
+    unserved.heard(taken.served, &instance_id);
     loop {
         // Held: renewed every `renew`, and lost the moment `lapse` has passed since the last
         // renewal the database confirmed was sent, on the lease's clock, a suspend included. Each
@@ -461,6 +496,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
                     sent = asked;
                     proof.lapses_at(sent.saturating_add(times.lapse));
                     versions.send_replace(Some(renewal.list_version));
+                    unserved.heard(renewal.served, &instance_id);
                     match take_over_lapsed(lease, &instance_id, sent).await {
                         Waited::LockLost => return lock_lost(lease, &instance_id),
                         Waited::Done(true) => takeovers.send_modify(|count| *count += 1),
@@ -504,6 +540,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
                     );
                     instance_id = taken.instance_id;
                     sent = taken.sent;
+                    unserved.heard(taken.served, &instance_id);
                     proof.lapses_at(sent.saturating_add(times.lapse));
                     held.send_replace(Some(instance_id.clone()));
                     if !taken.taken_over.is_empty() {
@@ -1641,6 +1678,48 @@ mod tests {
                 .any(|line| line.contains("later than its interval")),
             "{lines:?}"
         );
+    }
+
+    /// While no live lease serves a plane, the instance warns of it once, naming it; it warns
+    /// again only after a live lease served it in between.
+    /// Verifies: SRV-instance-opens-chosen-planes
+    #[tokio::test]
+    async fn a_plane_no_live_lease_serves_is_warned_of_once_until_one_serves_it() {
+        use crate::config::OpenPlanes;
+        let agent = OpenPlanes {
+            agent: true,
+            operator: false,
+        };
+        let warned = |lines: &[String]| {
+            lines
+                .iter()
+                .filter(|line| line.contains("no live lease serves"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut unserved = super::Unserved::default();
+        let first = logged_while(async {
+            unserved.heard(agent, "a");
+            unserved.heard(agent, "a");
+        })
+        .await;
+        let first = warned(&first);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            first[0].contains("the Operator plane") && !first[0].contains("the Agent plane"),
+            "{first:?}"
+        );
+        let served = logged_while(async {
+            unserved.heard(OpenPlanes::BOTH, "a");
+            unserved.heard(OpenPlanes::BOTH, "a");
+        })
+        .await;
+        assert_eq!(warned(&served), Vec::<String>::new());
+        let again = logged_while(async {
+            unserved.heard(agent, "a");
+        })
+        .await;
+        assert_eq!(warned(&again).len(), 1, "{again:?}");
     }
 
     /// What the log writes, collected.

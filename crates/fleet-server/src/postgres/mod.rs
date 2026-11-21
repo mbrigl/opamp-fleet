@@ -2868,24 +2868,22 @@ mod tests {
                 },
             )
         };
-        // The schema of 0.8.5, and a live lease of 0.8.4 on it.
-        let older = open_as("0.8.4", &schema::MIGRATIONS[..19]).expect("0.8.4 migrates");
-        let held = older
-            // timed: a lease term, not a wait
-            .take_lease("host-0.8.4", Duration::from_secs(3600), &Terms::default())
-            .expect("a lease of 0.8.4");
+        // The schema of 0.8.5, and a live lease of 0.8.4 on it, written as 0.8.4 writes it: this
+        // build writes the lease's planes, a column that schema does not have.
+        drop(open_as("0.8.4", &schema::MIGRATIONS[..19]).expect("0.8.4 migrates"));
+        let held = lease_of(&test, "0.8.4");
         let schema_rows =
             || test.rows("SELECT version, oldest_server FROM fleet_schema ORDER BY version");
         let before = schema_rows();
         let err = open_as("0.8.6", schema::MIGRATIONS)
             .map(|_| ())
             .expect_err("a live lease of 0.8.4");
-        for named in ["0.8.4", "0.8.5", "0.8.6", held.instance_id.as_str()] {
+        for named in ["0.8.4", "0.8.5", "0.8.6", held.as_str()] {
             assert!(err.contains(named), "{named}: {err}");
         }
         assert_eq!(schema_rows(), before, "nothing migrated");
 
-        older.release_lease(&held.instance_id).expect("released");
+        test.sql(&format!("DELETE FROM leases WHERE instance_id = '{held}'"));
         lease_of(&test, "0.8.5");
         let newer = open_as("0.8.6", schema::MIGRATIONS).expect("beside 0.8.5");
         newer
