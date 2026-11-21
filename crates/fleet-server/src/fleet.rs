@@ -634,8 +634,8 @@ struct PresenceWritten {
 }
 
 /// What an instance keeps of each Agent beside its record and its group: one entry of four parts,
-/// each keyed by the Agent's `instance_uid`. A forget drops it ([`Kept::forget`]) and a re-key
-/// moves it ([`Kept::rekey`]) as one, each naming every part, so a part added later does not
+/// each keyed by the Agent's `instance_uid`. A forget drops it (`held`'s `Kept::forget`) and a
+/// re-key moves it (`Kept::rekey`) as one, each naming every part, so a part added later does not
 /// compile until both say what becomes of it. Each part keeps its own lock, every one taken
 /// strictly after `fleet`.
 struct Kept {
@@ -649,7 +649,7 @@ struct Kept {
     /// one each moved to, if it committed, which the Agent's next report reads back and assigns.
     unsure_rekeys: Mutex<HashMap<InstanceUid, PendingRekey>>,
     /// The restarts whose command was not sent and whose put-back the store did not take, each
-    /// with when it is tried again ([`retry_restarts`](AppState::retry_restarts)).
+    /// with when it is tried again (`held`'s `retry_restarts`).
     unput_restarts: Mutex<HashMap<InstanceUid, Backoff>>,
 }
 
@@ -666,7 +666,7 @@ impl Kept {
 }
 
 /// When a kept put-back of a restart is tried again, counted in calls of
-/// [`AppState::retry_restarts`].
+/// `held`'s `retry_restarts`.
 #[derive(Debug, Clone, Copy)]
 struct Backoff {
     /// Calls until the next try.
@@ -708,7 +708,7 @@ pub struct AppState {
     /// and moved by a re-key as one entry. Its parts are locked strictly after `fleet`.
     kept: Kept,
     configs: ConfigStore,
-    /// Which Agents each [`Group`] holds, owned by [`placement`].
+    /// Which Agents each [`Group`] holds, owned by `placement`.
     groups: Groups,
     push: watch::Sender<u64>,
     /// Hands every WebSocket connection its identity for the duplicate detection.
@@ -787,7 +787,7 @@ pub struct AppState {
     /// How often an Agent's lock was found taken and waited for.
     agent_lock_waits: AtomicU64,
     /// The Agents whose take a report of this instance is making, from before it is written until
-    /// the report holds the Agent in memory, which [`release_taken`](Self::release_taken) waits
+    /// the report holds the Agent in memory, which `held`'s `release_taken` waits
     /// for. Locked after an Agent's own lock, and alone.
     taking: Mutex<HashSet<InstanceUid>>,
     /// The new Agents a report on a store this Server alone writes has counted against
@@ -796,7 +796,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The state on these stores, built as [`with_stores`](Self::with_stores) builds it but with no
+    /// The state on these stores, built as `placement`'s `with_stores` builds it but with no
     /// Agent placed yet.
     fn unplaced(
         agent_store: Box<dyn AgentStore>,

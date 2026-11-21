@@ -242,7 +242,8 @@ no module.
      one), the state's limits, the lease, the audit helpers, the capabilities the Server declares,
      the staleness rule, and the types the contexts share, with the tests of staleness, of the host
      a register derives, and of label inheritance. It also keeps what `approval` and `session` both
-     build a report's answer from: the end a report answers with and the connection settings offer.
+     build a report's answer from: the end a report answers with, and `compose_settings_offer`,
+     which composes one connection settings offer message with its hash; `session` builds the offer.
      It names no context but in its own `pub use` lines.
   2. How the Agents of one Client are placed under its Client Agent
      ([SRV-fleet-record-agents-hosts §19](adr/SRV-fleet-record-agents-hosts.md)) is the core module

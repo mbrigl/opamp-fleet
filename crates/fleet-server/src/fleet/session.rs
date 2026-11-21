@@ -5,7 +5,8 @@
 //! `approval`, which issues a certificate within the round, ranks below `session` and shares some of
 //! the round's parts (SRV-fleet-contexts-call-by-rank): the persist path that writes what changed
 //! stands in `held`, the answers every refused report gets in `approval`, and the end a report
-//! answers with (`Ending`) and the connection settings offer in the module root.
+//! answers with (`Ending`) and `compose_settings_offer`, which composes one offer message with its
+//! hash, in the module root. `settings_offer`, which builds the offer, stays here.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};

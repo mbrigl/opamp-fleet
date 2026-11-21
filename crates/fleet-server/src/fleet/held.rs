@@ -3,11 +3,16 @@
 //! answer was lost, the restarts kept for retry, the take-up of what other instances announced, and
 //! the per-Agent locks. Its entry points are methods of `AppState`.
 //!
-//! It also takes labels into a held record, notes the end of a forgotten Agent's session, and
-//! holds the persist path that writes a record when its durable content changed, which `rollout`,
-//! `approval` and `session` call: `held` ranks below them, and its own take-up and its dirty check
-//! use the same (SRV-fleet-contexts-call-by-rank). What it keeps of each Agent (`Kept` and its parts) and the
-//! count of locks are parts of the state and stand in the module root, which names no context.
+//! It also holds three helpers of the contexts ranked above it (SRV-fleet-contexts-call-by-rank):
+//! - `take_labels`, which takes labels into a held record, called by `rollout` and by `held`'s
+//!   own take-up;
+//! - `end_session`, which notes the end of a forgotten Agent's session, called by `session` and
+//!   by `held`'s own take-up;
+//! - `persist_if_dirty`, which writes a record when its durable content changed, called by
+//!   `approval` and `session`.
+//!
+//! What it keeps of each Agent (`Kept` and its parts) and the count of locks are parts of the
+//! state and stand in the module root, which names no context.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::Ordering;
