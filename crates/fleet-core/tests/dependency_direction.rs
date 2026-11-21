@@ -1229,12 +1229,14 @@ fn fleet_rank(context: &str) -> Option<usize> {
     FLEET_RANKS.iter().position(|c| *c == context)
 }
 
-/// The bodies of the inherent `impl AppState` blocks of `tokens`, each from its `{` to its `}`.
+/// The bodies of the `impl AppState` and `impl … for AppState` blocks of `tokens`, each from its
+/// `{` to its `}`. A `for AppState {` opens only an impl block: a `for` loop's pattern is followed
+/// by `in`.
 fn app_state_blocks(tokens: &[Located]) -> Vec<std::ops::Range<usize>> {
     let mut found = Vec::new();
     let mut i = 0;
     while i + 2 < tokens.len() {
-        let opens = tokens[i].0 == Token::Ident("impl".into())
+        let opens = matches!(&tokens[i].0, Token::Ident(k) if k == "impl" || k == "for")
             && tokens[i + 1].0 == Token::Ident("AppState".into())
             && tokens[i + 2].0 == Token::Punct('{');
         if !opens {
@@ -1262,7 +1264,7 @@ fn app_state_blocks(tokens: &[Located]) -> Vec<std::ops::Range<usize>> {
     found
 }
 
-/// The methods the inherent `impl AppState` blocks of `tokens` define, by name.
+/// The methods the `impl AppState` and `impl … for AppState` blocks of `tokens` define, by name.
 fn app_state_methods(tokens: &[Located]) -> Vec<String> {
     let mut found = Vec::new();
     for block in app_state_blocks(tokens) {
@@ -1366,8 +1368,10 @@ fn fleet_root_imports(root: &[Located], reexports: &Reexports) -> BTreeMap<Strin
 /// Its limits, which review covers (SRV-fleet-contexts-call-by-rank, *Consequences*):
 /// - it resolves `super::` from the file's module, so a `mod` with a body inside a context,
 ///   outside the tests, would have its paths resolved one level off; no context has one;
-/// - it collects methods from blocks written `impl AppState` alone, not `impl super::AppState`
-///   or `impl crate::fleet::AppState`;
+/// - it collects methods from blocks written `impl AppState` or `impl … for AppState` alone, not
+///   from `impl super::AppState` or `impl crate::fleet::AppState`;
+/// - it resolves calls on `self`, `Self::` and `AppState::` alone, so a call on another binding
+///   of `AppState` (`state.place_all()`) is not seen;
 /// - it resolves calls of `AppState`'s methods alone, so a method a context defines on another
 ///   type of the state, called through a field (`self.kept.forget(..)`), is not seen; matching
 ///   such calls by name would take every `lock` or `remove` of the standard library for one.
@@ -1514,7 +1518,15 @@ fn each_fleet_context_names_only_the_contexts_ranked_below_it() {
 /// code, in a string, and in the root's `pub use`, left alone.
 #[test]
 fn the_rank_check_finds_a_context_naming_one_above_it() {
-    let reexports = Reexports::new();
+    let reexports: Reexports = [(
+        ("fleet-server", "fleet".to_owned(), "bad_request".to_owned()),
+        Target::Internal(
+            "fleet-server",
+            vec!["fleet".into(), "approval".into(), "bad_request".into()],
+        ),
+    )]
+    .into_iter()
+    .collect();
     let methods: BTreeMap<String, String> = [
         ("issue", "fleet::approval"),
         ("place_all", "fleet::placement"),
@@ -1532,15 +1544,26 @@ fn the_rank_check_finds_a_context_naming_one_above_it() {
             fn f(&self) { self.take_row(); Self::issue(); AppState::place_all(); }
             fn g(&self) { let _ = super::session::bad_request(); let _ = "self.issue()"; }
             fn h(&self) { let _ = xs.map(AppState::issue); let _ = self.issue; }
+            fn k(&self) { let _ = super::bad_request(""); }
         }
         #[cfg(test)]
         mod tests { fn t(s: &AppState) { s.issue(); super::session::bad_request(); } }
     "##;
     let found = rank_breaches("fleet::held", held, &methods, &imports, &reexports);
-    assert_eq!(found.len(), 3, "{found:#?}");
+    assert_eq!(found.len(), 4, "{found:#?}");
     assert!(found[0].contains("calls issue of fleet::approval"));
     assert!(found[1].contains("calls issue of fleet::approval"));
     assert!(found[2].contains("names super::session::bad_request of fleet::session"));
+    // A name the root re-exports is judged by where it really is.
+    assert!(found[3].contains("names super::bad_request of fleet::approval"));
+    // A trait's block for `AppState` defines methods too; a `for` loop opens none.
+    let blocks = r##"
+        impl std::fmt::Display for AppState {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) }
+        }
+        impl AppState { fn g(&self) { for x in y { let _ = x; } } }
+    "##;
+    assert_eq!(app_state_methods(&tokenize(blocks)), ["fmt", "g"]);
     // The root names no context; its `pub use` of one keeps a public path.
     let root = r##"
         mod placement;
