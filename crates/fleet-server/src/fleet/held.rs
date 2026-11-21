@@ -3,9 +3,10 @@
 //! answer was lost, the restarts kept for retry, the take-up of what other instances announced, and
 //! the per-Agent locks. Its entry points are methods of `AppState`.
 //!
-//! It also takes labels into a held record and notes the end of a forgotten Agent's session, which
-//! `rollout` and `session` call: `held` ranks below both, and its own take-up does the same
-//! (SRV-fleet-contexts-call-by-rank). What it keeps of each Agent (`Kept` and its parts) and the
+//! It also takes labels into a held record, notes the end of a forgotten Agent's session, and
+//! holds the persist path that writes a record when its durable content changed, which `rollout`,
+//! `approval` and `session` call: `held` ranks below them, and its own take-up and its dirty check
+//! use the same (SRV-fleet-contexts-call-by-rank). What it keeps of each Agent (`Kept` and its parts) and the
 //! count of locks are parts of the state and stand in the module root, which names no context.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -1097,6 +1098,73 @@ impl AppState {
         self.unplace(fleet, uid, record.placement.group.clone(), elsewhere);
         info!(agent = %uid, "dropped an agent forgotten through another instance");
         Gone::Forgotten
+    }
+
+    /// Persists one record when — and only when — its durable content changed since it was last
+    /// written (SRV-fleet-record-agents-hosts). `last_seen_ms` and `sequence_num` are outside the comparison and ride
+    /// along on whatever write happens, so the common heartbeat reaches no storage backend at
+    /// all; [`flush_agents`](Self::flush_agents) is what makes them current on a graceful stop.
+    /// A write that fails is logged, never fatal: a fleet that keeps running on a full disk beats
+    /// one that refuses reports. Answers whether the record is still stored: on a shared store
+    /// one forgotten through another instance is not, and is not written again.
+    ///
+    /// Here, not in `session`, whose round it ends, because `approval` persists a report whose
+    /// certificate it refused and ranks below `session`, and `held` ranks below both
+    /// (SRV-fleet-contexts-call-by-rank).
+    pub(super) fn persist_if_dirty(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> bool {
+        match self.persist(uid, persisted) {
+            Ok(stored) => stored,
+            Err(e) => {
+                warn!(agent = %uid, error = %e, "cannot persist the agent record");
+                true
+            }
+        }
+    }
+
+    /// Writes one record when its durable content changed since it was last written, and says
+    /// whether the write failed — for an operator's act that must not be answered unwritten — or
+    /// found no record to write, as of an Agent forgotten through another instance. The record was
+    /// created or read before (SRV-fleet-record-agents-hosts §14), so only what a report decides is written of
+    /// it, and nothing creates it again.
+    ///
+    /// `persisted` is what the record held when the report let the fleet lock go, and it is
+    /// written after: no other report waits for the write. Two writes of one record do not race,
+    /// so an older state never lands after a newer one, since the Agent's own lock, which every
+    /// report of it holds from its start to its answer, is held across the write; and a report is
+    /// answered only once its record is written (SRV-fleet-record-agents-hosts §4). What a store's write may take
+    /// is bounded: a PostgreSQL call fails after `postgres::CALL_TIMEOUT` (SRV-state-stores-contract-pair §24).
+    ///
+    /// On a shared store, an Agent this instance was answered no count of takes for, its take not
+    /// written or its answer lost, has its record written at every report and no digest kept: a
+    /// shutdown flush of another instance with a higher sequence number, as of an Agent that started
+    /// again, may have written over it, and the next report writes it again. Once a count is
+    /// answered, a report that changes nothing durable writes nothing again
+    /// (SRV-instance-opens-chosen-planes §8).
+    fn persist(&self, uid: &InstanceUid, persisted: &PersistedAgent) -> Result<bool, String> {
+        let digest = persisted.durable_digest();
+        let counted = !self.agent_store.is_shared()
+            || self
+                .kept
+                .presence_written
+                .lock()
+                .expect("presence lock")
+                .counted(uid);
+        if counted && self.kept.written.lock().expect("written lock").get(uid) == Some(&digest) {
+            return Ok(true);
+        }
+        if !self.agent_store.write_report(uid, persisted)? {
+            return Ok(false);
+        }
+        if !counted {
+            self.kept.written.lock().expect("written lock").remove(uid);
+            return Ok(true);
+        }
+        self.kept
+            .written
+            .lock()
+            .expect("written lock")
+            .insert(*uid, digest);
+        Ok(true)
     }
 
     /// Notes that `record`, just forgotten as `uid`, was carried by a live WebSocket, whose loop

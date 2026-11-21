@@ -2,10 +2,10 @@
 //! lock, its record created, taken or settled, the reply it is answered with, the connection
 //! settings it is offered, a goodbye and a forget. Its entry points are methods of `AppState`.
 //!
-//! The persist path that writes what changed, the end a report answers with (`Ending`), the
-//! connection settings offer, and the answers every refused report gets stand in the module root:
-//! `approval`, which issues a certificate within the round, uses them too and ranks below `session`
-//! (SRV-fleet-contexts-call-by-rank).
+//! `approval`, which issues a certificate within the round, ranks below `session` and shares some of
+//! the round's parts (SRV-fleet-contexts-call-by-rank): the persist path that writes what changed
+//! stands in `held`; the end a report answers with (`Ending`), the connection settings offer, and
+//! the answers every refused report gets stand in the module root.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
