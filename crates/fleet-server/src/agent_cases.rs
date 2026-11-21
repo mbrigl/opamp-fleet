@@ -84,7 +84,7 @@ impl Proofs {
         }
     }
 
-    /// The refusal of a message or a download past the limit (SEC-tls13-two-planes-bounded-input §29): the host, or the
+    /// The refusal of a message or a download past the limit (SEC-tls13-bounded-input-chosen-planes §29): the host, or the
     /// certificate's serial and the role of the CA that issued it.
     fn throttled_entry(
         &self,
@@ -117,7 +117,7 @@ fn is_gateway(subject: &Subject, revocations: Option<&Arc<Revocations>>) -> bool
     }
 }
 
-/// What a message past the limit is answered (SEC-tls13-two-planes-bounded-input §25).
+/// What a message past the limit is answered (SEC-tls13-bounded-input-chosen-planes §25).
 const THROTTLED: &str = "too many messages arrive from this sender — retry later";
 
 impl Admission {
@@ -267,7 +267,7 @@ pub struct AgentCases {
 }
 
 /// A message or a push while this instance holds no lease it can prove
-/// (SRV-instances-share-one-postgresql §3).
+/// (SRV-instance-opens-chosen-planes §3).
 #[derive(Debug)]
 pub(crate) struct NoLease;
 
@@ -287,7 +287,7 @@ pub(crate) enum Refused {
 }
 
 /// Why a download is not admitted (SEC-admission-by-client-certificate §18 and
-/// SEC-tls13-two-planes-bounded-input §26).
+/// SEC-tls13-bounded-input-chosen-planes §26).
 #[derive(Debug)]
 pub(crate) enum DownloadRefused {
     /// The peer address is in back-off for this many seconds.
@@ -449,7 +449,7 @@ impl AgentCases {
 
     /// Admits a download (SEC-admission-by-client-certificate §18): the same handshake as
     /// `/v1/opamp`, and a certificate from the client CA — a bootstrap certificate is not enough —
-    /// counted against the sender's rate (SEC-tls13-two-planes-bounded-input §24). What the
+    /// counted against the sender's rate (SEC-tls13-bounded-input-chosen-planes §24). What the
     /// certificate proves, read once, is handed to the route, which serves only what is offered to
     /// an Agent of the host it names (SRV-fleet-record-agents-hosts §16).
     pub(crate) fn admit_download(
@@ -976,14 +976,14 @@ impl AgentCases {
     ) -> Result<ServerToAgent, NoLease> {
         // Nothing is answered on a lease this instance cannot prove, after a suspend before its
         // listeners are closed included
-        // (SRV-instances-share-one-postgresql §3).
+        // (SRV-instance-opens-chosen-planes §3).
         if !self.state.holds_its_lease() {
             return Err(NoLease);
         }
         // An enrolment request through a Gateway (CLT-modes-and-gateway §25); counted in the Gateway's
         // enrolment aggregate and, once checked, by the bootstrap certificate it names (CLT-modes-and-gateway §26).
         let through_gateway = self.enrolment_through_gateway(carrier, &report);
-        // Before anything else: enrolment, the CSR, and the fleet lock (SEC-tls13-two-planes-bounded-input §24).
+        // Before anything else: enrolment, the CSR, and the fleet lock (SEC-tls13-bounded-input-chosen-planes §24).
         if self.over_rate(
             carrier,
             Some(&report.instance_uid),
@@ -1049,7 +1049,7 @@ impl AgentCases {
     pub(crate) fn outbound(&self, carrier: &mut Connection, push: Push) -> Vec<ServerToAgent> {
         // Nothing is pushed on a lease this instance cannot prove: a queued restart stays queued,
         // and an offer or an approval waits for an instance that holds one
-        // (SRV-instances-share-one-postgresql §3).
+        // (SRV-instance-opens-chosen-planes §3).
         if !self.state.holds_its_lease() {
             return Vec::new();
         }
@@ -1101,9 +1101,9 @@ impl AgentCases {
     }
 
     /// The answer to a message that does not decode, counted as a message
-    /// (SEC-tls13-two-planes-bounded-input §24).
+    /// (SEC-tls13-bounded-input-chosen-planes §24).
     pub(crate) fn unreadable(&self, carrier: &mut Connection) -> ServerToAgent {
-        // It names no Agent, so its reply reaches none (SEC-tls13-two-planes-bounded-input §27).
+        // It names no Agent, so its reply reaches none (SEC-tls13-bounded-input-chosen-planes §27).
         if self.over_rate(carrier, None, None) {
             return unavailable(&[], THROTTLED);
         }
@@ -1120,7 +1120,7 @@ impl AgentCases {
     }
 
     /// A restart command its connection did not take stays queued
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     pub(crate) fn unsent(&self, message: &ServerToAgent) {
         self.state.unsent(message);
     }
@@ -1144,7 +1144,7 @@ enum Relayed {
 }
 
 impl AgentCases {
-    /// Takes the message's token (SEC-tls13-two-planes-bounded-input) — for an enrolment request through a Gateway, from the
+    /// Takes the message's token (SEC-tls13-bounded-input-chosen-planes) — for an enrolment request through a Gateway, from the
     /// Gateway's enrolment aggregate and the bucket of the bootstrap certificate it names, once
     /// checked (CLT-modes-and-gateway §26) — and records a message past the limit.
     fn over_rate(
@@ -1453,7 +1453,7 @@ mod tests {
     use super::*;
 
     /// A restart command the endpoint reports unsent is queued again, so it is sent once more.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_restart_command_reported_unsent_is_queued_again() {
         let dir = tempfile::tempdir().expect("tempdir");

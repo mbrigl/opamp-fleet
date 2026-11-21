@@ -1,6 +1,6 @@
 //! The REST API v1 — the Server's integration contract (DEV-six-crates-tokio-axum, SRV-configurations-compose-one-map) — and the bundled
 //! rudimentary UI. Both belong to the Operator plane and are served on its own listener
-//! (SEC-tls13-two-planes-bounded-input); the Agent-facing artifact download is the Agent plane's, in
+//! (SEC-tls13-bounded-input-chosen-planes); the Agent-facing artifact download is the Agent plane's, in
 //! `transport`.
 //!
 //! The OpenAPI document is generated code-first with `utoipa`: the same annotations that register
@@ -204,7 +204,7 @@ pub fn router(state: Arc<OperatorCases>) -> Router {
                 std::future::ready(body.into_response())
             }),
         )
-        // The interactive API docs (SEC-tls13-two-planes-bounded-input): a Redoc page rendering /api/v1/openapi.json, with
+        // The interactive API docs (SEC-tls13-bounded-input-chosen-planes): a Redoc page rendering /api/v1/openapi.json, with
         // Redoc vendored and served from this same origin so the docs work offline.
         .route("/api/v1/docs", get(docs))
         .route("/api/v1/docs/redoc.js", get(redoc_js))
@@ -266,7 +266,7 @@ static CONTENT_SECURITY_POLICY: std::sync::LazyLock<header::HeaderValue> =
 
 /// The response headers of the Operator plane: its policy, no framing, no content sniffing, no
 /// referrer, no cached `/api/v1` answer, and HSTS. The plane serves TLS on every address
-/// (SEC-tls13-two-planes-bounded-input), so a browser that once reached it by name never tries `http://` for it again,
+/// (SEC-tls13-bounded-input-chosen-planes), so a browser that once reached it by name never tries `http://` for it again,
 /// where an active attacker could answer and ask for the Basic credentials; browsers ignore the
 /// header for an IP address. It names no subdomains: what else runs on the plane's domain is not
 /// the plane's to bind.
@@ -338,7 +338,7 @@ fn stylesheet(css: &'static str) -> Response {
     ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], css).into_response()
 }
 
-/// The API docs page: renders the OpenAPI document with the vendored Redoc bundle (SEC-tls13-two-planes-bounded-input).
+/// The API docs page: renders the OpenAPI document with the vendored Redoc bundle (SEC-tls13-bounded-input-chosen-planes).
 async fn docs() -> Html<&'static str> {
     Html(include_str!("../static/docs.html"))
 }

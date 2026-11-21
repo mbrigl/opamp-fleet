@@ -20,7 +20,7 @@ impl Drop for ServerUnderTest {
     }
 }
 
-// Verifies: SEC-tls13-two-planes-bounded-input, SRV-fleet-record-agents-hosts, SRV-state-stores-contract-pair
+// Verifies: SEC-tls13-bounded-input-chosen-planes, SRV-fleet-record-agents-hosts, SRV-state-stores-contract-pair
 #[test]
 fn sigterm_shuts_the_server_down_gracefully() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -1,14 +1,14 @@
 //! Which plane answers what: the OpAMP endpoint is the Agent plane's, and the REST API is the
-//! Operator plane's alone (SEC-tls13-two-planes-bounded-input).
+//! Operator plane's alone (SEC-tls13-bounded-input-chosen-planes).
 
 mod support;
 
 use support::spawn;
 
-/// The REST API answers on the Operator plane's own listener (SEC-tls13-two-planes-bounded-input), where authenticating it is
+/// The REST API answers on the Operator plane's own listener (SEC-tls13-bounded-input-chosen-planes), where authenticating it is
 /// a separate decision from the Agent plane's admission, and it is *not* served on the Agent plane
 /// at all, which is what the split is. The name is kept because accepted ADRs cite it.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn the_rest_api_stays_open_on_its_own_listener_when_the_opamp_endpoint_is_guarded() {
     let server = spawn().await;

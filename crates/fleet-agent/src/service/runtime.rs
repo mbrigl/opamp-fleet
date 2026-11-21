@@ -205,7 +205,7 @@ fn start_log_file(config: &crate::config::ClientConfig) {
 /// reconstruct from the command line of a service they did not start.
 ///
 /// **The second line is the trust and the identity in force**, resolved through the same two
-/// accessors the transports build their TLS from (SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate) rather than read off the
+/// accessors the transports build their TLS from (SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate) rather than read off the
 /// configuration — so it states what *will* be presented, including a Server-issued certificate
 /// that no `supervisor.toml` mentions. Without it, a handshake that fails because the identity is
 /// not the one anybody assumed is diagnosed from the peer's error message, which is written by the
@@ -300,7 +300,7 @@ fn recovery_state_dir(spec: &RunSpec) -> PathBuf {
 }
 
 /// Load the configuration, build the Engine (the configured Supervisors, or the self-Agent when
-/// none are), and run the transport the endpoint selects (SEC-tls13-two-planes-bounded-input) until `shutdown` fires.
+/// none are), and run the transport the endpoint selects (SEC-tls13-bounded-input-chosen-planes) until `shutdown` fires.
 ///
 /// # Errors
 /// Returns an error if the configuration cannot be loaded or the Agent state cannot be restored.

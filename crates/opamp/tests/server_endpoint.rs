@@ -136,7 +136,7 @@ fn report(uid: &[u8], sequence_num: u64) -> AgentToServer {
     }
 }
 
-/// The workspace builds reqwest without a TLS provider of its own (SEC-tls13-two-planes-bounded-input); install the one every
+/// The workspace builds reqwest without a TLS provider of its own (SEC-tls13-bounded-input-chosen-planes); install the one every
 /// binary installs, once, even though these exchanges are plaintext.
 fn client() -> reqwest::Client {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -192,7 +192,7 @@ async fn a_plain_http_exchange_is_answered_by_the_handler() {
 
 /// A reply past the limit is answered `500` and never put on the wire, and the handler is told it
 /// was not sent, so what it carried can wait for the next exchange.
-// Verifies: SRV-instances-share-one-postgresql
+// Verifies: SRV-instance-opens-chosen-planes
 #[tokio::test]
 async fn a_plain_http_reply_past_the_limit_is_reported_unsent() {
     let (addr, handler) = serve(Settings::new(LIMIT)).await;

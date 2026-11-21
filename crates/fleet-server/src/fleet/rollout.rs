@@ -26,7 +26,7 @@ use super::{
 impl AppState {
     /// Reads the Configurations and, where package delivery is armed, the Deployments and the
     /// Packages again from their stores, as another instance changed them
-    /// (SRV-instances-share-one-postgresql §12).
+    /// (SRV-instance-opens-chosen-planes §12).
     /// Each one whose flag is set is dropped and read again whole.
     ///
     /// # Errors
@@ -560,7 +560,7 @@ impl AppState {
     /// queued again through [`unsent`](Self::unsent). It is handed out only to `conn`, the
     /// WebSocket connection asking, where that connection carries the Agent: an older connection
     /// of its host that still names it leaves the restart to the newer one
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     ///
     /// A delivery holds the Agent's own lock, and clears the restart in the store with the fleet
     /// lock let go.
@@ -1759,7 +1759,7 @@ mod tests {
     /// B's memory too, and A, which has not taken up the deletions and still holds both in
     /// memory, is refused when it adds either to a Deployment: the add reads the member it adds
     /// in its own transaction and finds it gone, so no Deployment names it.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_member_deleted_through_one_instance_is_refused_by_another_that_has_not_taken_it_up() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -1814,7 +1814,7 @@ mod tests {
     /// row too, so the deletion waits for its commit, and then takes the member out of every
     /// Deployment in the transaction that deletes it. Whichever commits first, no Deployment names
     /// the deleted member once both have — for a Configuration and for a Package.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-deployments-and-pinned-rollouts
     #[test]
     fn an_add_held_while_another_instance_deletes_the_member_leaves_no_deployment_naming_it() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

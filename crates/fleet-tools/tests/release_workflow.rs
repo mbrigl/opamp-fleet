@@ -333,7 +333,7 @@ fn words_after<'w>(text: &'w str, prefix: &str) -> Vec<&'w str> {
         .collect()
 }
 
-/// What every release publishes, as the `publish` job's globs name it (OPS-releases-attestations-server-image §5).
+/// What every release publishes, as the `publish` job's globs name it (OPS-releases-image-probed-by-plane §5).
 const PUBLISHED: [&str; 6] = [
     "*.tar.gz",
     "*.deb",
@@ -343,7 +343,7 @@ const PUBLISHED: [&str; 6] = [
     "SHA256SUMS",
 ];
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn only_the_publish_job_may_attest() {
     let workflow = workflow();
@@ -356,7 +356,7 @@ fn only_the_publish_job_may_attest() {
 
     let publish = job(&workflow, "publish");
     let permissions = permissions(publish);
-    // `packages: write` pushes the image's attestation and tags the image (OPS-releases-attestations-server-image §10).
+    // `packages: write` pushes the image's attestation and tags the image (OPS-releases-image-probed-by-plane §10).
     for grant in [
         "id-token: write",
         "attestations: write",
@@ -428,7 +428,7 @@ fn only_the_publish_job_may_attest() {
     );
 }
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn the_publish_job_attests_and_verifies_every_asset_before_it_publishes() {
     let workflow = workflow();
@@ -493,7 +493,7 @@ fn the_publish_job_attests_and_verifies_every_asset_before_it_publishes() {
     assert_eq!(published, PUBLISHED, "{release}");
 }
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn the_sbom_job_writes_one_sbom_per_program_and_target_with_a_pinned_tool() {
     let workflow = workflow();
@@ -581,7 +581,7 @@ fn the_sbom_job_writes_one_sbom_per_program_and_target_with_a_pinned_tool() {
     }
 }
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn the_notes_say_how_to_verify() {
     let workflow = workflow();
@@ -661,7 +661,7 @@ fn all<'i>(instructions: &'i [(String, String)], keyword: &str) -> Vec<&'i str> 
 
 const BASE: &str = "gcr.io/distroless/cc-debian13:nonroot";
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and_runs_nothing() {
     let text = containerfile();
@@ -722,7 +722,7 @@ fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and
 
     // It sets nothing but the two listen addresses: no data directory, which a Server on
     // PostgreSQL and S3 refuses, and no secret
-    // (OPS-releases-attestations-server-image §16).
+    // (OPS-releases-image-probed-by-plane §16).
     let env: Vec<&str> = all(&instructions, "ENV")
         .iter()
         .flat_map(|args| args.split_whitespace())
@@ -761,7 +761,7 @@ fn the_containerfile_copies_the_release_binary_onto_a_pinned_distroless_base_and
     );
 }
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn both_linux_rows_build_the_server_and_assert_its_version() {
     let workflow = workflow();
@@ -816,7 +816,7 @@ fn both_linux_rows_build_the_server_and_assert_its_version() {
     assert!(!upload.contains(".sha256"), "{upload}");
 }
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn the_sbom_job_describes_the_server_for_both_linux_targets() {
     let workflow = workflow();
@@ -837,7 +837,7 @@ fn the_sbom_job_describes_the_server_for_both_linux_targets() {
     assert_eq!(linux, 2, "{write}");
 }
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn the_image_job_builds_checks_and_pushes_by_digest_alone() {
     let workflow = workflow();
@@ -976,7 +976,7 @@ fn the_image_job_builds_checks_and_pushes_by_digest_alone() {
     }
 }
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn the_publish_job_attests_and_verifies_the_image_before_it_tags_it() {
     let workflow = workflow();
@@ -1037,7 +1037,7 @@ fn the_publish_job_attests_and_verifies_the_image_before_it_tags_it() {
     assert!(order.is_sorted(), "{order:?}");
 }
 
-// Verifies: OPS-releases-attestations-server-image
+// Verifies: OPS-releases-image-probed-by-plane
 #[test]
 fn the_notes_name_the_image_by_its_digest_and_say_how_to_verify_it() {
     let workflow = workflow();

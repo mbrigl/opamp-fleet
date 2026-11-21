@@ -1,4 +1,4 @@
-//! The listeners' TLS material (SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate), read from the files `[tls]`,
+//! The listeners' TLS material (SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate), read from the files `[tls]`,
 //! `[rest.tls]` and `[enrolment]` name and handed to `opamp`'s listener (DEV-six-crates-tokio-axum).
 //!
 //! What is the Server's here is which material and why. The Agent plane requires a client
@@ -140,7 +140,7 @@ pub fn enrolling(certificate: &[u8]) -> Peer {
 }
 
 /// The material both planes serve with: `[tls]`'s on the Agent plane, and on the Operator plane
-/// `operator`'s — `[rest.tls]` — or, without it, `[tls]`'s as well (SEC-tls13-two-planes-bounded-input).
+/// `operator`'s — `[rest.tls]` — or, without it, `[tls]`'s as well (SEC-tls13-bounded-input-chosen-planes).
 ///
 /// # Errors
 /// Returns an error naming the file that cannot be read or holds nothing usable, or a `[rest.tls]`
@@ -200,7 +200,7 @@ pub fn server_tls(
     })
 }
 
-/// The `[rest.tls]` pair, read and checked as `[tls]`'s is (SEC-tls13-two-planes-bounded-input §11). The key is
+/// The `[rest.tls]` pair, read and checked as `[tls]`'s is (SEC-tls13-bounded-input-chosen-planes §11). The key is
 /// matched against the certificate here rather than when the plane is built, so the refusal
 /// names both files.
 fn operator_identity(operator: &RestTlsConfig) -> Result<Identity, String> {
@@ -342,9 +342,9 @@ mod tests {
 
     /// A `[rest.tls]` pair is checked at startup as `[tls]`'s is: a key that does not match its
     /// certificate, or a key file that cannot be read, refuses the start, and the message names
-    /// the files (SEC-tls13-two-planes-bounded-input §11). A matching pair is what the Operator plane serves, while the
+    /// the files (SEC-tls13-bounded-input-chosen-planes §11). A matching pair is what the Operator plane serves, while the
     /// Agent plane keeps `[tls]`'s.
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn a_rest_tls_pair_is_checked_at_startup_and_served_on_the_operator_plane_alone() {
         let dir = tempfile::tempdir().expect("tempdir");

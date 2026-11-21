@@ -10,7 +10,7 @@ use opamp::server::listen::{Handle, Listener};
 use rustls::ServerConfig;
 
 /// A plane on an already-bound listener, over TLS when `tls` is given, holding at most
-/// `max_connections` at once (SEC-tls13-two-planes-bounded-input). `handle` is shared by every plane the instance
+/// `max_connections` at once (SEC-tls13-bounded-input-chosen-planes). `handle` is shared by every plane the instance
 /// opens, so one signal drains them all (SEC-tls13-bounded-input-chosen-planes §17).
 #[must_use]
 pub fn plane(
@@ -29,7 +29,7 @@ pub fn plane(
 /// Asks the planes the instance opens to stop: none takes a new connection, and the WebSocket sessions are closed
 /// spread over `drain`, so their Agents come back to the other instances, or to this one once it is
 /// started again, without arriving all at once
-/// (SRV-instances-share-one-postgresql §3).
+/// (SRV-instance-opens-chosen-planes §3).
 /// What is still open shortly after the window is cut, and only then does the record
 /// flush that follows shutdown (SRV-fleet-record-agents-hosts) run.
 ///

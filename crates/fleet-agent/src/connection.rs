@@ -168,7 +168,7 @@ pub fn merge(
 ///
 /// None of the three is honoured, on purpose. `TLSConnectionSettings` is mostly a way to weaken
 /// verification — `insecure_skip_verify` would let a Server switch off the check that proves it is
-/// the Server — and trust here is an operator's file (SEC-tls13-two-planes-bounded-input). `ProxyConnectionSettings` has
+/// the Server — and trust here is an operator's file (SEC-tls13-bounded-input-chosen-planes). `ProxyConnectionSettings` has
 /// nothing on this Client to configure. Offered `headers` have no reader on the Agent plane, which
 /// admits by client certificate alone (SEC-admission-by-client-certificate): an applied one would be a value the Server plants
 /// on every connection of the fleet. They are named by their keys, never their values — the

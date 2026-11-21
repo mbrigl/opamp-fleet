@@ -414,7 +414,7 @@ impl Ended {
 
 /// Closes the chain of the lease `chain` taken over, for the instance whose own chain is
 /// `closed_by`
-/// (SRV-instances-share-one-postgresql §18):
+/// (SRV-instance-opens-chosen-planes §18):
 /// `audit.chain_closed` with the `reason` `ended` names after its last entry, and that
 /// entry's hash and the time in its record
 /// (SEC-append-only-audit-record §7).
@@ -1153,7 +1153,7 @@ mod tests {
     /// the entries it had, and the record holds. The chains' records are read through a view that
     /// holds a read-only transaction, the verification's, at a gate, and lets every other read and
     /// write through; the close commits meanwhile.
-    /// Verifies: SEC-append-only-audit-record, SRV-instances-share-one-postgresql
+    /// Verifies: SEC-append-only-audit-record, SRV-instance-opens-chosen-planes
     #[test]
     fn a_close_committed_during_audit_verify_is_not_seen_by_it() {
         const KEY: i64 = 0x29_0005;
@@ -1238,7 +1238,7 @@ mod tests {
     /// its lapsed lease, at a take or at a renewal, closes it with `audit.chain_closed`, `reason`
     /// `lease_lapsed` and `closed_by` its own chain, and from then on the store refuses the dead
     /// chain an entry. Two instances that try at once take it over once.
-    /// Verifies: SEC-append-only-audit-record, SRV-instances-share-one-postgresql
+    /// Verifies: SEC-append-only-audit-record, SRV-instance-opens-chosen-planes
     #[test]
     fn the_instance_that_takes_over_a_lapsed_lease_closes_its_chain() {
         let Some(test) = TestDatabase::named() else {

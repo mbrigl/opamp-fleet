@@ -2476,7 +2476,7 @@ mod tests {
 
     /// A refusal of the rate limit never waits for its entry: one that finds the channel full is
     /// counted, and the next entry written says so in `unrecorded_before`.
-    /// Verifies: SEC-tls13-two-planes-bounded-input, SEC-append-only-audit-record
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes, SEC-append-only-audit-record
     #[test]
     fn a_throttle_refusal_that_finds_the_channel_full_is_counted_unrecorded() {
         let memory = Memory::default();

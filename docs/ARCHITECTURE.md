@@ -43,7 +43,7 @@ than anywhere else, and none beats one that has stopped being true.
   ([SEC-admission-by-client-certificate](adr/SEC-admission-by-client-certificate.md)).
 - **Clients** reach the Agent plane over OpAMP — WebSocket or plain HTTP — admitted by the client
   certificate in the TLS 1.3 handshake alone
-  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md),
+  ([SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md),
   SEC-admission-by-client-certificate). A Client in Gateway Mode carries other Clients' Agents over
   its own upstream connections and refuses what the Server revoked
   ([CLT-modes-and-gateway](adr/CLT-modes-and-gateway.md)).
@@ -208,7 +208,7 @@ no module.
   [SRV-state-stores-contract-pair](adr/SRV-state-stores-contract-pair.md)).
 - **Server instances** — on PostgreSQL every Server is an instance, and several share one
   database and one bucket
-  ([SRV-instances-share-one-postgresql](adr/SRV-instances-share-one-postgresql.md)). Each opens
+  ([SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md)). Each opens
   the planes `planes` names, both by default and always both where it must be alone; every
   instance reads and checks the whole configuration
   ([SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md)).
@@ -295,12 +295,12 @@ no module.
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
   section is present
-  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)) — and tells a
-  member's certificate from a bootstrap one by its
+  ([SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md)) — and
+  tells a member's certificate from a bootstrap one by its
   issuer. `tls` reads the files of both planes on every instance, whichever it opens. An instance
   binds and serves the planes it opens and no other, and `listen` serves them on one handle with
   one drain and a connection cap each
-  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md),
+  ([SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md),
   [SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md)). `pki` is
   `server pki status` and the running Server's warnings before a certificate it depends on ends
   (OPS-operator-program-fleetctl).
@@ -323,7 +323,7 @@ no module.
   marked Gateway, and the Gateway as a whole are heard, in the bounded tables of
   `fleet_core::rate`; `agent_cases` takes a token for each
   message before anything else is done with it and for each download in its guard
-  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)).
+  ([SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md)).
 - **Audit record** — `audit` is the port every security decision is recorded through;
   `audit_log` chains the entries by hash and `fs::FsAuditStore` keeps them under `data_dir/audit/`
   ([SEC-append-only-audit-record](adr/SEC-append-only-audit-record.md)).
@@ -372,7 +372,7 @@ no module.
   as a lease and a sweep measure it: `PackageStore::with_backend` takes it, and `instance`'s
   `Lease::take_as`. `clock::Elapsed::monotonic` is the adapter on `std::time::Instant`, and
   `main.rs` hands both of them `CLOCK_BOOTTIME`, which counts a suspend of the host, on Linux
-  ([SRV-instances-share-one-postgresql §3](adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §3](adr/SRV-instance-opens-chosen-planes.md)).
   The `[connection_offer]` and `[telemetry_offer]` sections become the fleet's offers in
   `config`.
 - **Server configuration** — `config` builds one TOML document from the defaults, `server.toml`
@@ -604,7 +604,7 @@ lease, which reads the Agent's record at its first report and takes it as its ho
 instance's lease has lapsed, the instance that removes it closes its audit chain. The others serve
 from what the lost instance committed to the database, the Operator plane included, which
 instances of its own may serve
-([SRV-instances-share-one-postgresql](adr/SRV-instances-share-one-postgresql.md),
+([SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md),
 [SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md)).
 
 **A Supervisor starts its program.** Without a process account the runner starts the Managed

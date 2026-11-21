@@ -11,7 +11,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
-    /// The Server's OpAMP endpoint. The URL scheme selects the transport (SEC-tls13-two-planes-bounded-input):
+    /// The Server's OpAMP endpoint. The URL scheme selects the transport (SEC-tls13-bounded-input-chosen-planes):
     /// `ws://` / `wss://` is the WebSocket transport, `http://` / `https://` the polling one.
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
@@ -813,7 +813,7 @@ pub struct GatewayConfig {
 }
 
 /// The `[gateway.rate_limit]` section (CLT-gateway-rate-limits-hosts §3): the bucket of each downstream host,
-/// sized as the Server sizes a host's (SEC-tls13-two-planes-bounded-input §22). Both keys have a default, and neither
+/// sized as the Server sizes a host's (SEC-tls13-bounded-input-chosen-planes §22). Both keys have a default, and neither
 /// is `0`: no value switches the limit off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -946,7 +946,7 @@ impl TlsConfig {
     }
 }
 
-/// The transport the endpoint's scheme selects (SEC-tls13-two-planes-bounded-input).
+/// The transport the endpoint's scheme selects (SEC-tls13-bounded-input-chosen-planes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransportKind {
     WebSocket,
@@ -955,7 +955,7 @@ pub enum TransportKind {
 
 fn default_endpoint() -> String {
     // The Baseline's default port and path, over TLS: the Agent plane serves nothing else
-    // (SEC-tls13-two-planes-bounded-input).
+    // (SEC-tls13-bounded-input-chosen-planes).
     "wss://127.0.0.1:4320/v1/opamp".to_string()
 }
 
@@ -1083,7 +1083,7 @@ impl ClientConfig {
                 )
             })?;
         }
-        // Plaintext is for the loopback alone, and refused rather than warned about (SEC-tls13-two-planes-bounded-input).
+        // Plaintext is for the loopback alone, and refused rather than warned about (SEC-tls13-bounded-input-chosen-planes).
         config
             .transport()
             .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1168,7 +1168,7 @@ impl ClientConfig {
         self.package_key.as_deref()
     }
 
-    /// The CA bundle that replaces the built-in roots, when one is configured (SEC-tls13-two-planes-bounded-input).
+    /// The CA bundle that replaces the built-in roots, when one is configured (SEC-tls13-bounded-input-chosen-planes).
     pub fn ca_file(&self) -> Option<&Path> {
         self.tls.as_ref()?.ca_file.as_deref()
     }
@@ -1283,7 +1283,7 @@ impl ClientConfig {
     }
 
     /// The transport the endpoint names, held to the specification's rule: `wss://` or `https://`,
-    /// and `ws://` or `http://` only to `127.0.0.1` or `::1` (SEC-tls13-two-planes-bounded-input).
+    /// and `ws://` or `http://` only to `127.0.0.1` or `::1` (SEC-tls13-bounded-input-chosen-planes).
     pub fn transport(&self) -> Result<TransportKind, String> {
         opamp::endpoint::check_url(&self.endpoint).map_err(|e| format!("endpoint {e}"))?;
         match self.endpoint.split("://").next() {
@@ -1932,7 +1932,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn scheme_selects_the_transport() {
         for (endpoint, kind) in [
@@ -1949,7 +1949,7 @@ mod tests {
         }
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn the_default_endpoint_is_wss_on_the_loopback() {
         assert_eq!(
@@ -1958,7 +1958,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input, Q-1
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes, Q-1
     #[test]
     fn a_plaintext_endpoint_off_the_loopback_is_refused_at_startup() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1975,7 +1975,7 @@ mod tests {
         ClientConfig::load(&path).expect("plaintext on a loopback literal loads");
     }
 
-    /// Verifies: SEC-tls13-two-planes-bounded-input, DEV-six-crates-tokio-axum
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes, DEV-six-crates-tokio-axum
     #[test]
     fn rejects_an_unknown_scheme_and_unknown_keys() {
         let cfg = ClientConfig {

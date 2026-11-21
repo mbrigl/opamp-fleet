@@ -322,7 +322,7 @@ pub trait LedgerStore: Send + Sync {
     /// counted, and a renewal whose chain holds a revoked certificate is refused, in the write
     /// itself, so both hold for every instance on one store together and no instance with a stale
     /// view can pass them
-    /// (SRV-instances-share-one-postgresql §19).
+    /// (SRV-instance-opens-chosen-planes §19).
     /// A store that is its only writer decides as [`register_into`] does; the one
     /// that only puts what the Server decided in memory is answered `Registered`.
     ///
@@ -365,7 +365,7 @@ pub trait LedgerStore: Send + Sync {
     /// issuers widened by those `entry` names beside them ([`widened`]), and a list already
     /// holding `bound` entries takes no more. The bound is counted
     /// in the write itself, so it holds for every instance on one store together
-    /// (SRV-instances-share-one-postgresql §19).
+    /// (SRV-instance-opens-chosen-planes §19).
     ///
     /// # Errors
     /// Returns an error when it cannot be written; the list is then as it was.
@@ -385,7 +385,7 @@ pub trait LedgerStore: Send + Sync {
 
     /// Binds `instance_uid` to `host`, unless another Host holds it: the binding is one row the
     /// store holds once for every instance
-    /// (SRV-instances-share-one-postgresql §19).
+    /// (SRV-instance-opens-chosen-planes §19).
     /// A store that is its only writer binds what the Server decided in memory.
     ///
     /// # Errors
@@ -451,7 +451,7 @@ pub trait LedgerStore: Send + Sync {
     /// moves forward, an approval and a subject are written only into a Host that has no row yet,
     /// a Host is forgotten only while what is stored says it has ended, and a Gateway's mark is
     /// written only for a host that a Host row or a register entry names
-    /// (SRV-instances-share-one-postgresql §19).
+    /// (SRV-instance-opens-chosen-planes §19).
     /// Answers whether the store knows the host a Gateway's mark names: `false` when
     /// it knows neither, and nothing is then written; every other act answers `true`. A store that
     /// writes the Hosts whole writes nothing here and answers `true`.
@@ -1619,7 +1619,7 @@ impl Revocations {
         state.acted();
         if by_act {
             // The mark and the release of every binding it ends are one write, made only for a
-            // host the store knows (SRV-instances-share-one-postgresql §19).
+            // host the store knows (SRV-instance-opens-chosen-planes §19).
             let known = self.store.write_host_act(&HostAct::Gateway {
                 host: host.to_string(),
                 gateway,
@@ -1943,7 +1943,7 @@ impl Revocations {
     /// Reads the register and the Hosts again from the store, as another instance may have changed
     /// them, so what this instance admits follows what is stored: an `instance_uid` another instance
     /// bound, released or moved, a Host it marked, and the entries it registered
-    /// (SRV-instances-share-one-postgresql §19).
+    /// (SRV-instance-opens-chosen-planes §19).
     /// The revocation list is read again too, and announced when it changed, so every
     /// open session checks itself against what is stored
     /// (SEC-admission-by-client-certificate §32).
@@ -3617,7 +3617,7 @@ mod tests {
     /// A revocation check, `speaks_for` and a report's check wait for a reload's swap only, not
     /// for its read of the store, and a reload no act of this instance's own crossed is swapped in
     /// after one read.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_check_does_not_wait_for_a_reloads_read() {
         let store = ReadHeld::default();
@@ -3710,7 +3710,7 @@ mod tests {
         hex::encode([n; 16])
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_revocation_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3722,7 +3722,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_lift_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3738,7 +3738,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_binding_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3756,7 +3756,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_valid_until_moved_during_a_reload_holds() {
         let until = |r: &Revocations| {
@@ -3778,7 +3778,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_register_write_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3791,7 +3791,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_release_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3804,7 +3804,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_rekey_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3817,7 +3817,7 @@ mod tests {
         );
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_gateway_mark_made_during_a_reload_holds() {
         an_own_act_outlives_a_reload(
@@ -3928,7 +3928,7 @@ mod tests {
     /// A reload whose read began after a report's binding was decided, and read the store before
     /// the binding was written, is not swapped in once the binding is taken up: taking it up is an
     /// act of this instance's own, and the store is read again.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_reload_that_read_before_a_binding_was_written_does_not_undo_it() {
         let (revocations, store, hooked) = hooked_register();
@@ -3987,7 +3987,7 @@ mod tests {
 
     /// A reload that read the store before a Host's valid until was written does not leave it
     /// moved back, whether it is swapped in before the write is taken up or would be after it.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_reload_that_read_before_a_valid_until_was_written_does_not_move_it_back() {
         let until = |r: &Revocations| {
@@ -4045,7 +4045,7 @@ mod tests {
 
     /// A revocation check, a handshake's Gateway test and another report's check do not wait for a
     /// report's binding or its Host to be written.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_check_does_not_wait_for_a_binding_or_a_host_to_be_written() {
         let (revocations, _store, hooked) = hooked_register();
@@ -4190,7 +4190,7 @@ mod tests {
     /// Own acts that keep crossing a reload's reads do not keep it from ending: after
     /// `RELOAD_SWAPS_REFUSED` refused swaps it reads once under the lock and swaps that in, with
     /// another instance's act and every own act held.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_reload_crossed_by_own_acts_ends_after_its_bounded_reads() {
         let store = Acting::default();
@@ -4247,7 +4247,7 @@ mod tests {
 
     /// Two reloads at once never swap an older read over a newer one: the second reads once the
     /// first has swapped.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_reload_never_swaps_an_older_read_over_a_newer_one() {
         let store = ReadHeld::default();
@@ -4327,7 +4327,7 @@ mod tests {
 
     /// A reload whose read panicked does not end the reloads after it: the next one reads and
     /// swaps, and takes up what another instance committed.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_reload_after_one_that_panicked_still_swaps() {
         let store = PanicsOnce::default();

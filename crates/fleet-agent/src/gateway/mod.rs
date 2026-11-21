@@ -671,7 +671,7 @@ impl Handler for Forwarding {
 
     /// An unreadable report is dropped, never answered: the Gateway invents nothing (CLT-modes-and-gateway). A
     /// plain-HTTP exchange still needs a response, and it says why. It takes the host's token as
-    /// the Server counts one (SEC-tls13-two-planes-bounded-input §24); past the limit it is answered as the Server
+    /// the Server counts one (SEC-tls13-bounded-input-chosen-planes §24); past the limit it is answered as the Server
     /// answers it, naming no Agent, and not logged one by one (CLT-gateway-rate-limits-hosts §4).
     fn on_unreadable(&self, downstream: &mut Downstream, error: &Unreadable) -> Reply {
         if !self.rate.admit(&downstream.bucket) {

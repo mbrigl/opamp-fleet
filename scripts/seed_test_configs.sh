@@ -18,7 +18,7 @@
 #       PUTs each Configuration to a running Server's REST API, puts it into its Deployment and
 #       rolls the Deployment out — the act that assigns it to the Agents the Deployment claims
 #       (SRV-deployments-and-pinned-rollouts); a PUT alone reaches nobody.
-#       (default server-url: https://127.0.0.1:4321). The Operator plane serves TLS (SEC-tls13-two-planes-bounded-input); the
+#       (default server-url: https://127.0.0.1:4321). The Operator plane serves TLS (SEC-tls13-bounded-input-chosen-planes); the
 #       CA curl trusts is $SEED_CACERT, or .dev-pki/offline/server-ca.pem when scripts/dev-pki.sh
 #       made one.
 #   scripts/seed_test_configs.sh --offline [data-dir]

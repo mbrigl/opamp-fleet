@@ -75,7 +75,7 @@ sysinfo = { workspace = true, features = ["network"] }
 axum.workspace = true
 # SEC-secrets-wiped-on-drop: the Client's keys, the password and bytes of a `bootstrap.p12` and the Supervisor
 # Endpoint token are held in buffers wiped on drop. No TLS or crypto backend comes with it
-# (SEC-tls13-two-planes-bounded-input).
+# (SEC-tls13-bounded-input-chosen-planes).
 zeroize.workspace = true
 
 # CLT-supervisor-mode-and-kinds: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,

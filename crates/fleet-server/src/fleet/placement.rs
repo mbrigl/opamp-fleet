@@ -1,5 +1,5 @@
 //! How the Agents of one Client are placed under its Client Agent (SRV-fleet-record-agents-hosts §18 and §19,
-//! SRV-instances-share-one-postgresql §8): the rule for one group, which the fleet in memory and a page read from the
+//! SRV-instance-opens-chosen-planes §8): the rule for one group, which the fleet in memory and a page read from the
 //! store share, the index of the groups this instance holds members of, how the Client Agents of a
 //! group another instance carries are read, and the placing again after a notice or a catch-up.
 //! Its entry points are methods of `AppState`.
@@ -65,7 +65,7 @@ pub(super) type ClientsByGroup = HashMap<Group, Vec<(InstanceUid, BTreeMap<Strin
 
 /// How a placement reads the Client Agents of a group that this instance does not hold
 /// (SRV-fleet-record-agents-hosts §19,
-/// SRV-instances-share-one-postgresql §8).
+/// SRV-instance-opens-chosen-planes §8).
 pub(super) enum Elsewhere {
     /// From the store as the group is placed, under the fleet lock.
     Now,
@@ -212,7 +212,7 @@ impl AppState {
     /// does. On a shared store the Client Agent of a Host may be carried by another instance, so
     /// the Agents the host register binds to the Host that this instance does not hold are read
     /// from the store, and a Client Agent among them counts as one of the group
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     /// Behind a Gateway, where the register binds no Agent, the Agents that arrived
     /// over the Gateway's Host are read instead ([`arrived_over`](Self::arrived_over)).
     ///
@@ -296,7 +296,7 @@ impl AppState {
     /// Places again every group of each of `hosts` that this instance holds members of: of a Host,
     /// the group under the Host, and of a Gateway's Host, every group behind it. What a notice that
     /// a binding of the Host changed, or that a Client Agent first arrived over it, calls for
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     /// Nothing on a store this Server alone writes, whose own acts place what they
     /// change.
     pub fn place_hosts_again(&self, hosts: &BTreeSet<String>) {
@@ -320,7 +320,7 @@ impl AppState {
     /// stored; none on a store this Server alone writes. Of a Host, those the host register binds
     /// to it; behind a Gateway, which the register binds none to, those that arrived over the
     /// Gateway's Host and report the group's machine, read through the port's `query_page`
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     /// One that cannot be read is logged, and the group is placed from what this
     /// instance holds.
     fn client_agents_elsewhere(
@@ -575,7 +575,7 @@ impl AppState {
 
     /// What a catch-up reads before the fleet lock of the Client Agents behind each Gateway whose
     /// groups this instance holds members of: the Agents that arrived over each Gateway's Host, read
-    /// once per Gateway, not yet sifted of what is held (SRV-instances-share-one-postgresql §10).
+    /// once per Gateway, not yet sifted of what is held (SRV-instance-opens-chosen-planes §10).
     pub(super) fn read_behind_gateways(&self) -> ClientsByGroup {
         let gateways: Vec<Group> = self
             .groups
@@ -905,7 +905,7 @@ mod tests {
     /// A fellow Agent B placed before the binding of its Host's Client Agent through A reached B
     /// inherits the Client Agent's labels in B's memory once the binding's notice reaches B. The
     /// notice is held back from B, as one still on its way is, until the test sends it.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts
     #[test]
     fn a_fellow_agent_inherits_once_the_notice_of_its_client_agents_binding_arrives() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {
@@ -946,7 +946,7 @@ mod tests {
 
     /// A fellow Agent behind a Gateway that B placed inherits in B's memory the labels of its
     /// Client Agent that arrives behind the same Gateway through A afterwards.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-fleet-record-agents-hosts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-fleet-record-agents-hosts
     #[test]
     fn a_fellow_agent_behind_a_gateway_inherits_from_a_client_agent_arriving_on_another_instance() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

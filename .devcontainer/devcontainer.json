@@ -96,7 +96,7 @@
     }
   },
 
-  // The Server's two planes (SEC-tls13-two-planes-bounded-input), published the way each one is meant to be reached.
+  // The Server's two planes (SEC-tls13-bounded-input-chosen-planes), published the way each one is meant to be reached.
   //
   // The Agent plane (4320, OpAMP + package downloads) is where the fleet connects, so `appPort`
   // publishes it through Docker itself (`-p 0.0.0.0:4320:4320`) and the Server is reachable from

@@ -1,7 +1,7 @@
 //! Package records in PostgreSQL (SRV-state-stores-contract-pair §6): the PostgreSQL adapter behind
 //! [`PackageBackend`](crate::packages::PackageBackend) — one row per Package and one per entry,
 //! each entry naming its artifact by hash, and each call one transaction on the rows it names
-//! (SRV-instances-share-one-postgresql §19).
+//! (SRV-instance-opens-chosen-planes §19).
 //! The bytes are the blob store's, with either.
 
 use std::collections::BTreeMap;
@@ -360,7 +360,7 @@ impl PgPackageBackend {
 /// 13). A rollout holds the row of each Package it pins `FOR KEY SHARE` until its assignments are
 /// committed, so the count waits for it and sees them, and no rollout pins the Package until this
 /// transaction ends
-/// (SRV-instances-share-one-postgresql §19).
+/// (SRV-instance-opens-chosen-planes §19).
 /// Answers whether the Package is stored.
 async fn hold_unassigned(
     client: &impl GenericClient,
@@ -781,7 +781,7 @@ mod tests {
     /// A Package created with its entry through another instance between the two statements of
     /// `load` is read whole or not at all: the entries are read in the snapshot the Packages were,
     /// so none names a Package the read did not see, and the load does not fail.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_package_committed_between_the_reads_of_load_is_read_whole_or_not_at_all() {
         let Some(test) = TestDatabase::named() else {
@@ -964,7 +964,7 @@ mod tests {
     /// A deletion of a Package through B while a rollout through A that pins it has not yet
     /// committed waits for the rollout, and then refuses it from the assignment the rollout
     /// stored: the rollout holds the Package's row until it commits.
-    /// Verifies: SRV-instances-share-one-postgresql, SRV-deployments-and-pinned-rollouts
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-deployments-and-pinned-rollouts
     #[test]
     fn a_deletion_waits_for_a_rollout_that_pins_the_package_and_is_refused() {
         use crate::agent_store::{tests::record, AgentStore as _};
@@ -1582,7 +1582,7 @@ mod tests {
     /// B deletes the one entry it holds of a blob; an entry written through A, which B has not
     /// read, names the same blob, and B's sweep keeps it: it reads the stored entries under the
     /// blob store's lock, not what B holds.
-    /// Verifies: SRV-state-stores-contract-pair, SRV-instances-share-one-postgresql
+    /// Verifies: SRV-state-stores-contract-pair, SRV-instance-opens-chosen-planes
     #[test]
     fn a_sweep_keeps_a_blob_an_entry_stored_through_another_writer_names() {
         let Some(test) = TestDatabase::named() else {

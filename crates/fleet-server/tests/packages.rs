@@ -208,7 +208,7 @@ fn set_url(server: &TestServer, agent_type: &str, version: &str) -> String {
     )
 }
 
-/// The artifact download of one Set — on the **Agent plane** (SEC-tls13-two-planes-bounded-input), which is where the
+/// The artifact download of one Set — on the **Agent plane** (SEC-tls13-bounded-input-chosen-planes), which is where the
 /// `download_url` in an offer points and the one `/api/v1` route the Operator plane does not serve.
 fn download_url(server: &TestServer, agent_type: &str, version: &str) -> String {
     format!(
@@ -422,10 +422,10 @@ async fn the_act_names_the_version_it_releases() {
     assert_eq!(served.as_ref(), b"old-binary");
 }
 
-/// SEC-tls13-two-planes-bounded-input: the offered `download_url` is a path the Client resolves against **its own OpAMP
+/// SEC-tls13-bounded-input-chosen-planes: the offered `download_url` is a path the Client resolves against **its own OpAMP
 /// endpoint**, so the artifact has to be served by the listener the Agents already talk to — not by
 /// the Operator plane, which is where authentication is going and where no Agent will ever look.
-/// Verifies: PKG-signed-packages-and-delivery, SEC-tls13-two-planes-bounded-input
+/// Verifies: PKG-signed-packages-and-delivery, SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn the_artifact_is_served_where_the_agents_are_and_not_on_the_operator_plane() {
     let (server, _scratch) = spawn_with_packages().await;
@@ -2595,8 +2595,8 @@ fn staged_uploads(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 /// An upload that stops arriving is answered `408` and leaves nothing staged behind: the floor
-/// on every body holds on the Operator plane's longest route too (SEC-tls13-two-planes-bounded-input §18).
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// on every body holds on the Operator plane's longest route too (SEC-tls13-bounded-input-chosen-planes §18).
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn an_upload_that_stops_is_answered_408_and_leaves_nothing_staged() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -2842,7 +2842,7 @@ async fn an_upload_in_progress_counts_against_the_ceiling_and_a_cancelled_one_le
 /// A member over its rate is answered `429` with `Retry-After: 30` and not served the artifact;
 /// once its bucket refills the download is served again, and the refusals counted no failure
 /// toward the failed-admission throttle, which here backs off after a single one.
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_download_past_the_limit_is_answered_429_after_thirty_seconds() {
     opamp::tls::install_ring_provider();

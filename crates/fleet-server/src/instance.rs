@@ -1,5 +1,5 @@
 //! A Server instance on PostgreSQL
-//! (SRV-instances-share-one-postgresql §1–§3, §9 and §10):
+//! (SRV-instance-opens-chosen-planes §1–§3, §9 and §10):
 //! the lease it holds while it serves, the planes it opens only while it
 //! holds one, and the changes of other instances it takes up.
 //!
@@ -49,7 +49,7 @@ pub type Held = watch::Receiver<Option<String>>;
 
 /// Whether the lease is still held by the clock it is measured on, read at the moment of asking:
 /// what each request on either plane and each message of an Agent checks before it is answered
-/// (SRV-instances-share-one-postgresql §3).
+/// (SRV-instance-opens-chosen-planes §3).
 /// The lease thread reads the clock only every [`CHECKED_EVERY`], and after a suspend
 /// this answers at once.
 #[derive(Clone)]
@@ -234,7 +234,7 @@ impl Lease {
     }
 
     /// The revocation list's version as each renewal reads it
-    /// (SRV-instances-share-one-postgresql §10),
+    /// (SRV-instance-opens-chosen-planes §10),
     /// for [`follow`] to compare with the one the instance holds.
     #[must_use]
     pub fn list_versions(&self) -> watch::Receiver<Option<u64>> {
@@ -435,7 +435,7 @@ async fn sleep_until(clock: &Elapsed, at: Duration) {
 /// id, and renews that. Ends, and with it what `held` sends, once the exclusive lock of an
 /// instance that must be alone is lost, or once a new lease finds a schema that needs a newer
 /// Server: such an instance takes it again only when it is started again
-/// (SRV-instances-share-one-postgresql §2).
+/// (SRV-instance-opens-chosen-planes §2).
 async fn renew(lease: &Renewing, taken: Taken) {
     let Renewing {
         database,
@@ -550,7 +550,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
                 }
                 // A schema migrated by a newer Server while this one held no lease, or a live
                 // lease that names another audit key: it stops, as at a failed start
-                // (SRV-instances-share-one-postgresql §16,
+                // (SRV-instance-opens-chosen-planes §16,
                 // and SEC-append-only-audit-record §16).
                 Err(e) if database.outdated().is_some() => {
                     error!(
@@ -570,7 +570,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
 }
 
 /// Takes over the leases that lapsed, after a renewal sent at `sent`
-/// (SRV-instances-share-one-postgresql §18),
+/// (SRV-instance-opens-chosen-planes §18),
 /// closing their audit chains; bounded by half a renewal interval, so a database that
 /// does not answer delays the next renewal by no more than that, well inside the lease. Answers
 /// whether it took over any.
@@ -618,12 +618,12 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 }
 
 /// Takes up the changes other instances commit
-/// (SRV-instances-share-one-postgresql §9 and §10):
+/// (SRV-instance-opens-chosen-planes §9 and §10):
 /// for each one announced, what its kind concerns is read again. A revocation, a
 /// Host or a register entry has the ledger read again, and the sessions check themselves against it
 /// (SEC-admission-by-client-certificate §32), and a binding of a Host that changed has the groups of that Host placed
 /// again; a Client Agent first arrived over a Gateway's Host has the Gateway's groups placed again
-/// (SRV-instances-share-one-postgresql §8);
+/// (SRV-instance-opens-chosen-planes §8);
 /// a floor has the floors read again; an enrolment request or the window has the window
 /// and its queue read again, and the connections waiting on them answered; a Configuration, a
 /// Deployment or a Package has its store read again
@@ -639,7 +639,7 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
 /// notification that was missed without the connection ending, and a notice that was to follow a
 /// commit but was never sent, as when its instance ended between the two, are caught within one
 /// renewal
-/// (SRV-instances-share-one-postgresql §9 and §10).
+/// (SRV-instance-opens-chosen-planes §9 and §10).
 /// The revocation list's version the renewal read is compared with the one
 /// held, and a version that moved is logged.
 pub fn follow(
@@ -752,7 +752,7 @@ pub(crate) fn take_up_held_for(state: &AppState, heard: &[Heard]) -> Result<(), 
 /// (SRV-fleet-record-agents-hosts §4). A batch that fails is logged, and what
 /// it held is written with the next one. A batch written later than its interval after it was
 /// due is logged as a warning naming how late it was
-/// (SRV-instances-share-one-postgresql §5).
+/// (SRV-instance-opens-chosen-planes §5).
 /// The batches run until they are stopped.
 pub fn write_presence(state: Arc<AppState>, held: Held, interval: Duration) -> PresenceBatches {
     let (stop, mut stopped) = tokio::sync::oneshot::channel();
@@ -1305,7 +1305,7 @@ async fn bind_again(
 }
 
 /// The instance id the log names
-/// (SRV-instances-share-one-postgresql §1):
+/// (SRV-instance-opens-chosen-planes §1):
 /// the one the instance makes at startup, once its store is known to be PostgreSQL and
 /// before it takes its first lease under it; then the one of each new lease. Between a lost lease
 /// and the next it names the lost one, so every line names an instance. A line logged before the
@@ -1409,7 +1409,7 @@ mod tests {
 
     /// A request is served while the lease is held by its clock, and answered `503` once the clock
     /// has jumped past its lapse, as after a suspend, though nothing else has noticed yet.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn a_request_is_answered_503_once_the_leases_clock_has_passed_its_lapse() {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -1619,7 +1619,7 @@ mod tests {
 
     /// A presence batch written later than its interval after it was due is logged as a warning
     /// naming how late it was.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn a_presence_batch_written_late_is_logged_with_how_late() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1655,7 +1655,7 @@ mod tests {
     }
 
     /// A presence batch written within its interval logs no lateness.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn a_presence_batch_written_in_time_logs_no_lateness() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1766,8 +1766,8 @@ mod tests {
     /// Each line names the instance id of the lease the instance holds, and none while it holds
     /// none; a line that names an instance id of its own names it once, as the lease's take and
     /// takeover do
-    /// (SRV-instances-share-one-postgresql §1).
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// (SRV-instance-opens-chosen-planes §1).
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn each_line_names_the_instance_id_of_the_lease_held() {
         let id = LoggedId::default();
@@ -1795,7 +1795,7 @@ mod tests {
 
     /// The log follows the lease: the id it holds and each new one, and the last one while the
     /// lease is lost or can be held no more, so every line names an instance.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn the_logged_id_follows_the_lease() {
         let (held, watched) = tokio::sync::watch::channel(Some("a1".to_string()));
@@ -1876,8 +1876,8 @@ mod tests {
 
     /// What is heard before a read starts is answered by one read, and each kind has what it
     /// concerns read again and nothing else
-    /// (SRV-instances-share-one-postgresql §9 and §19).
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// (SRV-instance-opens-chosen-planes §9 and §19).
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn what_is_heard_at_once_is_answered_by_one_read_of_what_it_concerns() {
         assert_eq!(
@@ -1999,8 +1999,8 @@ mod tests {
 
     /// A listening connection made again, and a notification of a kind the instance does not
     /// know, have everything read again
-    /// (SRV-instances-share-one-postgresql §10).
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// (SRV-instance-opens-chosen-planes §10).
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn a_missed_or_unknown_notification_has_everything_read_again() {
         assert_eq!(
@@ -2012,7 +2012,7 @@ mod tests {
 
     /// A read that fails is tried again, each wait longer, until one holds, together with what was
     /// heard meanwhile.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[tokio::test]
     async fn a_read_that_fails_is_tried_again_until_one_holds() {
         let (heard, hearing) = tokio::sync::mpsc::unbounded_channel();

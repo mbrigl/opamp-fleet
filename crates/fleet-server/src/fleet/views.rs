@@ -88,7 +88,7 @@ impl AppState {
 
     /// The REST view of the fleet (`GET /api/v1/agents`), read as [`read_fleet`](Self::read_fleet)
     /// reads it: on a shared store from the database, each Agent connected as its stored presence
-    /// says (SRV-instances-share-one-postgresql §13).
+    /// says (SRV-instance-opens-chosen-planes §13).
     ///
     /// # Errors
     /// Returns an error when the shared store cannot be read.
@@ -531,7 +531,7 @@ pub struct AgentView {
     /// Gateway's.
     pub host: String,
     /// The instance id of the instance that holds it under a live lease
-    /// (SRV-instances-share-one-postgresql §13);
+    /// (SRV-instance-opens-chosen-planes §13);
     /// empty without one, and always on the filesystem store.
     pub holder: String,
     /// The host name that instance's lease records; empty when `holder` is.
@@ -1419,7 +1419,7 @@ mod tests {
     /// On PostgreSQL an Agent's view and a rollout to it read the Agent and the Agents bound to its
     /// Host, not the whole fleet, and the view inherits the labels of its Client Agent, which this
     /// instance does not hold either.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_agents_view_and_a_rollout_to_it_read_its_host_and_not_the_fleet() {
         let Some(test) = crate::postgres::testing::TestDatabase::named() else {

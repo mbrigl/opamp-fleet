@@ -295,7 +295,7 @@ mod tests {
         within(&FsBootstrapStore::open(dir.path()).expect("open"));
     }
 
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_issuance_within_the_bound_holds_on_postgres() {
         let Some(test) = TestDatabase::named() else {
@@ -306,7 +306,7 @@ mod tests {
 
     /// Two instances issue a bootstrap certificate each with one place left on record, behind a
     /// barrier, and exactly one is kept.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn two_issuers_at_the_bound_keep_one_certificate_between_them() {
         let Some(test) = TestDatabase::named() else {

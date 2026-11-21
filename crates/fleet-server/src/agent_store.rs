@@ -182,7 +182,7 @@ pub struct StoredAgent {
     /// `false` on a store that keeps no presence.
     pub connected: bool,
     /// The instance its presence names, while that instance has a live lease
-    /// (SRV-instances-share-one-postgresql §13);
+    /// (SRV-instance-opens-chosen-planes §13);
     /// `None` on a store that keeps no presence.
     pub holder: Option<Holder>,
 }
@@ -267,7 +267,7 @@ pub struct AgentPage {
 }
 
 /// What [`AgentStore::take`] found of the holder it replaced
-/// (SRV-instances-share-one-postgresql §8).
+/// (SRV-instance-opens-chosen-planes §8).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Taken {
     /// The other instance the stored presence named as the holder, by the id of its lease; `None`
@@ -334,7 +334,7 @@ pub trait AgentStore: Send + Sync {
 
     /// The record of `uid` as stored now, `None` when none is: what an instance reads again when
     /// another instance announced a change to it
-    /// (SRV-instances-share-one-postgresql §9).
+    /// (SRV-instance-opens-chosen-planes §9).
     /// The default reads every record through [`load`](Self::load), as a store that
     /// is its only writer may; a shared store, and a wrapper of one, overrides it, or each read
     /// reads the whole fleet.
@@ -510,7 +510,7 @@ pub trait AgentStore: Send + Sync {
     /// A shared store announces a write that makes the record a Client Agent behind a Gateway's
     /// Host, which the stored record was not, named by the Host, right after the write commits, so
     /// every other Server places the Gateway's groups again
-    /// (SRV-instances-share-one-postgresql §8 and §9).
+    /// (SRV-instance-opens-chosen-planes §8 and §9).
     /// A store whose one Server is its only writer has no one to tell.
     ///
     /// # Errors
@@ -527,7 +527,7 @@ pub trait AgentStore: Send + Sync {
     /// Servers' clocks differ (SRV-fleet-record-agents-hosts §2), and only where the stored sequence number is not
     /// higher than the record's, so a Server that still holds the row as it stops leaves a newer
     /// report another Server wrote meanwhile
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     /// `holder`
     /// is the instance id of this Server's lease, `None` without one, and `take` is `None` where
     /// this Server was answered none. Answers whether it wrote the record. A store whose one
@@ -623,7 +623,7 @@ pub trait AgentStore: Send + Sync {
     /// the holder it replaced is another Server, live lease or not, so that one stops carrying it,
     /// and counts each change of holder, so the take that makes it change more than ten times
     /// within a minute says so
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     /// Answers `None` when there is no record. A store whose one Server holds every
     /// presence in memory keeps none, and writes nothing.
     ///
@@ -642,7 +642,7 @@ pub trait AgentStore: Send + Sync {
     /// The holder each stored presence of `uids` names, by the id of its lease, `None` where it
     /// names none; a record not stored is left out. What an instance that heard of a take reads
     /// to decide whether it still carries the Agent
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     ///
     /// # Errors
     /// Returns an error when the records cannot be read, and on a store that keeps no presence.
@@ -659,7 +659,7 @@ pub trait AgentStore: Send + Sync {
     /// not know whether its take was written, since its answer was lost, reads before it writes the
     /// Agent's disconnect under the count it read. A database adapter reads them under a share
     /// lock, which waits for a take still in flight
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     ///
     /// # Errors
     /// Returns an error when the records cannot be read, and on a store that keeps no presence.
@@ -713,7 +713,7 @@ pub trait AgentStore: Send + Sync {
     /// same: the record is stored under `new` and no longer under `old`. What an instance whose
     /// re-key lost its answer reads back before it answers the Agent; a database adapter waits for
     /// a move of the record still in flight
-    /// (SRV-instances-share-one-postgresql §10).
+    /// (SRV-instance-opens-chosen-planes §10).
     ///
     /// # Errors
     /// Returns an error when the records cannot be read; the outcome is then not known.

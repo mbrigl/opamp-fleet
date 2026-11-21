@@ -1,5 +1,5 @@
 //! The lease every instance on one database holds while it serves
-//! (SRV-instances-share-one-postgresql §1–§3).
+//! (SRV-instance-opens-chosen-planes §1–§3).
 //!
 //! A lease is a row of `leases` whose `expires_at` the database sets from its own clock, so every
 //! instance reads one time. An instance takes one under a new instance id before it opens either
@@ -64,7 +64,7 @@ pub struct Terms {
 #[derive(Clone, Copy, Debug)]
 pub struct Renewal {
     /// The revocation list's version as the database held it at the renewal
-    /// (SRV-instances-share-one-postgresql §10).
+    /// (SRV-instance-opens-chosen-planes §10).
     pub list_version: u64,
     /// The planes the live leases serve at the renewal, this one's among them
     /// (SRV-instance-opens-chosen-planes §26).
@@ -106,7 +106,7 @@ impl Database {
     ///
     /// The lease is taken under the migrations' lock and refused, naming both versions, on a
     /// schema that needs a newer Server than this instance's release, which it records
-    /// (SRV-instances-share-one-postgresql §16).
+    /// (SRV-instance-opens-chosen-planes §16).
     /// Such a refusal is kept: [`Database::outdated`] answers it from then on.
     ///
     /// # Errors
@@ -150,7 +150,7 @@ impl Database {
             // The schema again, under the migrations' lock: of this lease and a migration that
             // runs at once, the one later sees the other, so no instance serves on a schema it
             // does not understand
-            // (SRV-instances-share-one-postgresql §16).
+            // (SRV-instance-opens-chosen-planes §16).
             transaction
                 .execute(
                     &format!("SELECT pg_advisory_xact_lock({MIGRATION_LOCK})"),
@@ -354,7 +354,7 @@ impl Database {
     /// Takes over every lease other than `instance_id`'s that has lapsed, waiting at most `bound`
     /// for the answer, the lines it writes exported as `terms` say: what an instance does after
     /// each renewal
-    /// (SRV-instances-share-one-postgresql §18).
+    /// (SRV-instance-opens-chosen-planes §18).
     /// Each lease is removed in one transaction with the closing of its audit chain,
     /// `closed_by` the chain of `instance_id`; the removal locks the lease, so one instance alone
     /// takes it. Answers the leases taken over.
@@ -528,7 +528,7 @@ mod tests {
 
     /// Two instances that share the database each take a lease of their own and renew it; a lease
     /// that lapsed is renewed no more, and a released one is gone.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn instances_that_share_the_database_each_hold_a_lease() {
         let Some(test) = TestDatabase::named() else {
@@ -664,7 +664,7 @@ mod tests {
     /// An instance that must be alone fails startup while another live lease exists, naming the
     /// key and the number of leases; an instance that shares the database fails while one holds it
     /// alone; one that had to be alone and is gone has its lease taken over.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn an_instance_that_must_be_alone_is_alone() {
         let Some(test) = TestDatabase::named() else {
@@ -751,7 +751,7 @@ mod tests {
 
     /// A lease that lapsed is taken over by the next instance that takes one, which names it; a
     /// live lease of an instance that shares the database is not.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_lapsed_lease_is_taken_over_and_named() {
         let Some(test) = TestDatabase::named() else {
@@ -810,8 +810,8 @@ mod tests {
     /// An instance that takes over the lapsed lease of another logs its own instance id and the
     /// lapsed one as a takeover; one that takes a new lease after losing its own logs the lapsed
     /// one as its own, never as an instance that is gone
-    /// (SRV-instances-share-one-postgresql §1 and §3).
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// (SRV-instance-opens-chosen-planes §1 and §3).
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[test]
     fn a_take_names_a_lapsed_lease_as_a_takeover_or_as_its_own() {
         let Some(test) = TestDatabase::named() else {

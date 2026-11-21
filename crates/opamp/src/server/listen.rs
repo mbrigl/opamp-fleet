@@ -1,5 +1,5 @@
 //! The listener an OpAMP endpoint is served on (DEV-six-crates-tokio-axum): TLS from the material the application
-//! hands it, the bounds on connection setup of SEC-tls13-two-planes-bounded-input, and what the handshake learned carried
+//! hands it, the bounds on connection setup of SEC-tls13-bounded-input-chosen-planes, and what the handshake learned carried
 //! into every request.
 //!
 //! Every other limit an endpoint enforces starts at a request. A peer that completes the TCP
@@ -50,13 +50,13 @@ pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// ([`Listener::with_max_connections`]).
 pub const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
 
-/// The HTTP/2 streams one connection may have open at once (SEC-tls13-two-planes-bounded-input).
+/// The HTTP/2 streams one connection may have open at once (SEC-tls13-bounded-input-chosen-planes).
 pub const H2_MAX_CONCURRENT_STREAMS: u32 = 100;
 
-/// How often an HTTP/2 connection is pinged (SEC-tls13-two-planes-bounded-input).
+/// How often an HTTP/2 connection is pinged (SEC-tls13-bounded-input-chosen-planes).
 pub const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// How long a ping may go unanswered before the HTTP/2 connection is dropped (SEC-tls13-two-planes-bounded-input).
+/// How long a ping may go unanswered before the HTTP/2 connection is dropped (SEC-tls13-bounded-input-chosen-planes).
 pub const H2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long the TLS handshake may take before the connection is dropped — `axum_server`'s default,
@@ -68,7 +68,7 @@ pub const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// It is `axum_server`'s handle plus what that one cannot reach: the WebSocket sessions, which
 /// outlive the HTTP connection they were upgraded from and so are not counted by its drain. A
-/// shutdown tells them at once, and the same deadline bounds them (SEC-tls13-two-planes-bounded-input §17).
+/// shutdown tells them at once, and the same deadline bounds them (SEC-tls13-bounded-input-chosen-planes §17).
 #[derive(Clone, Debug)]
 pub struct Handle {
     server: axum_server::Handle<SocketAddr>,
@@ -111,7 +111,7 @@ impl Handle {
 
     /// Stops accepting at once and tells each WebSocket session to close at an instant drawn
     /// uniformly over `over`
-    /// (SRV-instances-share-one-postgresql §3),
+    /// (SRV-instance-opens-chosen-planes §3),
     /// so the
     /// peers come back spread rather than all at once; what is still open [`SPREAD_GRACE`] after
     /// the window is cut. A window of zero tells them all at once.
@@ -297,7 +297,7 @@ impl Listener {
     }
 
     /// Sets the floor on the pace of bodies and messages, [`PACE_WINDOW`] and [`MIN_PACE_BYTES`]
-    /// unless stated. For a test to drive it short: the floor is no setting (SEC-tls13-two-planes-bounded-input §18).
+    /// unless stated. For a test to drive it short: the floor is no setting (SEC-tls13-bounded-input-chosen-planes §18).
     #[doc(hidden)]
     #[must_use]
     pub fn with_pace(mut self, window: Duration, min_bytes: u64) -> Self {
@@ -306,7 +306,7 @@ impl Listener {
     }
 
     /// Caps the connections held at once. A connection past the cap is closed on accept, before
-    /// any TLS handshake, and the ones already held keep working (SEC-tls13-two-planes-bounded-input).
+    /// any TLS handshake, and the ones already held keep working (SEC-tls13-bounded-input-chosen-planes).
     #[must_use]
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
@@ -314,7 +314,7 @@ impl Listener {
     }
 
     /// Takes at most `rate` new connections a second
-    /// (SEC-tls13-two-planes-bounded-input §4). A connection past it is served
+    /// (SEC-tls13-bounded-input-chosen-planes §4). A connection past it is served
     /// nothing but `503` with a `Retry-After` of whole seconds drawn from 1 to 30, so a fleet that
     /// comes back at once is spread rather than turned away together; the connections already
     /// held keep working. Without it, a listener takes new connections as fast as they come; a rate
@@ -405,7 +405,7 @@ impl Listener {
 
 /// The header-read bound, with the timer it needs first: without the timer hyper discards the
 /// default, and with the timeout set but no timer it panics. HTTP/2 has no header phase to time,
-/// so it is bounded by its streams and its pings instead (SEC-tls13-two-planes-bounded-input). Before either, hyper reads the
+/// so it is bounded by its streams and its pings instead (SEC-tls13-bounded-input-chosen-planes). Before either, hyper reads the
 /// first bytes to tell the two apart with no timer of its own, so a peer that falls silent before
 /// its first request, after the TCP connection or the TLS handshake, would hold its slot of the
 /// cap for good; the same bound covers the time to the first request.
@@ -677,7 +677,7 @@ mod tests {
 
     /// A bucket of 200 a second takes exactly 200 new connections at one instant and refuses the
     /// rest, then takes 10 more after 50 ms: the rate, without the timing of a real listener.
-    /// Verifies: SEC-tls13-two-planes-bounded-input
+    /// Verifies: SEC-tls13-bounded-input-chosen-planes
     #[test]
     fn the_bucket_takes_its_rate_and_refills_at_it() {
         let mut bucket = Bucket::new(200);

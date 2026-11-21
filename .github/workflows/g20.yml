@@ -2,7 +2,7 @@ name: G-20
 
 # The tests that decide G-20 (docs/SPECIFICATION.md): three Server instances behind a layer-4
 # balancer that keeps the peer's address, on PostgreSQL and S3, one of them killed, in another run
-# frozen, under 10 000 simulated Agents (SRV-instances-share-one-postgresql §20 and the
+# frozen, under 10 000 simulated Agents (SRV-instance-opens-chosen-planes §20 and the
 # Enforcement); the same fleet on three Agent-plane instances, one of them killed, while an
 # Operator-plane instance answers within 2 seconds (SRV-instance-opens-chosen-planes); and the
 # presence and notifications of 100 000 simulated Agents for ten minutes.

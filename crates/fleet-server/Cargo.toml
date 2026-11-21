@@ -1,6 +1,6 @@
 [package]
 name = "fleet-server"
-description = "OpAMP Fleet Server: dual-transport OpAMP endpoint, REST API, and bundled UI (DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input)"
+description = "OpAMP Fleet Server: dual-transport OpAMP endpoint, REST API, and bundled UI (DEV-six-crates-tokio-axum, SEC-tls13-bounded-input-chosen-planes)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -71,12 +71,12 @@ deadpool-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
 # SEC-secrets-wiped-on-drop: the CA keys, the keys sealed into a PKCS#12 file, a bootstrap password and a Basic
 # password before it is verified are held in buffers wiped on drop. No TLS or crypto backend comes
-# with it (SEC-tls13-two-planes-bounded-input).
+# with it (SEC-tls13-bounded-input-chosen-planes).
 zeroize.workspace = true
 
 [dev-dependencies]
 # A Gateway in front of two instances in one test process
-# (SRV-instances-share-one-postgresql §21).
+# (SRV-instance-opens-chosen-planes §21).
 # The Client depends on the Server only for its own tests, so this is no cycle.
 fleet-agent = { path = "../fleet-agent" }
 tokio-tungstenite.workspace = true

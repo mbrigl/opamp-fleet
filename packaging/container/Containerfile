@@ -1,4 +1,4 @@
-# The Server's image (OPS-releases-attestations-server-image): the binary the
+# The Server's image (OPS-releases-image-probed-by-plane): the binary the
 # release built and checked, on a distroless glibc base, and nothing else.
 #
 # No `RUN`: the image copies a binary that already exists, so a multi-architecture build needs no

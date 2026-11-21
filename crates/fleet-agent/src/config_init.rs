@@ -1,7 +1,7 @@
 //! The configuration file the questionnaire writes and edits — `service install --interactive`
 //! and `service config` (CLT-installed-service-and-state).
 //!
-//! A release artifact is the bare binary (OPS-releases-attestations-server-image), so a fresh host has nothing to copy from, and
+//! A release artifact is the bare binary (OPS-releases-image-probed-by-plane), so a fresh host has nothing to copy from, and
 //! [`ClientConfig::load`](crate::config::ClientConfig::load) answers a missing file with the
 //! development defaults — a service that installs, starts, dials `127.0.0.1`, and manages nothing.
 //! This module is the way out of that state: it asks the handful of questions a fresh host cannot
@@ -208,13 +208,13 @@ impl Beside {
 /// that is right on a fresh host, and is written as a comment rather than as a value (SEC-bootstrap-certificates-and-enrolment).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answers {
-    /// The Server's OpAMP endpoint; its scheme selects the transport (SEC-tls13-two-planes-bounded-input).
+    /// The Server's OpAMP endpoint; its scheme selects the transport (SEC-tls13-bounded-input-chosen-planes).
     pub endpoint: String,
     /// The operator's name for this Client, reported as `service.instance.name` (CLT-what-an-agent-reports) — which
     /// of the fleet's Clients this is. Not its `service.name`: that is the Agent *type*, the
     /// constant `supervisor` (CLT-installed-service-and-state), the same on every host and nothing to ask about.
     pub name: String,
-    /// The CA that signed the Server's certificate, for a `wss://` / `https://` endpoint (SEC-tls13-two-planes-bounded-input).
+    /// The CA that signed the Server's certificate, for a `wss://` / `https://` endpoint (SEC-tls13-bounded-input-chosen-planes).
     /// The questionnaire always asks for it there; `None` for a loopback `ws://` / `http://`
     /// endpoint, or where no question was put — a packaged install.
     pub ca_file: Option<PathBuf>,

@@ -35,7 +35,7 @@ hex.workspace = true
 ring.workspace = true
 time.workspace = true
 # The key a `bootstrap.p12` opens to is held in a buffer wiped on drop (SEC-secrets-wiped-on-drop). No TLS or
-# crypto backend comes with zeroize itself (SEC-tls13-two-planes-bounded-input).
+# crypto backend comes with zeroize itself (SEC-tls13-bounded-input-chosen-planes).
 zeroize.workspace = true
 # What the Server and the operator program do alike on a PKCS#11 token (SEC-admission-by-client-certificate, OPS-operator-program-fleetctl §5),
 # behind the `pkcs11` feature: only those two turn it on, so the Client does not build it.

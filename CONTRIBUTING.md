@@ -316,7 +316,7 @@ or transfer:
 - after the first release that pushes the Server's image, set the package
   **`opamp-fleet-server`** on `ghcr.io` to **public** and linked to this repository: a package a
   workflow publishes for the first time is private, and operators pull the image without an account
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)).
+  ([OPS-releases-image-probed-by-plane](docs/adr/OPS-releases-image-probed-by-plane.md)).
 
 [`scripts/sensor-repo-settings.sh`](scripts/sensor-repo-settings.sh) reads these settings
 through `gh` and reports each one that differs from this list. It runs on a human's

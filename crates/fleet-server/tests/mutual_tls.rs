@@ -170,7 +170,7 @@ struct Setup<'a> {
     revocations: bool,
     /// The audit record (SEC-append-only-audit-record).
     audit: Option<Arc<dyn fleet_server::audit::Audit>>,
-    /// `[agent_rate_limit]` (SEC-tls13-two-planes-bounded-input).
+    /// `[agent_rate_limit]` (SEC-tls13-bounded-input-chosen-planes).
     agent_rate: Option<fleet_server::agent_rate::Limits>,
     /// `max_agents`.
     max_agents: Option<usize>,
@@ -180,7 +180,7 @@ struct Setup<'a> {
     packages: bool,
     /// The bootstrap CA's key on the Server, which then issues bootstrap certificates (SEC-bootstrap-certificates-and-enrolment).
     issue_bootstrap: bool,
-    /// The CA of `[rest.tls]`: the Operator plane then serves a certificate it issued (SEC-tls13-two-planes-bounded-input).
+    /// The CA of `[rest.tls]`: the Operator plane then serves a certificate it issued (SEC-tls13-bounded-input-chosen-planes).
     operator_pki: Option<&'a Pki>,
     /// `[enrolment] max_pending_per_bootstrap` (SEC-bootstrap-certificates-and-enrolment); its default when `None`.
     max_pending_per_bootstrap: Option<usize>,
@@ -226,7 +226,7 @@ struct Served {
     config_dir: std::path::PathBuf,
 }
 
-/// Serves both planes over TLS on ephemeral ports (SEC-tls13-two-planes-bounded-input), the Agent plane requiring a client
+/// Serves both planes over TLS on ephemeral ports (SEC-tls13-bounded-input-chosen-planes), the Agent plane requiring a client
 /// certificate in the handshake (SEC-admission-by-client-certificate) and the Operator plane asking for none, exactly as the
 /// binary builds them.
 async fn serve(pki: &Pki, setup: Setup<'_>) -> Served {
@@ -502,9 +502,9 @@ async fn post(
 
 /// The handshake half: a peer without a certificate, or with one from a CA the Server does not
 /// trust, never reaches the Agent plane — neither the OpAMP endpoint nor the package download —
-/// while the Operator plane on its own listener serves a browser that presents none (SEC-tls13-two-planes-bounded-input,
+/// while the Operator plane on its own listener serves a browser that presents none (SEC-tls13-bounded-input-chosen-planes,
 /// SEC-admission-by-client-certificate).
-/// Verifies: SEC-admission-by-client-certificate, SEC-tls13-two-planes-bounded-input, PKG-signed-packages-and-delivery, G-17
+/// Verifies: SEC-admission-by-client-certificate, SEC-tls13-bounded-input-chosen-planes, PKG-signed-packages-and-delivery, G-17
 #[tokio::test]
 async fn a_client_certificate_is_required_in_the_handshake_on_the_agent_plane() {
     let pki = Pki::new();
@@ -3406,7 +3406,7 @@ async fn a_bootstrap_certificate_is_not_handed_the_list() {
     );
 }
 
-// ---- The rate limit on the Agent plane (SEC-tls13-two-planes-bounded-input) ----
+// ---- The rate limit on the Agent plane (SEC-tls13-bounded-input-chosen-planes) ----
 
 /// A clock a test moves by hand, started at the real time so certificates and entries read true.
 struct Manual(std::sync::atomic::AtomicU64);
@@ -3585,7 +3585,7 @@ impl fleet_server::audit_log::AuditStore for Lines {
 /// from one address the rest are counted in `agent_rate.throttled.aggregated`. The record runs on
 /// the Server's frozen clock, so every refusal falls into one second: ten are written and the
 /// other fifteen are counted once the clock has moved past it.
-/// Verifies: SEC-tls13-two-planes-bounded-input, SEC-append-only-audit-record
+/// Verifies: SEC-tls13-bounded-input-chosen-planes, SEC-append-only-audit-record
 #[tokio::test]
 async fn a_throttled_message_leaves_an_aggregated_refusal_naming_the_host() {
     const REFUSED: u64 = 25;
@@ -3775,7 +3775,7 @@ async fn one_bootstrap_certificate_holds_at_most_its_share_of_the_queue() {
 /// Each `Unavailable` this Server sends carries the `instance_uid` of the message it answers — the
 /// field the Client and a Gateway route a reply by: the rate limit's, the Agent-record ceiling's, a
 /// CSR held back for its record, the full enrolment queue and the closed enrolment window.
-/// Verifies: SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate, SEC-append-only-audit-record
+/// Verifies: SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate, SEC-append-only-audit-record
 #[tokio::test]
 async fn every_unavailable_reply_names_the_agent_it_answers() {
     let names_its_agent = |reply: &ServerToAgent, uid: &InstanceUid, case: &str| {
@@ -4312,7 +4312,7 @@ async fn a_malformed_token_is_answered_400_before_the_offer_is_tested() {
 
 /// A download takes a token from the bucket of the host its certificate names — the bucket its
 /// Agent's messages draw on.
-/// Verifies: PKG-signed-packages-and-delivery, SEC-tls13-two-planes-bounded-input
+/// Verifies: PKG-signed-packages-and-delivery, SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn a_download_costs_a_token_of_the_hosts_bucket() {
     let pki = Pki::new();
@@ -5190,8 +5190,8 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// With `[rest.tls]` the Operator plane serves the certificate the operator's own PKI issued, and
 /// the Agent plane keeps `[tls]`'s: a browser trusts the one, a Client the other, and neither
 /// trust reaches the other plane. Without the section both planes serve `[tls]`'s
-/// (SEC-tls13-two-planes-bounded-input §9 and §10).
-/// Verifies: SEC-tls13-two-planes-bounded-input
+/// (SEC-tls13-bounded-input-chosen-planes §9 and §10).
+/// Verifies: SEC-tls13-bounded-input-chosen-planes
 #[tokio::test]
 async fn the_operator_plane_serves_its_own_certificate_and_the_agent_plane_keeps_the_fleets() {
     let pki = Pki::new();
@@ -6765,7 +6765,7 @@ impl fleet_server::agent_store::AgentStore for HeldWrite {
 /// completes and its report is answered: the report runs off the runtime's workers, so the one
 /// worker of the Server's runtime here stays free, and the fleet lock is not held across the
 /// call.
-/// Verifies: SRV-instances-share-one-postgresql
+/// Verifies: SRV-instance-opens-chosen-planes
 #[test]
 fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_call_waits() {
     let pki = Pki::new();
@@ -6839,7 +6839,7 @@ fn a_handshake_completes_and_a_report_is_answered_while_another_reports_store_ca
 /// An Agent whose report waits for its store call is answered a WebSocket ping on the same
 /// connection meanwhile, so a stall of the Server's handling ends no live connection for silence;
 /// its reply follows once the call is let go.
-/// Verifies: SRV-instances-share-one-postgresql
+/// Verifies: SRV-instance-opens-chosen-planes
 #[test]
 fn a_ping_is_answered_on_a_connection_whose_report_waits_for_its_store_call() {
     let pki = Pki::new();

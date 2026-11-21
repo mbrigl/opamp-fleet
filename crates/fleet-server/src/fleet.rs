@@ -138,7 +138,7 @@ pub struct AgentRecord {
     /// When the connection that carries it last carried a report of it, in milliseconds since the
     /// epoch — runtime-only. An older connection of its host takes it back once this is a
     /// heartbeat interval old
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     pub carried_ms: u64,
     /// Whether this Server heard the Agent report since it started — runtime-only. What it holds
     /// of one it did not is what it loaded, which on a shared store another instance may have
@@ -153,7 +153,7 @@ pub struct AgentRecord {
     /// Where the Host and the Client Agent place this Agent — derived, never persisted.
     pub placement: Placement,
     /// The instance that holds it, as a shared store read it
-    /// (SRV-instances-share-one-postgresql §13);
+    /// (SRV-instance-opens-chosen-planes §13);
     /// `None` for what this Server holds in memory.
     pub holder: Option<crate::agent_store::Holder>,
     /// What the operator's last rollout released to this Agent (SRV-deployments-and-pinned-rollouts §6). **Every offer
@@ -431,7 +431,7 @@ pub trait Clock: Send + Sync {
 }
 
 /// The port of the time that has passed, as a lease and a sweep measure it
-/// (SRV-instances-share-one-postgresql §3,
+/// (SRV-instance-opens-chosen-planes §3,
 /// SRV-state-stores-contract-pair §14): a clock that counts the time the host was suspended, which the
 /// binary hands the lease and the package store (on Linux `CLOCK_BOOTTIME`). A reading is the time since an origin of the
 /// clock's own: two readings of one clock compare, readings of two clocks do not. The adapters'
@@ -557,7 +557,7 @@ pub struct AppState {
     floors: Option<Arc<crate::floors::PackageFloors>>,
     /// The audit record every security decision goes to (SEC-append-only-audit-record); `None` only in tests.
     audit: Option<Arc<dyn Audit>>,
-    /// How often an admitted peer may be heard (SEC-tls13-two-planes-bounded-input); `None` only in tests.
+    /// How often an admitted peer may be heard (SEC-tls13-bounded-input-chosen-planes); `None` only in tests.
     agent_rate: Option<Arc<crate::agent_rate::AgentRate>>,
     /// When an Agent is heard from, and how long ago that was.
     clock: Box<dyn Clock>,
@@ -644,7 +644,7 @@ impl AppState {
         //
         // On a shared store an instance holds only the Agents it carries, each loaded at its first
         // report here, and loads none at startup
-        // (SRV-instances-share-one-postgresql §8).
+        // (SRV-instance-opens-chosen-planes §8).
         let mut fleet = HashMap::new();
         let mut written = HashMap::new();
         let restored = if agent_store.is_shared() {
@@ -785,7 +785,7 @@ impl AppState {
 
     /// Answers the messages of Agents only while `holds` answers that the lease is held by its
     /// clock
-    /// (SRV-instances-share-one-postgresql §3).
+    /// (SRV-instance-opens-chosen-planes §3).
     /// Set once; a later call is ignored.
     pub fn answer_while(&self, holds: impl Fn() -> bool + Send + Sync + 'static) {
         let _ = self.proof.set(Box::new(holds));
@@ -986,7 +986,7 @@ impl AppState {
         self.audit.as_ref()
     }
 
-    /// Arms the rate limit on the Agent plane (SEC-tls13-two-planes-bounded-input).
+    /// Arms the rate limit on the Agent plane (SEC-tls13-bounded-input-chosen-planes).
     #[must_use]
     pub fn with_agent_rate(
         mut self,

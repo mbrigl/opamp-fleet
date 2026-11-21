@@ -377,7 +377,7 @@ pub trait BootstrapStore: Send + Sync {
     /// [`put_with_p12`](Self::put_with_p12) does, unless `max` certificates valid at `now_ms` are on
     /// record already, and answers whether it did. The count is of what is stored, in the write,
     /// so the bound holds for every instance on one database
-    /// (SRV-instances-share-one-postgresql §19).
+    /// (SRV-instance-opens-chosen-planes §19).
     /// This body counts what it loads, for a store that is its only writer.
     ///
     /// # Errors

@@ -32,7 +32,7 @@ pub fn provider() -> CryptoProvider {
 }
 
 /// Installs [`provider`] as the process-wide rustls provider — ring, never a system library
-/// (SEC-tls13-two-planes-bounded-input) — once; later calls are no-ops. A binary calls it at startup, before anything builds
+/// (SEC-tls13-bounded-input-chosen-planes) — once; later calls are no-ops. A binary calls it at startup, before anything builds
 /// a TLS client. reqwest's `rustls-no-provider` feature refuses to build a client without a process
 /// provider, which is the guarantee that keeps aws-lc-rs and its cmake out of the build; and since
 /// reqwest builds its own configuration from this provider, it speaks TLS 1.3 alone too.
@@ -212,7 +212,7 @@ mod tests {
         assert!(!format!("{identity:?}").contains("PRIVATE KEY"));
     }
 
-    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-two-planes-bounded-input, SEC-connection-settings-never-plaintext, Q-3
+    /// Verifies: DEV-six-crates-tokio-axum, SEC-tls13-bounded-input-chosen-planes, SEC-connection-settings-never-plaintext, Q-3
     #[test]
     fn the_provider_offers_tls_1_3_suites_alone() {
         let provider = provider();

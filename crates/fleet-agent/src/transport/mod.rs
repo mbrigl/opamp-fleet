@@ -1,4 +1,4 @@
-//! The Client's upstream connection (SEC-tls13-two-planes-bounded-input, DEV-six-crates-tokio-axum). The connection itself — the transport,
+//! The Client's upstream connection (SEC-tls13-bounded-input-chosen-planes, DEV-six-crates-tokio-axum). The connection itself — the transport,
 //! its TLS, backoff, heartbeat, framing, limits, throttling, the goodbye — is `opamp::client`'s.
 //! What is the Client's is which material it is built from, in [`connection`], and [`Upstream`]:
 //! the session over the [`Engine`], with the flows that follow a reply.

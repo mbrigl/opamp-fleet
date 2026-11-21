@@ -1749,7 +1749,7 @@
       const KNOWN_ARCH = new Set(["amd64", "arm64", ...Object.keys(ARCH_ALIASES)]);
 
       // What an artifact's file name already says. A release is `<name><sep><version><sep><os>`
-      // `<sep><arch>.7z` (OPS-releases-attestations-server-image), and the last two fields are exactly the platform
+      // `<sep><arch>.7z` (OPS-releases-image-probed-by-plane), and the last two fields are exactly the platform
       // pair an entry is keyed by (PKG-signed-packages-and-delivery) — so naming the file answers the fields. The platform
       // is found by matching the known tokens at the end, not by splitting: `linux-x86_64` must
       // not come apart at its own underscore. A tail the vocabulary does not know returns null

@@ -1,9 +1,9 @@
 //! Entry point: load the configuration from `server.toml` and the environment (SRV-configuration-toml-and-environment), bind the
-//! two listeners (plain or TLS) — the Agent plane and the Operator plane (SEC-tls13-two-planes-bounded-input) — and serve
+//! two listeners (plain or TLS) — the Agent plane and the Operator plane (SEC-tls13-bounded-input-chosen-planes) — and serve
 //! both until interrupted.
 //!
 //! Both planes are served the same way whether or not TLS is configured, so that what bounds a
-//! connection before it becomes a request holds on all four surfaces (SEC-tls13-two-planes-bounded-input). Only the acceptor
+//! connection before it becomes a request holds on all four surfaces (SEC-tls13-bounded-input-chosen-planes). Only the acceptor
 //! differs.
 
 use std::net::SocketAddr;
@@ -610,7 +610,7 @@ fn main() {
 
 async fn serve() {
     // The log goes to stderr, so that stdout carries only what a command prints as its result.
-    // On PostgreSQL each line names the instance id of the lease the instance holds (SRV-instances-share-one-postgresql §1).
+    // On PostgreSQL each line names the instance id of the lease the instance holds (SRV-instance-opens-chosen-planes §1).
     let logged = fleet_server::instance::LoggedId::default();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -624,11 +624,11 @@ async fn serve() {
         ))
         .init();
 
-    // One TLS provider for the whole process (SEC-tls13-two-planes-bounded-input): ring, never a system library.
+    // One TLS provider for the whole process (SEC-tls13-bounded-input-chosen-planes): ring, never a system library.
     opamp::tls::install_ring_provider();
 
     // The clock a lease and a sweep measure on counts a suspend of the host
-    // (SRV-instances-share-one-postgresql §3),
+    // (SRV-instance-opens-chosen-planes §3),
     // handed to the package store and the lease.
     let elapsed = since_boot().unwrap_or_else(fleet_server::clock::Elapsed::monotonic);
 
@@ -639,7 +639,7 @@ async fn serve() {
     info!("{}", opens.startup_line());
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
-    // to know which CA issued what (SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate).
+    // to know which CA issued what (SEC-tls13-bounded-input-chosen-planes, SEC-admission-by-client-certificate).
     let planes = match config
         .tls
         .as_ref()
@@ -659,7 +659,7 @@ async fn serve() {
         }
     };
     // On PostgreSQL the instance id is made as soon as the store is known, so that every line
-    // from here on names it, and the first lease is taken under it (SRV-instances-share-one-postgresql §1).
+    // from here on names it, and the first lease is taken under it (SRV-instance-opens-chosen-planes §1).
     let instance_id = if config.database.postgres().is_some() {
         match fleet_server::postgres::lease::new_instance_id() {
             Ok(id) => {
@@ -884,7 +884,7 @@ async fn serve() {
         }
     };
     // With PostgreSQL, a lease before anything is decided and before any listener opens
-    // (SRV-instances-share-one-postgresql §1–§3):
+    // (SRV-instance-opens-chosen-planes §1–§3):
     // the audit chain is the lease's.
     let lease = match &records {
         fleet_server::Records::Postgres(database) => {
@@ -1060,7 +1060,7 @@ async fn serve() {
         }
     });
     if let Some(warning) = config.rate_limit_warning() {
-        // SEC-tls13-two-planes-bounded-input §23.
+        // SEC-tls13-bounded-input-chosen-planes §23.
         warn!("{warning}");
     }
     let agent_rate = Arc::new(fleet_server::agent_rate::AgentRate::new(
@@ -1110,7 +1110,7 @@ async fn serve() {
             std::process::exit(1);
         }
     }
-    // Two planes, two listeners (SEC-tls13-two-planes-bounded-input): Agents reach the OpAMP endpoint and the package
+    // Two planes, two listeners (SEC-tls13-bounded-input-chosen-planes): Agents reach the OpAMP endpoint and the package
     // downloads their offers point at; operators reach the REST API, its docs, and the UI. Each
     // plane's use cases and router are built only where the instance opens that plane
     // (SRV-instance-opens-chosen-planes §24).
@@ -1153,13 +1153,13 @@ async fn serve() {
     let operators = opens.operator.then(|| {
         if operator_auth.is_some() {
             // SEC-admission-by-client-certificate. Both planes serve TLS, so the password never crosses a network in clear
-            // (SEC-tls13-two-planes-bounded-input).
+            // (SEC-tls13-bounded-input-chosen-planes).
             info!("the REST API and the UI require authentication");
         }
         fleet_server::operator_app(state.clone(), operator_auth)
     });
 
-    // The revocations, and every other change, of the other instances followed (SRV-instances-share-one-postgresql §9–§11),
+    // The revocations, and every other change, of the other instances followed (SRV-instance-opens-chosen-planes §9–§11),
     // and the presence of the Agents this instance carries written in batches under its lease
     // (SRV-fleet-record-agents-hosts §4). Without the Agent plane the instance carries no Agent
     // and writes no presence (SRV-instance-opens-chosen-planes §24).
@@ -1183,7 +1183,7 @@ async fn serve() {
     };
     // A restart whose command was not sent and whose put-back failed is tried again until it
     // holds, on every store
-    // (SRV-instances-share-one-postgresql §8).
+    // (SRV-instance-opens-chosen-planes §8).
     fleet_server::instance::retry_restarts(state.clone());
     // The handlers are installed before any plane is bound and logged as served, so a stop
     // sent as soon as the log says so drains the planes rather than ending the process.
@@ -1236,7 +1236,7 @@ async fn serve() {
     }
     // A new lease that found a schema a newer Server migrated stops the instance as a failed
     // start does, naming both versions
-    // (SRV-instances-share-one-postgresql §16).
+    // (SRV-instance-opens-chosen-planes §16).
     if let fleet_server::Records::Postgres(database) = &records {
         if let Some(refusal) = database.outdated() {
             eprintln!("{refusal}");
@@ -1246,7 +1246,7 @@ async fn serve() {
     // number, so the ordinary restart restores a fleet without gaps or false silence.
     state.flush_agents();
     // And the presence of every Agent, its sessions ended by the drain, before the lease goes
-    // (SRV-instances-share-one-postgresql §3):
+    // (SRV-instance-opens-chosen-planes §3):
     // once the periodic batches stopped, so none commits after it.
     if let Some(presence) = presence {
         presence.stop().await;
@@ -1462,7 +1462,7 @@ mod tests {
 
     /// On Linux the lease's clock is `CLOCK_BOOTTIME`: it reads, it moves on as time passes, and it
     /// counts at least as much as the monotonic clock, which a suspend would leave behind.
-    /// Verifies: SRV-instances-share-one-postgresql
+    /// Verifies: SRV-instance-opens-chosen-planes
     #[cfg(target_os = "linux")]
     #[test]
     fn the_leases_clock_is_the_one_that_counts_a_suspend() {

@@ -1,4 +1,4 @@
-//! The OpAMP endpoint — both transports on one path (SEC-tls13-two-planes-bounded-input) — and the
+//! The OpAMP endpoint — both transports on one path (SEC-tls13-bounded-input-chosen-planes) — and the
 //! rest of the Agent plane: the package download, the Gateways' revocation list and the package
 //! floors.
 //!
@@ -268,7 +268,7 @@ async fn package_floors(State(cases): State<Arc<AgentCases>>, request: Request) 
     }
 }
 
-/// The answer to a download past the sender's rate (SEC-tls13-two-planes-bounded-input §26): `429`, retry in 30 s.
+/// The answer to a download past the sender's rate (SEC-tls13-bounded-input-chosen-planes §26): `429`, retry in 30 s.
 fn over_rate() -> Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
@@ -383,7 +383,7 @@ impl Handler for Fleet {
     }
 
     /// A restart command its connection did not take stays queued
-    /// (SRV-instances-share-one-postgresql §8).
+    /// (SRV-instance-opens-chosen-planes §8).
     fn on_unsent(&self, message: &ServerToAgent) {
         self.0.unsent(message);
     }

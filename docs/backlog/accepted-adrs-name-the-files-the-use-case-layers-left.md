@@ -8,10 +8,10 @@ accepted ADRs still names the old files for that code:
 
 - SEC-admission-by-client-certificate: the download route in `transport.rs` and the Operator
   plane's guard in `api.rs`;
-- SEC-tls13-two-planes-bounded-input: "`Fleet::enrol` and the download guard `admit_download` in
+- SEC-tls13-bounded-input-chosen-planes: "`Fleet::enrol` and the download guard `admit_download` in
   `transport.rs`";
 - SEC-bootstrap-certificates-and-enrolment: the queue's answer in `transport.rs`;
-- SRV-instances-share-one-postgresql: "the sessions and their guard in `transport.rs`";
+- SRV-instance-opens-chosen-planes: "the sessions and their guard in `transport.rs`";
 - PKG-signed-packages-and-delivery: "download routes of `api.rs` with the handler
   `download_package`".
 
