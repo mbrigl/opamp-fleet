@@ -242,8 +242,8 @@ no module.
      one), the state's limits, the lease, the audit helpers, the capabilities the Server declares,
      the staleness rule, and the types the contexts share, with the tests of staleness, of the host
      a register derives, and of label inheritance. It also keeps what `approval` and `session` both
-     answer a report with: the persist path, the end a report answers with, the connection settings
-     offer, and the answers a refused report gets. It names no context.
+     build a report's answer from: the end a report answers with and the connection settings offer.
+     It names no context but in its own `pub use` lines.
   2. How the Agents of one Client are placed under its Client Agent
      ([SRV-fleet-record-agents-hosts §19](adr/SRV-fleet-record-agents-hosts.md)) is the core module
      `fleet::placement`, behind the same `AppState` entry points: the rule for one group, which the
@@ -257,8 +257,9 @@ no module.
      announced of the Agents a notice names, the catch-up after a missed notification (`catch_up`:
      one read of the records and one of the holders of every Agent held, from which each kind of
      kept state and every group is taken up), and the per-Agent locks — is the core module
-     `fleet::held`, behind the same `AppState` entry points. It also takes labels into a held record
-     and notes the end of a forgotten Agent's session.
+     `fleet::held`, behind the same `AppState` entry points. It also takes labels into a held
+     record, notes the end of a forgotten Agent's session, and keeps the persist path that writes a
+     record when its durable content changed, which `approval` and `session` call.
   4. Packages in the fleet — the Package Sets, their entries and signatures, the upload limit, the
      offer of a Package to an Agent and of an artifact to a Host, and the Packages a Deployment
      holds ([PKG-signed-packages-and-delivery](adr/PKG-signed-packages-and-delivery.md)) — are the
@@ -274,7 +275,8 @@ no module.
      `fleet::views`, behind the same `AppState` entry points.
   7. Enrolment and certificates — the approval of an enrolment and its take-back, the answer an
      enrolling Agent is given, the issuing and renewal of a host certificate with the records of
-     what was issued and signed, and the mark of a host as a Gateway, which places every Agent again
+     what was issued and signed, the mark of a host as a Gateway, which places every Agent again,
+     and the answers a refused report gets, which `session` uses too
      ([SEC-bootstrap-certificates-and-enrolment](adr/SEC-bootstrap-certificates-and-enrolment.md)) —
      are the core module `fleet::approval`, behind the same `AppState` entry points.
   8. The round of an Agent's report — a report processed under the Agent's lock, its record

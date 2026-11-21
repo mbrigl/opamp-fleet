@@ -1,6 +1,7 @@
 //! In-memory fleet state, keyed by Instance UID — never by the connection that carried a message
 //! (CLT-modes-and-gateway). Each context that changes it is a submodule, which imports by name what it takes
-//! from the root, its siblings and the crate.
+//! from the root, the siblings ranked below it, and the crate; the root names no context but in
+//! its own `pub use` lines (SRV-fleet-contexts-call-by-rank).
 
 #![deny(clippy::wildcard_imports)]
 
