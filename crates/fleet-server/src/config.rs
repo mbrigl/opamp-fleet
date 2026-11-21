@@ -120,6 +120,11 @@ pub struct ServerConfig {
     /// (SRV-instances-share-one-postgresql §3).
     #[serde(default = "default_drain_secs")]
     pub drain_secs: u64,
+    /// The planes this instance opens, `"agent"` and `"operator"`, both by default
+    /// (SRV-instance-opens-chosen-planes §22). Read through [`planes`](Self::planes), which
+    /// answers what the checks at load admitted.
+    #[serde(default = "default_planes")]
+    pub planes: Vec<String>,
     /// The bootstrap CA a host enrols with (SEC-admission-by-client-certificate §17); absent means no host enrols, and
     /// an operator provisions every certificate.
     pub enrolment: Option<EnrolmentConfig>,
@@ -1245,6 +1250,148 @@ fn default_drain_secs() -> u64 {
 /// The longest drain an orderly shutdown may spread over.
 const MAX_DRAIN_SECS: u64 = 300;
 
+/// Both planes, as `planes` names them where it is not set
+/// (SRV-instance-opens-chosen-planes §22).
+fn default_planes() -> Vec<String> {
+    OpenPlanes::BOTH
+        .names()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The planes an instance opens, never none (SRV-instance-opens-chosen-planes §22): what
+/// `planes` names, and what a lease records of its instance (clause 26).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenPlanes {
+    /// The Agent plane: the OpAMP endpoint, the package downloads and the Gateways' revocation
+    /// list, on `listen`.
+    pub agent: bool,
+    /// The Operator plane: the REST API, its docs and the UI, on `[rest] listen`.
+    pub operator: bool,
+}
+
+impl Default for OpenPlanes {
+    fn default() -> Self {
+        Self::BOTH
+    }
+}
+
+impl OpenPlanes {
+    /// Both planes: what an instance opens where `planes` is not set, and what a lease written by
+    /// a release that records no planes counts as (SRV-instance-opens-chosen-planes §26).
+    pub const BOTH: OpenPlanes = OpenPlanes {
+        agent: true,
+        operator: true,
+    };
+
+    /// The planes `names` names, each `"agent"` or `"operator"`.
+    ///
+    /// # Errors
+    /// Returns an error naming `planes` when `names` is empty, names a plane twice, or names
+    /// another word.
+    pub fn named(names: &[String]) -> Result<Self, String> {
+        let mut planes = OpenPlanes {
+            agent: false,
+            operator: false,
+        };
+        for name in names {
+            let opened = match name.as_str() {
+                "agent" => &mut planes.agent,
+                "operator" => &mut planes.operator,
+                other => {
+                    return Err(format!(
+                        "planes names {other:?}, which is no plane — name \"agent\", \
+                         \"operator\", or both"
+                    ))
+                }
+            };
+            if *opened {
+                return Err(format!(
+                    "planes names {name:?} twice — name each plane once"
+                ));
+            }
+            *opened = true;
+        }
+        if planes.is_none() {
+            return Err(
+                "planes is empty — an instance opens at least one plane; name \"agent\", \
+                 \"operator\", or both, or remove the key for both"
+                    .to_string(),
+            );
+        }
+        Ok(planes)
+    }
+
+    /// The planes the names a lease records serve, each name it knows: a name of a later release
+    /// is passed over.
+    #[must_use]
+    pub fn recorded(names: &[String]) -> Self {
+        OpenPlanes {
+            agent: names.iter().any(|name| name == "agent"),
+            operator: names.iter().any(|name| name == "operator"),
+        }
+    }
+
+    /// Whether neither plane is named.
+    #[must_use]
+    pub fn is_none(self) -> bool {
+        !self.agent && !self.operator
+    }
+
+    /// Whether both planes are named.
+    #[must_use]
+    pub fn both(self) -> bool {
+        self.agent && self.operator
+    }
+
+    /// The names of the planes, as `planes` and a lease write them.
+    #[must_use]
+    pub fn names(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.agent {
+            names.push("agent");
+        }
+        if self.operator {
+            names.push("operator");
+        }
+        names
+    }
+
+    /// The planes as the log names them, each with its name in prose.
+    #[must_use]
+    pub fn each(self) -> Vec<(bool, &'static str)> {
+        vec![
+            (self.agent, "the Agent plane"),
+            (self.operator, "the Operator plane"),
+        ]
+    }
+
+    /// What the startup log says of the planes: the ones the instance opens, and any it leaves
+    /// closed (SRV-instance-opens-chosen-planes §25).
+    #[must_use]
+    pub fn startup_line(self) -> String {
+        let opened: Vec<&str> = self
+            .each()
+            .into_iter()
+            .filter_map(|(open, name)| open.then_some(name))
+            .collect();
+        let closed: Vec<&str> = self
+            .each()
+            .into_iter()
+            .filter_map(|(open, name)| (!open).then_some(name))
+            .collect();
+        match closed.as_slice() {
+            [] => format!("opening {}", opened.join(" and ")),
+            closed => format!(
+                "opening {}; {} stays closed",
+                opened.join(" and "),
+                closed.join(" and ")
+            ),
+        }
+    }
+}
+
 fn default_rest_max_connections() -> usize {
     256
 }
@@ -1322,6 +1469,7 @@ impl Default for ServerConfig {
             max_connections: default_agent_max_connections(),
             max_new_connections_per_sec: default_max_new_connections_per_sec(),
             drain_secs: default_drain_secs(),
+            planes: default_planes(),
             enrolment: None,
             admission_throttle: AdmissionThrottleConfig::default(),
             audit: AuditConfig::default(),
@@ -1607,7 +1755,48 @@ impl ServerConfig {
                 self.drain_secs
             ));
         }
-        self.check_secure()
+        self.check_secure()?;
+        self.check_planes()
+    }
+
+    /// The planes this instance opens, as `planes` names them, or both where the key is not set
+    /// (SRV-instance-opens-chosen-planes §22). The checks at load refuse a `planes` this would
+    /// not read, so a loaded configuration answers what it names.
+    #[must_use]
+    pub fn planes(&self) -> OpenPlanes {
+        OpenPlanes::named(&self.planes).unwrap_or_default()
+    }
+
+    /// `planes` names at least one plane, each once, and both where the instance must be alone
+    /// (SRV-instance-opens-chosen-planes §22 and §23). Checked after every other check, so an
+    /// instance of one plane refuses each other mistake as one of both planes does, with the same
+    /// message (clause 25).
+    fn check_planes(&self) -> Result<(), String> {
+        let planes = OpenPlanes::named(&self.planes)?;
+        if planes.both() {
+            return Ok(());
+        }
+        let alone = if self.database.postgres().is_none() {
+            Some("[database] store = \"fs\"".to_string())
+        } else {
+            match crate::exclusive(self) {
+                crate::postgres::Exclusive::Alone(because) => Some(because),
+                crate::postgres::Exclusive::Shared => None,
+            }
+        };
+        match alone {
+            Some(because) => Err(format!(
+                "planes names {} alone, and an instance with {because} must be alone and opens \
+                 both planes — remove planes, or run on PostgreSQL with the blobs in S3 and no \
+                 CA key in a file",
+                planes
+                    .each()
+                    .into_iter()
+                    .find_map(|(open, name)| open.then_some(name))
+                    .unwrap_or("no plane")
+            )),
+            None => Ok(()),
+        }
     }
 
     /// The settings that name a key on the `[pkcs11]` token, each with its label.
@@ -3410,6 +3599,245 @@ mod tests {
             exclusive(&format!("{s3}{}", bootstrap(true))),
             Exclusive::Alone("[enrolment] bootstrap_ca_key_file".to_string())
         );
+    }
+
+    /// A configuration an instance of one plane may run: PostgreSQL, the blobs in S3, and no CA
+    /// key in a file (SRV-instance-opens-chosen-planes §23).
+    const SHARED: &str = "[database]\nstore = \"postgres\"\n[database.postgres]\n\
+                          host = \"127.0.0.1\"\ndbname = \"fleet\"\nuser = \"fleet\"\n\
+                          password_file = \"pw\"\ntls = false\n\
+                          [blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
+                          bucket = \"fleet\"\nregion = \"eu\"\n";
+
+    /// `planes` as a line of `server.toml`, or nothing for `None`.
+    fn planes_line(planes: Option<&str>) -> String {
+        planes.map_or_else(String::new, |planes| format!("planes = {planes}\n"))
+    }
+
+    /// Without `planes` an instance opens both planes; `planes` opens the ones it names, and an
+    /// empty array, a name that is no plane or a name given twice fails startup, naming the key.
+    /// Verifies: SRV-instance-opens-chosen-planes
+    #[test]
+    fn planes_opens_both_by_default_and_refuses_an_empty_unknown_or_repeated_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        let load = |planes: Option<&str>| {
+            std::fs::write(&path, format!("{}{TLS}{SHARED}", planes_line(planes))).expect("write");
+            ServerConfig::load(&path)
+        };
+        assert_eq!(load(None).expect("both").planes(), OpenPlanes::BOTH);
+        assert_eq!(
+            ServerConfig::load_layered(None, variables(&TLS_VARIABLES))
+                .expect("the defaults")
+                .config
+                .planes(),
+            OpenPlanes::BOTH
+        );
+        for (planes, agent, operator) in [
+            ("[\"agent\"]", true, false),
+            ("[\"operator\"]", false, true),
+            ("[\"operator\", \"agent\"]", true, true),
+        ] {
+            assert_eq!(
+                load(Some(planes)).expect(planes).planes(),
+                OpenPlanes { agent, operator },
+                "{planes}"
+            );
+        }
+        for planes in [
+            "[]",
+            "[\"agents\"]",
+            "[\"agent\", \"agent\"]",
+            "[\"agent\", \"operator\", \"operator\"]",
+        ] {
+            let err = load(Some(planes)).expect_err(planes);
+            assert!(err.contains("planes"), "{planes}: {err}");
+        }
+    }
+
+    /// `FLEET_SERVER__PLANES` sets `planes` as every variable sets its key, and is refused as the
+    /// file's key is.
+    /// Verifies: SRV-instance-opens-chosen-planes, SRV-configuration-toml-and-environment
+    #[test]
+    fn planes_from_the_environment_opens_what_the_file_would() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("server.toml");
+        std::fs::write(&path, format!("{TLS}{SHARED}")).expect("write");
+        let from_environment = ServerConfig::load_layered(
+            Some(&path),
+            variables(&[("FLEET_SERVER__PLANES", "[\"agent\"]")]),
+        )
+        .expect("the Agent plane alone");
+        std::fs::write(&path, format!("planes = [\"agent\"]\n{TLS}{SHARED}")).expect("write");
+        let from_file = ServerConfig::load(&path).expect("the Agent plane alone");
+        assert_eq!(from_environment.config.planes(), from_file.planes());
+        assert_eq!(
+            from_environment.config.planes(),
+            OpenPlanes {
+                agent: true,
+                operator: false
+            }
+        );
+        std::fs::write(&path, format!("{TLS}{SHARED}")).expect("write");
+        let err =
+            ServerConfig::load_layered(Some(&path), variables(&[("FLEET_SERVER__PLANES", "[]")]))
+                .expect_err("no plane");
+        assert!(err.contains("planes"), "{err}");
+    }
+
+    /// An instance that must be alone opens both planes: on the filesystem store, and on
+    /// PostgreSQL with its blobs as files or a CA key in a file, a `planes` without both fails
+    /// startup, naming `planes` and the key that makes the instance alone.
+    /// Verifies: SRV-instance-opens-chosen-planes
+    #[test]
+    fn an_instance_that_must_be_alone_refuses_planes_without_both() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let at = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "").expect("write");
+            path.display().to_string()
+        };
+        let postgres = "[database]\nstore = \"postgres\"\n[database.postgres]\n\
+                        host = \"127.0.0.1\"\ndbname = \"fleet\"\nuser = \"fleet\"\n\
+                        password_file = \"pw\"\ntls = false\n";
+        let s3 = "[blobs]\nstore = \"s3\"\n[blobs.s3]\nendpoint = \"https://s3.example\"\n\
+                  bucket = \"fleet\"\nregion = \"eu\"\n";
+        let pkcs11 = "[pkcs11]\nmodule = \"m.so\"\ntoken_label = \"fleet\"\npin_file = \"pin\"\n";
+        let cases = [
+            (String::new(), "[database] store = \"fs\""),
+            (postgres.to_string(), "[blobs] store = \"fs\""),
+            (
+                format!(
+                    "{postgres}{s3}[client_ca]\ncert_file = {:?}\nkey_file = {:?}\n",
+                    at("ca.pem"),
+                    at("ca-key.pem")
+                ),
+                "[client_ca] key_file",
+            ),
+            (
+                format!(
+                    "{postgres}{s3}{pkcs11}[client_ca]\ncert_file = {:?}\nkey_label = \"ca\"\n\
+                     [enrolment]\nbootstrap_ca_file = \"b.pem\"\nbootstrap_ca_key_file = \"b-key.pem\"\n",
+                    at("ca.pem")
+                ),
+                "[enrolment] bootstrap_ca_key_file",
+            ),
+        ];
+        let path = dir.path().join("server.toml");
+        for (sections, key) in &cases {
+            std::fs::write(&path, format!("{TLS}{sections}")).expect("write");
+            ServerConfig::load(&path).unwrap_or_else(|e| panic!("{key}: both planes start: {e}"));
+            for planes in ["[\"agent\"]", "[\"operator\"]"] {
+                std::fs::write(&path, format!("planes = {planes}\n{TLS}{sections}"))
+                    .expect("write");
+                let err = ServerConfig::load(&path).expect_err(key);
+                assert!(
+                    err.contains("planes") && err.contains(key),
+                    "{key}, {planes}: {err}"
+                );
+            }
+        }
+    }
+
+    /// An instance of one plane reads and checks the whole configuration as one of both planes
+    /// does: it refuses each mistake with the same message, among them one without `[tls]`, one
+    /// whose `[rest.tls]` key file cannot be read, and an Operator plane off the loopback without
+    /// `[rest.auth]`; and it starts with the same valid configuration, its startup log naming the
+    /// plane it opens and the plane it leaves closed.
+    /// Verifies: SRV-instance-opens-chosen-planes, SEC-tls13-bounded-input-chosen-planes
+    #[test]
+    fn an_instance_of_one_plane_refuses_what_one_of_both_refuses_with_the_same_message() {
+        opamp::tls::install_ring_provider();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let at = |name: &str, content: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, content).expect("write");
+            path.display().to_string()
+        };
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("a certificate");
+        let tls = format!(
+            "[tls]\ncert_file = {:?}\nkey_file = {:?}\nclient_ca_file = {:?}\n",
+            at("cert.pem", &certified.cert.pem()),
+            at("key.pem", &certified.signing_key.serialize_pem()),
+            at("ca.pem", &certified.cert.pem()),
+        );
+        let rest_tls = format!(
+            "[rest.tls]\ncert_file = {:?}\nkey_file = {:?}\n",
+            dir.path().join("cert.pem").display().to_string(),
+            dir.path().join("absent-key.pem").display().to_string(),
+        );
+        let refused = [
+            ("no [tls]", SHARED.to_string()),
+            (
+                "[rest.tls] key unreadable",
+                format!("{tls}{SHARED}{rest_tls}"),
+            ),
+            (
+                "an Operator plane off the loopback without [rest.auth]",
+                format!("{tls}{SHARED}[rest]\nlisten = \"0.0.0.0:4321\"\n"),
+            ),
+            (
+                "colliding planes",
+                format!("listen = \"127.0.0.1:4321\"\n{tls}{SHARED}"),
+            ),
+            (
+                "a drain past 300",
+                format!("drain_secs = 301\n{tls}{SHARED}"),
+            ),
+            (
+                "no connection",
+                format!("max_connections = 0\n{tls}{SHARED}"),
+            ),
+            (
+                "a client CA that does not exist",
+                format!(
+                    "{tls}{SHARED}[client_ca]\ncert_file = \"absent.pem\"\nkey_label = \"ca\"\n"
+                ),
+            ),
+        ];
+        let path = dir.path().join("server.toml");
+        // What the Server refuses a configuration with: its load, then the TLS material it reads
+        // before anything else, as `main` does.
+        let start = |planes: Option<&str>, sections: &str| {
+            std::fs::write(&path, format!("{}{sections}", planes_line(planes))).expect("write");
+            let config = ServerConfig::load(&path)?;
+            crate::tls::server_tls(
+                config.tls.as_ref().ok_or("[tls] is required")?,
+                config.rest.tls.as_ref(),
+                config.enrolment.as_ref(),
+            )
+            .map(|_| config)
+        };
+        for (case, sections) in &refused {
+            let Err(both) = start(None, sections) else {
+                panic!("{case}: an instance of both planes starts");
+            };
+            for planes in ["[\"agent\"]", "[\"operator\"]"] {
+                let Err(one) = start(Some(planes), sections) else {
+                    panic!("{case}: an instance of {planes} starts");
+                };
+                assert_eq!(one, both, "{case}, {planes}");
+            }
+        }
+        let valid = format!("{tls}{SHARED}");
+        assert_eq!(
+            start(None, &valid).expect("both").planes().startup_line(),
+            "opening the Agent plane and the Operator plane"
+        );
+        for (planes, line) in [
+            (
+                "[\"agent\"]",
+                "opening the Agent plane; the Operator plane stays closed",
+            ),
+            (
+                "[\"operator\"]",
+                "opening the Operator plane; the Agent plane stays closed",
+            ),
+        ] {
+            let config = start(Some(planes), &valid).expect(planes);
+            assert_eq!(config.planes().startup_line(), line);
+        }
     }
 
     /// `[database] pool_size` is 16 by default, from 2 to 256, PostgreSQL's alone, and reaches the

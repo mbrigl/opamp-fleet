@@ -633,6 +633,10 @@ async fn serve() {
     let elapsed = since_boot().unwrap_or_else(fleet_server::clock::Elapsed::monotonic);
 
     let Layered { config, origin, .. } = load_config(parse_args());
+    // The planes this instance opens; the whole configuration was read and checked as for both
+    // (SRV-instance-opens-chosen-planes §22 and §25).
+    let opens = config.planes();
+    info!("{}", opens.startup_line());
 
     // The TLS material first: a Server that cannot serve it does not start, and admission needs
     // to know which CA issued what (SEC-tls13-two-planes-bounded-input, SEC-admission-by-client-certificate).
@@ -879,7 +883,7 @@ async fn serve() {
             std::process::exit(1);
         }
     };
-    // With PostgreSQL, a lease before anything is decided and before either listener opens
+    // With PostgreSQL, a lease before anything is decided and before any listener opens
     // (SRV-instances-share-one-postgresql §1–§3):
     // the audit chain is the lease's.
     let lease = match &records {
@@ -906,6 +910,7 @@ async fn serve() {
                 audit_key_label: config.audit.key_label.clone(),
                 archive,
                 export: export.as_ref().map(|export| export.sink()),
+                planes: opens,
             };
             let made = instance_id.clone().map_or_else(
                 fleet_server::postgres::lease::new_instance_id,
@@ -1105,23 +1110,27 @@ async fn serve() {
             std::process::exit(1);
         }
     }
-    // The certificate is the whole of admission (SEC-admission-by-client-certificate): the configuration was refused at load
-    // without the client CA.
-    info!("the OpAMP endpoint admits by client certificate");
     // Two planes, two listeners (SEC-tls13-two-planes-bounded-input): Agents reach the OpAMP endpoint and the package
-    // downloads their offers point at; operators reach the REST API, its docs, and the UI.
+    // downloads their offers point at; operators reach the REST API, its docs, and the UI. Each
+    // plane's use cases and router are built only where the instance opens that plane
+    // (SRV-instance-opens-chosen-planes §24).
     let (agent_tls, operator_tls, issuers, _) = planes;
-    let agents = fleet_server::agent_app(
-        state.clone(),
-        fleet_server::agent_cases::Admission::new(true)
-            .with_enrolment(issuers, enrolment)
-            .with_revocations(Some(revocations.clone()))
-            .with_audit(Some(audit.clone()))
-            .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
-                limits,
-                clock.clone(),
-            ))),
-    );
+    let agents = opens.agent.then(|| {
+        // The certificate is the whole of admission (SEC-admission-by-client-certificate): the configuration was refused at load
+        // without the client CA.
+        info!("the OpAMP endpoint admits by client certificate");
+        fleet_server::agent_app(
+            state.clone(),
+            fleet_server::agent_cases::Admission::new(true)
+                .with_enrolment(issuers, enrolment)
+                .with_revocations(Some(revocations.clone()))
+                .with_audit(Some(audit.clone()))
+                .with_throttle(Arc::new(fleet_server::throttle::Throttle::new(
+                    limits,
+                    clock.clone(),
+                ))),
+        )
+    });
     let operator_auth = match config
         .rest
         .auth
@@ -1139,24 +1148,33 @@ async fn serve() {
             std::process::exit(1);
         }
     };
-    if operator_auth.is_some() {
-        // SEC-admission-by-client-certificate. Both planes serve TLS, so the password never crosses a network in clear
-        // (SEC-tls13-two-planes-bounded-input).
-        info!("the REST API and the UI require authentication");
-    }
-    let operators = fleet_server::operator_app(state.clone(), operator_auth);
+    // `[rest.auth]` is read and checked on every instance, the Operator plane open or not
+    // (SRV-instance-opens-chosen-planes §25).
+    let operators = opens.operator.then(|| {
+        if operator_auth.is_some() {
+            // SEC-admission-by-client-certificate. Both planes serve TLS, so the password never crosses a network in clear
+            // (SEC-tls13-two-planes-bounded-input).
+            info!("the REST API and the UI require authentication");
+        }
+        fleet_server::operator_app(state.clone(), operator_auth)
+    });
 
     // The revocations, and every other change, of the other instances followed (SRV-instances-share-one-postgresql §9–§11),
     // and the presence of the Agents this instance carries written in batches under its lease
-    // (SRV-fleet-record-agents-hosts §4).
+    // (SRV-fleet-record-agents-hosts §4). Without the Agent plane the instance carries no Agent
+    // and writes no presence (SRV-instance-opens-chosen-planes §24).
     let presence = match (&lease, &records) {
         (Some(lease), fleet_server::Records::Postgres(database)) => {
             state.serve_under(lease.held());
             let proof = lease.proof();
             state.answer_while(move || proof.holds());
-            let presence = config.database.presence_interval().map(|interval| {
-                fleet_server::instance::write_presence(state.clone(), lease.held(), interval)
-            });
+            let presence = config
+                .database
+                .presence_interval()
+                .filter(|_| opens.agent)
+                .map(|interval| {
+                    fleet_server::instance::write_presence(state.clone(), lease.held(), interval)
+                });
             fleet_server::instance::follow(database, state.clone(), Some(lease.list_versions()));
             fleet_server::instance::retry_unmarks(state.clone(), config.database.lease().renew);
             presence
@@ -1167,27 +1185,47 @@ async fn serve() {
     // holds, on every store
     // (SRV-instances-share-one-postgresql §8).
     fleet_server::instance::retry_restarts(state.clone());
-    // The handlers are installed before either plane is bound and logged as served, so a stop
+    // The handlers are installed before any plane is bound and logged as served, so a stop
     // sent as soon as the log says so drains the planes rather than ending the process.
     let shutdown = shutdown_signal();
-    let agent_listener = bind(config.listen, "the Agent plane");
-    let operator_listener = bind(config.rest.listen, "the Operator plane");
-    info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
-    info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
-    // One signal, both planes: the interrupt is watched once, and both planes drain together
-    // within a bounded window (SEC-tls13-two-planes-bounded-input).
+    // Every listener the instance opens is bound before any serves, and none other
+    // (SEC-tls13-bounded-input-chosen-planes §14).
+    let agent_listener = agents
+        .as_ref()
+        .map(|_| bind(config.listen, "the Agent plane"));
+    let operator_listener = operators
+        .as_ref()
+        .map(|_| bind(config.rest.listen, "the Operator plane"));
+    if agent_listener.is_some() {
+        info!(listen = %config.listen, "serving the OpAMP endpoint and package downloads over TLS");
+    }
+    if operator_listener.is_some() {
+        info!(listen = %config.rest.listen, "serving the REST API, the API docs, and the UI over TLS");
+    }
+    // One signal, every plane the instance opens: the interrupt is watched once, and the planes
+    // drain together within a bounded window (SEC-tls13-bounded-input-chosen-planes §17).
     let served = fleet_server::instance::serve(
         fleet_server::instance::Planes {
-            agents,
-            operators,
-            agent_tls,
-            operator_tls,
-            agent_max_connections: config.max_connections,
-            agent_max_new_connections_per_sec: config.max_new_connections_per_sec,
-            operator_max_connections: config.rest.max_connections,
+            agent: agents.zip(agent_listener).map(|(router, listener)| {
+                fleet_server::instance::Plane {
+                    router,
+                    listener,
+                    tls: agent_tls,
+                    max_connections: config.max_connections,
+                    max_new_connections_per_sec: Some(config.max_new_connections_per_sec),
+                }
+            }),
+            operator: operators.zip(operator_listener).map(|(router, listener)| {
+                fleet_server::instance::Plane {
+                    router,
+                    listener,
+                    tls: operator_tls,
+                    max_connections: config.rest.max_connections,
+                    max_new_connections_per_sec: None,
+                }
+            }),
             drain: std::time::Duration::from_secs(config.drain_secs),
         },
-        (agent_listener, operator_listener),
         lease.as_ref().map(fleet_server::instance::Lease::held),
         lease.as_ref().map(fleet_server::instance::Lease::proof),
         shutdown,
@@ -1215,6 +1253,7 @@ async fn serve() {
     }
     if let Some(holder) = lease
         .as_ref()
+        .filter(|_| opens.agent)
         .and_then(|lease| lease.held().borrow().clone())
     {
         if let Err(e) = state.write_presence(&holder) {

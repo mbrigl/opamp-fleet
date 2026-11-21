@@ -20,8 +20,10 @@ services beside it directly: `api.rs` names `AppState` 63 times, `Enrolment`, `R
 what their code may do. A handler of one plane can reach any operation of the other, and a reviewer
 has to read `fleet` and every module of it to know what the Agent plane can change.
 
-On PostgreSQL several instances serve one fleet, and each serves both planes
-([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)). The planes
+On PostgreSQL several instances serve one fleet, and each serves both planes today
+([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)). The proposed
+[SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md) follows this ADR and lets
+each instance open the planes its configuration names. The planes
 already meet only through the database there: an operator's act on one instance reaches the
 sessions on another by a notification
 ([SRV-instances-share-one-postgresql §9](SRV-instances-share-one-postgresql.md)) or by the
@@ -143,14 +145,10 @@ Instance UID, so that it can be filtered per host.
 - Negative / trade-offs: the list of state-holding types in clause 2 is kept by hand in the test;
   a new such type must be added to it.
 - Follow-ups: a role per instance on PostgreSQL, one program whose instances open the Agent plane,
-  the Operator plane or both, so that each plane is scaled and kept available apart. It needs a
-  decision of its own that supersedes the clauses which close and drain "both listeners"
-  ([SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md)), and the probe of
-  [OPS-releases-attestations-server-image §17](OPS-releases-attestations-server-image.md), a TCP
-  connection to `4320` that an Operator-plane instance does not open; it settles where a certificate
-  is signed, since an enrolment's approval and a bootstrap certificate come from the Operator plane
-  and the CSR from the Agent plane. Splitting `AppState` along the same line; renaming the planes;
-  adding the use-case layer to the glossary.
+  the Operator plane or both, so that each plane is scaled and kept available apart.
+  [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md), proposed, decides it
+  and builds on this split. Splitting `AppState` along the same line; renaming the planes; adding
+  the use-case layer to the glossary.
 
 ## Enforcement
 

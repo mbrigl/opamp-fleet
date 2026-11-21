@@ -22,8 +22,9 @@ than anywhere else, and none beats one that has stopped being true.
 ```text
  operator ── REST / bundled UI ──▶ Operator plane :4321 ─┐
                                                          │  Server (Linux): one, or several
- Client ──── OpAMP, mTLS ──────────────▶ Agent plane :4320 ─┘   │  instances behind a balancer
-   │  ▲                                                          └─▶ data_dir, or PostgreSQL with
+ Client ──── OpAMP, mTLS ──────────────▶ Agent plane :4320 ─┘   │  instances, each opening one plane
+   │  ▲                                                          │  or both, behind a balancer
+   │  │                                                          └─▶ data_dir, or PostgreSQL with
    │  └── Gateway (a Client) ◀── OpAMP, mTLS ── other Clients        the blobs as files or in an S3
    │                                                                 bucket, which instances share:
    │                                                                 fleet state, register, audit
@@ -207,11 +208,15 @@ no module.
   [SRV-state-stores-contract-pair](adr/SRV-state-stores-contract-pair.md)).
 - **Server instances** — on PostgreSQL every Server is an instance, and several share one
   database and one bucket
-  ([SRV-instances-share-one-postgresql](adr/SRV-instances-share-one-postgresql.md)).
-  `instance` takes a lease, a row of `postgres::lease`, before either listener opens, renews it,
-  proves it before every answer, and closes both planes while it cannot. Each lease it takes checks
-  the schema under the migrations' lock and records the instance's release and its `[audit]
-  key_label`, refused while a live lease names another label, and a migration refuses
+  ([SRV-instances-share-one-postgresql](adr/SRV-instances-share-one-postgresql.md)). Each opens
+  the planes `planes` names, both by default and always both where it must be alone; every
+  instance reads and checks the whole configuration
+  ([SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md)).
+  `instance` takes a lease, a row of `postgres::lease`, before any listener it opens, renews it,
+  proves it before every answer, and closes the planes it opens while it cannot. The lease records
+  those planes, and each take and renewal warns once of a plane no live lease serves. Each lease it
+  takes checks the schema under the migrations' lock and records the instance's release and its
+  `[audit] key_label`, refused while a live lease names another label, and a migration refuses
   while a live lease is of a release older than the schema it leaves needs, so two consecutive
   versions run side by side. A change that concerns a live session is one `NOTIFY` of
   `postgres::notify`, sent in the transaction that commits it, or right after the commit for a
@@ -273,25 +278,30 @@ no module.
   production code.
 - **Server use cases** — each plane reaches the core through one use-case module
   ([SRV-two-use-case-layers](adr/SRV-two-use-case-layers.md)). `transport`, the Agent plane's
-  endpoints, carries the protocol and calls `agent_cases::AgentCases`, whose methods are the
-  plane's operations: admission, a report, a certificate request, an enrolment, a download, and the
+  endpoints, carries the protocol and calls `agent_cases::AgentCases`, whose methods are the plane's
+  operations: admission, a report, a certificate request, an enrolment, a download, and the
   Gateways' read of the revocation list. `api`, the REST API and the bundled UI, calls
   `operator_cases::OperatorCases`, whose methods are every read and change of the Operator plane,
   with the guard of `[rest.auth]` (`OperatorAuth`) and the record of each act. Neither endpoint
-  module names the other plane's modules or a type of the core that holds state; the core's
-  values cross unchanged, and the plain answers and the peer's address both endpoints use are
-  `answers`. `lib.rs` builds both modules over one core. They are adapters in the table, since
-  they read certificates and credentials through adapters, and
-  [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs) also lists
-  what each plane's modules name of the other.
+  module names the other plane's modules or a type of the core that holds state; the core's values
+  cross unchanged, and the plain answers and the peer's address both endpoints use are `answers`.
+  `lib.rs` builds each module over one core, and `main.rs` builds only those of the planes the
+  instance opens, so an instance without the Agent plane carries no Agent and writes no presence
+  ([SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md)). They are adapters
+  in the table, since they read certificates and credentials through adapters, and
+  [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs) also lists what
+  each plane's modules name of the other.
 - **Server listeners** — `tls` reads the `[tls]`, `[rest.tls]` and `[enrolment]` files into the
   material each plane serves with — the Agent plane requiring a client certificate in the
   handshake, the Operator plane asking for none and serving `[rest.tls]`'s certificate when the
   section is present
   ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)) — and tells a
   member's certificate from a bootstrap one by its
-  issuer. `listen` serves both planes on one handle with one drain and a connection cap each
-  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md)). `pki` is
+  issuer. `tls` reads the files of both planes on every instance, whichever it opens. An instance
+  binds and serves the planes it opens and no other, and `listen` serves them on one handle with
+  one drain and a connection cap each
+  ([SEC-tls13-two-planes-bounded-input](adr/SEC-tls13-two-planes-bounded-input.md),
+  [SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md)). `pki` is
   `server pki status` and the running Server's warnings before a certificate it depends on ends
   (OPS-operator-program-fleetctl).
 - **Server admission** — `agent_cases::Admission` requires the client certificate on every request
@@ -589,11 +599,13 @@ concerns at once, on every instance by its notification, and follows every renew
 
 **An instance is lost.** Killed, its connections are cut; frozen, its Agents end their
 WebSockets after one heartbeat interval of silence. Each Agent reconnects after a delay drawn over
-`[0, 30 s)`, through the balancer, to an instance that still holds its lease, which reads the
-Agent's record at its first report and takes it as its holder. Once the lost instance's lease has
-lapsed, the instance that removes it closes its audit chain. The others serve from what the lost
-instance committed to the database
-([SRV-instances-share-one-postgresql](adr/SRV-instances-share-one-postgresql.md)).
+`[0, 30 s)`, through the balancer, to an instance that opens the Agent plane and still holds its
+lease, which reads the Agent's record at its first report and takes it as its holder. Once the lost
+instance's lease has lapsed, the instance that removes it closes its audit chain. The others serve
+from what the lost instance committed to the database, the Operator plane included, which
+instances of its own may serve
+([SRV-instances-share-one-postgresql](adr/SRV-instances-share-one-postgresql.md),
+[SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md)).
 
 **A Supervisor starts its program.** Without a process account the runner starts the Managed
 Process, its version probe and a package's preflight as the Client. Where `service install

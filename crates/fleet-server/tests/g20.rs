@@ -1,11 +1,15 @@
-//! The two tests that decide G-20: a fleet is served on when one of three Server instances is lost,
-//! and the database carries the presence and the notifications of 100 000 Agents
-//! (SRV-instances-share-one-postgresql §20
-//! and the Enforcement).
+//! The tests that decide G-20: a fleet is served on when one of three Server instances is lost,
+//! killed or frozen; the database carries the presence and the notifications of 100 000 Agents
+//! (SRV-instances-share-one-postgresql §20 and the Enforcement); and where the planes run on
+//! instances of their own, the Operator plane answers each page of the Agents and each revocation
+//! within 2 seconds while the Agents of a killed Agent-plane instance reconnect
+//! (SRV-instance-opens-chosen-planes and its Enforcement).
 //!
 //! Each runs three `server` processes at the defaults, `max_connections` and `max_agents` raised
 //! for the fleet, on the database the `FLEET_TEST_POSTGRES_*` variables name, in a role and schema
-//! of the test's own, and on the bucket the `FLEET_TEST_S3_*` variables name. In front of the Agent
+//! of the test's own, and on the bucket the `FLEET_TEST_S3_*` variables name. The three open both
+//! planes, except in the test of the planes on instances of their own: there they open the Agent
+//! plane alone, and a fourth process opens the Operator plane alone. In front of the Agent
 //! planes stands a layer-4 balancer of the test's own: it hashes the peer's address over the
 //! instances that answer its probe, and connects to the instance from the peer's own address, which
 //! on the loopback every test address is, so the instances see each peer as it is. Each simulated
@@ -544,6 +548,36 @@ impl Pki {
     }
 }
 
+/// The planes an instance opens (SRV-instance-opens-chosen-planes §22).
+#[derive(Clone, Copy, Debug)]
+enum Planes {
+    /// Both, with no `planes` key.
+    Both,
+    /// `planes = ["agent"]`.
+    Agent,
+    /// `planes = ["operator"]`.
+    Operator,
+}
+
+impl Planes {
+    /// The line of `server.toml` that names them.
+    fn key(self) -> &'static str {
+        match self {
+            Planes::Both => "",
+            Planes::Agent => "planes = [\"agent\"]\n",
+            Planes::Operator => "planes = [\"operator\"]\n",
+        }
+    }
+
+    /// What the instance logs once the last plane it opens is served.
+    fn ready(self) -> &'static str {
+        match self {
+            Planes::Agent => "serving the OpAMP endpoint",
+            Planes::Both | Planes::Operator => "serving the REST API",
+        }
+    }
+}
+
 /// One `server` process, killed on drop.
 struct Instance {
     child: Option<Child>,
@@ -554,7 +588,13 @@ struct Instance {
 }
 
 impl Instance {
+    /// An instance that opens both planes, as one without `planes` does.
     fn start(pki: &Pki, role: &Role, bucket: &Bucket) -> Self {
+        Self::start_with(pki, role, bucket, Planes::Both)
+    }
+
+    /// An instance that opens the planes `planes` names.
+    fn start_with(pki: &Pki, role: &Role, bucket: &Bucket, planes: Planes) -> Self {
         let files = tempfile::tempdir().expect("tempdir");
         for (file, pem) in [
             ("server.pem", &pki.server_pem),
@@ -570,7 +610,7 @@ impl Instance {
             &config,
             format!(
                 "listen = \"127.0.0.1:{agent}\"\nmax_connections = 80000\nmax_agents = 250000\n\
-                 [tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {ca:?}\n\
+                 {planes}[tls]\ncert_file = {cert:?}\nkey_file = {key:?}\nclient_ca_file = {ca:?}\n\
                  [rest]\nlisten = \"127.0.0.1:{operator}\"\n\
                  [database]\nstore = \"postgres\"\n{database}{blobs}",
                 cert = path("server.pem"),
@@ -578,6 +618,7 @@ impl Instance {
                 ca = path("ca.pem"),
                 database = role.section(files.path()),
                 blobs = bucket.section,
+                planes = planes.key(),
             ),
         )
         .expect("write server.toml");
@@ -596,9 +637,10 @@ impl Instance {
         let (up, came_up) = std::sync::mpsc::channel();
         let stderr = child.stderr.take().expect("stderr");
         let lines = log.clone();
+        let ready = planes.ready();
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if line.contains("serving the REST API") {
+                if line.contains(ready) {
                     let _ = up.send(());
                 }
                 lines.lock().expect("log").push(line);
@@ -1825,6 +1867,367 @@ fn failover(loss: Loss) {
         );
         fleet.stop().await;
     });
+}
+
+/// G-20 where the planes run on instances of their own: of 10 000 simulated Agents, one on each
+/// connection, across three instances that open the Agent plane alone, one is killed, and a fourth
+/// instance opens the Operator plane alone. The window opens with the kill and closes once every
+/// Agent the killed instance carried is carried by the other two. Throughout the window the list of
+/// the Agents is walked through the Operator-plane instance, 100 Agents a page, and a revocation is
+/// sent to it every second. Each page is answered `2xx` with its entries within 2 seconds, and each
+/// revocation is committed and answered `2xx` within 2 seconds. At least one whole walk, from the
+/// first page to the last, and one revocation complete inside the window.
+/// Verifies: SRV-instance-opens-chosen-planes
+/// Verifies: G-20
+#[test]
+fn g20_the_operator_plane_answers_within_2_s_while_a_killed_agent_plane_instance_s_agents_reconnect(
+) {
+    if !stack_named() {
+        return;
+    }
+    opamp::tls::install_ring_provider();
+    let role = Role::named();
+    let bucket = Bucket::named();
+    let pki = Pki::new();
+    let tls = pki.hosts(FAILOVER_AGENTS, 1_000, |i| format!("sim-{i}"));
+
+    // Three Agent-plane instances behind the balancer, and one Operator-plane instance beside them.
+    let mut instances: Vec<Instance> = (0..3)
+        .map(|_| Instance::start_with(&pki, &role, &bucket, Planes::Agent))
+        .collect();
+    let operator = Instance::start_with(&pki, &role, &bucket, Planes::Operator);
+    let balancer = Balancer::start(instances.iter().map(|instance| instance.agent).collect());
+    let endpoint = format!("wss://127.0.0.1:{}/v1/opamp", balancer.address.port());
+    const KILLED: usize = 2;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("the fleet's runtime");
+    let record = Record::new(FAILOVER_AGENTS);
+    record_into(&record);
+    let client = operator_client(&pki);
+    runtime.block_on(async {
+        let mut fleet = Fleet::new(record.clone());
+        let started = Instant::now();
+        ramp(&mut fleet, &endpoint, &tls, 1, usize::MAX, RAMP_PER_SEC).await;
+        let agents = fleet.agents();
+        let held = |role: &Role| {
+            role.number("SELECT count(*) FROM agents WHERE connected AND holder IS NOT NULL")
+                as usize
+        };
+        assert!(
+            eventually(Duration::from_secs(180), || held(&role) == agents).await,
+            "the fleet is held: {} of {agents}\n{}",
+            held(&role),
+            diagnosis(&fleet, &instances)
+        );
+        let ramp_took = started.elapsed();
+
+        // What the killed instance carries: by the balancer's placement, and by the rows.
+        let placed = balancer.placed();
+        let on = |backend: usize| -> Vec<usize> {
+            (0..fleet.hosts.len())
+                .filter(|&host| placed.get(&fleet.hosts[host].address) == Some(&backend))
+                .collect()
+        };
+        let killed_hosts = on(KILLED);
+        let killed_id = role.text(&format!(
+            "SELECT holder::text FROM agents WHERE instance_uid = '{}'",
+            fleet.hosts[killed_hosts[0]].uids[0]
+        ));
+        role.sql(&format!(
+            "CREATE TABLE g20_before AS SELECT instance_uid FROM agents \
+             WHERE holder = '{killed_id}'"
+        ));
+        let killed_agents = killed_hosts.len();
+        assert_eq!(
+            role.number("SELECT count(*) FROM g20_before") as usize,
+            killed_agents,
+            "the rows name the killed instance as the holder of what it carries"
+        );
+        // The revocations name hosts the instances left carry, so that the Agents counted as
+        // carried again stay those the killed instance carried.
+        let (on_a, on_b) = (on(0), on(1));
+        let revocable: Vec<u64> = on_a
+            .iter()
+            .zip(&on_b)
+            .flat_map(|(&a, &b)| [a, b])
+            .map(|host| fleet.hosts[host].serial)
+            .collect();
+
+        let window = Arc::new(AtomicBool::new(true));
+        let killed_at = Instant::now();
+        instances[KILLED].kill();
+        eprintln!("killed Agent-plane instance {KILLED}, which carried {killed_agents} Agents");
+        let walking = tokio::spawn(walk(client.clone(), operator.operator, window.clone()));
+        let revoking = tokio::spawn(revoke_each_second(
+            client.clone(),
+            operator.operator,
+            revocable,
+            window.clone(),
+        ));
+
+        // The window closes once every Agent the killed instance carried is carried again.
+        let carried = |role: &Role| {
+            role.number(&format!(
+                "SELECT count(*) FROM agents a JOIN g20_before b USING (instance_uid) \
+                 WHERE a.connected AND a.holder IS NOT NULL AND a.holder <> '{killed_id}'"
+            )) as usize
+        };
+        let deadline = killed_at + CARRIED_WITHIN;
+        while carried(&role) != killed_agents && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(200)).await; // timed: the poll of the database
+        }
+        let closed_at = Instant::now();
+        window.store(false, Ordering::SeqCst);
+        let open_for = closed_at - killed_at;
+        assert_eq!(
+            carried(&role),
+            killed_agents,
+            "every Agent of the killed instance is carried again within {CARRIED_WITHIN:?}: \
+             {} of {killed_agents} after {open_for:?}\n{}",
+            carried(&role),
+            diagnosis(&fleet, &instances)
+        );
+        let (pages, walks) = walking.await.expect("the walk");
+        let revocations = revoking.await.expect("the revocations");
+
+        // Every page and every revocation sent in the window is answered `2xx` within 2 seconds.
+        for page in &pages {
+            assert!(
+                page.status.is_some_and(|status| status.is_success()),
+                "a page {:?} after the kill was answered {:?}: {}",
+                page.at - killed_at,
+                page.status,
+                page.text
+            );
+            assert!(
+                (1..=100).contains(&page.entries),
+                "a page {:?} after the kill holds {} entries, not 1 to 100",
+                page.at - killed_at,
+                page.entries
+            );
+            assert!(
+                page.took <= OPERATOR_WITHIN,
+                "a page {:?} after the kill was answered within {OPERATOR_WITHIN:?}: {:?}",
+                page.at - killed_at,
+                page.took
+            );
+        }
+        for revocation in &revocations {
+            assert!(
+                revocation.status.is_some_and(|status| status.is_success()),
+                "a revocation {:?} after the kill was answered {:?}: {}",
+                revocation.at - killed_at,
+                revocation.status,
+                revocation.text
+            );
+            assert!(
+                revocation.took <= OPERATOR_WITHIN,
+                "a revocation {:?} after the kill was committed within {OPERATOR_WITHIN:?}: {:?}",
+                revocation.at - killed_at,
+                revocation.took
+            );
+        }
+        // At least one whole walk and one revocation inside the window, each walk the whole list.
+        let whole: Vec<&Walk> = walks
+            .iter()
+            .filter(|walk| walk.ended <= closed_at)
+            .collect();
+        assert!(
+            !whole.is_empty(),
+            "a whole walk of the list completed inside the window of {open_for:?}: {} pages read, \
+             none of {} walks whole",
+            pages.len(),
+            walks.len()
+        );
+        for walk in &whole {
+            assert_eq!(walk.agents, agents, "a walk read every Agent once");
+        }
+        let committed = revocations
+            .iter()
+            .filter(|revocation| revocation.at + revocation.took <= closed_at)
+            .count();
+        assert!(
+            committed >= 1,
+            "a revocation completed inside the window of {open_for:?}: {} sent",
+            revocations.len()
+        );
+
+        let slowest_page = pages.iter().map(|page| page.took).max().unwrap_or_default();
+        let slowest_revocation = revocations
+            .iter()
+            .map(|revocation| revocation.took)
+            .max()
+            .unwrap_or_default();
+        let walk_took: Vec<Duration> = whole
+            .iter()
+            .map(|walk| walk.ended - walk.started)
+            .collect();
+        eprintln!(
+            "G-20 planes on instances of their own: {agents} Agents, 1 per connection, 3 Agent-plane \
+             instances and 1 Operator-plane instance, Agent-plane instance {KILLED} killed carrying \
+             {killed_agents}; carried again after {open_for:?} (bound {CARRIED_WITHIN:?}); in the \
+             window {} pages, slowest {slowest_page:?}, {} whole walks taking {walk_took:?}, \
+             {} revocations, {committed} committed inside it, slowest {slowest_revocation:?} \
+             (bound {OPERATOR_WITHIN:?} each); ramp {ramp_took:?}; {}, the Operator-plane \
+             instance {} MiB",
+            pages.len(),
+            whole.len(),
+            revocations.len(),
+            memory(&instances),
+            operator.rss_mib()
+        );
+        drop(operator);
+        fleet.stop().await;
+    });
+}
+
+/// G-20's bound on each page and each revocation the Operator plane answers while the Agents of a
+/// lost Agent-plane instance reconnect.
+// timed: the bound G-20 sets on each answer, which the test measures and never waits for
+const OPERATOR_WITHIN: Duration = Duration::from_secs(2);
+
+/// One request to the Operator plane: when it was sent, how long its answer took, its status (none
+/// when no answer came), the entries of a page, and the body of an answer that was no success.
+struct Asked {
+    at: Instant,
+    took: Duration,
+    status: Option<reqwest::StatusCode>,
+    entries: usize,
+    text: String,
+}
+
+/// One walk of the list from its first page to its last: when it began and ended, and the
+/// distinct Agents it read.
+struct Walk {
+    started: Instant,
+    ended: Instant,
+    agents: usize,
+}
+
+/// Walks the list of the Agents through the Operator plane on `port`, 100 a page by the `Link`
+/// header, from its first page to its last and again, while `open` holds. A page that is not
+/// answered `2xx` starts the walk again. Answers every page asked and every walk that reached the
+/// last page.
+async fn walk(
+    client: reqwest::Client,
+    port: u16,
+    open: Arc<AtomicBool>,
+) -> (Vec<Asked>, Vec<Walk>) {
+    let (mut pages, mut walks) = (Vec::new(), Vec::new());
+    'walks: while open.load(Ordering::SeqCst) {
+        let started = Instant::now();
+        let mut path = "/api/v1/agents?limit=100".to_string();
+        let mut seen: HashSet<String> = HashSet::new();
+        loop {
+            if !open.load(Ordering::SeqCst) {
+                break 'walks;
+            }
+            let at = Instant::now();
+            let answer = client
+                .get(format!("https://127.0.0.1:{port}{path}"))
+                .send()
+                .await;
+            let mut page = Asked {
+                at,
+                took: Duration::ZERO,
+                status: None,
+                entries: 0,
+                text: String::new(),
+            };
+            let mut next = None;
+            match answer {
+                Ok(answer) => {
+                    page.status = Some(answer.status());
+                    next = answer
+                        .headers()
+                        .get("link")
+                        .and_then(|link| link.to_str().ok())
+                        .and_then(|link| link.strip_prefix('<'))
+                        .and_then(|link| link.split('>').next())
+                        .map(str::to_string);
+                    let text = answer.text().await.unwrap_or_default();
+                    let uids: Vec<String> = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|body| {
+                            body.as_array().map(|entries| {
+                                entries
+                                    .iter()
+                                    .filter_map(|agent| agent["instance_uid"].as_str())
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                        })
+                        .unwrap_or_default();
+                    page.entries = uids.len();
+                    seen.extend(uids);
+                    if !page.status.is_some_and(|status| status.is_success()) {
+                        page.text = text;
+                    }
+                }
+                Err(e) => page.text = e.to_string(),
+            }
+            page.took = at.elapsed();
+            let answered = page.status.is_some_and(|status| status.is_success());
+            pages.push(page);
+            match next {
+                Some(link) if answered => path = link,
+                _ if answered => {
+                    walks.push(Walk {
+                        started,
+                        ended: Instant::now(),
+                        agents: seen.len(),
+                    });
+                    continue 'walks;
+                }
+                _ => continue 'walks,
+            }
+        }
+    }
+    (pages, walks)
+}
+
+/// Revokes the certificate of the next of `serials` through the Operator plane on
+/// `port` once a second while `open` holds. Answers every revocation sent.
+async fn revoke_each_second(
+    client: reqwest::Client,
+    port: u16,
+    serials: Vec<u64>,
+    open: Arc<AtomicBool>,
+) -> Vec<Asked> {
+    let mut sent = Vec::new();
+    for serial in serials {
+        if !open.load(Ordering::SeqCst) {
+            break;
+        }
+        let at = Instant::now();
+        let answer = client
+            .post(format!("https://127.0.0.1:{port}/api/v1/revocations"))
+            .json(&serde_json::json!({
+                "certificate": {"authority": "client", "serial": format!("{serial:x}")}
+            }))
+            .send()
+            .await;
+        let (status, text) = match answer {
+            Ok(answer) => {
+                let status = answer.status();
+                (Some(status), answer.text().await.unwrap_or_default())
+            }
+            Err(e) => (None, e.to_string()),
+        };
+        sent.push(Asked {
+            at,
+            took: at.elapsed(),
+            status,
+            entries: 0,
+            text,
+        });
+        // timed: the pace of one revocation a second, the load G-20 names
+        tokio::time::sleep_until((at + Duration::from_secs(1)).into()).await;
+    }
+    sent
 }
 
 /// G-20's load: the presence batches and notifications of 100 000 simulated Agents at the default

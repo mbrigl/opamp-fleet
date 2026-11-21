@@ -17,6 +17,26 @@ carries a date once its tag exists.
 
 ## [0.8.7]
 
+### Added
+
+- **An instance opens the planes `planes` names**
+  ([SRV-instance-opens-chosen-planes §22–§26](docs/adr/SRV-instance-opens-chosen-planes.md),
+  [SEC-tls13-bounded-input-chosen-planes §14](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)).
+  The new key `planes` in `server.toml`, `["agent", "operator"]` by default, lets an instance on
+  PostgreSQL with its blobs in S3 and no CA key in a file open the Agent plane or the Operator
+  plane alone. Such an instance binds, serves and drains that plane's listener alone, and builds
+  nothing of the other plane. It still takes its lease, keeps its audit chain and runs every task
+  of the database. It checks the whole configuration as an instance of both planes does. An empty
+  `planes`, an unknown or repeated name, or one plane on an instance that must be alone fails
+  startup, naming the key. The startup log names the planes an instance opens. Each lease records
+  its planes, in a column `planes` that the Server adds to `leases` at startup, and an instance
+  warns while no live lease serves a plane. An instance of the Operator plane alone has nothing
+  listening on `4320`: probe it on `4321`
+  ([OPS-releases-image-probed-by-plane §17](docs/adr/OPS-releases-image-probed-by-plane.md)).
+  **What to do:**
+  nothing; without `planes` every instance opens both planes as before. Set `planes` only once
+  every instance of the fleet runs this release, since an older one refuses the key.
+
 ## [0.8.6] - 2026-11-19
 
 ### Fixed

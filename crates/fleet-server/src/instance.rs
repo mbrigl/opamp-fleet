@@ -3,13 +3,14 @@
 //! the lease it holds while it serves, the planes it opens only while it
 //! holds one, and the changes of other instances it takes up.
 //!
-//! An instance takes its lease before it opens either listener and renews it while it serves. It
-//! measures the lease from the moment it sent the last renewal the database confirmed, on a clock
-//! that counts a suspend ([`Elapsed`]), so it deems it lapsed no later than the database and every
-//! other instance do. It reads that clock before each answer ([`Proof`]). Once it cannot prove
-//! one, it ends every session it carries and closes both listeners; it never serves on a lease it
-//! cannot prove, because it could not learn of a revocation. When the database answers again it
-//! takes a new lease under a new instance id and binds the same addresses again. On the filesystem
+//! An instance takes its lease before it opens a listener of the planes it opens, and renews it
+//! while it serves (SRV-instance-opens-chosen-planes §1). It measures the lease from the moment it
+//! sent the last renewal the database confirmed, on a clock that counts a suspend ([`Elapsed`]), so
+//! it deems it lapsed no later than the database and every other instance do. It reads that clock
+//! before each answer ([`Proof`]). Once it cannot prove one, it ends every session it carries and
+//! closes the listeners it opens (clause 3); it never serves on a lease it cannot prove, because
+//! it could not learn of a revocation. When the database answers again it takes a new lease under
+//! a new instance id and binds the same addresses again. On the filesystem
 //! store there is one Server, no lease, and the planes are served until the Server stops.
 
 use std::collections::{BTreeSet, HashSet};
@@ -28,7 +29,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::changed::Changed;
 use crate::clock::Elapsed;
-use crate::config::LeaseTimes;
+use crate::config::{LeaseTimes, OpenPlanes};
 use crate::fleet::AppState;
 use crate::postgres::lease::Terms;
 use crate::postgres::notify::{Heard, Notice};
@@ -333,15 +334,48 @@ pub(crate) fn take_in_time(
         instance_id: taken.instance_id,
         sent,
         taken_over: taken.taken_over,
+        served: taken.served,
     })
 }
 
-/// A lease taken: under which instance id, when its request was sent on the lease's clock, and the
-/// leases it took over.
+/// A lease taken: under which instance id, when its request was sent on the lease's clock, the
+/// leases it took over, and the planes the live leases serve once it is taken.
 pub(crate) struct Taken {
     pub(crate) instance_id: String,
     pub(crate) sent: Duration,
     pub(crate) taken_over: Vec<String>,
+    pub(crate) served: OpenPlanes,
+}
+
+/// The planes no live lease served when the instance last read them, each warned of once until
+/// a live lease serves it again (SRV-instance-opens-chosen-planes §26). Nothing is refused.
+#[derive(Default)]
+struct Unserved {
+    agent: bool,
+    operator: bool,
+}
+
+impl Unserved {
+    /// Takes up the planes the live leases serve, as the lease of `instance_id` read them, and
+    /// warns of each plane none serves that it has not warned of since a live lease served it.
+    fn heard(&mut self, served: OpenPlanes, instance_id: &str) {
+        for ((serves, plane), warned) in served
+            .each()
+            .into_iter()
+            .zip([&mut self.agent, &mut self.operator])
+        {
+            if serves {
+                *warned = false;
+            } else if !*warned {
+                *warned = true;
+                warn!(
+                    instance_id = %instance_id,
+                    plane,
+                    "no live lease serves {plane}: no instance on the database opens it"
+                );
+            }
+        }
+    }
 }
 
 /// What the lease thread renews with, and what it tells.
@@ -416,6 +450,8 @@ async fn renew(lease: &Renewing, taken: Taken) {
     } = lease;
     let times = *times;
     let (mut instance_id, mut sent) = (taken.instance_id, taken.sent);
+    let mut unserved = Unserved::default();
+    unserved.heard(taken.served, &instance_id);
     loop {
         // Held: renewed every `renew`, and lost the moment `lapse` has passed since the last
         // renewal the database confirmed was sent, on the lease's clock, a suspend included. Each
@@ -460,6 +496,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
                     sent = asked;
                     proof.lapses_at(sent.saturating_add(times.lapse));
                     versions.send_replace(Some(renewal.list_version));
+                    unserved.heard(renewal.served, &instance_id);
                     match take_over_lapsed(lease, &instance_id, sent).await {
                         Waited::LockLost => return lock_lost(lease, &instance_id),
                         Waited::Done(true) => takeovers.send_modify(|count| *count += 1),
@@ -472,7 +509,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
         proof.lost();
         error!(
             instance_id = %instance_id,
-            "lost the lease: ending every session and closing both listeners until a new lease is \
+            "lost the lease: ending every session and closing the listeners until a new lease is \
              held"
         );
         held.send_replace(None);
@@ -503,6 +540,7 @@ async fn renew(lease: &Renewing, taken: Taken) {
                     );
                     instance_id = taken.instance_id;
                     sent = taken.sent;
+                    unserved.heard(taken.served, &instance_id);
                     proof.lapses_at(sent.saturating_add(times.lapse));
                     held.send_replace(Some(instance_id.clone()));
                     if !taken.taken_over.is_empty() {
@@ -573,7 +611,7 @@ fn lock_lost(lease: &Renewing, instance_id: &str) {
     lease.proof.lost();
     error!(
         instance_id = %instance_id,
-        "lost the exclusive lock: ending every session, closing both listeners, and serving no more \
+        "lost the exclusive lock: ending every session, closing the listeners, and serving no more \
          until the Server is started again"
     );
     lease.held.send_replace(None);
@@ -1048,57 +1086,112 @@ const RELOAD_RETRY_FIRST: Duration = Duration::from_millis(250);
 /// The longest wait before a failed read is tried again.
 const RELOAD_RETRY_MAX: Duration = Duration::from_secs(10);
 
-/// The two planes as the binary builds them (SEC-tls13-two-planes-bounded-input): what each serves, its TLS and how many
-/// connections it holds at most.
+/// One plane as the binary builds it (SEC-tls13-bounded-input-chosen-planes §14 and §15): what it
+/// serves, the listener it was bound to, its TLS and how many connections it holds at most.
+pub struct Plane {
+    /// What it serves: on the Agent plane the OpAMP endpoint, the package downloads and the
+    /// Gateways' revocation list; on the Operator plane the REST API, its docs, and the UI.
+    pub router: Router,
+    /// The listener it serves on, bound before any plane serves.
+    pub listener: TcpListener,
+    /// Its TLS: on the Agent plane with a client certificate required in the handshake.
+    pub tls: Arc<ServerConfig>,
+    /// The connections it holds at most.
+    pub max_connections: usize,
+    /// The new connections it takes a second, where it bounds them: the Agent plane does.
+    pub max_new_connections_per_sec: Option<u32>,
+}
+
+/// The planes an instance opens, as the binary builds them: each one it opens, and none other
+/// (SEC-tls13-bounded-input-chosen-planes §14,
+/// SRV-instance-opens-chosen-planes §22).
 pub struct Planes {
-    /// The OpAMP endpoint and the package downloads.
-    pub agents: Router,
-    /// The REST API, its docs, and the UI.
-    pub operators: Router,
-    /// The Agent plane's TLS, a client certificate required in the handshake.
-    pub agent_tls: Arc<ServerConfig>,
-    /// The Operator plane's TLS.
-    pub operator_tls: Arc<ServerConfig>,
-    /// The connections the Agent plane holds at most.
-    pub agent_max_connections: usize,
-    /// The new connections the Agent plane takes a second.
-    pub agent_max_new_connections_per_sec: u32,
-    /// The connections the Operator plane holds at most.
-    pub operator_max_connections: usize,
+    /// The Agent plane, where the instance opens it.
+    pub agent: Option<Plane>,
+    /// The Operator plane, where the instance opens it.
+    pub operator: Option<Plane>,
     /// What a stop spreads the closing of the WebSocket sessions over.
     pub drain: Duration,
 }
 
-/// Serves both planes from `listeners` until `stop` resolves, then drains them over
-/// [`Planes::drain`].
+/// A plane [`serve`] opens: what it serves, gated by the lease, and the address it binds again
+/// after a lost lease.
+struct Opened {
+    name: &'static str,
+    router: Router,
+    address: SocketAddr,
+    tls: Arc<ServerConfig>,
+    max_connections: usize,
+    max_new_connections_per_sec: Option<u32>,
+}
+
+impl Opened {
+    /// Serves this plane on `listener` until `handle` shuts it down.
+    async fn serve(&self, listener: TcpListener, handle: Handle) -> Result<(), String> {
+        let mut plane = crate::listen::plane(
+            listener,
+            Some(self.tls.clone()),
+            self.max_connections,
+            handle,
+        );
+        if let Some(rate) = self.max_new_connections_per_sec {
+            plane = plane.with_max_new_connections_per_sec(rate);
+        }
+        plane
+            .serve(self.router.clone())
+            .await
+            .map_err(|e| format!("serving {}: {e}", self.name))
+    }
+}
+
+/// Serves the planes the instance opens until `stop` resolves, then drains them over
+/// [`Planes::drain`]. Every listener it opens is bound before any serves, and they share one
+/// handle, so one stop closes them all
+/// (SEC-tls13-bounded-input-chosen-planes §14 and §17).
 ///
 /// With a lease, the planes are open only while it is held: once it is lost, every connection is
-/// cut and both listeners are closed; once a new one is held, the same addresses are bound again.
-/// Each request on either plane is answered `503` while `proof` does not hold ([`gated`]).
+/// cut and the listeners of the planes it opens are closed; once a new one is held, the same
+/// addresses are bound again, and no other
+/// (SRV-instance-opens-chosen-planes §1 and §3).
+/// Each request on a plane it opens is answered `503` while `proof` does not hold ([`gated`]).
 ///
 /// # Errors
 /// Returns an error when a plane cannot be served.
 pub async fn serve(
     planes: Planes,
-    listeners: (TcpListener, TcpListener),
     mut held: Option<Held>,
     proof: Option<Proof>,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    let (agents, operators) = (
-        gated(planes.agents.clone(), proof.clone()),
-        gated(planes.operators.clone(), proof),
+    let drain = planes.drain;
+    let mut opened = Vec::new();
+    let mut bound = Vec::new();
+    for (name, plane) in [
+        ("the Agent plane", planes.agent),
+        ("the Operator plane", planes.operator),
+    ] {
+        let Some(plane) = plane else { continue };
+        opened.push(Opened {
+            name,
+            router: gated(plane.router, proof.clone()),
+            address: plane.listener.local_addr().map_err(|e| e.to_string())?,
+            tls: plane.tls,
+            max_connections: plane.max_connections,
+            max_new_connections_per_sec: plane.max_new_connections_per_sec,
+        });
+        bound.push(plane.listener);
+    }
+    debug_assert!(
+        !opened.is_empty(),
+        "the load checks refuse an instance that opens no plane"
     );
-    let addresses = (
-        listeners.0.local_addr().map_err(|e| e.to_string())?,
-        listeners.1.local_addr().map_err(|e| e.to_string())?,
-    );
+    let addresses: Vec<SocketAddr> = opened.iter().map(|plane| plane.address).collect();
     let (stopping, stopped) = watch::channel(false);
     tokio::spawn(async move {
         stop.await;
         stopping.send_replace(true);
     });
-    let mut listeners = Some(listeners);
+    let mut listeners = Some(bound);
     loop {
         if let Some(held) = held.as_mut() {
             let mut stopped = stopped.clone();
@@ -1117,9 +1210,9 @@ pub async fn serve(
                 }
             }
         }
-        let (agent, operator) = match listeners.take() {
+        let bound = match listeners.take() {
             Some(bound) => bound,
-            None => match bind_again(addresses, stopped.clone()).await {
+            None => match bind_again(&addresses, stopped.clone()).await {
                 Some(bound) => bound,
                 None => return Ok(()),
             },
@@ -1129,7 +1222,6 @@ pub async fn serve(
         // another, every connection is cut, since none of them may outlive the lease it was
         // admitted under.
         let opened_under = held.as_ref().and_then(|held| held.borrow().clone());
-        let drain = planes.drain;
         let watching = tokio::spawn({
             let (handle, mut held, mut stopped) = (handle.clone(), held.clone(), stopped.clone());
             async move {
@@ -1161,26 +1253,15 @@ pub async fn serve(
                 }
             }
         });
-        let (agents, operators) = tokio::join!(
-            crate::listen::plane(
-                agent,
-                Some(planes.agent_tls.clone()),
-                planes.agent_max_connections,
-                handle.clone()
-            )
-            .with_max_new_connections_per_sec(planes.agent_max_new_connections_per_sec)
-            .serve(agents.clone()),
-            crate::listen::plane(
-                operator,
-                Some(planes.operator_tls.clone()),
-                planes.operator_max_connections,
-                handle
-            )
-            .serve(operators.clone()),
-        );
+        let served = futures_util::future::join_all(
+            opened
+                .iter()
+                .zip(bound)
+                .map(|(plane, listener)| plane.serve(listener, handle.clone())),
+        )
+        .await;
         watching.abort();
-        agents.map_err(|e| format!("serving the Agent plane: {e}"))?;
-        operators.map_err(|e| format!("serving the Operator plane: {e}"))?;
+        served.into_iter().collect::<Result<Vec<()>, String>>()?;
         if *stopped.borrow() {
             return Ok(());
         }
@@ -1195,18 +1276,23 @@ fn ended_for_good() -> String {
         .to_string()
 }
 
-/// Binds both addresses again, trying once a second until both are bound; `None` once stopped.
+/// Binds the addresses of the planes the instance opens again, trying once a second until every
+/// one is bound; `None` once stopped.
 async fn bind_again(
-    (agent, operator): (SocketAddr, SocketAddr),
+    addresses: &[SocketAddr],
     stopped: watch::Receiver<bool>,
-) -> Option<(TcpListener, TcpListener)> {
+) -> Option<Vec<TcpListener>> {
     loop {
         if *stopped.borrow() {
             return None;
         }
-        match (TcpListener::bind(agent), TcpListener::bind(operator)) {
-            (Ok(agent), Ok(operator)) => return Some((agent, operator)),
-            (Err(e), _) | (_, Err(e)) => {
+        match addresses
+            .iter()
+            .map(TcpListener::bind)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(bound) => return Some(bound),
+            Err(e) => {
                 warn!(error = %e, "could not bind the planes again; trying once a second");
                 let mut stopped = stopped.clone();
                 tokio::select! {
@@ -1593,6 +1679,48 @@ mod tests {
                 .any(|line| line.contains("later than its interval")),
             "{lines:?}"
         );
+    }
+
+    /// While no live lease serves a plane, the instance warns of it once, naming it; it warns
+    /// again only after a live lease served it in between.
+    /// Verifies: SRV-instance-opens-chosen-planes
+    #[tokio::test]
+    async fn a_plane_no_live_lease_serves_is_warned_of_once_until_one_serves_it() {
+        use crate::config::OpenPlanes;
+        let agent = OpenPlanes {
+            agent: true,
+            operator: false,
+        };
+        let warned = |lines: &[String]| {
+            lines
+                .iter()
+                .filter(|line| line.contains("no live lease serves"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut unserved = super::Unserved::default();
+        let first = logged_while(async {
+            unserved.heard(agent, "a");
+            unserved.heard(agent, "a");
+        })
+        .await;
+        let first = warned(&first);
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            first[0].contains("the Operator plane") && !first[0].contains("the Agent plane"),
+            "{first:?}"
+        );
+        let served = logged_while(async {
+            unserved.heard(OpenPlanes::BOTH, "a");
+            unserved.heard(OpenPlanes::BOTH, "a");
+        })
+        .await;
+        assert_eq!(warned(&served), Vec::<String>::new());
+        let again = logged_while(async {
+            unserved.heard(agent, "a");
+        })
+        .await;
+        assert_eq!(warned(&again).len(), 1, "{again:?}");
     }
 
     /// What the log writes, collected.

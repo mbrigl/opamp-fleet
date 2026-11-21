@@ -216,7 +216,23 @@ pub const MIGRATIONS: &[Migration] = &[
         oldest_server: "0.8.5",
         sql: CONTRACT_PAIR_DROPPED,
     },
+    // A column with a default only added. A Server of 0.8.5 names it in no statement, and the
+    // leases it writes take the default, both planes, so it serves on what this leaves
+    // (SRV-instance-opens-chosen-planes §26,
+    // SRV-instances-share-one-postgresql §16).
+    Migration {
+        version: 21,
+        oldest_server: "0.8.5",
+        sql: LEASE_PLANES,
+    },
 ];
+
+/// The planes the instance that holds each lease opens
+/// (SRV-instance-opens-chosen-planes §26): a lease written by a release that records none takes
+/// the default, both planes, which is what such a release opens.
+const LEASE_PLANES: &str = "
+ALTER TABLE leases ADD COLUMN planes text[] NOT NULL DEFAULT '{agent,operator}';
+";
 
 /// The defaults of the contract pair — the Deployments' mirror columns `packages` and
 /// `configurations` and the Hosts' `instance_uids` arrays — so that a row inserted without naming
@@ -981,13 +997,16 @@ mod tests {
         assert_eq!(MIGRATIONS[18].oldest_server, "0.8.4", "migration 19");
         // The drop names 0.8.5, the first release that names no column of the pair.
         assert_eq!(MIGRATIONS[19].oldest_server, "0.8.5", "migration 20");
+        // The lease's planes name 0.8.5 too: a Server of 0.8.5 names the column nowhere, and its
+        // leases take the default (SRV-instance-opens-chosen-planes §26).
+        assert_eq!(MIGRATIONS[20].oldest_server, "0.8.5", "migration 21");
         assert_eq!(
             MIGRATIONS.len(),
-            20,
+            21,
             "migrations 11 to 18 name 0.8.0, the audit key's label of SEC-append-only-audit-record, the \
              checkpoints of the audit record and the indexes of the pin counts among them, \
-             migration 19, the contract pair's defaults, names 0.8.4, and migration 20, its drop, \
-             names 0.8.5"
+             migration 19, the contract pair's defaults, names 0.8.4, migration 20, its drop, \
+             and migration 21, the lease's planes, name 0.8.5"
         );
         assert!(
             LEASE_RELEASE.contains(&format!("DEFAULT '{RELEASE_BEFORE_THE_RECORD}'")),

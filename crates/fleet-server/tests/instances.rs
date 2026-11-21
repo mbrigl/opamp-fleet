@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use fleet_server::config::{LeaseTimes, PostgresConfig};
+use fleet_server::config::{LeaseTimes, OpenPlanes, PostgresConfig};
 use fleet_server::enrolment::Enrolment;
 use fleet_server::floors::PackageFloors;
 use fleet_server::postgres::schema::{Migration, MIGRATIONS};
@@ -408,7 +408,17 @@ impl Instance {
     /// [`follow`](Self::follow) is called: what it hears is held back until then.
     async fn start_deaf(pki: &Pki, schema: &Schema, config: PostgresConfig) -> Self {
         Self::start_with(
-            pki, schema, config, true, false, None, None, None, None, None,
+            pki,
+            schema,
+            config,
+            true,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenPlanes::BOTH,
         )
         .await
     }
@@ -432,6 +442,7 @@ impl Instance {
             None,
             Some(signing),
             None,
+            OpenPlanes::BOTH,
         )
         .await
     }
@@ -455,6 +466,7 @@ impl Instance {
             None,
             None,
             None,
+            OpenPlanes::BOTH,
         )
         .await
     }
@@ -473,6 +485,7 @@ impl Instance {
             None,
             None,
             Some(gated),
+            OpenPlanes::BOTH,
         )
         .await
     }
@@ -515,7 +528,17 @@ impl Instance {
         renewals: bool,
     ) -> Self {
         Self::start_with(
-            pki, schema, config, renewals, true, None, None, None, None, None,
+            pki,
+            schema,
+            config,
+            renewals,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenPlanes::BOTH,
         )
         .await
     }
@@ -539,6 +562,22 @@ impl Instance {
             None,
             None,
             None,
+            OpenPlanes::BOTH,
+        )
+        .await
+    }
+
+    /// [`start`](Self::start), opening the planes `planes` names alone, as the binary opens them
+    /// (SRV-instance-opens-chosen-planes §24): the address of a plane it leaves closed is one
+    /// nothing listens on.
+    async fn start_opening(
+        pki: &Pki,
+        schema: &Schema,
+        config: PostgresConfig,
+        planes: OpenPlanes,
+    ) -> Self {
+        Self::start_with(
+            pki, schema, config, true, true, None, None, None, None, None, planes,
         )
         .await
     }
@@ -563,6 +602,7 @@ impl Instance {
             Some((release, migrations)),
             None,
             None,
+            OpenPlanes::BOTH,
         )
         .await
     }
@@ -571,7 +611,7 @@ impl Instance {
     /// says so, its admission throttled where `throttle` names limits, its package blobs in
     /// `blobs` where it names a directory, as the release and schema `version` names, or this
     /// build's, and with its client CA's key on a token where `signing` names one, or with the
-    /// signer `gated` as its client CA where it names one.
+    /// signer `gated` as its client CA where it names one, opening the planes `planes` names.
     #[allow(clippy::too_many_arguments)]
     async fn start_with(
         pki: &Pki,
@@ -584,6 +624,7 @@ impl Instance {
         version: Option<(&'static str, &'static [Migration])>,
         signing: Option<&Signing<'_>>,
         gated: Option<Gated>,
+        planes: OpenPlanes,
     ) -> Self {
         opamp::tls::install_ring_provider();
         let dir = tempfile::tempdir().expect("tempdir");
@@ -705,20 +746,24 @@ impl Instance {
             dir.path().join("ca.pem").display().to_string(),
         ))
         .expect("tls config");
-        let planes = fleet_server::tls::server_tls(&tls, None, enrolment_config.as_ref())
+        let material = fleet_server::tls::server_tls(&tls, None, enrolment_config.as_ref())
             .expect("server material");
         let throttle = throttle
             .map(|limits| Arc::new(fleet_server::throttle::Throttle::new(limits, clock.clone())));
         let mut admission = fleet_server::agent_cases::Admission::new(true)
             .with_revocations(Some(revocations.clone()));
         if signing.is_some() {
-            admission = admission.with_enrolment(planes.issuers, Some(enrolment.clone()));
+            admission = admission.with_enrolment(material.issuers, Some(enrolment.clone()));
         }
         if let Some(throttle) = &throttle {
             admission = admission.with_throttle(throttle.clone());
         }
-        let agents = fleet_server::agent_app(state.clone(), admission);
-        let operators = fleet_server::operator_app(state.clone(), None);
+        let agents = planes
+            .agent
+            .then(|| fleet_server::agent_app(state.clone(), admission));
+        let operators = planes
+            .operator
+            .then(|| fleet_server::operator_app(state.clone(), None));
 
         let suspended = Arc::new(AtomicU64::new(0));
         let lease = {
@@ -734,7 +779,10 @@ impl Instance {
                 "test-host",
                 fleet_server::postgres::lease::new_instance_id().expect("id"),
                 clock,
-                fleet_server::postgres::lease::Terms::default(),
+                fleet_server::postgres::lease::Terms {
+                    planes,
+                    ..fleet_server::postgres::lease::Terms::default()
+                },
             )
             .expect("lease")
         };
@@ -764,21 +812,35 @@ impl Instance {
         let operator_listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let agent = agent_listener.local_addr().expect("addr");
         let operator = operator_listener.local_addr().expect("addr");
+        // The listener of a plane the instance leaves closed is let go: its address is one
+        // nothing listens on.
+        let agent_listener = planes.agent.then_some(agent_listener);
+        let operator_listener = planes.operator.then_some(operator_listener);
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let held = lease.held();
         tokio::spawn(async move {
             fleet_server::instance::serve(
                 fleet_server::instance::Planes {
-                    agents,
-                    operators,
-                    agent_tls: planes.agent.rustls_config().expect("agent plane"),
-                    operator_tls: planes.operator.rustls_config().expect("operator plane"),
-                    agent_max_connections: 64,
-                    agent_max_new_connections_per_sec: 200,
-                    operator_max_connections: 64,
+                    agent: agents.zip(agent_listener).map(|(router, listener)| {
+                        fleet_server::instance::Plane {
+                            router,
+                            listener,
+                            tls: material.agent.rustls_config().expect("agent plane"),
+                            max_connections: 64,
+                            max_new_connections_per_sec: Some(200),
+                        }
+                    }),
+                    operator: operators.zip(operator_listener).map(|(router, listener)| {
+                        fleet_server::instance::Plane {
+                            router,
+                            listener,
+                            tls: material.operator.rustls_config().expect("operator plane"),
+                            max_connections: 64,
+                            max_new_connections_per_sec: None,
+                        }
+                    }),
                     drain: Duration::from_secs(1),
                 },
-                (agent_listener, operator_listener),
                 Some(lease.held()),
                 Some(lease.proof()),
                 async move {
@@ -1105,6 +1167,171 @@ async fn an_instance_without_a_lease_closes_its_listeners_until_it_holds_a_new_o
     assert!(
         eventually(Duration::from_secs(5), || instance.both_planes().0).await,
         "the listeners were not opened again"
+    );
+}
+
+/// The Agent plane alone, and the Operator plane alone.
+const ONE_PLANE: [(OpenPlanes, &str); 2] = [
+    (
+        OpenPlanes {
+            agent: true,
+            operator: false,
+        },
+        "the Agent plane",
+    ),
+    (
+        OpenPlanes {
+            agent: false,
+            operator: true,
+        },
+        "the Operator plane",
+    ),
+];
+
+impl Instance {
+    /// Whether the plane the instance opens takes a TCP connection, and whether its closed
+    /// plane's address takes one.
+    fn opened_and_closed(&self, planes: OpenPlanes) -> (bool, bool) {
+        let (opened, closed) = if planes.agent {
+            (self.agent, self.operator)
+        } else {
+            (self.operator, self.agent)
+        };
+        (
+            Self::takes_connections(opened),
+            Self::takes_connections(closed),
+        )
+    }
+}
+
+/// An instance of one plane listens on that plane's address alone. When its lease lapses it closes
+/// that listener, and once it holds a new lease it opens that one again and no other. Its drain at
+/// a stop closes that listener and ends its WebSocket sessions with `1001`
+/// (SRV-instance-opens-chosen-planes §1 and §3,
+/// SEC-tls13-bounded-input-chosen-planes §14 and §17).
+/// Verifies: SRV-instance-opens-chosen-planes, SEC-tls13-bounded-input-chosen-planes
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_instance_of_one_plane_opens_closes_and_drains_that_plane_alone() {
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let target = std::net::ToSocketAddrs::to_socket_addrs(&(
+        schema.config.host.as_str(),
+        schema.config.port,
+    ))
+    .expect("resolve")
+    .next()
+    .expect("an address");
+    for (planes, name) in ONE_PLANE {
+        let (port, frozen) = freezable_proxy(target);
+        let mut instance =
+            Instance::start_opening(&pki, &schema, schema.config_on(port), planes).await;
+        assert_eq!(
+            instance.opened_and_closed(planes),
+            (true, false),
+            "{name}: its own plane listens, and nothing on the other's address"
+        );
+
+        frozen.store(true, Ordering::SeqCst);
+        assert!(
+            eventually(TIMES.lapse + Duration::from_secs(2), || instance
+                .instance_id()
+                .is_none())
+            .await,
+            "{name}: the lease was not given up"
+        );
+        assert!(
+            eventually(Duration::from_secs(2), || instance
+                .opened_and_closed(planes)
+                == (false, false))
+            .await,
+            "{name}: its listener stayed open without a lease"
+        );
+        frozen.store(false, Ordering::SeqCst);
+        assert!(
+            eventually(Duration::from_secs(20), || instance.instance_id().is_some()).await,
+            "{name}: no new lease was taken"
+        );
+        assert!(
+            eventually(Duration::from_secs(5), || instance
+                .opened_and_closed(planes)
+                == (true, false))
+            .await,
+            "{name}: its own listener alone was opened again"
+        );
+
+        let mut session = if planes.agent {
+            let (cert, key) = pki.issue("edge-01");
+            let mut session = websocket(&instance, &pki, &cert, &key).await;
+            exchange(&mut session).await;
+            Some(session)
+        } else {
+            None
+        };
+        let _ = instance.stop.take().expect("running").send(());
+        if let Some(session) = session.as_mut() {
+            assert_eq!(
+                closed_within(session, Duration::from_secs(5))
+                    .await
+                    .map(|(code, _)| code),
+                Some(1001),
+                "{name}: the drain ends the session as going away"
+            );
+        }
+        assert!(
+            eventually(Duration::from_secs(5), || instance
+                .opened_and_closed(planes)
+                == (false, false))
+            .await,
+            "{name}: the drain closes its listener"
+        );
+    }
+}
+
+/// With one instance of each plane on one database, a revocation committed through the instance
+/// of the Operator plane ends the session of that certificate on the instance of the Agent plane
+/// within one lease renewal interval, as G-20 asks
+/// (SRV-instance-opens-chosen-planes §24).
+/// Verifies: SRV-instance-opens-chosen-planes, SEC-admission-by-client-certificate, G-20
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revocation_through_the_operator_plane_instance_ends_the_session_on_the_agent_plane_one()
+{
+    let Some(schema) = Schema::named() else {
+        return;
+    };
+    let pki = Pki::new();
+    let [(agent_plane, _), (operator_plane, _)] = ONE_PLANE;
+    let agents = Instance::start_opening(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        agent_plane,
+    )
+    .await;
+    let operators = Instance::start_opening(
+        &pki,
+        &schema,
+        schema.config_on(schema.config.port),
+        operator_plane,
+    )
+    .await;
+    // Listening, the Agent-plane instance hears the revocation's notification: a revocation
+    // committed before it listened would reach it only at a renewal.
+    assert!(
+        agents.has_read(1).await,
+        "the Agent-plane instance never listened"
+    );
+    let (cert, key) = pki.issue("edge-01");
+    let mut session = websocket(&agents, &pki, &cert, &key).await;
+    exchange(&mut session).await;
+    revoke_through(&operators, &pki, &cert).await;
+    assert_eq!(
+        // One renewal interval holds the notification alone: the renewal that would catch a
+        // missed one comes up to an interval after the commit and reads the ledger after that.
+        closed_within(&mut session, TIMES.renew).await,
+        Some((1008, "revoked".to_string())),
+        "the Agent-plane instance did not end the revoked session within one renewal interval"
     );
 }
 
@@ -6136,11 +6363,29 @@ fn two_releases_on() -> &'static [Migration] {
     Box::leak(migrations.into_boxed_slice())
 }
 
+/// The schema an instance of 0.8.1 runs on in a test of this build: migrations 1 to 18, which name
+/// 0.8.0, and the column of the lease's planes, which this build writes with every lease
+/// (SRV-instance-opens-chosen-planes §26), as step 19 that names 0.8.0 too. The steps 19 and 20 of
+/// the real schema name 0.8.4 and 0.8.5, so 0.8.1 does not apply them.
+fn as_0_8_1() -> &'static [Migration] {
+    let mut migrations = MIGRATIONS[..18].to_vec();
+    let planes = MIGRATIONS
+        .iter()
+        .find(|migration| migration.sql.contains("ADD COLUMN planes"))
+        .expect("the column of the lease's planes");
+    migrations.push(Migration {
+        version: 19,
+        oldest_server: "0.8.0",
+        sql: planes.sql,
+    });
+    Box::leak(migrations.into_boxed_slice())
+}
+
 /// The upgrade from 0.8.0 itself: on the schema 0.8.0 leaves, migrations 1 to 11, with a live lease
 /// as an instance of 0.8.0 takes one, writing no release, two instances of 0.8.1 that start at
 /// once apply migration 12 once beside it and both serve, and that lease reads 0.8.0. They apply
-/// the migrations up to 18, which name 0.8.0; migration 19 names 0.8.4, and migration 20 names
-/// 0.8.5 (SRV-instances-share-one-postgresql §16).
+/// the migrations up to 18, which name 0.8.0, and the lease's planes ([`as_0_8_1`]); migration 19
+/// names 0.8.4, and migration 20 names 0.8.5 (SRV-instances-share-one-postgresql §16).
 /// Verifies: SRV-instances-share-one-postgresql
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
@@ -6171,9 +6416,10 @@ async fn this_release_starts_beside_a_live_lease_of_0_8_0_and_migrates_once() {
         "INSERT INTO leases (instance_id, host, must_be_alone, taken_at, renewed_at, expires_at) \
          VALUES ('{old}', 'host-0.8.0', false, now(), now(), now() + interval '1 hour')"
     ));
+    let as_0_8_1 = as_0_8_1();
     let (newer, other) = tokio::join!(
-        Instance::start_as(&pki, &schema, config(), "0.8.1", &MIGRATIONS[..18]),
-        Instance::start_as(&pki, &schema, config(), "0.8.1", &MIGRATIONS[..18]),
+        Instance::start_as(&pki, &schema, config(), "0.8.1", as_0_8_1),
+        Instance::start_as(&pki, &schema, config(), "0.8.1", as_0_8_1),
     );
     assert_eq!(
         schema.query("SELECT count(*)::text FROM fleet_schema WHERE version = 12"),

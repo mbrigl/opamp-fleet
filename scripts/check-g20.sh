@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #
-# Runs the two tests that decide G-20 (docs/SPECIFICATION.md): three Server instances behind a
-# layer-4 balancer that keeps the peer's address, on PostgreSQL and S3, one of them killed under
-# 10 000 simulated Agents, and the presence and notifications of 100 000 simulated Agents for ten
-# minutes. `crates/fleet-server/tests/g20.rs` holds both and says what they assert. The
-# .github/workflows/g20.yml workflow starts the stores and runs this on demand.
+# Runs the tests that decide G-20 (docs/SPECIFICATION.md): three Server instances behind a layer-4
+# balancer that keeps the peer's address, on PostgreSQL and S3, one of them killed, in another run
+# frozen, under 10 000 simulated Agents; the same fleet on three Agent-plane instances, one of them
+# killed, while a fourth instance that opens the Operator plane alone answers each page of the
+# Agents and each revocation within 2 seconds; and the presence and notifications of 100 000
+# simulated Agents for ten minutes. `crates/fleet-server/tests/g20.rs` holds them and says what
+# they assert. The .github/workflows/g20.yml workflow starts the stores and runs this on demand.
 #
 # The stack is named by FLEET_G20_STACK=1 beside the FLEET_TEST_POSTGRES_* and FLEET_TEST_S3_*
 # variables scripts/check-store.sh reads; the stores named alone do not run it, for it runs for
