@@ -64,28 +64,29 @@ and let an endpoint reach state only through its own plane's module.
    REST API, the bundled UI and any later Operator-plane endpoint read and change. Each is one type,
    `AgentCases` and `OperatorCases`, whose methods are the plane's operations.
 
-2. **An endpoint calls its own plane's module and nothing else that holds state.** `transport`
-   calls `AgentCases`; `api` calls `OperatorCases`. Neither names a type of the core that holds
-   state or a port — `AppState`, `ConfigStore`, `DeploymentStore`, `PackageStore`,
+2. **An endpoint must call its own plane's module and nothing else that holds state.**
+   `transport` calls `AgentCases`; `api` calls `OperatorCases`. Neither may name a type of the core
+   that holds state or a port — `AppState`, `ConfigStore`, `DeploymentStore`, `PackageStore`,
    `PackageOffering`, `Enrolment`, `Revocations`, `BootstrapCertificates`, `Throttle`,
-   `AgentRate`, and every such type added later.
+   `AgentRate`, the ports `Audit` and `CertificateSigner`, and every such type added later.
 
 3. **An endpoint may name the core's values.** Identifiers, records, summaries and error types of
-   the core are named by the endpoints to map them to JSON or protobuf. A use-case module does not
+   the core are named by the endpoints to map them to JSON or protobuf. A use-case module must not
    copy them into types of its own.
 
-4. **The use-case modules do not name each other.** An operation both planes need is a method of
-   the core that each module calls. Audit, the throttle, the rate limits and the revocation check
-   stay in the core; the Agent plane's admission reaches them through `AgentCases`, the Operator
-   plane's through `OperatorCases`.
+4. **The use-case modules must not name each other, nor an endpoint.** An operation both planes
+   need is a method of the core that each module calls. Audit, the throttle, the rate limits and
+   the revocation check stay in the core; the Agent plane's admission must reach them through
+   `AgentCases`, the Operator plane's through `OperatorCases`. An endpoint must not name the other
+   plane's endpoint either.
 
-5. **One core, wired once.** The composition root builds the core, hands it to both modules, and
-   gives each router its own plane's module alone. A test may construct a module over a core of
+5. **One core, wired once.** The composition root must build the core, hand it to both modules,
+   and give each router its own plane's module alone. A test may construct a module over a core of
    its choosing.
 
-6. **Nothing an Agent or an operator sees changes.** The REST API and its OpenAPI document, the
-   OpAMP exchange, the capabilities, the audit entries and the files under `data_dir` stay as they
-   are. A change of behaviour does not ride on the split.
+6. **Nothing an Agent or an operator sees may change.** The REST API and its OpenAPI document,
+   the OpAMP exchange, the capabilities, the audit entries and the files under `data_dir` must stay
+   as they are. A change of behaviour must not ride on the split.
 
 **Out of scope:** splitting `AppState` itself or moving the modules of `fleet`; a third plane; an
 MCP endpoint; an instance that serves one plane alone, and separate programs per plane; renaming the
@@ -156,9 +157,14 @@ Instance UID, so that it can be filtered per host.
 `crates/fleet-core/tests/dependency_direction.rs` will carry `Verifies:
 SRV-two-use-case-layers`:
 
-- `agent_cases` and `operator_cases` get roles of their own; `transport` may name `agent_cases`
-  and not `operator_cases`, `api` the reverse, and neither use-case module names the other.
-- Neither `transport` nor `api` names a type of the list in clause 2 outside `#[cfg(test)]`.
+- A table of what each plane's modules may not name: `transport` names neither `operator_cases`
+  nor `api`, `api` neither `agent_cases` nor `transport`, and neither use-case module names the
+  other or an endpoint. A module both endpoints use names neither use-case module. Submodules are
+  held to their module's row. In the dependency direction both use-case modules keep the role of
+  an adapter, since they read certificates, CSRs and credentials through adapters; the table, not
+  a role, decides their reach.
+- Neither `transport` nor `api` names a type of the list in clause 2 outside `#[cfg(test)]`; the
+  test keeps the list by hand.
 
 The existing tests of the REST API and the OpAMP exchange stay unchanged and green, which is what
 clause 6 asks.
