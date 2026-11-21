@@ -8,9 +8,10 @@ two, report processing and Package and Deployment administration, got their modu
 processing cut into named steps, is not taken now (see *Not now* below); the administration
 `api` calls now stands behind `operator_cases` (SRV-two-use-case-layers).
 
-1. **The wire shape of the views.** The view types in `crates/fleet-server/src/fleet/views.rs`
-   (`AgentView`, `PendingConfigurationView`, `PendingPackageView`, `PackageStatusView`, near lines
-   384 to 593) derive `Serialize`, while `api.rs` mirrors each with a response type and a
+1. **The wire shape of the views.** The view types `AgentView` and `PackageStatusView` in
+   `crates/fleet-server/src/fleet/views.rs` (near lines 382 to 583) and `PendingConfigurationView`
+   and `PendingPackageView` in `crates/fleet-server/src/fleet/rollout.rs` (near lines 736 to 775)
+   derive `Serialize`, while `api.rs` mirrors each with a response type and a
    field-by-field `From`, the doc comments copied. The core's `Serialize` looks unused
    (SRV-configurations-compose-one-map).
 2. **The REST API by resource.** Every route, view and conversion of about ten resources lives in

@@ -241,7 +241,9 @@ no module.
      an instance keeps of each Agent beside its record, which a forget drops and a re-key moves as
      one), the state's limits, the lease, the audit helpers, the capabilities the Server declares,
      the staleness rule, and the types the contexts share, with the tests of staleness, of the host
-     a register derives, and of label inheritance. It names no context.
+     a register derives, and of label inheritance. It also keeps what `approval` and `session` both
+     answer a report with: the persist path, the end a report answers with, the connection settings
+     offer, and the answers a refused report gets. It names no context.
   2. How the Agents of one Client are placed under its Client Agent
      ([SRV-fleet-record-agents-hosts §19](adr/SRV-fleet-record-agents-hosts.md)) is the core module
      `fleet::placement`, behind the same `AppState` entry points: the rule for one group, which the
@@ -270,16 +272,14 @@ no module.
      fleet, and the list of Agents a page at a time
      ([API-lists-paged-by-cursor](adr/API-lists-paged-by-cursor.md)) — are the core module
      `fleet::views`, behind the same `AppState` entry points.
-  7. The round of an Agent's report — a report processed under the Agent's lock, its record
-     created, taken or settled, the reply and the connection settings it is offered, the issuing and
-     renewal of the host certificate it asked for, the persist path, a goodbye and a forget, and the
-     answers a refused report gets — is the core module `fleet::session`, behind the same `AppState`
-     entry points.
-  8. Enrolment — the approval of an enrolment and its take-back with the record of what it signed,
-     the answer an enrolling Agent is given, and the mark of a host as a Gateway, which places every
-     Agent again
+  7. Enrolment and certificates — the approval of an enrolment and its take-back, the answer an
+     enrolling Agent is given, the issuing and renewal of a host certificate with the records of
+     what was issued and signed, and the mark of a host as a Gateway, which places every Agent again
      ([SEC-bootstrap-certificates-and-enrolment](adr/SEC-bootstrap-certificates-and-enrolment.md)) —
-     is the core module `fleet::approval`, behind the same `AppState` entry points.
+     are the core module `fleet::approval`, behind the same `AppState` entry points.
+  8. The round of an Agent's report — a report processed under the Agent's lock, its record
+     created, taken or settled, the reply and the connection settings it is offered, a goodbye and a
+     forget — is the core module `fleet::session`, behind the same `AppState` entry points.
 
   The test helpers the contexts share are the test-only `fleet::fixtures`, which has no rank. Each
   context imports by name what it takes from the root, from its siblings and from the crate;
