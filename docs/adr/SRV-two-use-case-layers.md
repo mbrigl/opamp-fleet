@@ -145,14 +145,10 @@ Instance UID, so that it can be filtered per host.
 - Negative / trade-offs: the list of state-holding types in clause 2 is kept by hand in the test;
   a new such type must be added to it.
 - Follow-ups: a role per instance on PostgreSQL, one program whose instances open the Agent plane,
-  the Operator plane or both, so that each plane is scaled and kept available apart. It needs a
-  decision of its own that supersedes the clauses which close and drain "both listeners"
-  ([SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md)), and the probe of
-  [OPS-releases-attestations-server-image §17](OPS-releases-attestations-server-image.md), a TCP
-  connection to `4320` that an Operator-plane instance does not open; it settles where a certificate
-  is signed, since an enrolment's approval and a bootstrap certificate come from the Operator plane
-  and the CSR from the Agent plane. Splitting `AppState` along the same line; renaming the planes;
-  adding the use-case layer to the glossary.
+  the Operator plane or both, so that each plane is scaled and kept available apart.
+  [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md), proposed, decides it
+  and builds on this split. Splitting `AppState` along the same line; renaming the planes; adding
+  the use-case layer to the glossary.
 
 ## Enforcement
 

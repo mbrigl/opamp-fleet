@@ -15,10 +15,11 @@ plane or both, as its `planes` key names
 ([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)). The old ADR has every
 Server open both listeners, serve both on `listen::plane`, and drain both planes together. Here
 each of these concerns the planes the instance opens: the listeners (clause 14), the one place
-that builds them (clause 15), and the drain (clause 17). Every instance still reads and checks the
-whole configuration, `[tls]` and `[rest.tls]` included
-([SRV-instance-opens-chosen-planes §25](SRV-instance-opens-chosen-planes.md)). The clauses on
-them therefore stand unchanged. This ADR adds no clause. A proposed ADR on a branch of its own,
+that builds them (clause 15), and the drain (clause 17). The title of clause 7 and the handshake
+deadline of clause 16 follow them. Every instance still reads and checks the whole configuration,
+`[tls]` and `[rest.tls]` included
+([SRV-instance-opens-chosen-planes §25](SRV-instance-opens-chosen-planes.md)). The clauses on them
+therefore stand unchanged. This ADR adds no clause. A proposed ADR on a branch of its own,
 which signs operators in by OIDC beside Basic on the Operator plane, also supersedes
 SEC-tls13-two-planes-bounded-input. It will be restated against this ADR.
 
@@ -27,10 +28,12 @@ SEC-tls13-two-planes-bounded-input §*n* moves to §*n* of this ADR.
 
 | Old clauses | Clauses here | Change |
 |---|---|---|
-| SEC-tls13-two-planes-bounded-input §1–§13 | 1–13 | none |
-| SEC-tls13-two-planes-bounded-input §14 | 14 | the listeners are those of the planes the instance opens; every listener it opens is bound before any serves |
+| SEC-tls13-two-planes-bounded-input §1–§6 | 1–6 | none |
+| SEC-tls13-two-planes-bounded-input §7 | 7 | the title names two planes, each on a listener of its own, instead of two listeners |
+| SEC-tls13-two-planes-bounded-input §8–§13 | 8–13 | none |
+| SEC-tls13-two-planes-bounded-input §14 | 14 | the listeners are those of the planes the instance opens; colliding addresses and a failed bind fail at startup; every listener it opens is bound before any serves |
 | SEC-tls13-two-planes-bounded-input §15 | 15 | `listen::plane` serves each plane the instance opens |
-| SEC-tls13-two-planes-bounded-input §16 | 16 | none |
+| SEC-tls13-two-planes-bounded-input §16 | 16 | the handshake deadline holds on the acceptor of each plane the instance opens |
 | SEC-tls13-two-planes-bounded-input §17 | 17 | one bounded drain and one `Handle` for the planes the instance opens, citing SRV-instance-opens-chosen-planes §3 |
 | SEC-tls13-two-planes-bounded-input §18–§29 | 18–29 | none |
 
@@ -299,7 +302,7 @@ WebSocket message, and limit what an admitted peer sends on the Agent plane with
    host. Each end refuses such a configuration at startup with a message naming the setting. It
    never warns and continues.
 
-7. **Two listeners, split by audience rather than by path.**
+7. **Two planes, each on a listener of its own, split by audience rather than by path.**
 
    | Plane | Key | Default | TLS | Serves |
    |---|---|---|---|---|
@@ -355,8 +358,8 @@ WebSocket message, and limit what an admitted peer sends on the Agent plane with
     [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md). A file named in both
     `[tls]` and `[rest.tls]` is listed once.
 
-14. **The listeners of the planes an instance opens; addresses that cannot both be bound fail at
-    startup.** There is no single-port mode.
+14. **The listeners of the planes an instance opens; colliding addresses and a failed bind fail
+    at startup.** There is no single-port mode.
     - An instance opens one listener for each plane it opens, and no other
       ([SRV-instance-opens-chosen-planes §22](SRV-instance-opens-chosen-planes.md)). An instance
       that opens both planes opens two listeners.
@@ -383,8 +386,8 @@ WebSocket message, and limit what an admitted peer sends on the Agent plane with
     `hyper-util` is a dependency of `opamp`'s `server` feature for this.
 
 16. **The TLS handshake deadline is stated, not inherited.** `TLS_HANDSHAKE_TIMEOUT` is 10 seconds
-    on both planes' acceptors. It is `axum_server`'s default value, named in this code so that it
-    reads as a decision.
+    on the acceptor of each plane the instance opens. It is `axum_server`'s default value, named in
+    this code so that it reads as a decision.
 
 17. **Shutdown is one bounded drain for the planes an instance opens.** Their listeners share one
     `Handle`. A stop closes every listener the instance opens at once. It tells each WebSocket
@@ -1120,11 +1123,13 @@ instance with one plane:
 - It binds that plane's address alone, and a bind failure of it names the plane (clause 14).
 - On `SIGTERM` it closes that listener and ends its sessions over `drain_secs` (clause 17).
 
-**Not mechanically decidable:** clauses 16 and 20.
+**Not mechanically decidable:** clauses 16 and 20, the one place of clause 15, and the one
+`Handle` of clause 17.
 
+- Clause 15: review keeps every plane an instance opens on `listen::plane`.
 - Clause 16: the 10-second handshake deadline is a named constant in `listen.rs`, and no test
-  waits it out. Review keeps every plane an instance opens on `listen::plane`, and its listeners
-  on one `Handle`.
+  waits it out.
+- Clause 17: review keeps the listeners an instance opens on one `Handle`.
 - Clause 20: the HTTP/2 stream cap and keep-alive bounds are named constants set in
   `opamp::server::listen`. The workspace has no HTTP/2 client to drive a peer past them.
   Review checks that every listener goes through `Listener::serve`.
