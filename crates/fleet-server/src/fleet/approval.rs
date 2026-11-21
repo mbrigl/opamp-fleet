@@ -1,153 +1,23 @@
 //! Enrolment and certificates (SRV-state-stores-contract-pair §9, SEC-admission-by-client-certificate, SEC-bootstrap-certificates-and-enrolment): the approval of an
-//! enrolment and its take-back, the answer an enrolling Agent is given, the issuing and renewal of
-//! a host certificate on the connection the request arrived over, the records of what was issued
-//! and signed, each written with its decision, and the mark of a host as a Gateway (SEC-bootstrap-certificates-and-enrolment §11).
+//! enrolment and its take-back, the answer an enrolling Agent is given, the record of what an
+//! approval signed, written with its decision, and the mark of a host as a Gateway (SEC-bootstrap-certificates-and-enrolment §11).
 //! Its entry points are methods of `AppState`.
+//!
+//! The issuing and renewal of a host certificate on the connection the request arrived over live
+//! in `session`, whose round issues it and which ranks below `approval`
+//! (SRV-fleet-contexts-call-by-rank).
 
 use opamp::proto::{OpAmpConnectionSettings, ServerCapabilities, ServerToAgent, TlsCertificate};
 use opamp::uid::InstanceUid;
-use tracing::{info, warn};
 
-use crate::agent_store::PersistedAgent;
 use crate::audit::Entry;
 use crate::enrolment::{DecisionError, Recorder, Registrar};
-use crate::revocation::{CertId, Facts, Presented, Signed, SubjectValues};
+use crate::revocation::{CertId, Facts, Signed};
 
-use super::session::{
-    bad_request, compose_settings_offer, unavailable, Ending, MEMBER_DOES_NOT_ENROL, NEEDS_A_PROOF,
-};
-use super::{AppState, CertificateSigner, Processed, TelemetryOffer, UseCase};
+use super::session::compose_settings_offer;
+use super::{AppState, TelemetryOffer};
 
 impl AppState {
-    /// Records a certificate the client CA signed on a renewal, before it is offered (SRV-state-stores-contract-pair §9,
-    /// SEC-append-only-audit-record §1). An approval records through [`Approving`].
-    fn record_issued(
-        &self,
-        signed: &Signed,
-        instance_uid: &[u8],
-        predecessor: Option<CertId>,
-    ) -> Result<(), String> {
-        self.audited(self.signature_entry(signed, instance_uid, predecessor.as_ref(), None))?;
-        let Some(revocations) = &self.revocations else {
-            return Ok(());
-        };
-        revocations
-            .record(signed.facts.clone(), instance_uid, predecessor)
-            .map_err(|e| format!("cannot record the issued certificate: {e}"))
-    }
-
-    /// The audit entry of a signature, `issuance.signed` (SEC-append-only-audit-record §1): `predecessor` for a
-    /// renewal, and for an enrolment the request it approves.
-    fn signature_entry(
-        &self,
-        signed: &Signed,
-        instance_uid: &[u8],
-        predecessor: Option<&CertId>,
-        request: Option<&str>,
-    ) -> Entry {
-        Entry::new("issuance.signed", "issued")
-            .with(
-                "kind",
-                if predecessor.is_some() {
-                    "renewal"
-                } else {
-                    "enrolment"
-                },
-            )
-            .with("issuer", signed.facts.issuer_name.clone())
-            .with(
-                "authority",
-                self.revocations.as_ref().and_then(|revocations| {
-                    revocations
-                        .authority_of(&signed.facts.id.issuer)
-                        .map(|authority| authority.role.clone())
-                }),
-            )
-            .with("serial", signed.facts.id.serial.clone())
-            .with("subject", signed.facts.subject.clone())
-            .with("key_fingerprint", signed.facts.key_fingerprint.clone())
-            .with("instance_uid", hex::encode(instance_uid))
-            .with(
-                "predecessor_serial",
-                predecessor.map(|id| id.serial.clone()),
-            )
-            .with("request", request.map(str::to_string))
-    }
-
-    /// What a CSR renews, the host the new certificate is for (CLT-modes-and-gateway §18), and the
-    /// subject values it carries on (SEC-bootstrap-certificates-and-enrolment §12). A renewal proof names the certificate
-    /// whose key signed the new one — through a Gateway too — and the host and the values carry
-    /// on from it; without one, the certificate the connection presented is renewed, unless its
-    /// host is marked as a Gateway (CLT-modes-and-gateway §18). A bootstrap proof makes the request an
-    /// enrolment, which a member does not make (CLT-modes-and-gateway §25) — unless it proves the very
-    /// certificate the connection presented: a Client cannot tell a certificate an operator
-    /// provisioned from a bootstrap certificate, and proves whichever it holds. A certificate that
-    /// names no host — one an operator provisioned — gets a host derived from its issuer and
-    /// serial, the same on every retry.
-    fn renews(
-        &self,
-        ca: &dyn CertificateSigner,
-        csr: &str,
-        presented: Option<&Presented>,
-    ) -> Result<(Option<CertId>, String, SubjectValues, UseCase), String> {
-        let derived = |id: &CertId| fleet_core::host::derived(&id.issuer, &id.serial);
-        if let Some(old) = ca.renewal_proof(csr)? {
-            if self
-                .revocations
-                .as_ref()
-                .is_some_and(|revocations| revocations.is_certificate_revoked(&old.id))
-            {
-                return Err("the certificate this request renews is revoked".to_string());
-            }
-            let host = old.host.clone().unwrap_or_else(|| derived(&old.id));
-            return Ok((Some(old.id), host, old.subject_values, UseCase::Renewal));
-        }
-        // A proof of the certificate presented is that certificate's renewal, and without a
-        // certificate presented — `Admission::open`, which no Server serves — nothing is enrolled.
-        let enrols = match (ca.bootstrap_proof_id(csr)?, presented) {
-            (Some(named), Some(presented)) => named != presented.id,
-            _ => false,
-        };
-        Ok(match presented {
-            Some(presented) => {
-                let host = presented
-                    .host
-                    .clone()
-                    .unwrap_or_else(|| derived(&presented.id));
-                // Behind a Gateway the presented certificate is the Gateway's, and its host carries
-                // the mark: a CSR without a proof would hand the Gateway's powers to whoever sent
-                // it (CLT-modes-and-gateway §18).
-                let gateway = self
-                    .revocations
-                    .as_ref()
-                    .is_some_and(|revocations| revocations.is_gateway(&host));
-                if enrols {
-                    return Err(if gateway {
-                        "a bootstrap proof through a Gateway is an enrolment request, not a renewal"
-                            .to_string()
-                    } else {
-                        MEMBER_DOES_NOT_ENROL.to_string()
-                    });
-                }
-                if gateway {
-                    return Err(NEEDS_A_PROOF.to_string());
-                }
-                (
-                    Some(presented.id.clone()),
-                    host,
-                    presented.subject_values.clone(),
-                    UseCase::MemberCsr,
-                )
-            }
-            None => (
-                None,
-                InstanceUid::default().to_string(),
-                SubjectValues::default(),
-                UseCase::MemberCsr,
-            ),
-        })
-    }
-
     /// Approves one pending enrolment request: the client CA signs it (SEC-bootstrap-certificates-and-enrolment §10), with
     /// the subject values of the bootstrap certificate the request came with (CLT-modes-and-gateway §23).
     ///
@@ -258,82 +128,6 @@ impl AppState {
             }),
             ..Default::default()
         }
-    }
-
-    /// Signs and records the certificate a report asked for (SEC-admission-by-client-certificate): signing it here, on the
-    /// connection it arrived over, is the whole of the approval, since admission already required
-    /// every proof this endpoint asks of any message, which is what the Baseline's flow means by
-    /// awaiting one. A request the Server refuses, or one whose record cannot be written, which
-    /// the Agent retries (SEC-append-only-audit-record §5), is answered here, the report's record persisted.
-    pub(super) fn issue(
-        &self,
-        csr: Vec<u8>,
-        sender: &[u8],
-        presented: Option<&Presented>,
-        ending: &Ending,
-        persisted: &PersistedAgent,
-    ) -> Result<TlsCertificate, Box<Processed>> {
-        let uid = ending.uid;
-        // `Ok(Err(..))` is a request the Server refuses; `Err(..)` a record it cannot write,
-        // which the Agent retries (SEC-append-only-audit-record §5).
-        let outcome: Result<Result<Signed, String>, String> = match &self.client_ca {
-            // The Baseline's MUST when the Server cannot act on the request. An Agent reaching
-            // here ignored the undeclared capability, so it is a client error.
-            None => Ok(Err("this Server issues no client certificates".to_string())),
-            Some(ca) => match String::from_utf8(csr)
-                .map_err(|_| "the certificate signing request is not PEM".to_string())
-                .and_then(|csr| {
-                    // The message's own instance_uid, before any re-key (SEC-admission-by-client-certificate).
-                    ca.check_claims(&csr, sender)?;
-                    let (predecessor, host, subject, use_case) =
-                        self.renews(ca.as_ref(), &csr, presented)?;
-                    Ok((ca.sign(&csr, &host, &subject, use_case)?, predecessor))
-                }) {
-                Err(e) => Ok(Err(e)),
-                Ok((signed, predecessor)) => self
-                    .record_issued(&signed, sender, predecessor)
-                    .map(|()| Ok(signed)),
-            },
-        };
-        let refused = match outcome {
-            Ok(Ok(signed)) => {
-                info!(
-                    agent = %uid,
-                    serial = %signed.facts.id.serial,
-                    "issued a client certificate"
-                );
-                return Ok(TlsCertificate {
-                    cert: signed.pem.into_bytes(),
-                    // The Agent generated its own key and keeps it — the point of the CSR flow —
-                    // so the Server has nothing to put here and must not invent it.
-                    private_key: Vec::new(),
-                    ..Default::default()
-                });
-            }
-            Err(e) => {
-                warn!(agent = %uid, error = %e, "held back a certificate: the audit record is unavailable");
-                unavailable(ending.reported.as_bytes(), &e)
-            }
-            Ok(Err(e)) => {
-                warn!(agent = %uid, error = %e, "refused a certificate signing request");
-                self.audit_refusal(
-                    Entry::new("issuance.refused", "refused")
-                        .with("instance_uid", uid.to_string())
-                        .with("reason", e.clone()),
-                );
-                bad_request(&e)
-            }
-        };
-        // The report's updates are already in the record, so they are persisted even though no
-        // certificate is issued (SRV-fleet-record-agents-hosts).
-        if !self.persist_if_dirty(&uid, persisted) {
-            return Err(Box::new(self.forgotten_elsewhere(&uid, &ending.reported)));
-        }
-        Err(Box::new(Processed {
-            reply: refused,
-            uid: Some(uid),
-            disconnected: false,
-        }))
     }
 
     /// Marks `host` as a Gateway, or not (SEC-bootstrap-certificates-and-enrolment §11); answers whether this Server knows
