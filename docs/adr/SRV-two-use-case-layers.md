@@ -1,7 +1,7 @@
 # SRV-two-use-case-layers: Two use-case layers stand between the Server's planes and its core
 
-- **Status:** 🟡 proposed
-- **Date:** 2026-10-21
+- **Status:** 🟢 accepted
+- **Date:** 2026-11-21
 - **Deciders:** Markus Brigl
 - **Applies to:** the module structure of `crates/fleet-server/src/`: the Agent-plane endpoints in `transport.rs`, the Operator-plane endpoints in `api.rs` and every later Operator-plane endpoint, the two use-case modules between them and the core, the wiring in `lib.rs` and `main.rs`, the roles in `crates/fleet-core/tests/dependency_direction.rs`, and `docs/ARCHITECTURE.md`
 
