@@ -55,8 +55,8 @@ two constants of the enrolment's refusals by `fleet/approval.rs`,
 [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md) binds the persist path by
 `fleet/held.rs`, and
 [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md) binds the
-composition of the settings offer by `fleet/session.rs` and its capability declaration by
-`fleet.rs`, so that the composition stays in its scope in the module root. Nothing holds the
+composition of the settings offer by `fleet/session.rs` and names `fleet.rs` only for the
+capability declaration. Nothing holds the
 direction: a session that needs a method of another context calls it, and the cycles grow.
 
 The architecture catalogue's *modular monolith* fits when several areas of the domain grow at
@@ -85,9 +85,10 @@ it, while they keep sharing one state.
    `rollout`, `views`, `approval`, `session`. `docs/ARCHITECTURE.md` names the contexts in this
    order.
 
-2. **A context must name only contexts ranked below it.** It must not call a method another
-   context defines on `AppState` ranked at or above it, nor name such a context's function, type or
-   constant, whether by path, through a `use`, or through a re-export of the module root.
+2. **A context must name only contexts ranked below it.** It must not call a method that another
+   context ranked at or above it defines on `AppState`. It must not name such a context's function,
+   type or constant either: not by path, not through a `use`, not through a re-export of the module
+   root.
 
 3. **The module root is the base.** Every context may use it; it must not name a context. Its `pub
    use` of a context's types keeps the public paths and is not a use by the root's own code. A step
@@ -96,8 +97,8 @@ it, while they keep sharing one state.
 
 4. **Every context has a rank before it has code.** The change that adds a submodule of `fleet`
    must give it a rank in `docs/ARCHITECTURE.md` and in the test. The author of a dependency that
-   would point up must resolve it by moving the method or type down to where its callers can reach
-   it, or by revising this ADR's order, and must not add an exception for one call.
+   would point up must resolve it: the method or type moves down to where its callers can reach
+   it, or this ADR's order is revised. The author must not add an exception for one call.
 
 5. **The state stays shared.** The ranks do not split `AppState`, its lock, its stores or its
    services. Every context may read and write every field, and what one lock holds together stays
@@ -172,16 +173,26 @@ decides; the structure of the other crates.
 - Negative / trade-offs: a linear order ranks contexts that never meet, so a dependency between
   them can point the wrong way for no domain reason and need a move or a new order.
 - Negative / trade-offs: methods and types move to where the order lets their callers reach them,
-  which can put them in a context a reader would not look in first; the module comment names why.
+  and a helper goes to a file that already binds it. Either can put it in a context a reader would
+  not look in first; the module comment names why.
 - Negative / trade-offs: the module root carries the types of the state, so their fields are no
   longer private to the one context that works on them; clause 5 allows every context to reach
   them.
 - Negative / trade-offs: the test resolves calls on `self`, `Self::` and `AppState::` in `impl
-  AppState` blocks. A call on another binding of `AppState`, a method of a type of the state that a
-  context defines and another calls through a field, and a block written as `impl
-  super::AppState` are left to review.
-- Negative / trade-offs: a helper moved by this decision goes to a file that already binds it,
-  which can place it in a context a reader would not look in first.
+  AppState` blocks, and review covers what it does not see. It does not see a call on another
+  binding of `AppState`, nor a method of a type of the state that a context defines and another
+  calls through a field. It does not collect a block written as `impl super::AppState` or `impl
+  Trait for AppState`. It resolves `super::` one level off in an inline module inside a context.
+- Negative / trade-offs: accepted ADRs cite some moved items by the file they left, until the
+  next normalization moves the citations.
+  [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) cites
+  `unavailable` and `RETRY_AFTER` in `fleet/session.rs`, now in `fleet/approval.rs`.
+  [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md) cites the construction and the
+  stored reads in `fleet.rs`, now in `fleet/placement.rs`.
+  [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md) cites the
+  composition of the offer in `fleet/session.rs`, now in `fleet.rs`. The binding sensor still
+  lists these ADRs for the new files, since it routes every file under `fleet/` to the ADRs of
+  `fleet.rs` as well.
 - Follow-ups: state per context, when a requirement asks for it. The six edges of the Context are
   resolved with this decision's implementation.
 
@@ -193,9 +204,11 @@ SRV-fleet-contexts-call-by-rank`:
 - A rank table of the module root and the submodules of `fleet`. A submodule of
   `crates/fleet-server/src/fleet/` outside `#[cfg(test)]` without a rank fails (clause 4).
 - Outside `#[cfg(test)]` and `fixtures`, it collects the methods each context defines in its `impl
-  AppState` blocks and fails on a call on `self`, or a call or function value through `Self::` or
-  `AppState::`, of a method another context defines at or above the caller's rank, and on a path, a
-  `use` or a name reached through the root's re-exports that resolves into such a context (clauses
-  2, 3, 6). The root's own `pub use` lines are skipped.
+  AppState` blocks. It fails on a call on `self`, or a call or function value through `Self::` or
+  `AppState::`, of a method another context defines at or above the caller's rank (clause 2). It
+  fails on a path, a `use` or a name reached through the root's re-exports that resolves into such
+  a context (clauses 2, 3). It skips the root's own `pub use` lines and test code (clauses 3, 6).
+- Review covers the order in `docs/ARCHITECTURE.md` and what the test does not see, as
+  *Consequences* lists it.
 
 The existing tests of the Server stay unchanged and green, which is what clause 7 asks.
