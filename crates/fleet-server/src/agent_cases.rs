@@ -12,6 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use fleet_core::revocation_list::{Entry as ListEntry, ListBody};
 use opamp::proto::{AgentToServer, ServerToAgent};
 use opamp::uid::InstanceUid;
 use tokio::sync::watch;
@@ -585,7 +586,7 @@ impl AgentCases {
         // Without a register nothing is revoked, so the empty list reveals nothing to anyone. With one,
         // the list is a member's whose host is marked as a Gateway, and nobody else's.
         match self.state.revocations() {
-            None => Some(gateway_list(&[], None)),
+            None => Some(gateway_list(Vec::new(), None)),
             Some(revocations) => {
                 if !host
                     .as_ref()
@@ -648,12 +649,10 @@ impl AgentCases {
 /// as it would when a Server of 0.8.0 beside this one registered a renewal, which moves no version
 /// (SRV-state-stores-contract-pair §10). Either way it changes with the list and survives a restart.
 #[must_use]
-pub(crate) fn gateway_list(
-    certificates: &[serde_json::Value],
-    version: Option<u64>,
-) -> (String, String) {
+pub(crate) fn gateway_list(certificates: Vec<ListEntry>, version: Option<u64>) -> (String, String) {
     use sha2::Digest as _;
-    let body = serde_json::json!({ "certificates": certificates }).to_string();
+    let body =
+        serde_json::to_string(&ListBody { certificates }).expect("a list of strings serializes");
     let hash = hex::encode(sha2::Sha256::digest(body.as_bytes()));
     let etag = match version {
         Some(version) => format!("\"list-{version}-{hash}\""),
@@ -666,11 +665,14 @@ pub(crate) fn gateway_list(
 #[must_use]
 pub(crate) fn gateway_list_of(revocations: &Revocations) -> (String, String) {
     let (revoked, version) = revocations.revoked_certificates_at("client");
-    let certificates: Vec<serde_json::Value> = revoked
+    let certificates: Vec<ListEntry> = revoked
         .into_iter()
-        .map(|id| serde_json::json!({ "issuer": id.issuer, "serial": id.serial }))
+        .map(|id| ListEntry {
+            issuer: id.issuer,
+            serial: id.serial,
+        })
         .collect();
-    gateway_list(&certificates, version)
+    gateway_list(certificates, version)
 }
 
 /// One connection as the fleet sees it.
@@ -1451,6 +1453,39 @@ fn proves_the_handshake(csr_pem: &str, handshake: &Requester) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The list's body keeps the bytes it had before its shape moved to `fleet-core`, so an
+    /// instance of an earlier release beside this one answers the same `ETag` for the same list.
+    /// Verifies: SEC-admission-by-client-certificate, SRV-state-stores-contract-pair
+    #[test]
+    fn the_gateways_list_body_keeps_its_bytes() {
+        let entry = |issuer: &str, serial: &str| ListEntry {
+            issuer: issuer.to_string(),
+            serial: serial.to_string(),
+        };
+        let (body, etag) = gateway_list(vec![entry("ab", "1f"), entry("cd", "2")], Some(7));
+        let before = serde_json::json!({ "certificates": [
+            { "issuer": "ab", "serial": "1f" },
+            { "issuer": "cd", "serial": "2" },
+        ] })
+        .to_string();
+        assert_eq!(body, before);
+        assert_eq!(
+            body,
+            r#"{"certificates":[{"issuer":"ab","serial":"1f"},{"issuer":"cd","serial":"2"}]}"#
+        );
+        // The SHA-256 of the body above, computed apart from this code.
+        assert_eq!(
+            etag,
+            "\"list-7-5686e8a89b1b23a7d28be38c78fec52836a2cc47aece04b7a6043120f9fb4641\""
+        );
+        let (empty, etag) = gateway_list(Vec::new(), None);
+        assert_eq!(empty, r#"{"certificates":[]}"#);
+        assert_eq!(
+            etag,
+            "\"001ca68166a6cc4e49fffa9c7425585e3bbf110595fb5e26f36e96d6213f9c24\""
+        );
+    }
 
     /// A restart command the endpoint reports unsent is queued again, so it is sent once more.
     /// Verifies: SRV-instance-opens-chosen-planes

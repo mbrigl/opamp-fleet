@@ -1031,6 +1031,7 @@ dependencies = [
  "pkcs5",
  "rcgen",
  "ring",
+ "serde",
  "sha2",
  "time",
  "x509-parser",

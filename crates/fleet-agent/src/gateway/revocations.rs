@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use serde::Deserialize;
+use fleet_core::revocation_list::ListBody;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tracing::{info, warn};
@@ -39,7 +39,7 @@ pub const REVOCATION_FIRST_WAIT: Duration = Duration::from_secs(5);
 const MAX_LIST_BYTES: usize = 128 << 20;
 
 /// Where the Server serves the list, on its Agent plane.
-const PATH: &str = "/v1/gateway/revocations";
+const PATH: &str = fleet_core::revocation_list::PATH;
 
 /// What the list says about one downstream certificate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,17 +161,6 @@ impl RevocationList {
 pub(crate) fn certificate_id(der: &[u8]) -> Option<(String, String)> {
     let certificate = fleet_core::x509::read::certificate(der).ok()?;
     Some(fleet_core::x509::read::id(&certificate))
-}
-
-#[derive(Deserialize)]
-struct ListBody {
-    certificates: Vec<Entry>,
-}
-
-#[derive(Deserialize)]
-struct Entry {
-    issuer: String,
-    serial: String,
 }
 
 /// The revoked certificates a list body from the Server names, each by issuer hash and serial.
