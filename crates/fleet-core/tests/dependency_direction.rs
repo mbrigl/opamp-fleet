@@ -1193,3 +1193,356 @@ fn the_plane_check_finds_what_a_plane_may_not_name() {
     let paging = "fn f() { let _ = crate::agent_cases::Proofs::default(); }";
     assert_eq!(plane_reach("api::paging", paging, &reexports).len(), 1);
 }
+
+/// The contexts of the Server's fleet core, from the bottom (SRV-fleet-contexts-call-by-rank §1):
+/// the module root first, each context naming only those before it. A submodule of a context
+/// takes the context's rank.
+const FLEET_RANKS: &[&str] = &[
+    "fleet",
+    "fleet::placement",
+    "fleet::held",
+    "fleet::delivery",
+    "fleet::rollout",
+    "fleet::views",
+    "fleet::session",
+    "fleet::approval",
+];
+
+/// The submodules of `fleet` that only the tests build, and so have no rank (§6).
+const FLEET_TEST_ONLY: &[&str] = &["fleet::fixtures"];
+
+/// The context of `fleet` that `module` lies in: the root itself, or its submodule `module` is
+/// or lies beneath. `None` outside `fleet`.
+fn fleet_context(module: &str) -> Option<String> {
+    let mut parts = module.split("::");
+    if parts.next() != Some("fleet") {
+        return None;
+    }
+    Some(match parts.next() {
+        Some(context) => format!("fleet::{context}"),
+        None => "fleet".to_owned(),
+    })
+}
+
+/// The rank of a context of `fleet`, by [`FLEET_RANKS`].
+fn fleet_rank(context: &str) -> Option<usize> {
+    FLEET_RANKS.iter().position(|c| *c == context)
+}
+
+/// The bodies of the inherent `impl AppState` blocks of `tokens`, each from its `{` to its `}`.
+fn app_state_blocks(tokens: &[Located]) -> Vec<std::ops::Range<usize>> {
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i + 2 < tokens.len() {
+        let opens = tokens[i].0 == Token::Ident("impl".into())
+            && tokens[i + 1].0 == Token::Ident("AppState".into())
+            && tokens[i + 2].0 == Token::Punct('{');
+        if !opens {
+            i += 1;
+            continue;
+        }
+        let mut depth = 0;
+        let mut j = i + 2;
+        while j < tokens.len() {
+            match tokens[j].0 {
+                Token::Punct('{') => depth += 1,
+                Token::Punct('}') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        found.push(i + 2..j + 1);
+        i = j;
+    }
+    found
+}
+
+/// The methods the inherent `impl AppState` blocks of `tokens` define, by name.
+fn app_state_methods(tokens: &[Located]) -> Vec<String> {
+    let mut found = Vec::new();
+    for block in app_state_blocks(tokens) {
+        let mut depth = 0;
+        for i in block {
+            match &tokens[i].0 {
+                Token::Punct('{') => depth += 1,
+                Token::Punct('}') => depth -= 1,
+                Token::Ident(fn_) if fn_ == "fn" && depth == 1 => {
+                    if let Some((Token::Ident(name), _)) = tokens.get(i + 1) {
+                        found.push(name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
+/// The ranges of `tokens` that are `use` declarations, `pub use` among them.
+fn use_declarations(tokens: &[Located]) -> Vec<std::ops::Range<usize>> {
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].0 == Token::Ident("use".into()) {
+            let start = i;
+            while i < tokens.len() && tokens[i].0 != Token::Punct(';') {
+                i += 1;
+            }
+            found.push(start..i);
+        }
+        i += 1;
+    }
+    found
+}
+
+/// Where `target` really is, following the re-exports of the Server.
+fn through_reexports(mut target: Target, reexports: &Reexports) -> Target {
+    for _ in 0..8 {
+        let Target::Internal(k, ref s) = target else {
+            break;
+        };
+        let Some((name, at)) = s.split_last() else {
+            break;
+        };
+        match reexports.get(&(k, at.join("::"), name.clone())) {
+            Some(next) => target = next.clone(),
+            None => break,
+        }
+    }
+    target
+}
+
+/// The context of `fleet` that a path, named in `module`, really leads to.
+fn fleet_context_reached(
+    module: &str,
+    segments: &[String],
+    reexports: &Reexports,
+) -> Option<String> {
+    let krate = "fleet-server";
+    let Target::Internal(k, segments) =
+        through_reexports(resolve(krate, module, segments), reexports)
+    else {
+        return None;
+    };
+    if k != krate {
+        return None;
+    }
+    let (reached, _) = module_of(k, &segments);
+    fleet_context(reached)
+}
+
+/// What the module root's `use` declarations bring into scope from a context, by the name they
+/// bring it in as: what a context's `use super::*`, and the root's own code, reach through them.
+fn fleet_root_imports(root: &[Located], reexports: &Reexports) -> BTreeMap<String, String> {
+    let mut found = BTreeMap::new();
+    for range in use_declarations(root) {
+        for named in paths(&root[range]) {
+            let (Some(name), Some(context)) = (
+                named.name(),
+                fleet_context_reached("fleet", &named.segments, reexports),
+            ) else {
+                continue;
+            };
+            if context != "fleet" {
+                found.insert(name.to_owned(), context);
+            }
+        }
+    }
+    found
+}
+
+/// What the shipped code `src` of `module`, a ranked module of `fleet`, names at or above its own
+/// context's rank (SRV-fleet-contexts-call-by-rank §2 and §3): a method of `methods`, by the
+/// context that defines it on `AppState`, called on `self`, `Self::` or `AppState::`; a path or a
+/// `use` that leads into such a context, through a re-export or not; and a name the root's
+/// `use` declarations bring in from one, in `imports`, reached by `use super::*` or, in the root,
+/// directly. The root's own `pub use` declarations are not its code.
+fn rank_breaches(
+    module: &str,
+    src: &str,
+    methods: &BTreeMap<String, String>,
+    imports: &BTreeMap<String, String>,
+    reexports: &Reexports,
+) -> Vec<String> {
+    let Some(own) = fleet_context(module) else {
+        return Vec::new();
+    };
+    let rank = fleet_rank(&own).expect("a ranked module");
+    let above = |context: &str| context != own && fleet_rank(context).is_some_and(|r| r >= rank);
+    let mut tokens = tokenize(src);
+    if own == "fleet" {
+        tokens = split_reexports(tokens).0;
+    }
+    let mut found = Vec::new();
+    // Calls of a method a context above defines: on `self` and `Self::` within an
+    // `impl AppState` block, where they are `AppState`, and on `AppState::` anywhere.
+    let blocks = app_state_blocks(&tokens);
+    for (i, w) in tokens.windows(4).enumerate() {
+        let in_impl = || blocks.iter().any(|b| b.contains(&i));
+        let receiver = match (&w[0].0, &w[1].0) {
+            (Token::Ident(r), Token::Punct('.')) if r == "self" => in_impl(),
+            (Token::Ident(r), Token::PathSep) if r == "Self" => in_impl(),
+            (Token::Ident(r), Token::PathSep) => r == "AppState",
+            _ => false,
+        };
+        let called = matches!(w[3].0, Token::Punct('(') | Token::PathSep);
+        if let (true, true, Token::Ident(method)) = (receiver, called, &w[2].0) {
+            if let Some(context) = methods.get(method).filter(|c| above(c)) {
+                found.push(format!("{module}:{}: calls {method} of {context}", w[2].1));
+            }
+        }
+    }
+    // Paths and `use` declarations that lead into a context above.
+    for Named { segments, line, .. } in paths(&tokens) {
+        if let Some(context) =
+            fleet_context_reached(module, &segments, reexports).filter(|c| above(c))
+        {
+            found.push(format!(
+                "{module}:{line}: names {} of {context}",
+                segments.join("::")
+            ));
+        }
+    }
+    // Names of a context above, brought in by the root's `use` declarations.
+    let globbed = own == "fleet"
+        || tokens.windows(4).any(|w| {
+            w[0].0 == Token::Ident("use".into())
+                && w[1].0 == Token::Ident("super".into())
+                && w[2].0 == Token::PathSep
+                && w[3].0 == Token::Punct('*')
+        });
+    if globbed {
+        let declared = use_declarations(&tokens);
+        for (i, (token, line)) in tokens.iter().enumerate() {
+            let Token::Ident(name) = token else { continue };
+            let qualified = i > 0 && matches!(tokens[i - 1].0, Token::PathSep | Token::Punct('.'));
+            if qualified || declared.iter().any(|r| r.contains(&i)) {
+                continue;
+            }
+            if let Some(context) = imports.get(name).filter(|c| above(c)) {
+                found.push(format!(
+                    "{module}:{line}: names {name} of {context}, through the root"
+                ));
+            }
+        }
+    }
+    found
+}
+
+/// Each context of the Server's fleet core names only the contexts ranked below it, and the
+/// module root names none: no call on `self`, `Self::` or `AppState::` to a method another context
+/// defines at or above the caller's rank, and no path, `use` or name through the root that leads
+/// into one. Every submodule of `fleet` outside the tests has a rank.
+///
+/// Verifies: SRV-fleet-contexts-call-by-rank
+#[test]
+fn each_fleet_context_names_only_the_contexts_ranked_below_it() {
+    let reexports = reexports();
+    let src = crates_dir().join("fleet-server").join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    files.sort();
+    let mut ranked = Vec::new();
+    let mut unranked = Vec::new();
+    for file in files {
+        let module = module_path(&src, &file);
+        let Some(context) = fleet_context(&module) else {
+            continue;
+        };
+        if FLEET_TEST_ONLY.contains(&context.as_str()) {
+            continue;
+        }
+        if fleet_rank(&context).is_none() {
+            unranked.push(module);
+            continue;
+        }
+        ranked.push((module, fs::read_to_string(&file).unwrap()));
+    }
+    assert!(
+        unranked.is_empty(),
+        "submodules of fleet without a rank in FLEET_RANKS: {unranked:#?}"
+    );
+    let gone: Vec<&str> = FLEET_RANKS
+        .iter()
+        .copied()
+        .filter(|c| {
+            !ranked
+                .iter()
+                .any(|(m, _)| fleet_context(m).as_deref() == Some(*c))
+        })
+        .collect();
+    assert!(
+        gone.is_empty(),
+        "contexts of FLEET_RANKS without a source file: {gone:?}"
+    );
+    let mut methods = BTreeMap::new();
+    let mut imports = BTreeMap::new();
+    for (module, text) in &ranked {
+        let tokens = tokenize(text);
+        let context = fleet_context(module).unwrap();
+        for method in app_state_methods(&tokens) {
+            methods.insert(method, context.clone());
+        }
+        if module == "fleet" {
+            imports = fleet_root_imports(&tokens, &reexports);
+        }
+    }
+    let found: Vec<String> = ranked
+        .iter()
+        .flat_map(|(module, text)| rank_breaches(module, text, &methods, &imports, &reexports))
+        .collect();
+    assert!(
+        found.is_empty(),
+        "a context of fleet names one ranked at or above it: {found:#?}"
+    );
+}
+
+/// The check the rank test stands on: a call on `self`, `Self::` and `AppState::`, a path, and a
+/// name through the root, each judged by the rank of the context it reaches; and the same in test
+/// code, in a string, and in the root's `pub use`, left alone.
+#[test]
+fn the_rank_check_finds_a_context_naming_one_above_it() {
+    let reexports = Reexports::new();
+    let methods: BTreeMap<String, String> = [
+        ("issue", "fleet::approval"),
+        ("place_all", "fleet::placement"),
+        ("take_row", "fleet::held"),
+    ]
+    .into_iter()
+    .map(|(m, c)| (m.to_owned(), c.to_owned()))
+    .collect();
+    let imports: BTreeMap<String, String> = [("Processed", "fleet::session")]
+        .into_iter()
+        .map(|(m, c)| (m.to_owned(), c.to_owned()))
+        .collect();
+    let held = r##"
+        use super::*;
+        impl AppState {
+            fn f(&self) -> Processed { self.take_row(); Self::issue(); AppState::place_all(); }
+            fn g(&self) { let _ = super::session::bad_request(); let _ = "self.issue()"; }
+        }
+        #[cfg(test)]
+        mod tests { fn t(s: &AppState) { s.issue(); super::session::bad_request(); } }
+    "##;
+    let found = rank_breaches("fleet::held", held, &methods, &imports, &reexports);
+    assert_eq!(found.len(), 3, "{found:#?}");
+    assert!(found[0].contains("calls issue of fleet::approval"));
+    assert!(found[1].contains("names super::session::bad_request of fleet::session"));
+    assert!(found[2].contains("names Processed of fleet::session, through the root"));
+    // The root names no context; its `pub use` of one keeps a public path.
+    let root = r##"
+        mod placement;
+        pub use placement::Placement;
+        use placement::Groups;
+        impl AppState { fn new() { Self::place_all(); } }
+    "##;
+    let found = rank_breaches("fleet", root, &methods, &imports, &reexports);
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(found[0].contains("calls place_all of fleet::placement"));
+    assert!(found[1].contains("names placement::Groups of fleet::placement"));
+}
