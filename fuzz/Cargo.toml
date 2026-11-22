@@ -20,6 +20,8 @@ fleet-server = { path = "../crates/fleet-server" }
 fleet-core = { path = "../crates/fleet-core" }
 fleet-util = { path = "../crates/fleet-util" }
 prost = "0.14"
+# The GitHub answers `opamp-fleetctl package fetch` reads, parsed as the tool parses them.
+serde_json = "1"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 tempfile = "3"
 toml = "1"
@@ -106,6 +108,20 @@ bench = false
 [[bin]]
 name = "renewal_proof"
 path = "fuzz_targets/renewal_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "checksum_file"
+path = "fuzz_targets/checksum_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "release_listing"
+path = "fuzz_targets/release_listing.rs"
 test = false
 doc = false
 bench = false

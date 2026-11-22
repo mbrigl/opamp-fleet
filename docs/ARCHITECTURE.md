@@ -139,7 +139,10 @@ Six crates in one workspace
   — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
   of a PKCS#12 file (OPS-operator-program-fleetctl). `gpgv` verifies an upstream's OpenPGP signature
-  (OPS-operator-program-fleetctl §29); no command calls it yet. It depends on neither end: what it
+  (OPS-operator-program-fleetctl §29); no command calls it yet. `fetch` reads every download
+  within a cap, and `fetch::upstream` holds the parsers of what upstream sends; the crate has no
+  library, so the fuzz targets `checksum_file` and `release_listing` compile that file by its path
+  (Q-2). The crate depends on neither end: what it
   shares with the Client — the 7z Unix-mode convention (`archive::unix_mode_attributes`; its tests
   also use the unpacker), the links a tree package keeps (`tree::KeptLink`, `tree::is_kept`), the
   PKCS#12 reader (`identity::pkcs12::open`), and the reads of an administrator's file

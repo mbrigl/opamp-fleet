@@ -252,6 +252,11 @@ underlying cause (DNS, refused connection, TLS) rather than only the request tha
   private CA needs that CA trusted here. Off the loopback, carry the
   [`[rest.auth]`](server.md#the-operator-plane-restauth) credential in the URL:
   `https://fleet-admin:secret@fleet.example:4321`.
+- **Every download has a ceiling**: 1 GiB for an artifact, 64 KiB for a checksum file, and
+  16 MiB for an answer of GitHub's API. The largest artifact published today is about 118 MB, and
+  the largest release answer 1.7 MB. A download that states a larger size is refused before its
+  body is read; one that does not is refused as soon as it passes the ceiling, and a partial
+  artifact is removed. The error names the URL and the ceiling.
 - **GitHub rate-limits unauthenticated requests to 60 per hour** per address. A run costs two
   requests (one to list versions, one to read a release), so this is only reached by scripting.
   The error says so rather than leaving you guessing.
