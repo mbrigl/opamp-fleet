@@ -2152,6 +2152,44 @@ Here `fluent-bit-conf` is the *name of the Configuration on the Server* — that
 file
 is called.
 
+### `type = "telegraf"`
+
+For Telegraf. Also two lines:
+
+```toml
+[[supervisor]]
+type = "telegraf"
+name = "telegraf"
+```
+
+The kind knows the program's name per platform, points `--config` at the Configuration named
+`telegraf-conf`, asks `--version`, and applies a configuration with **`SIGHUP`** where signals exist
+and a restart where they do not. That last part is why the kind exists: no block may name a reload
+signal, so a `command` block would restart Telegraf on every apply. Listed
+in `remote_config_disabled`, it runs on the `telegraf-conf` you place in its `config/` directory,
+and without one Telegraf exits and is reported.
+
+Telegraf runs under the Client's account. Under the account a Linux package creates, an input that
+needs root (`smart`, `ipmi_sensor`) works only with `use_sudo = true` and a `sudoers` rule for that
+account; running the Client as root is your choice per host, with
+`opamp-fleet service install --run-as root`
+([Running it under its own account](#running-it-under-its-own-account)). Where a
+[process account](#managed-processes-under-a-process-account) is registered, Telegraf runs under
+that account instead, which is never root, so the `sudoers` rule names the process account, and an
+input that needs root fails without one even where the Client runs as root.
+
+**A `telegraf-conf` from the Server runs code on this host.** Telegraf's configuration can run
+commands and write files: `inputs.exec`, `inputs.execd`, `outputs.exec`, `outputs.execd` and
+`outputs.file`. Whoever writes the `telegraf-conf` the Server delivers runs those commands as the
+account Telegraf runs under — as root where the Client runs with `--run-as root`, or where a
+`sudoers` rule for `use_sudo` lets it. On a host where the Server must not run code, list the
+Supervisor in `remote_config_disabled`
+([Switching remote configuration off for one Supervisor](#switching-remote-configuration-off-for-one-supervisor),
+[the hardening guide](../HARDENING.md#the-channels-that-put-code-on-the-host)). Telegraf leads its
+own process group, so a stop also ends the programs its `exec` and `execd` plugins started.
+
+The artifact is [`docs/artifacts/telegraf.md`](../artifacts/telegraf.md).
+
 ## How a block names its program
 
 `binary` and `command` take a **bare file name** — `otelcol-contrib`, not a path. It names a file in

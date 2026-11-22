@@ -39,6 +39,43 @@ carries a date once its tag exists.
   nothing; without `planes` every instance opens both planes as before. Set `planes` only once
   every instance of the fleet runs this release, since an older one refuses the key.
 
+- **Telegraf is managed by the fleet again** — the Supervisor kind `telegraf`, removed in 0.5.3, is
+  back, compiled into the Client by default as the `telegraf` feature
+  ([CLT-telegraf-kind](docs/adr/CLT-telegraf-kind.md)). A block is `type = "telegraf"` and `name`;
+  the kind derives the program, `--config` and the preflight, and applies a new configuration with
+  `SIGHUP` where the platform has signals and with a restart on Windows, so one Supervisor set
+  serves a mixed fleet. Telegraf leads its own process group, so a stop also ends the programs its
+  `exec` and `execd` plugins started. Telegraf runs under the Client's account, so an input that
+  needs root fails under the account a Linux package creates. The unit sets nothing that implies
+  `no_new_privs`
+  ([CLT-accounts-service-runs-under §8](docs/adr/CLT-accounts-service-runs-under.md)), so `sudo`
+  works inside it: with `use_sudo = true` in the input and a `sudoers` rule for the account, the
+  input works; without the rule, install the Client with `service install --run-as root`
+  ([`docs/artifacts/telegraf.md`](docs/artifacts/telegraf.md)). Where a process account is
+  registered, Telegraf runs under that account, which is never root
+  (CLT-accounts-service-runs-under §18), and the `sudoers` rule names that account. A
+  `telegraf-conf` the Server delivers can run commands and write files as Telegraf's account
+  (`exec`, `execd`, `outputs.file`), as root under `--run-as root` or a `sudoers` rule. The UI
+  colours a Telegraf Agent's effective configuration as TOML
+  ([SRV-kinds-name-their-ui-grammar](docs/adr/SRV-kinds-name-their-ui-grammar.md)).
+  **What to do:** nothing, unless you run Telegraf; a block that was rewritten as `command` for
+  0.5.3 can go back to `type = "telegraf"`. On a host where the Server must not run code, list the
+  Telegraf Supervisor in `[supervisors] remote_config_disabled`
+  ([`docs/manual/client.md`](docs/manual/client.md#switching-remote-configuration-off-for-one-supervisor)).
+  - **`opamp-fleetctl package fetch --agent telegraf`** fetches the archives from InfluxData's CDN
+    for Linux (amd64, arm64, 386), macOS (amd64, arm64) and Windows (amd64, arm64), verified against
+    the SHA-256 the GitHub release notes publish; a release whose notes name no SHA-256 for an
+    archive is refused. Each archive's `.asc` is verified with `gpgv` against InfluxData's
+    package-signing key, which the tool carries (primary key
+    `24C9 75CB A61A 024E E1B6 3178 7C3D 5715 9FC2 F927`): required from 1.34.4 on, where
+    InfluxData signs every archive, and checked where published before that. A bad signature, or
+    one by another key, refuses the archive. A signature is read within 64 KiB. It uploads the
+    archives as published, as Package version `<major>.<minor>.<patch>` of tag
+    `v<major>.<minor>.<patch>`. The upload also stores the default configuration `telegraf-conf`
+    from `config/examples/`, left untouched where the Server already holds it. **What to do:**
+    install `gpgv` (Debian and Ubuntu have it; on macOS install GnuPG) on the host that fetches
+    Telegraf 1.34.4 or later.
+
 ### Security
 
 - **`opamp-fleetctl package fetch` reads every download within a ceiling** (specification Q-2).
