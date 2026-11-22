@@ -1,10 +1,11 @@
 //! What `package fetch` reads out of the bytes an upstream sends: GitHub's tag listing and release
-//! object, and the checksum files beside an artifact, with the asset names and tags in them.
+//! object, the checksum files beside an artifact, with the asset names and tags in them, and the
+//! digests a release's notes state.
 //!
 //! Every function here reads bytes from the network, so each has a fuzz target that runs in CI
-//! (specification Q-2): `fuzz/fuzz_targets/release_listing.rs` and
-//! `fuzz/fuzz_targets/checksum_file.rs`. Their size limit is enforced before this module sees the
-//! bytes, by the bounded reads of the module above.
+//! (specification Q-2): `fuzz/fuzz_targets/release_listing.rs`,
+//! `fuzz/fuzz_targets/checksum_file.rs` and `fuzz/fuzz_targets/release_notes.rs`. Their size limit
+//! is enforced before this module sees the bytes, by the bounded reads of the module above.
 //!
 //! `fleet-tools` has no library (DEV-six-crates-tokio-axum §22), so the fuzz crate compiles this
 //! file into its targets by its path. That is why this module names nothing of `crate::` and uses
@@ -101,4 +102,52 @@ pub fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
                 .is_some_and(|n| n.to_string_lossy() == wanted)
         })
         .map(|(hash, _)| hash.trim().to_string())
+}
+
+/// The notes of a GitHub release object (`GET /repos/{repo}/releases/tags/{tag}`): its `body`, as
+/// the release page shows it. Empty when the release carries no notes, which names no digest.
+///
+/// # Errors
+/// Returns the message to print, without the URL, when the answer is no JSON.
+pub fn release_notes(body: &[u8]) -> Result<String, String> {
+    let release: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("the release is not JSON: {e}"))?;
+    Ok(release
+        .get("body")
+        .and_then(|b| b.as_str())
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// The digest release notes state for `asset`, read from their table of
+/// `| <arch> | <os> | [<asset>](<url>) | <sha256> |` rows, where the name and the digest may be
+/// wrapped in backticks — Telegraf's (CLT-telegraf-kind §3). Lower case. `None` when no row names
+/// the asset, when its last cell is not a SHA-256, or when two rows name it with different digests.
+pub fn release_notes_digest(notes: &str, asset: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in notes.lines() {
+        let cells: Vec<&str> = line
+            .split('|')
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .collect();
+        let names_it = cells.iter().any(|cell| {
+            cell.strip_prefix('[')
+                .and_then(|rest| rest.split_once("]("))
+                .is_some_and(|(text, _)| text.trim_matches('`') == asset)
+        });
+        if !names_it {
+            continue;
+        }
+        let digest = cells.last()?.trim_matches('`');
+        if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let digest = digest.to_ascii_lowercase();
+        match &found {
+            Some(earlier) if *earlier != digest => return None,
+            _ => found = Some(digest),
+        }
+    }
+    found
 }

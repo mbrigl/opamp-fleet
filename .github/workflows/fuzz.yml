@@ -43,6 +43,7 @@ jobs:
           - renewal_proof
           - checksum_file
           - release_listing
+          - release_notes
     env:
       SECONDS_PER_TARGET: ${{ github.event_name == 'schedule' && '900' || '60' }}
     steps:

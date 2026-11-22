@@ -9,7 +9,7 @@ use libfuzzer_sys::fuzz_target;
 // their path. This target calls four of them.
 #[allow(
     dead_code,
-    reason = "the checksum file's parsers are fuzzed by checksum_file"
+    reason = "the checksum file's and the release notes' parsers are fuzzed by checksum_file and release_notes"
 )]
 #[path = "../../crates/fleet-tools/src/fetch/upstream.rs"]
 mod upstream;
