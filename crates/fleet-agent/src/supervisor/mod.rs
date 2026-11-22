@@ -17,6 +17,8 @@ pub mod port;
 pub mod ports;
 pub mod process;
 pub mod restart;
+#[cfg(feature = "telegraf")]
+pub mod telegraf;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -47,7 +49,12 @@ pub const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
 /// follow from this one list.
 ///
 fn registry() -> Vec<Box<dyn Plugin>> {
-    vec![Box::new(collector::Collector), Box::new(command::Command)]
+    vec![
+        Box::new(collector::Collector),
+        Box::new(command::Command),
+        #[cfg(feature = "telegraf")]
+        Box::new(telegraf::Telegraf),
+    ]
 }
 
 /// The [`registry`] of a run: its plugins with the [`Spawner`] the composition root chose from the
@@ -673,7 +680,7 @@ mod tests {
     }
 
     /// The wrapped kinds, each with whether this build's features carry it (CLT-wrappers-act-through-the-core §14).
-    const WRAPPED: &[(&str, bool)] = &[];
+    const WRAPPED: &[(&str, bool)] = &[("telegraf", cfg!(feature = "telegraf"))];
 
     /// A build's kinds are the core's two and the wrapped ones its features name — no more, so a
     /// Selector aimed at `supervisor.kind.<type>` never reaches a build without it, and no fewer

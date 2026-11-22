@@ -20,7 +20,8 @@ path = "src/main.rs"
 # CLT-wrappers-act-through-the-core §14: each wrapped Supervisor kind is a feature named after its `type`, all of them
 # in the published build. `collector` and `command` are the core's own and always compiled in.
 [features]
-default = []
+default = ["telegraf"]
+telegraf = []
 
 [dependencies]
 clap.workspace = true
@@ -175,3 +176,8 @@ fleet-server = { path = "../fleet-server" }
 syn.workspace = true
 quote.workspace = true
 proc-macro2.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+# On Windows a test builds the `.zip` fixture the Client then installs, as the Unix tests build
+# `.tar.gz` ones; the unpacker itself is `fleet-util`'s (DEV-six-crates-tokio-axum).
+zip.workspace = true

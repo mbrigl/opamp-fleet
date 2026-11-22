@@ -137,8 +137,9 @@ pub fn take_program(
 }
 
 /// Where the program sits inside a package tree (PKG-signed-packages-and-delivery): the block's answer, or the one the kind
-/// knows (CLT-wrappers-act-through-the-core). A kind that knows it refuses a block that states it, for the reason
-/// [`take_program`] refuses a program name.
+/// knows (CLT-wrappers-act-through-the-core). A wrapped kind, one that names its program, refuses a block that
+/// states it, for the reason [`take_program`] refuses a program name — also where its package is a
+/// single file and the answer is that there is no tree (CLT-wrappers-act-through-the-core §20).
 ///
 /// # Errors
 /// Returns an error when a block states a `program_path` its kind already supplies.
@@ -146,7 +147,15 @@ pub fn effective_program_path(
     block: &SupervisorBlock,
     plugin: &dyn Plugin,
 ) -> Result<Option<PathBuf>, String> {
-    match (&block.program_path, plugin.defaults().program_path) {
+    let defaults = plugin.defaults();
+    match (&block.program_path, defaults.program_path) {
+        (Some(_), None) if defaults.program.is_some() => Err(format!(
+            "supervisor {:?}: `program_path` is no longer a supervisor key for type {:?} — the \
+             kind delivers its program as a single file, with no tree to point into; remove the \
+             line",
+            block.name,
+            plugin.kind()
+        )),
         (Some(_), Some(derived)) => Err(format!(
             "supervisor {:?}: `program_path` is no longer a supervisor key for type {:?} — the \
              kind knows where its program sits in the tree it delivers ({derived}); remove the line",

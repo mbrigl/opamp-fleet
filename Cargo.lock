@@ -1019,6 +1019,7 @@ dependencies = [
  "windows-service",
  "x509-parser",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

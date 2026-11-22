@@ -415,7 +415,8 @@ nowhere and the test does not exempt it.
   acts only through the host functions it is handed
   ([CLT-wrappers-act-through-the-core](adr/CLT-wrappers-act-through-the-core.md)). The Plugins
   are the two Supervisors this project brings, the Collector's in `supervisor::collector` and the
-  example Custom Supervisor in `supervisor::command`. `supervisor::host` is the core's side of
+  example Custom Supervisor in `supervisor::command`, and the wrapped kinds the build's features
+  carry, Telegraf's in `supervisor::telegraf`. `supervisor::host` is the core's side of
   that port, an adapter: it feeds an instance its inputs one at a time, answers what the instance
   leaves unanswered, and carries out each host function over the process runner, the files in
   the Supervisor's own roots through `supervisor::host::files` and the timers through
