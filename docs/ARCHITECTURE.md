@@ -141,8 +141,10 @@ Six crates in one workspace
   of a PKCS#12 file (OPS-operator-program-fleetctl). `gpgv` verifies an upstream's OpenPGP signature
   (OPS-operator-program-fleetctl §29); no command calls it yet. `fetch` reads every download
   within a cap, and `fetch::upstream` holds the parsers of what upstream sends; the crate has no
-  library, so the fuzz targets `checksum_file` and `release_listing` compile that file by its path
-  (Q-2). The crate depends on neither end: what it
+  library, so the fuzz targets `checksum_file`, `release_listing` and `appimage_header` compile
+  that file by its path (Q-2). The GLPI Agent's Linux artifact is the one repack `fetch` makes: it
+  reads the AppImage's headers there and extracts its file system with `unsquashfs`, never running
+  it (CLT-glpi-agent-kind). The crate depends on neither end: what it
   shares with the Client — the 7z Unix-mode convention (`archive::unix_mode_attributes`; its tests
   also use the unpacker), the links a tree package keeps (`tree::KeptLink`, `tree::is_kept`), the
   PKCS#12 reader (`identity::pkcs12::open`), and the reads of an administrator's file
@@ -406,7 +408,9 @@ no module.
   and `shutdown` the handle every task stops on; the Plugins and the process runner are its
   adapters, among them the two Supervisors
   this project brings, the Collector's in `supervisor::collector` and the example Custom
-  Supervisor in `supervisor::command`. How a `[[supervisor]]` block is
+  Supervisor in `supervisor::command`, and the wrapped kind `glpi` in `supervisor::glpi`, compiled
+  in by its feature
+  ([CLT-glpi-agent-kind](adr/CLT-glpi-agent-kind.md)). How a `[[supervisor]]` block is
   read — its plugin, program, Agent type and timings — is `supervisor::block`, and what a
   Server-delivered block may bring is `supervisor::delivered`; the registry of Plugins stays in
   `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the

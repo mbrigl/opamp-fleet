@@ -420,6 +420,10 @@ fleet to another TLS endpoint its trust accepts, install a certificate for
 the key the Client generated, and set its telemetry destinations; restart a Managed Process; and
 re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a command it
 names, a receiver bound to any port — it allows as the process's account; that is the product.
+The `glpi` kind holds the GLPI Agent's Deploy task off on its command line, which no Configuration
+overrides; its Configuration still names the GLPI server that drives every other task, and its
+`local` key writes the inventory into any directory the agent's account may write
+([CLT-glpi-agent-kind](adr/CLT-glpi-agent-kind.md)).
 The switch of CLT-supervisor-mode-and-kinds binds a name: while the Server manages the set, it can
 remove a listed Supervisor and deliver the same agent under a name that is not listed, whose
 configuration is then the Server's again. A host that also sets `server_manages_set = false` closes
