@@ -136,6 +136,17 @@ for head in '#!/bin/sh\nset -o pipefail' '#!/usr/bin/env bash'; do  # either con
   expect 1 "a pipe into grep -q fails under '$head'" "$d" "*read the input whole"
 done
 
+# A pipe into grep -m1 and into adr_field_line, which is grep -m1, spelled apart as above.
+PIPE_M="$(printf '%s %s' '|' 'grep -m1 x')"
+PIPE_ADR="$(printf '%s %s' '|' 'adr_field_line - Status')"
+for pipe in "$PIPE_M" "$PIPE_ADR"; do
+  d="$(repo "grep-max-${pipe//[^a-z]/}")"
+  # shellcheck disable=SC2016  # the fixture's "$(...)" and "$l" are its own
+  printf '#!/usr/bin/env bash\nset -o pipefail\nif l="$(cat big %s)"; then echo "$l"; fi\n' "$pipe" > "$d/find.sh"
+  git -C "${d:?}" add find.sh
+  expect 1 "a pipe that ends early ('$pipe') fails" "$d" "find.sh:3:*read the input whole"
+done
+
 d="$(repo grep-quiet-whole)"
 # shellcheck disable=SC2016  # the fixture's "$(...)" is its own
 {

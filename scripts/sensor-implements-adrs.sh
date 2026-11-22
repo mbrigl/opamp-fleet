@@ -52,11 +52,13 @@ adr_categories "$index"
 
 # state <id> — 'in force' for an ADR accepted or proposed at the head, else what it is.
 state() {
-  local id="$1" file="docs/adr/$1.md" status line
+  local id="$1" file="docs/adr/$1.md" status line text
   git cat-file -e "$head:$file" 2>/dev/null || { echo "no ADR of that identifier"; return; }
   # The status without its emoji and with a link's text alone: 'superseded by <CAT>-<slug>'.
-  status=""
-  if line="$(git show "$head:$file" | adr_field_line - Status)"; then
+  # The file is read to its end before it is matched: piped into grep -m1, a file larger than a
+  # pipe's buffer kills git show with SIGPIPE, and pipefail drops the line the match found.
+  status="" text="$(git show "$head:$file")"
+  if line="$(adr_field_line - Status <<< "$text")"; then
     adr_field_value "$line" Status
     status="$(sed -E 's/\[([^]]*)\]\([^)]*\)/\1/g' <<< "$ADR_VALUE")"
     status="${status#"${status%%[A-Za-z]*}"}"
