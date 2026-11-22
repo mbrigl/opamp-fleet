@@ -1293,7 +1293,7 @@ async fn the_ui_takes_its_look_from_its_own_stylesheet() {
 /// The vendored Shiki bundle is served from the plane's own origin as JavaScript, under the same
 /// policy as every page, and it is the file the pin names: the bundle cannot change without
 /// `scripts/vendor-shiki.lock` changing in the same commit.
-/// Verifies: SRV-ui-colours-with-shiki
+/// Verifies: SRV-kinds-name-their-ui-grammar, SRV-ui-colours-with-shiki
 #[tokio::test]
 async fn the_ui_serves_the_pinned_shiki_bundle() {
     use sha2::Digest as _;
@@ -1355,10 +1355,11 @@ async fn the_ui_serves_the_pinned_shiki_bundle() {
 
 /// The UI loads the vendored Shiki bundle without waiting for it, chooses the grammar of an
 /// Agent's effective configuration by the type the Agent reports — `otelcol*` YAML, the fleet's
-/// own Client TOML, Fluent Bit INI, anything else none — and each look defines the
-/// CSS-variables theme's colours in its light and its dark theme. The project's TOML and INI token
-/// rules in the bundle name only those colours, so no look needs a variable of its own for them.
-/// Verifies: SRV-ui-colours-with-shiki
+/// own Client TOML, Fluent Bit INI, each kind the grammar its ADR names (Telegraf TOML, by
+/// CLT-telegraf-kind §9), anything else none — and each look defines the CSS-variables theme's
+/// colours in its light and its dark theme. The project's TOML and INI token rules in the bundle
+/// name only those colours, so no look needs a variable of its own for them.
+/// Verifies: SRV-kinds-name-their-ui-grammar, SRV-ui-colours-with-shiki
 #[tokio::test]
 async fn the_ui_colours_an_effective_configuration_by_the_agents_type() {
     let server = spawn().await;
@@ -1377,9 +1378,9 @@ async fn the_ui_colours_an_effective_configuration_by_the_agents_type() {
     );
     assert!(
         html.contains(
-            r#"const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["fluent-bit", "ini"]]);"#
+            r#"const CONFIG_GRAMMARS = new Map([["supervisor", "toml"], ["telegraf", "toml"], ["fluent-bit", "ini"]]);"#
         ),
-        "supervisor is not TOML, or fluent-bit is not INI"
+        "supervisor and telegraf are not TOML, or fluent-bit is not INI"
     );
     assert!(
         html.contains(
