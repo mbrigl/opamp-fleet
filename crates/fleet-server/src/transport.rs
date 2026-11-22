@@ -46,7 +46,7 @@ fn unauthorized(text: &'static str) -> Response {
 }
 
 /// Where a Gateway fetches the revoked certificates it refuses (SEC-admission-by-client-certificate §34).
-pub const GATEWAY_REVOCATIONS_PATH: &str = "/v1/gateway/revocations";
+pub const GATEWAY_REVOCATIONS_PATH: &str = fleet_core::revocation_list::PATH;
 
 /// Where every member fetches the floor of each Agent type (PKG-versions-high-water-mark-floor §15).
 pub const PACKAGE_FLOORS_PATH: &str = "/v1/package-floors";

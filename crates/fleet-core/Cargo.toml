@@ -14,6 +14,9 @@ publish.workspace = true
 git2.workspace = true
 
 [dependencies]
+# The shape of the Gateways' revocation list, which the Server writes and a Gateway reads; already
+# linked by both ends.
+serde.workspace = true
 # The bootstrap certificate as a password-protected PKCS#12 file, written by the Server and read by
 # the Client (SEC-bootstrap-certificates-and-enrolment): `pkcs12`, `pkcs5` and `der` read which schemes a file uses; `rcgen` and
 # `x509-parser` tell whether the key and the certificate belong together. `x509-parser` also reads a

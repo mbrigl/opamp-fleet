@@ -4,7 +4,8 @@
 //! bootstrap certificate's PKCS#12 file (SEC-bootstrap-certificates-and-enrolment), and the host a certificate that names none is
 //! taken for (CLT-modes-and-gateway), and the proofs a renewal and an enrolment request carry in their CSR
 //! (CLT-modes-and-gateway §18, §20 and §21), what a package signature and a floor signature cover
-//! (PKG-signed-packages-and-delivery, PKG-versions-high-water-mark-floor), the token buckets a sender is counted in (SEC-tls13-bounded-input-chosen-planes, CLT-gateway-rate-limits-hosts), and what a
+//! (PKG-signed-packages-and-delivery, PKG-versions-high-water-mark-floor), the token buckets a sender is counted in (SEC-tls13-bounded-input-chosen-planes, CLT-gateway-rate-limits-hosts), where the
+//! Server serves the Gateways' revocation list and the shape of its body (SEC-admission-by-client-certificate §34), and what a
 //! client certificate is known by and every issued certificate gets (`x509`). What only the Client
 //! and the operator tool share is in `fleet-util` (DEV-six-crates-tokio-axum).
 //! The protocol and its transport, TLS included, are in the `opamp` crate (DEV-six-crates-tokio-axum).
@@ -23,5 +24,6 @@ pub mod pkcs12;
 pub mod platform;
 pub mod rate;
 pub mod renewal;
+pub mod revocation_list;
 pub mod version;
 pub mod x509;
