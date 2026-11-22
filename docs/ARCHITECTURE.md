@@ -139,9 +139,11 @@ Six crates in one workspace
   — its `pki` commands make the fleet's certificates and, through
   `token`, the CA keys and the audit key on a PKCS#11 token, and `pki p12-extract` takes a pair out
   of a PKCS#12 file (OPS-operator-program-fleetctl). `gpgv` verifies an upstream's OpenPGP signature
-  (OPS-operator-program-fleetctl §29); no command calls it yet. `fetch` reads every download
-  within a cap, and `fetch::upstream` holds the parsers of what upstream sends; the crate has no
-  library, so the fuzz targets `checksum_file` and `release_listing` compile that file by its path
+  (OPS-operator-program-fleetctl §29); the Icinga 2 repack calls it on Icinga's and Debian's signed
+  indexes (CLT-icinga2-repacked-kind). `fetch` reads every download within a cap, and
+  `fetch::upstream` holds the parsers of what upstream sends, `fetch::debian` those of what Debian's
+  archives send; the crate has no library, so the fuzz targets `checksum_file`, `release_listing`,
+  `deb_release`, `deb_index`, `deb_alternatives` and `elf_needed` compile those files by their path
   (Q-2). The crate depends on neither end: what it
   shares with the Client — the 7z Unix-mode convention (`archive::unix_mode_attributes`; its tests
   also use the unpacker), the links a tree package keeps (`tree::KeptLink`, `tree::is_kept`), the
@@ -406,7 +408,9 @@ no module.
   and `shutdown` the handle every task stops on; the Plugins and the process runner are its
   adapters, among them the two Supervisors
   this project brings, the Collector's in `supervisor::collector` and the example Custom
-  Supervisor in `supervisor::command`. How a `[[supervisor]]` block is
+  Supervisor in `supervisor::command`, and the wrapped kind `supervisor::icinga2`, behind the
+  feature of its name
+  ([CLT-icinga2-repacked-kind](adr/CLT-icinga2-repacked-kind.md)). How a `[[supervisor]]` block is
   read — its plugin, program, Agent type and timings — is `supervisor::block`, and what a
   Server-delivered block may bring is `supervisor::delivered`; the registry of Plugins stays in
   `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the

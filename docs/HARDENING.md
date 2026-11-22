@@ -430,7 +430,8 @@ names, the configuration a `command` kind's program reads — is in `remote_conf
 otherwise the Server can configure such a Supervisor to rewrite `supervisor.toml`, and the keys
 change at the next start. Where a process account
 is registered (CLT-accounts-service-runs-under), such a command runs under it, and it cannot write
-`supervisor.toml`. A signed Client
+`supervisor.toml`. An `icinga2` Supervisor is refused there, so its commands always run as the
+Client's account (CLT-icinga2-repacked-kind). A signed Client
 build can still replace the program that reads them where `[packages] self_update` consents
 (CLT-self-update-signed-package).
 
