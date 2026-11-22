@@ -1,0 +1,16 @@
+Package: icinga2-bin
+Architecture: amd64
+Version: 2.16.4-1+debian13
+Pre-Depends: init-system-helpers (>= 1.54~)
+Depends: libc6 (>= 2.38), libssl3t64 (>= 3.0.0) | libssl3, libboost-regex1.83.0:amd64
+Provides: icinga2-bin-virtual
+Section: admin
+Filename: pool/main/i/icinga2/icinga2-bin_2.16.4-1+debian13_amd64.deb
+Size: 4411932
+SHA256: aaaa
+
+Package: icinga2-bin
+Architecture: amd64
+Version: 1:2.16.3~rc1-1+debian13
+Filename: pool/main/i/icinga2/icinga2-bin_2.16.3-1+debian13_amd64.deb
+SHA256: bbbb

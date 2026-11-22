@@ -1,0 +1,5 @@
+set -e
+if [ "$1" = "configure" ]; then
+        update-alternatives --install /usr/lib/nagios/plugins/check_http check_http /usr/lib/nagios/plugins/check_http.deprecated 50
+        update-alternatives --install /usr/lib/nagios/plugins/check_http check_http /usr/lib/nagios/plugins/check_curl -100
+fi

@@ -43,6 +43,10 @@ jobs:
           - renewal_proof
           - checksum_file
           - release_listing
+          - deb_release
+          - deb_index
+          - deb_alternatives
+          - elf_needed
     env:
       SECONDS_PER_TARGET: ${{ github.event_name == 'schedule' && '900' || '60' }}
     steps:

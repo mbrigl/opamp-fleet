@@ -22,6 +22,9 @@ fleet-util = { path = "../crates/fleet-util" }
 prost = "0.14"
 # The GitHub answers `opamp-fleetctl package fetch` reads, parsed as the tool parses them.
 serde_json = "1"
+# The `Valid-Until` of a Debian `Release` text `opamp-fleetctl package fetch` reads, parsed as the
+# tool parses it.
+time = { version = "0.3", default-features = false, features = ["std", "parsing", "macros"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem"] }
 tempfile = "3"
 toml = "1"
@@ -122,6 +125,34 @@ bench = false
 [[bin]]
 name = "release_listing"
 path = "fuzz_targets/release_listing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deb_release"
+path = "fuzz_targets/deb_release.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deb_index"
+path = "fuzz_targets/deb_index.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deb_alternatives"
+path = "fuzz_targets/deb_alternatives.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "elf_needed"
+path = "fuzz_targets/elf_needed.rs"
 test = false
 doc = false
 bench = false

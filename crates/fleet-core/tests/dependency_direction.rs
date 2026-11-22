@@ -281,6 +281,7 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             // module added to the crate has to be given a role like anywhere else.
             ("main", Root),
             ("fetch", Adapter),
+            ("fetch::debian", Adapter),
             ("fetch::upstream", Adapter),
             ("gpgv", Adapter),
             ("package", Adapter),
