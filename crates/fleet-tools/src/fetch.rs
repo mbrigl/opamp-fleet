@@ -29,9 +29,33 @@ use dialoguer::{Confirm, Input, MultiSelect, Select};
 use fleet_util::tree::KeptLink;
 use std::path::{Path, PathBuf};
 
+mod upstream;
+use upstream::{parse_sums, platform_of};
+
 /// How many release series the operator is offered. Enough to reach the release before last when
 /// one turns out badly, few enough to read without scrolling.
 const SERIES_SHOWN: usize = 3;
+
+/// The most an artifact download may write (specification Q-2): 1 GiB. The largest artifact this
+/// tool fetches, the Contrib Collector's `.tar.gz` of 0.165.0, is 114 MB, and the largest file of
+/// that release, its `.rpm`, 118 MB; the cap leaves room for eight times that. An artifact is streamed to disk, so
+/// the cap guards the operator's disk rather than memory.
+const MAX_ARTIFACT: u64 = 1024 * 1024 * 1024;
+
+/// The most a checksum file may hold (specification Q-2): 64 KiB. A sidecar holds one digest of 64
+/// characters. The largest combined file, the Contrib Collector's `…_checksums.txt` of 0.157.0, is
+/// 5 KiB, and this project's own `SHA256SUMS` under 3 KiB. Read whole into memory.
+const MAX_CHECKSUM_FILE: u64 = 64 * 1024;
+
+/// The most an answer of GitHub's API may hold (specification Q-2): 16 MiB. The largest this tool
+/// asks for is a Collector release object: 0.165.0 lists 816 assets in 1.7 MB. A tag listing of a
+/// hundred tags is under 60 KB. Read whole into memory and parsed as JSON. The cap bounds the
+/// bytes; the JSON tree parsed from them is a small multiple of them.
+const MAX_GITHUB_ANSWER: u64 = 16 * 1024 * 1024;
+
+/// The most of a refusal's body the tool prints (specification Q-2): 64 KiB. The Server's refusals
+/// are one JSON line. Anything longer is no reason an operator reads.
+const MAX_REFUSAL: u64 = 64 * 1024;
 
 /// The member cap a tree package is held to (PKG-signed-packages-and-delivery). Checked while packing rather than
 /// discovered on three hundred hosts at rollout time.
@@ -130,12 +154,7 @@ impl AgentKind {
     /// (`cmd/builder/v0.158.0`). A pattern
     /// per source is what keeps those out of the list an operator picks from.
     fn version_of_tag(self, tag: &str) -> Option<String> {
-        let numeric = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
-        let rest = tag.strip_prefix(self.tag_prefix())?;
-        let parts = rest.split('.').count();
-        // `v0.158.0`, `version/1.2.3` — three numeric parts behind the prefix, and nothing else.
-        let shaped = parts == 3;
-        (shaped && rest.split('.').all(numeric)).then(|| rest.to_string())
+        upstream::version_behind(self.tag_prefix(), tag)
     }
 
     /// What each project puts in front of the version in its tags: `v`, the `version/` this
@@ -694,16 +713,14 @@ fn upload_target(args: &Args) -> Result<Option<String>, String> {
 /// kilobytes. The order is this tool's own — sorted by the numbers, not by whatever order the API
 /// returned — so the newest is the newest whatever the repository's tagging history looks like.
 async fn recent_versions(agent: AgentKind, source: &Source) -> Result<Vec<String>, String> {
-    let body = get_json(&format!(
+    let url = format!(
         "https://api.github.com/repos/{}/tags?per_page=100",
         source.repo
-    ))
-    .await?;
-    let mut versions: Vec<String> = body
-        .as_array()
-        .ok_or("the tag listing is not a list")?
+    );
+    let body = get_github(&url).await?;
+    let mut versions: Vec<String> = upstream::tag_names(&body)
+        .map_err(|e| format!("{url}: {e}"))?
         .iter()
-        .filter_map(|tag| tag.get("name")?.as_str())
         .filter_map(|name| agent.version_of_tag(name))
         .collect();
     versions.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
@@ -742,24 +759,14 @@ fn version_key(version: &str) -> Vec<u64> {
 
 /// The assets of one release: `(name, download URL)`.
 async fn release_assets(source: &Source, tag: &str) -> Result<Vec<(String, String)>, String> {
-    let body = get_json(&format!(
+    let url = format!(
         "https://api.github.com/repos/{}/releases/tags/{tag}",
         source.repo
-    ))
-    .await?;
-    let assets = body
-        .get("assets")
-        .and_then(|a| a.as_array())
-        .ok_or_else(|| format!("{} has no release {tag}", source.repo))?;
-    Ok(assets
-        .iter()
-        .filter_map(|asset| {
-            Some((
-                asset.get("name")?.as_str()?.to_string(),
-                asset.get("browser_download_url")?.as_str()?.to_string(),
-            ))
-        })
-        .collect())
+    );
+    let body = get_github(&url).await?;
+    upstream::release_assets(&body)
+        .map_err(|e| format!("{url}: {e}"))?
+        .ok_or_else(|| format!("{} has no release {tag}", source.repo))
 }
 
 /// What this release offers, one entry per platform this fleet can name.
@@ -803,20 +810,6 @@ fn collector_plans(agent: AgentKind, version: &str, assets: &[(String, String)])
     }
     plans.sort_by(|a, b| (&a.os, &a.arch).cmp(&(&b.os, &b.arch)));
     plans
-}
-
-/// The platform an asset named `<prefix><os>_<arch>.tar.gz` is for, folded by the table an Agent's
-/// report and the Server's store fold through (PKG-signed-packages-and-delivery §6) — or `None` when the name has
-/// another shape or a token that cannot be canonical.
-fn platform_of(name: &str, prefix: &str) -> Option<(String, String)> {
-    let (os, arch) = name
-        .strip_prefix(prefix)?
-        .strip_suffix(".tar.gz")?
-        .split_once('_')?;
-    Some((
-        fleet_core::platform::os_token(os).ok()?,
-        fleet_core::platform::arch_token(arch).ok()?,
-    ))
 }
 
 /// The platforms this project's own release publishes, in the order its build matrix states them
@@ -911,7 +904,7 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
                 .unwrap_or_else(|| plan.out_name.clone()),
         );
         eprintln!("  downloading {} …", source.url);
-        download(&source.url, &downloaded).await?;
+        download_within(&source.url, &downloaded, MAX_ARTIFACT).await?;
 
         let published = published_sha256(&source.checksum, &downloaded).await?;
         let actual = hex::encode(sha256_file(&downloaded)?);
@@ -959,13 +952,9 @@ async fn produce(plan: &Plan, out_dir: &Path) -> Result<PathBuf, String> {
 async fn published_sha256(source: &ChecksumSource, artifact: &Path) -> Result<String, String> {
     let urls = match source {
         ChecksumSource::BareDigest { url } => {
-            let text = String::from_utf8(get_bytes(url).await?)
+            let text = String::from_utf8(get_bytes_within(url, MAX_CHECKSUM_FILE).await?)
                 .map_err(|_| format!("{url} is not a checksum file"))?;
-            return Ok(text
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_string());
+            return Ok(upstream::bare_digest(&text));
         }
         ChecksumSource::Sums { urls } => urls,
     };
@@ -973,7 +962,7 @@ async fn published_sha256(source: &ChecksumSource, artifact: &Path) -> Result<St
         return Err("upstream published no checksum for this artifact".to_string());
     }
     for url in urls {
-        let text = String::from_utf8(get_bytes(url).await?)
+        let text = String::from_utf8(get_bytes_within(url, MAX_CHECKSUM_FILE).await?)
             .map_err(|_| format!("{url} is not a checksum file"))?;
         if let Some(hash) = parse_sums(&text, artifact) {
             return Ok(hash);
@@ -984,21 +973,6 @@ async fn published_sha256(source: &ChecksumSource, artifact: &Path) -> Result<St
         artifact.file_name().unwrap_or_default().to_string_lossy(),
         urls.join(", ")
     ))
-}
-
-/// The artifact's digest out of a `sha256sum`-style file: `<hash>  <name>` lines, where the name
-/// may carry a `*` for binary mode or a path in front of it. Matched on the file name alone, which
-/// is the one thing every one of these files spells the same way.
-fn parse_sums(text: &str, artifact: &Path) -> Option<String> {
-    let wanted = artifact.file_name()?.to_string_lossy().into_owned();
-    text.lines()
-        .filter_map(|line| line.split_once(char::is_whitespace))
-        .find(|(_, name)| {
-            Path::new(name.trim().trim_start_matches('*'))
-                .file_name()
-                .is_some_and(|n| n.to_string_lossy() == wanted)
-        })
-        .map(|(hash, _)| hash.trim().to_string())
 }
 
 /// Packs a directory as a `.tar.gz` a Client can install as a tree — deterministically, with every
@@ -1500,8 +1474,7 @@ async fn refusal_behind(client: &reqwest::Client, entry: &str, error: &reqwest::
     if let Ok(response) = client.put(entry).body(Vec::new()).send().await {
         let status = response.status();
         if status != reqwest::StatusCode::BAD_REQUEST {
-            let body = response.text().await.unwrap_or_default();
-            return format!("{entry} answered {status}: {}", body.trim());
+            return answered(entry, status, &refusal_text(response, entry).await);
         }
     }
     format!("cannot reach {entry}: {}", because(error))
@@ -1525,8 +1498,24 @@ async fn expect_ok(response: reqwest::Response, url: &str) -> Result<(), String>
     if status.is_success() {
         return Ok(());
     }
-    let body = response.text().await.unwrap_or_default();
-    Err(format!("{url} answered {status}: {}", body.trim()))
+    Err(answered(url, status, &refusal_text(response, url).await))
+}
+
+/// A refusal as the operator reads it: the status, and the reason when there is one.
+fn answered(url: &str, status: reqwest::StatusCode, reason: &str) -> String {
+    match reason.trim() {
+        "" => format!("{url} answered {status}"),
+        reason => format!("{url} answered {status}: {reason}"),
+    }
+}
+
+/// The reason a refusal carries, at most [`MAX_REFUSAL`] bytes of it. Empty when it is longer or
+/// cannot be read, since the status alone still says what happened.
+async fn refusal_text(response: reqwest::Response, url: &str) -> String {
+    read_within(response, url, MAX_REFUSAL)
+        .await
+        .map(|body| String::from_utf8_lossy(&body).into_owned())
+        .unwrap_or_default()
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────────
@@ -1574,12 +1563,21 @@ fn client_builder() -> reqwest::ClientBuilder {
         .user_agent("opamp-fleetctl")
 }
 
-async fn get(url: &str) -> Result<reqwest::Response, String> {
-    let response = http()?
+/// The answer to a `GET`, whatever its status.
+async fn send_get(url: &str) -> Result<reqwest::Response, String> {
+    http()?
         .get(url)
         .send()
         .await
-        .map_err(|e| format!("cannot reach {url}: {}", because(&e)))?;
+        .map_err(|e| format!("cannot reach {url}: {}", because(&e)))
+}
+
+/// The answer to a `GET`, refused unless its status is a success.
+async fn get(url: &str) -> Result<reqwest::Response, String> {
+    succeeded(send_get(url).await?, url)
+}
+
+fn succeeded(response: reqwest::Response, url: &str) -> Result<reqwest::Response, String> {
     let status = response.status();
     if !status.is_success() {
         return Err(format!("{url} answered {status}"));
@@ -1587,50 +1585,106 @@ async fn get(url: &str) -> Result<reqwest::Response, String> {
     Ok(response)
 }
 
-/// Streams an artifact to disk. An agent release is hundreds of megabytes, and a tool that read
-/// one into memory to write it straight back out would be choosing the one shape that cannot work
-/// on a small host.
-async fn download(url: &str, dest: &Path) -> Result<(), String> {
-    use std::io::Write;
-
-    let mut response = get(url).await?;
-    let mut file =
-        std::fs::File::create(dest).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("cannot download {url}: {}", because(&e)))?
-    {
-        file.write_all(&chunk)
-            .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+/// Refuses a response whose `Content-Length` states more than `max` bytes, before a byte of its
+/// body is read. A response that states no length, or a smaller one, is bounded while it is read.
+fn refuse_stated_length(response: &reqwest::Response, url: &str, max: u64) -> Result<(), String> {
+    match response.content_length() {
+        Some(stated) if stated > max => Err(format!(
+            "{url} states {stated} bytes, more than the {max} this tool reads from it"
+        )),
+        _ => Ok(()),
     }
-    file.flush()
-        .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+}
+
+/// Whether a body passes `max` bytes with the next piece of `len` bytes, after `read` bytes. Each
+/// piece is judged before it is kept, and a piece that would pass the cap is refused. So no more
+/// than `max` bytes are ever kept, whatever the `Content-Length` claimed and however long the body
+/// goes on.
+fn passes_cap(read: u64, len: usize, max: u64, url: &str) -> Result<(), String> {
+    if read.saturating_add(len as u64) > max {
+        return Err(format!(
+            "{url} sent more than the {max} bytes this tool reads from it"
+        ));
+    }
     Ok(())
 }
 
-/// For the small answers — a checksum file, a JSON listing — where holding the whole body is the
-/// simplest thing that works.
-async fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    Ok(get(url)
-        .await?
-        .bytes()
+/// A response's body, at most `max` bytes of it (specification Q-2): refused up front when its
+/// `Content-Length` states more, and as soon as it passes `max` otherwise.
+async fn read_within(
+    mut response: reqwest::Response,
+    url: &str,
+    max: u64,
+) -> Result<Vec<u8>, String> {
+    refuse_stated_length(&response, url, max)?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|e| format!("cannot read {url}: {e}"))?
-        .to_vec())
+        .map_err(|e| format!("cannot read {url}: {}", because(&e)))?
+    {
+        passes_cap(body.len() as u64, chunk.len(), max, url)?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
-async fn get_json(url: &str) -> Result<serde_json::Value, String> {
-    let bytes = get_bytes(url).await.map_err(|e| {
-        // The one failure an operator hits without doing anything wrong, and it says nothing about
-        // itself: GitHub answers 403 for sixty-one unauthenticated requests in an hour.
-        if e.contains("403") {
-            format!("{e} — GitHub rate-limits unauthenticated requests to 60 per hour")
-        } else {
-            e
+/// Streams an artifact to disk, at most `max` bytes of it. An agent release is hundreds of
+/// megabytes, and a tool that read one into memory to write it straight back out would be choosing
+/// the one shape that cannot work on a small host.
+///
+/// The cap is held as [`read_within`] holds it, so a release host cannot fill the operator's
+/// disk. A download that fails after the file is created, past its cap or for any other reason,
+/// removes what it wrote: a truncated artifact is nothing to inspect, and leaving it invites
+/// uploading it.
+async fn download_within(url: &str, dest: &Path, max: u64) -> Result<(), String> {
+    use std::io::Write;
+
+    let mut response = get(url).await?;
+    refuse_stated_length(&response, url, max)?;
+    let mut file =
+        std::fs::File::create(dest).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+    let streamed = async {
+        let mut written = 0u64;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| format!("cannot download {url}: {}", because(&e)))?
+        {
+            passes_cap(written, chunk.len(), max, url)?;
+            file.write_all(&chunk)
+                .map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+            written += chunk.len() as u64;
         }
-    })?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("{url} did not answer JSON: {e}"))
+        file.flush()
+            .map_err(|e| format!("cannot write {}: {e}", dest.display()))
+    }
+    .await;
+    if streamed.is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(dest);
+    }
+    streamed
+}
+
+/// For the small answers — a checksum file, a JSON listing — where holding the whole body is the
+/// simplest thing that works, once `max` bounds it.
+async fn get_bytes_within(url: &str, max: u64) -> Result<Vec<u8>, String> {
+    read_within(get(url).await?, url, max).await
+}
+
+/// An answer of GitHub's API, at most [`MAX_GITHUB_ANSWER`] bytes of it.
+async fn get_github(url: &str) -> Result<Vec<u8>, String> {
+    let response = send_get(url).await?;
+    // The one failure an operator hits without doing anything wrong, and it says nothing about
+    // itself: GitHub answers 403 for sixty-one unauthenticated requests in an hour.
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!(
+            "{url} answered {} — GitHub rate-limits unauthenticated requests to 60 per hour",
+            response.status()
+        ));
+    }
+    read_within(succeeded(response, url)?, url, MAX_GITHUB_ANSWER).await
 }
 
 #[cfg(test)]
@@ -2930,5 +2984,169 @@ mod tests {
         let missing = dir.path().join("missing.pem");
         let error = server_http(Some(&missing)).expect_err("a missing file is no CA");
         assert!(error.contains("cannot read"), "{error}");
+    }
+
+    /// A stand-in release host on the loopback that answers every request with `head` and then
+    /// `body`, and then holds the connection open without closing it. A reader that waited for the
+    /// end of a body it should have refused would wait past the test's timeout.
+    fn holding_host(head: String, body: Vec<u8>) -> String {
+        stand_in(head, body, true)
+    }
+
+    /// A stand-in release host on the loopback that answers every request with `head` and then
+    /// `body`. With `hold`, it then keeps the connection open; without, it closes it.
+    fn stand_in(head: String, body: Vec<u8>, hold: bool) -> String {
+        use std::io::Write;
+
+        // What `main` does before anything builds a client (SEC-tls13-bounded-input-chosen-planes).
+        opamp::tls::install_ring_provider();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("http://{}/artifact", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => request.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+                if hold {
+                    std::thread::spawn(move || {
+                        // timed: holds the connection open past the test's deadline; nothing
+                        // waits on this sleep.
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                        drop(stream);
+                    });
+                }
+            }
+        });
+        url
+    }
+
+    /// Long enough for a loopback answer, short enough that a reader waiting on a held connection
+    /// fails the test rather than hanging it.
+    const PROMPTLY: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// A response whose `Content-Length` states more than the cap is refused before a byte of its
+    /// body is read: the stand-in sends the head alone and holds the connection, so a reader that
+    /// went on to the body would never return. A download refused so writes no file.
+    /// Verifies: Q-2
+    #[tokio::test]
+    async fn a_stated_length_over_the_cap_is_refused_up_front() {
+        let url = holding_host(
+            "HTTP/1.1 200 OK\r\ncontent-length: 1048577\r\n\r\n".to_string(),
+            Vec::new(),
+        );
+        let error = tokio::time::timeout(PROMPTLY, get_bytes_within(&url, 1024 * 1024))
+            .await
+            .expect("refused without reading the body")
+            .expect_err("a body stated over the cap is not read");
+        assert!(
+            error.contains("states 1048577 bytes, more than the 1048576"),
+            "{error}"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("artifact");
+        let error = tokio::time::timeout(PROMPTLY, download_within(&url, &dest, 1024 * 1024))
+            .await
+            .expect("refused without reading the body")
+            .expect_err("an artifact stated over the cap is not downloaded");
+        assert!(error.contains("states 1048577 bytes"), "{error}");
+        assert!(!dest.exists(), "nothing is written for a refused artifact");
+    }
+
+    /// A response that states no length is refused as soon as it passes the cap, not once it ends:
+    /// the stand-in sends four times the cap and holds the connection, so a reader that read it
+    /// whole would never return. A download refused so removes what it wrote. A body of exactly
+    /// the cap is read whole.
+    /// Verifies: Q-2
+    #[tokio::test]
+    async fn a_body_past_the_cap_is_refused_before_it_is_read_whole() {
+        const CAP: u64 = 64 * 1024;
+        let unstated = "HTTP/1.1 200 OK\r\n\r\n".to_string();
+        let url = holding_host(unstated.clone(), vec![b'x'; 4 * CAP as usize]);
+        let error = tokio::time::timeout(PROMPTLY, get_bytes_within(&url, CAP))
+            .await
+            .expect("refused before the end of the body")
+            .expect_err("a body past the cap is not kept");
+        assert!(error.contains("sent more than the 65536 bytes"), "{error}");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("artifact");
+        let error = tokio::time::timeout(PROMPTLY, download_within(&url, &dest, CAP))
+            .await
+            .expect("refused before the end of the body")
+            .expect_err("an artifact past the cap is not kept");
+        assert!(error.contains("sent more than the 65536 bytes"), "{error}");
+        assert!(!dest.exists(), "the truncated artifact is removed");
+
+        // At the cap and no further: the stated length gives the body its end, though the
+        // stand-in holds the connection.
+        let at_cap = holding_host(
+            format!("HTTP/1.1 200 OK\r\ncontent-length: {CAP}\r\n\r\n"),
+            vec![b'x'; CAP as usize],
+        );
+        let body = tokio::time::timeout(PROMPTLY, get_bytes_within(&at_cap, CAP))
+            .await
+            .expect("answered")
+            .expect("a body of exactly the cap is read");
+        assert_eq!(body.len() as u64, CAP);
+        tokio::time::timeout(PROMPTLY, download_within(&at_cap, &dest, CAP))
+            .await
+            .expect("answered")
+            .expect("an artifact of exactly the cap is downloaded");
+        assert_eq!(std::fs::metadata(&dest).expect("written").len(), CAP);
+    }
+
+    /// A download whose connection ends before the length it stated leaves no file behind: the
+    /// truncated artifact is removed as one refused past its cap is.
+    /// Verifies: Q-2
+    #[tokio::test]
+    async fn a_download_cut_short_leaves_no_file() {
+        let url = stand_in(
+            "HTTP/1.1 200 OK\r\ncontent-length: 1000\r\nconnection: close\r\n\r\n".to_string(),
+            vec![b'x'; 10],
+            false,
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("artifact");
+        let error = tokio::time::timeout(PROMPTLY, download_within(&url, &dest, 1024 * 1024))
+            .await
+            .expect("answered")
+            .expect_err("a body cut short is no artifact");
+        assert!(error.contains("cannot download"), "{error}");
+        assert!(!dest.exists(), "the truncated artifact is removed");
+    }
+
+    /// A refusal whose reason states more than [`MAX_REFUSAL`] is reported by its status alone,
+    /// without reading the reason: the stand-in sends the head and holds the connection.
+    /// Verifies: Q-2
+    #[tokio::test]
+    async fn a_refusal_over_its_cap_keeps_the_status_and_drops_the_reason() {
+        let url = holding_host(
+            format!(
+                "HTTP/1.1 403 Forbidden\r\ncontent-length: {}\r\n\r\n",
+                MAX_REFUSAL + 1
+            ),
+            Vec::new(),
+        );
+        let response = http()
+            .expect("client")
+            .get(&url)
+            .send()
+            .await
+            .expect("answered");
+        let error = tokio::time::timeout(PROMPTLY, expect_ok(response, &url))
+            .await
+            .expect("refused without reading the reason")
+            .expect_err("a 403 is no success");
+        assert_eq!(error, format!("{url} answered 403 Forbidden"));
     }
 }

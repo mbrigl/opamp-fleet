@@ -1050,6 +1050,7 @@ dependencies = [
  "opamp",
  "prost",
  "rcgen",
+ "serde_json",
  "tempfile",
  "toml",
  "x509-parser",

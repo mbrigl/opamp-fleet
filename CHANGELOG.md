@@ -37,6 +37,15 @@ carries a date once its tag exists.
   nothing; without `planes` every instance opens both planes as before. Set `planes` only once
   every instance of the fleet runs this release, since an older one refuses the key.
 
+### Security
+
+- **`opamp-fleetctl package fetch` reads every download within a ceiling** (specification Q-2).
+  It read a checksum file and an answer of GitHub's API whole, and streamed an artifact to disk,
+  however large. It now refuses an artifact over 1 GiB, a checksum file over 64 KiB, and an answer
+  of GitHub's API over 16 MiB. A download that states a larger size is refused before its body is
+  read. One that does not is refused as soon as it passes the ceiling, and a partial artifact is
+  removed. **What to do:** nothing; every artifact published today is far below its ceiling.
+
 ## [0.8.6] - 2026-11-19
 
 ### Fixed
