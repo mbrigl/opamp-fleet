@@ -114,8 +114,10 @@ fi
 
 # GNU-only: sed -i, with or without a suffix argument after it, and sed --in-place.
 IN_PLACE='(^|[;&|(`[:space:]])sed([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*i([[:space:]]|$)|--in-place)'
-# A pipe, not '||', into grep with -q among its options, or --quiet or --silent.
-QUIET_PIPE='(^|[^|])[|][[:space:]]*grep([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*q|--quiet|--silent)'
+# A pipe, not '||', into a reader that exits before its input ends: grep with -q or -m among its
+# options, or --quiet, --silent or --max-count, and adr_field_line of scripts/lib/adr.sh, which is
+# grep -m1.
+QUIET_PIPE='(^|[^|])[|][[:space:]]*(grep([[:space:]]+-[a-zA-Z]+)*[[:space:]]+(-[a-zA-Z]*[qm]|--quiet|--silent|--max-count)|adr_field_line([[:space:]]|$))'
 
 failed=0
 if ((have_shellcheck)); then
@@ -136,8 +138,8 @@ for f in "${scripts[@]}"; do
   [[ "$(head -n 1 "$f")" =~ ^#!.*[/[:space:]]sh([[:space:]]|$) ]] \
     && ! grep -qE '^[^#]*pipefail' "$f" && continue
   while IFS=: read -r line text; do
-    echo "${f#"$ROOT"/}:$line: a pipe into grep -q fails under pipefail when grep exits at its" \
-      "match before the producer has written its last line; read the input whole instead:" \
+    echo "${f#"$ROOT"/}:$line: a pipe into grep -q or -m fails under pipefail when grep exits at" \
+      "its match before the producer has written its last line; read the input whole instead:" \
       "grep -q PATTERN <<< \"\$(PRODUCER)\", or count with grep -c"
     echo "    $text"
     failed=1
