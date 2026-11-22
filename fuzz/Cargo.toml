@@ -125,3 +125,10 @@ path = "fuzz_targets/release_listing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "appimage_header"
+path = "fuzz_targets/appimage_header.rs"
+test = false
+doc = false
+bench = false

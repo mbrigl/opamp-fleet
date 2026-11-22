@@ -12,7 +12,7 @@ use libfuzzer_sys::fuzz_target;
 // their path. This target calls two of them.
 #[allow(
     dead_code,
-    reason = "the release listing's parsers are fuzzed by release_listing"
+    reason = "the release listing's parsers and the AppImage's headers are fuzzed by their own targets"
 )]
 #[path = "../../crates/fleet-tools/src/fetch/upstream.rs"]
 mod upstream;

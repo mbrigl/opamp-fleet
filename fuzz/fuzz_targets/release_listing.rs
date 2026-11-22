@@ -9,7 +9,7 @@ use libfuzzer_sys::fuzz_target;
 // their path. This target calls four of them.
 #[allow(
     dead_code,
-    reason = "the checksum file's parsers are fuzzed by checksum_file"
+    reason = "the checksum file's parsers and the AppImage's headers are fuzzed by their own targets"
 )]
 #[path = "../../crates/fleet-tools/src/fetch/upstream.rs"]
 mod upstream;
@@ -17,8 +17,8 @@ mod upstream;
 fuzz_target!(|data: &[u8]| {
     if let Ok(tags) = upstream::tag_names(data) {
         for tag in &tags {
-            for prefix in ["v", "version/"] {
-                let _ = upstream::version_behind(prefix, tag);
+            for (prefix, parts) in [("v", 3..=3), ("version/", 3..=3), ("", 2..=3)] {
+                let _ = upstream::version_behind(prefix, parts, tag);
             }
         }
     }
