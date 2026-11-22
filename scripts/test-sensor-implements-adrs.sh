@@ -10,7 +10,7 @@
 # table: an accepted ADR, a proposed one, a superseded one, a rejected one, an identifier the head
 # does not have, one of a category the project's index lists, a number from before the migration
 # to identifiers, a commit that implements nothing, an ADR named outside an Implements line,
-# nothing to compare, and a base that does not resolve.
+# nothing to compare, a base that does not resolve, and an ADR larger than a pipe's buffer.
 #
 # Inputs: scripts/sensor-implements-adrs.sh scripts/lib/
 #
@@ -124,6 +124,14 @@ commit "$r" $'chore: tidy\n\nImplements: none'
 commit "$r" "docs: $A2 is cited here, on a line that implements nothing"
 expect 0 "no Implements line naming an ADR: nothing counted" "$r" \
   "0 commit(s) name an ADR they implement" "$A2"
+
+r="$(repo large)"
+# 128 KiB below the status line, twice a pipe's buffer on Linux.
+head -c 131072 /dev/zero | tr '\0' 'x' | fold -w 100 >> "$r/docs/adr/$(file 1)"
+git_in "$r" commit -q -am "docs: a long ADR"
+commit "$r" "feat: one"$'\n\n'"Implements $A1."
+expect 0 "an ADR larger than a pipe's buffer: its status is read" "$r" \
+  "1 commit(s) name an ADR they implement; 0 name one not in force." "no status line"
 
 r="$(repo same)"
 expect 0 "base and head the same: says so" "$r" \
