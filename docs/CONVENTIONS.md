@@ -38,12 +38,14 @@ skimmed. The design revision drops what prevented nothing
   the same value from it, call one function. Two routes, a Gateway and the Server, or a list and
   a view of the same Agent are such paths. A second copy drifts: the path it misses admits what
   the other refuses, or shows what the other does not.
-- **An item lives in the context it changes, and a test with the context it verifies** — in a
-  module split by context, such as the Server's `fleet`, a method goes to the context whose state
-  it changes, not to the one it reads, and one that two contexts would claim stays in the module
-  root. A unit test goes to the context whose behaviour it decides, with the helpers only it
-  uses. A reviewer reads from the file which context a change may affect, and a test elsewhere
-  hides which context it pins.
+- **An item lives in the context it changes, and a test with the context it verifies** — in a module
+  split by context, such as the Server's `fleet`, a method goes to the context whose state it
+  changes, not to the one it reads. One that two contexts claim, or that a context ranked below
+  calls, goes down below its callers (SRV-fleet-contexts-call-by-rank §4): to a context whose file
+  an ADR already binds it by, and to the module root only where it names no context (`persist` went
+  to the root, then to `held`). A unit test goes to the context whose behaviour it decides, with the
+  helpers only it uses. A reviewer reads from the file which context a change may affect, and a test
+  elsewhere hides which context it pins.
 - **A context calls another's private item through `pub(super)`, never `pub`** — a private
   method of one context that another context calls becomes `pub(super)`. A `pub` method in any
   context's `impl AppState` widens the public interface of `AppState` for every caller of the
