@@ -57,7 +57,3 @@ skimmed. The design revision drops what prevented nothing
 - **A caller tells errors apart by their kind, never by their text** — where a caller answers two
   errors differently, the error carries a kind it matches on. A message is reworded for the
   operator, and a match on its text then answers the wrong status without a test noticing.
-- **A parser of `fleet-tools` that reads network bytes lives in a module that names nothing of
-  the crate** — such as `fetch::upstream`, and its fuzz target compiles that file by `#[path]`.
-  `fleet-tools` has no library (DEV-six-crates-tokio-axum §22), and its parsers belong to no
-  shared crate, so the path is the one way a fuzz target reaches them (Q-2).
