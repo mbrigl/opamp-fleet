@@ -9,7 +9,7 @@
 > **Kept current by:** Markus Brigl. A document everyone may edit and nobody owns is
 > the one that goes stale.
 >
-> **Last design revision:** 2026-11-19, due after 50 changes. The revision that took the count
+> **Last design revision:** 2026-11-24, due after 50 changes. The revision that took the count
 > moves the date; the number is this project's to set; a sensor counts the changes outside
 > `docs/` since the commit that set the date and says when the next is due
 > ([NUC-design-is-revised §4](adr/NUC-design-is-revised.md)).
@@ -316,8 +316,7 @@ no module.
   issuer. `tls` reads the files of both planes on every instance, whichever it opens. An instance
   binds and serves the planes it opens and no other, and `listen` serves them on one handle with
   one drain and a connection cap each
-  ([SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md),
-  [SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md)). `pki` is
+  ([SEC-tls13-bounded-input-chosen-planes](adr/SEC-tls13-bounded-input-chosen-planes.md)). `pki` is
   `server pki status` and the running Server's warnings before a certificate it depends on ends
   (OPS-operator-program-fleetctl).
 - **Server admission** — `agent_cases::Admission` requires the client certificate on every request
@@ -620,8 +619,7 @@ lease, which reads the Agent's record at its first report and takes it as its ho
 instance's lease has lapsed, the instance that removes it closes its audit chain. The others serve
 from what the lost instance committed to the database, the Operator plane included, which
 instances of its own may serve
-([SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md),
-[SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md)).
+([SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md)).
 
 **A Supervisor starts its program.** Without a process account the runner starts the Managed
 Process, its version probe and a package's preflight as the Client. Where `service install

@@ -18,16 +18,17 @@ skimmed. The design revision drops what prevented nothing
 - **A self-test asserts what it builds** — it takes its fixtures from the tree it copies or writes
   them itself, never from the template's own ADRs, scripts, or numbers, so it holds in a derived
   project and after a normalization.
-- **A comment that relies on a decision names its clause** — `CLT-accounts-service-runs-under §25`,
-  not the ADR alone, so that a normalization can re-cite it by its clause table. Several clauses
-  take a section sign each, joined as the template's own text joins them: `§3, §5`, `§3 and §5`,
-  `§3, §4, and §5`, a range `§3–§5`.
 - **A test waits for its event, never for a time** — a test waits for what it needs to see, under a
   deadline only a defect reaches. A sleep or a timed budget that holds on an idle host fails on a
   loaded one, and a race the test meant to provoke goes unprovoked on a fast one. A wait that
   must be timed, such as the waiter's own poll, carries its reason as `// timed: <why>`, on its
   line or on a comment line right above it, which `scripts/sensor-timed-waits.sh` reads in place
   of listing it.
+- **A commit that changes what a structural test expects lands before or with the code that needs
+  it** — a review round that moves code under such a test revises the test in that commit or an
+  earlier one, and puts its fixups in that order before the hand-off. The checks before a push see
+  only the tip, so a commit between would be red alone, and a bisect stops on it: 6c6ccc987 was,
+  until 932481ae1 revised the ranks.
 - **A structural test reads the syntax, never words** — a test that decides a rule over source or
   configuration parses it and asserts on items and keys. A word moves into a comment: the
   release-workflow test failed on one (a0dc7cd17), and a hand lexer missed test code that a syntax
@@ -38,12 +39,14 @@ skimmed. The design revision drops what prevented nothing
   the same value from it, call one function. Two routes, a Gateway and the Server, or a list and
   a view of the same Agent are such paths. A second copy drifts: the path it misses admits what
   the other refuses, or shows what the other does not.
-- **An item lives in the context it changes, and a test with the context it verifies** — in a
-  module split by context, such as the Server's `fleet`, a method goes to the context whose state
-  it changes, not to the one it reads, and one that two contexts would claim stays in the module
-  root. A unit test goes to the context whose behaviour it decides, with the helpers only it
-  uses. A reviewer reads from the file which context a change may affect, and a test elsewhere
-  hides which context it pins.
+- **An item lives in the context it changes, and a test with the context it verifies** — in a module
+  split by context, such as the Server's `fleet`, a method goes to the context whose state it
+  changes, not to the one it reads. One that two contexts claim, or that a context ranked below
+  calls, goes down below its callers (SRV-fleet-contexts-call-by-rank §4): to a context whose file
+  an ADR already binds it by, and to the module root only where it names no context (`persist` went
+  to the root, then to `held`). A unit test goes to the context whose behaviour it decides, with the
+  helpers only it uses. A reviewer reads from the file which context a change may affect, and a test
+  elsewhere hides which context it pins.
 - **A context calls another's private item through `pub(super)`, never `pub`** — a private
   method of one context that another context calls becomes `pub(super)`. A `pub` method in any
   context's `impl AppState` widens the public interface of `AppState` for every caller of the
@@ -55,7 +58,3 @@ skimmed. The design revision drops what prevented nothing
 - **A caller tells errors apart by their kind, never by their text** — where a caller answers two
   errors differently, the error carries a kind it matches on. A message is reworded for the
   operator, and a match on its text then answers the wrong status without a test noticing.
-- **A parser of `fleet-tools` that reads network bytes lives in a module that names nothing of
-  the crate** — such as `fetch::upstream`, and its fuzz target compiles that file by `#[path]`.
-  `fleet-tools` has no library (DEV-six-crates-tokio-axum §22), and its parsers belong to no
-  shared crate, so the path is the one way a fuzz target reaches them (Q-2).
