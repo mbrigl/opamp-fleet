@@ -46,9 +46,10 @@ carries a date once its tag exists.
   read. One that does not is refused as soon as it passes the ceiling, and a partial artifact is
   removed. **What to do:** nothing; every artifact published today is far below its ceiling.
 - **`url` 2.5.9 (RUSTSEC-2026-0592).** `Url::origin()` of 2.5.8 overflows the stack on nested
-  `blob:` URLs. The project's own code calls it once, in the Client, to name a download's origin in
-  a refusal, on a URL that has already passed the check for `https://` or `wss://`, so no `blob:`
-  URL reaches it. **What to do:** nothing.
+  `blob:` URLs. The project's own code calls it in one place, in the Client, to name two origins in
+  a refusal: a download's URL, which has just passed the transport check (`https://` or `wss://`,
+  plaintext only to the loopback address), and the Client's own Server URL, which the same check
+  passed when the configuration loaded. No `blob:` URL reaches it. **What to do:** nothing.
 
 ## [0.8.6] - 2026-11-19
 
