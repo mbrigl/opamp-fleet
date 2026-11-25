@@ -24,6 +24,11 @@ skimmed. The design revision drops what prevented nothing
   must be timed, such as the waiter's own poll, carries its reason as `// timed: <why>`, on its
   line or on a comment line right above it, which `scripts/sensor-timed-waits.sh` reads in place
   of listing it.
+- **A commit that changes what a structural test expects lands before or with the code that needs
+  it** — a review round that moves code under such a test revises the test in that commit or an
+  earlier one, and puts its fixups in that order before the hand-off. The checks before a push see
+  only the tip, so a commit between would be red alone, and a bisect stops on it: 6c6ccc987 was,
+  until 932481ae1 revised the ranks.
 - **A structural test reads the syntax, never words** — a test that decides a rule over source or
   configuration parses it and asserts on items and keys. A word moves into a comment: the
   release-workflow test failed on one (a0dc7cd17), and a hand lexer missed test code that a syntax
