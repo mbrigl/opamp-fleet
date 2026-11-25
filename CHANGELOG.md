@@ -45,6 +45,10 @@ carries a date once its tag exists.
   of GitHub's API over 16 MiB. A download that states a larger size is refused before its body is
   read. One that does not is refused as soon as it passes the ceiling, and a partial artifact is
   removed. **What to do:** nothing; every artifact published today is far below its ceiling.
+- **`url` 2.5.9 (RUSTSEC-2026-0592).** `Url::origin()` of 2.5.8 overflows the stack on nested
+  `blob:` URLs. The project's own code calls it once, in the Client, to name a download's origin in
+  a refusal, on a URL that has already passed the check for `https://` or `wss://`, so no `blob:`
+  URL reaches it. **What to do:** nothing.
 
 ## [0.8.6] - 2026-11-19
 
