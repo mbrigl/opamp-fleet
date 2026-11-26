@@ -264,6 +264,10 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("supervisor::endpoint", Adapter),
             // The core's side of the Plugin port, over the process runner.
             ("supervisor::host", Adapter),
+            // A Plugin's roots and the file operations in them, through the no-follow adapter.
+            ("supervisor::host::files", Adapter),
+            // The timers a Plugin sets.
+            ("supervisor::host::timers", Adapter),
             ("supervisor::process", Adapter),
             ("telemetry", Adapter),
             // Test-only: the log capture the unit tests share, bound to `tracing_subscriber`.

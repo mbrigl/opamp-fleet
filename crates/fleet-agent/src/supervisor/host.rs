@@ -6,22 +6,29 @@
 //! the registry, the block parse and the Supervisor-set apply reach both kinds of Plugin the same
 //! way while the kinds move onto the new port one by one.
 
+mod files;
+mod timers;
+
 use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::shutdown::Shutdown;
 use crate::supervisor::port::{
-    self, Call, Entry, Host, Input, Instance, Root, RootPath, Spec, Value,
+    self, Call, Entry, EntryKind, Facts, Host, Input, Instance, Ran, Root, RootPath, Run, Spec,
 };
-use crate::supervisor::ports::{
-    self, InstallTarget, KindDefaults, ProcessCommand, SupervisorContext,
-};
-use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
+use crate::supervisor::ports::{self, KindDefaults, ProcessCommand, SupervisorContext};
+use crate::supervisor::process::{Launch, Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
+
+use files::Roots;
+use timers::{Fired, Timers};
+
+pub use files::{DATA_DIR, READ_LIMIT, STATE_DIR};
 
 /// A [`port::Plugin`] as the core starts it: with the [`Spawner`] the run chose, which starts its
 /// programs (CLT-accounts-service-runs-under §18).
@@ -105,6 +112,7 @@ impl<P: port::Plugin + 'static> ports::Plugin for Hosted<P> {
             commands: runner_commands,
             build: Box::new(move || built.lock().ok()?.clone()),
         };
+        let (timers, fired) = Timers::new();
         let host = Arc::new(CoreHost {
             name: ctx.name,
             roots,
@@ -114,6 +122,9 @@ impl<P: port::Plugin + 'static> ports::Plugin for Hosted<P> {
             running: AtomicBool::new(false),
             configs: Mutex::new(HashMap::new()),
             packages: Mutex::new(HashMap::new()),
+            spawner: self.spawner.clone(),
+            timers: Arc::clone(&timers),
+            account: tokio::sync::OnceCell::new(),
         });
         let (commands, command_rx) = mpsc::channel(16);
         let (to_instance, inputs) = mpsc::channel(16);
@@ -128,72 +139,14 @@ impl<P: port::Plugin + 'static> ports::Plugin for Hosted<P> {
                 started.running.store(true, Ordering::SeqCst);
                 tokio::spawn(runner.run(runner_shutdown));
             },
-            inputs,
+            Fed {
+                inputs,
+                timers,
+                fired,
+            },
             ctx.shutdown,
         ));
         Ok(commands)
-    }
-}
-
-/// The Supervisor's own directories, as the roots of CLT-wrappers-act-through-the-core §3 name
-/// them.
-struct Roots {
-    supervisor_dir: PathBuf,
-    config: PathBuf,
-    program: PathBuf,
-}
-
-impl Roots {
-    fn of(ctx: &SupervisorContext) -> Self {
-        let program = match &ctx.install {
-            InstallTarget::Binary { path, .. } => path
-                .parent()
-                .map_or_else(|| ctx.supervisor_dir.clone(), Path::to_path_buf),
-            InstallTarget::Tree { root, .. } => root.join(crate::config::TREE_DIR),
-        };
-        Roots {
-            supervisor_dir: ctx.supervisor_dir.clone(),
-            config: ctx.config_dir.clone(),
-            program,
-        }
-    }
-
-    fn root(&self, root: Root) -> &Path {
-        match root {
-            Root::Config => &self.config,
-            Root::Program => &self.program,
-        }
-    }
-
-    /// The absolute path of `file`, refused where it would leave its root
-    /// (CLT-wrappers-act-through-the-core §3).
-    fn path(&self, file: &RootPath) -> Result<PathBuf, String> {
-        let relative = Path::new(&file.path);
-        let inside = relative
-            .components()
-            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
-        if !inside || file.path.contains('\\') {
-            return Err(format!(
-                "the path {:?} leaves its root: a Plugin names a file by a relative path without `..`",
-                file.path
-            ));
-        }
-        Ok(self.root(file.root).join(relative))
-    }
-
-    /// The placeholders naming the Supervisor's own directories, expanded in an operator's text
-    /// (CLT-wrappers-act-through-the-core §31); anything else in it stays as written.
-    fn expand(&self, text: &str) -> String {
-        text.replace("${supervisor_dir}", &self.supervisor_dir.to_string_lossy())
-            .replace("${config_dir}", &self.config.to_string_lossy())
-    }
-
-    fn value(&self, value: &Value) -> Result<String, String> {
-        match value {
-            Value::Text(text) => Ok(text.clone()),
-            Value::Template(text) => Ok(self.expand(text)),
-            Value::Rooted(file) => Ok(self.path(file)?.to_string_lossy().into_owned()),
-        }
     }
 }
 
@@ -243,6 +196,12 @@ struct CoreHost {
     /// (CLT-wrappers-act-through-the-core §2).
     configs: Mutex<HashMap<Vec<u8>, ProcessCommand>>,
     packages: Mutex<HashMap<Vec<u8>, ProcessCommand>>,
+    /// What starts a program the instance runs once: the same as starts the Managed Process
+    /// (CLT-accounts-service-runs-under §18).
+    spawner: Spawner,
+    timers: Arc<Timers>,
+    /// The account the Supervisor's programs run under, asked once.
+    account: tokio::sync::OnceCell<Option<String>>,
 }
 
 impl CoreHost {
@@ -286,6 +245,52 @@ impl CoreHost {
             .lock()
             .map_err(|_| "the process specification is lost".to_string())? = spec;
         Ok(())
+    }
+
+    /// Carries out a file operation off the runtime's threads.
+    async fn files<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&Roots) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let roots = self.roots.clone();
+        tokio::task::spawn_blocking(move || operation(&roots))
+            .await
+            .map_err(|_| "the file operation was cut short".to_string())?
+    }
+
+    /// Runs `launch` once through the spawner and answers how it ended.
+    async fn run_once(&self, launch: Launch, what: &str) -> Result<Ran, String> {
+        match self.spawner.output(&self.name, &launch).await {
+            Some(Ok(output)) => Ok(Ran {
+                status: output.status.code(),
+                stdout: output.stdout,
+                stderr: output.stderr,
+            }),
+            Some(Err(e)) => Err(format!("cannot run {what}: {}", e.kind())),
+            None => Err(format!("{what} did not end in time")),
+        }
+    }
+
+    /// The account a program of this Supervisor runs under, as that program itself states it.
+    async fn ask_account(&self) -> Option<String> {
+        #[cfg(unix)]
+        let (program, args) = (PathBuf::from("/usr/bin/id"), vec!["-un".to_string()]);
+        #[cfg(windows)]
+        let (program, args) = (
+            PathBuf::from(std::env::var_os("SystemRoot")?).join(r"System32\whoami.exe"),
+            Vec::new(),
+        );
+        let launch = Launch {
+            program,
+            args,
+            env: Vec::new(),
+            endpoint_token: None,
+            working_dir: None,
+            own_process_group: false,
+        };
+        let ran = self.run_once(launch, "the account query").await.ok()?;
+        let name = String::from_utf8_lossy(&ran.stdout).trim().to_string();
+        (ran.status == Some(0) && !name.is_empty()).then_some(name)
     }
 
     async fn send(&self, command: ProcessCommand) -> Result<(), String> {
@@ -341,6 +346,91 @@ impl Host for CoreHost {
 
     fn uninstall(&self) -> Call<'_, ()> {
         Box::pin(self.send(ProcessCommand::Uninstall))
+    }
+
+    fn read(&self, file: RootPath) -> Call<'_, Vec<u8>> {
+        Box::pin(self.files(move |roots| roots.read(&file)))
+    }
+
+    fn write(&self, file: RootPath, contents: Vec<u8>) -> Call<'_, ()> {
+        Box::pin(self.files(move |roots| roots.write(&file, &contents)))
+    }
+
+    fn rename(&self, from: RootPath, to: RootPath) -> Call<'_, ()> {
+        Box::pin(self.files(move |roots| roots.rename(&from, &to)))
+    }
+
+    fn remove(&self, file: RootPath) -> Call<'_, ()> {
+        Box::pin(self.files(move |roots| roots.remove(&file)))
+    }
+
+    fn list(&self, dir: RootPath) -> Call<'_, Vec<(String, EntryKind)>> {
+        Box::pin(self.files(move |roots| roots.list(&dir)))
+    }
+
+    fn create_dir(&self, dir: RootPath) -> Call<'_, ()> {
+        Box::pin(self.files(move |roots| roots.create_dir(&dir)))
+    }
+
+    /// The program from the `program` root, through the spawner the Managed Process starts
+    /// through: the second service where a process account is registered
+    /// (CLT-accounts-service-runs-under §18). It is handed no Endpoint token.
+    fn run(&self, run: Run) -> Call<'_, Ran> {
+        Box::pin(async move {
+            let program = self.roots.path(&RootPath {
+                root: Root::Program,
+                path: run.program.clone(),
+            })?;
+            let args = run
+                .args
+                .iter()
+                .map(|a| self.roots.value(a))
+                .collect::<Result<Vec<_>, _>>()?;
+            let env = run
+                .env
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), self.roots.value(v)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            let working_dir = match &run.working_dir {
+                Some(dir) => self.roots.path(dir)?,
+                None => self.roots.program.clone(),
+            };
+            let launch = Launch {
+                program,
+                args,
+                env,
+                endpoint_token: None,
+                working_dir: Some(working_dir),
+                own_process_group: false,
+            };
+            self.run_once(launch, &format!("program:{}", run.program))
+                .await
+        })
+    }
+
+    fn set_timer(&self, id: u64, after_ms: u64) -> Call<'_, ()> {
+        self.timers.set(id, Duration::from_millis(after_ms));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn cancel_timer(&self, id: u64) -> Call<'_, ()> {
+        self.timers.cancel(id);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn facts(&self) -> Call<'_, Facts> {
+        Box::pin(async move {
+            let host_name = tokio::task::spawn_blocking(crate::host::qualified_host_name)
+                .await
+                .ok()
+                .flatten();
+            let account = self
+                .account
+                .get_or_init(|| self.ask_account())
+                .await
+                .clone();
+            Ok(Facts { host_name, account })
+        })
     }
 }
 
@@ -410,14 +500,27 @@ async fn front(
 /// Feeds `instance` its inputs, one at a time: the start first, then `started`, then each input
 /// once the call before it has returned (CLT-wrappers-act-through-the-core §1). A shutdown cancels
 /// the call in progress; the `Runner` stops the Managed Process on the same signal.
+/// What feeds an instance after its start: the inputs of the core's commands and the timers it
+/// set.
+struct Fed {
+    inputs: mpsc::Receiver<Input>,
+    timers: Arc<Timers>,
+    fired: mpsc::UnboundedReceiver<Fired>,
+}
+
 async fn drive(
     mut instance: Box<dyn Instance>,
     host: Arc<dyn Host>,
     first: Input,
     started: impl FnOnce() + Send,
-    mut inputs: mpsc::Receiver<Input>,
+    fed: Fed,
     mut shutdown: Shutdown,
 ) {
+    let Fed {
+        mut inputs,
+        timers,
+        mut fired,
+    } = fed;
     let outcome = tokio::select! {
         outcome = instance.handle(first, &*host) => outcome,
         () = shutdown.requested() => return,
@@ -432,6 +535,12 @@ async fn drive(
                 Some(input) => input,
                 None => return,
             },
+            Some(timer) = fired.recv() => {
+                if !timers.take(timer) {
+                    continue;
+                }
+                Input::Timer { id: timer.0 }
+            }
             () = shutdown.requested() => return,
         };
         let last = input == Input::Uninstall;
@@ -507,6 +616,15 @@ mod tests {
         }
     }
 
+    fn fed(inputs: mpsc::Receiver<Input>) -> Fed {
+        let (timers, fired) = Timers::new();
+        Fed {
+            inputs,
+            timers,
+            fired,
+        }
+    }
+
     fn recording() -> (Recording, Arc<Mutex<Vec<String>>>, Arc<Notify>) {
         let log = Arc::new(Mutex::new(Vec::new()));
         let gate = Arc::new(Notify::new());
@@ -535,7 +653,7 @@ mod tests {
                 entries: Vec::new(),
             },
             || {},
-            inputs,
+            fed(inputs),
             shutdown,
         ));
         to_instance.send(Input::Restart).await.expect("send");
@@ -572,7 +690,7 @@ mod tests {
                 entries: Vec::new(),
             },
             || {},
-            inputs,
+            fed(inputs),
             shutdown,
         ));
         to_instance.send(Input::Restart).await.expect("send");
@@ -585,54 +703,6 @@ mod tests {
         assert_eq!(
             *log.lock().expect("log"),
             vec!["Start".to_string(), "restart begins".to_string()]
-        );
-    }
-
-    fn roots() -> Roots {
-        Roots {
-            supervisor_dir: PathBuf::from("/s/agent"),
-            config: PathBuf::from("/s/agent/config"),
-            program: PathBuf::from("/s/agent/program"),
-        }
-    }
-
-    /// A file a Plugin names resolves inside its root, and a path that would leave the root fails.
-    /// Verifies: CLT-wrappers-act-through-the-core
-    #[test]
-    fn a_plugin_path_stays_inside_its_root() {
-        let roots = roots();
-        let file = |root, path: &str| RootPath {
-            root,
-            path: path.to_string(),
-        };
-        assert_eq!(
-            roots.path(&file(Root::Config, "a/b.yaml")),
-            Ok(PathBuf::from("/s/agent/config/a/b.yaml"))
-        );
-        assert_eq!(
-            roots.path(&file(Root::Program, "")),
-            Ok(PathBuf::from("/s/agent/program"))
-        );
-        for escape in ["../x", "a/../../x", "/etc/passwd", "a\\..\\x"] {
-            assert!(
-                roots.path(&file(Root::Config, escape)).is_err(),
-                "{escape} leaves its root"
-            );
-        }
-    }
-
-    /// An operator's template expands the two placeholders and leaves any other `${…}` as written.
-    #[test]
-    fn a_template_expands_the_supervisors_own_directories() {
-        let roots = roots();
-        assert_eq!(
-            roots.value(&Value::Template("-c ${config_dir}/x ${env:Y}".to_string())),
-            Ok("-c /s/agent/config/x ${env:Y}".to_string())
-        );
-        assert_eq!(
-            roots.value(&Value::Text("${config_dir}".to_string())),
-            Ok("${config_dir}".to_string()),
-            "a text is passed as written"
         );
     }
 
@@ -665,5 +735,225 @@ mod tests {
                 .as_ref()
                 .to_vec()
         );
+    }
+
+    /// A Supervisor's roots in a temporary directory, its `config/` and `program/` made.
+    fn made_roots(dir: &Path) -> Roots {
+        let supervisor_dir = dir.join("agent");
+        std::fs::create_dir_all(supervisor_dir.join("config")).expect("config");
+        std::fs::create_dir_all(supervisor_dir.join("program")).expect("program");
+        Roots {
+            config: supervisor_dir.join("config"),
+            program: supervisor_dir.join("program"),
+            data: supervisor_dir.join(DATA_DIR),
+            state: supervisor_dir.join(STATE_DIR),
+            supervisor_dir,
+            group: None,
+        }
+    }
+
+    fn core_host(roots: Roots, spawner: Spawner) -> CoreHost {
+        let (runner, _gone) = mpsc::channel(1);
+        let (timers, _fired) = Timers::new();
+        CoreHost {
+            name: "agent".to_string(),
+            program: roots.program.join("agent"),
+            roots,
+            spec: Arc::new(Mutex::new(None)),
+            runner,
+            running: AtomicBool::new(false),
+            configs: Mutex::new(HashMap::new()),
+            packages: Mutex::new(HashMap::new()),
+            spawner,
+            timers,
+            account: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// The second service, run in this process on a socket in `dir` under this test's own uid,
+    /// and the spawner that starts programs through it.
+    #[cfg(unix)]
+    async fn second_service(dir: &Path) -> (Spawner, tokio::task::AbortHandle) {
+        use crate::supervisor::channel::{bind, serve, Channel, ServiceProcess};
+        let socket = dir.join("agents.sock");
+        let listener = bind(&socket).expect("bind");
+        // SAFETY: getuid(2) cannot fail and touches no memory.
+        let uid = unsafe { libc::getuid() };
+        let service = tokio::spawn(serve(listener, uid, || false, std::future::pending()));
+        let channel = Channel::connect(
+            &socket,
+            uid,
+            ServiceProcess::named(|| Ok(Some(std::process::id()))),
+        )
+        .await
+        .expect("connect");
+        (Spawner::Channel(channel), service.abort_handle())
+    }
+
+    /// A program a Plugin runs once comes from its `program` root, starts in that root, and
+    /// answers with its exit status and output, the same through the Client and through the
+    /// second service; a program outside the root is refused.
+    #[cfg(unix)]
+    async fn a_program_runs_once(spawner: Spawner, dir: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let roots = made_roots(dir);
+        let tool = roots.program.join("tool");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\necho \"ran $1 in $(pwd)\"\necho err >&2\nexit 3\n",
+        )
+        .expect("tool");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let root = std::fs::canonicalize(&roots.program).expect("root");
+        let host = core_host(roots, spawner);
+        let ran = host
+            .run(Run {
+                program: "tool".to_string(),
+                args: vec![port::Value::Text("x".to_string())],
+                ..Run::default()
+            })
+            .await
+            .expect("ran");
+        assert_eq!(ran.status, Some(3));
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stdout),
+            format!("ran x in {}\n", root.display())
+        );
+        assert_eq!(String::from_utf8_lossy(&ran.stderr), "err\n");
+        let outside = host
+            .run(Run {
+                program: "../../bin/sh".to_string(),
+                ..Run::default()
+            })
+            .await;
+        assert!(outside.is_err(), "a program outside its root is refused");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_program_runs_once_through_the_client() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        a_program_runs_once(Spawner::Local, dir.path()).await;
+    }
+
+    /// Where a process account is registered, a program a Plugin runs goes through the second
+    /// service, as the Managed Process does (CLT-accounts-service-runs-under §18).
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_program_a_plugin_runs_goes_through_the_second_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (spawner, service) = second_service(dir.path()).await;
+        a_program_runs_once(spawner, dir.path()).await;
+        service.abort();
+    }
+
+    /// The host facts name the host and the account a program runs under, as that program states
+    /// it.
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_facts_name_the_host_and_the_account() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let expected = std::process::Command::new("/usr/bin/id")
+            .arg("-un")
+            .output()
+            .expect("id");
+        let expected = String::from_utf8_lossy(&expected.stdout).trim().to_string();
+        let (spawner, service) = second_service(dir.path()).await;
+        for spawner in [Spawner::Local, spawner] {
+            let host = core_host(made_roots(dir.path()), spawner);
+            let facts = host.facts().await.expect("facts");
+            assert!(facts.host_name.is_some_and(|n| !n.is_empty()));
+            assert_eq!(facts.account.as_deref(), Some(expected.as_str()));
+        }
+        service.abort();
+    }
+
+    /// A host whose timers are the instance's, and which answers every other call.
+    struct Timed(Arc<Timers>);
+
+    impl Host for Timed {
+        fn start(&self, _spec: Spec) -> Call<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn apply_config(&self, _hash: Vec<u8>, _spec: Option<Spec>) -> Call<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn install(&self, _hash: Vec<u8>) -> Call<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn restart(&self) -> Call<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn uninstall(&self) -> Call<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+        fn set_timer(&self, id: u64, after_ms: u64) -> Call<'_, ()> {
+            self.0.set(id, Duration::from_millis(after_ms));
+            Box::pin(async { Ok(()) })
+        }
+        fn cancel_timer(&self, id: u64) -> Call<'_, ()> {
+            self.0.cancel(id);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// An instance that sets three timers at its start and cancels two of them, one after it has
+    /// fired, and records each timer that arrives.
+    struct Timing(Arc<Mutex<Vec<u64>>>);
+
+    impl Instance for Timing {
+        fn process(&self) -> Process {
+            Process::default()
+        }
+        fn spec(&self, _entries: &[Entry]) -> Option<Spec> {
+            None
+        }
+        fn handle<'a>(&'a mut self, input: Input, host: &'a dyn Host) -> Call<'a, ()> {
+            Box::pin(async move {
+                match input {
+                    Input::Start { .. } => {
+                        host.set_timer(1, 20).await?;
+                        host.set_timer(2, 20).await?;
+                        host.set_timer(3, 0).await?;
+                        host.cancel_timer(2).await?;
+                        // Timer 3 fires while this call runs, and waits for it to return.
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        host.cancel_timer(3).await?;
+                    }
+                    Input::Timer { id } => self.0.lock().expect("log").push(id),
+                    _ => {}
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// A timer arrives as an input; a cancelled one never does, even one that fired already.
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[tokio::test]
+    async fn a_timer_arrives_as_an_input_and_a_cancelled_one_never() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (timers, fired) = Timers::new();
+        let (_stop, shutdown) = shutdown_channel();
+        let (_to_instance, inputs) = mpsc::channel(4);
+        let driven = tokio::spawn(drive(
+            Box::new(Timing(Arc::clone(&log))),
+            Arc::new(Timed(Arc::clone(&timers))),
+            Input::Start {
+                entries: Vec::new(),
+            },
+            || {},
+            Fed {
+                inputs,
+                timers,
+                fired,
+            },
+            shutdown,
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(*log.lock().expect("log"), vec![1]);
+        driven.abort();
     }
 }

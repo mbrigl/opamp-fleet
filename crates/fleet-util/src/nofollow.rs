@@ -195,6 +195,44 @@ impl HeldDir {
         check_name(name)?;
         sys::remove(self, name)
     }
+
+    /// The existing directory `name` in this one, opened and held, never through a link and never
+    /// created.
+    ///
+    /// # Errors
+    /// Returns an error when `name` names no directory, or names a link.
+    pub fn open_dir(&self, name: &str) -> io::Result<Self> {
+        check_name(name)?;
+        sys::open_dir(self, name)
+    }
+
+    /// Removes the empty directory `name` in this one; a link at the name is no directory.
+    ///
+    /// # Errors
+    /// Returns an error when `name` names no empty directory.
+    pub fn remove_dir(&self, name: &str) -> io::Result<()> {
+        check_name(name)?;
+        sys::remove_dir(self, name)
+    }
+
+    /// The entries of this directory, each by name and by what it is itself, a link as a link.
+    /// A name that is not UTF-8 is left out, since no caller of this module could name it back.
+    ///
+    /// # Errors
+    /// Returns an error when the directory cannot be read.
+    pub fn list(&self) -> io::Result<Vec<(String, Kind)>> {
+        sys::list(self)
+    }
+}
+
+/// What an entry of a [`HeldDir`] is itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    File,
+    Dir,
+    /// A symbolic link, a junction or another reparse point.
+    Link,
+    Other,
 }
 
 #[cfg(unix)]
@@ -632,6 +670,34 @@ pub mod at {
         Ok(())
     }
 
+    /// Removes the empty directory `name` in `dir`; a link at the name is no directory.
+    pub fn rmdir(dir: RawFd, name: &CStr) -> io::Result<()> {
+        // SAFETY: a valid descriptor and a NUL-terminated name; only an empty directory goes.
+        if unsafe { libc::unlinkat(dir, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// The entry `name` in `dir` itself, a link as a link.
+    pub fn lstat(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: a valid descriptor, a NUL-terminated name and room for one `stat`.
+        let rc = unsafe {
+            libc::fstatat(
+                dir,
+                name.as_ptr(),
+                st.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fstatat` succeeded and filled it.
+        Ok(unsafe { st.assume_init() })
+    }
+
     /// Renames `from` in `from_dir` to `to` in `to_dir`; neither name is followed.
     pub fn rename(from_dir: RawFd, from: &CStr, to_dir: RawFd, to: &CStr) -> io::Result<()> {
         // SAFETY: valid descriptors and two NUL-terminated names.
@@ -673,7 +739,7 @@ mod sys {
     use std::path::Path;
 
     use super::at::{self, Flags, DIRECTORY};
-    use super::{refused_link, HeldDir};
+    use super::{refused_link, HeldDir, Kind};
 
     fn c_name(name: &OsStr) -> io::Result<CString> {
         CString::new(name.as_bytes()).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
@@ -848,6 +914,66 @@ mod sys {
         at::unlink(held.fd.as_raw_fd(), &c_name(OsStr::new(name))?)
     }
 
+    pub(super) fn open_dir(held: &HeldDir, name: &str) -> io::Result<HeldDir> {
+        let path = held.path.join(name);
+        let fd = at::open(held.fd.as_raw_fd(), &c_name(OsStr::new(name))?, DIRECTORY)
+            .map_err(|e| named(e, &path))?;
+        Ok(HeldDir { path, fd })
+    }
+
+    pub(super) fn remove_dir(held: &HeldDir, name: &str) -> io::Result<()> {
+        at::rmdir(held.fd.as_raw_fd(), &c_name(OsStr::new(name))?)
+    }
+
+    /// Read through a duplicate of the held descriptor, so the directory read is the one held,
+    /// whatever stands at its path by now.
+    pub(super) fn list(held: &HeldDir) -> io::Result<Vec<(String, Kind)>> {
+        use std::os::fd::IntoRawFd as _;
+        let raw = held.fd.try_clone()?.into_raw_fd();
+        // SAFETY: `raw` is an open descriptor this function owns; `fdopendir` takes it over on
+        // success, and it is closed here on failure.
+        let dir = unsafe { libc::fdopendir(raw) };
+        if dir.is_null() {
+            let e = io::Error::last_os_error();
+            // SAFETY: `raw` is still this function's own on failure.
+            unsafe { libc::close(raw) };
+            return Err(e);
+        }
+        // SAFETY: `dir` is a valid stream; the duplicate shares the held descriptor's offset.
+        unsafe { libc::rewinddir(dir) };
+        let mut entries = Vec::new();
+        loop {
+            // SAFETY: `dir` is a valid stream; the entry stays valid until the next call.
+            let entry = unsafe { libc::readdir(dir) };
+            if entry.is_null() {
+                break;
+            }
+            // SAFETY: `d_name` of a returned entry is NUL-terminated.
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+            let bytes = name.to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            let Ok(text) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            let kind = match at::lstat(held.fd.as_raw_fd(), name) {
+                Ok(st) => match st.st_mode & libc::S_IFMT {
+                    libc::S_IFREG => Kind::File,
+                    libc::S_IFDIR => Kind::Dir,
+                    libc::S_IFLNK => Kind::Link,
+                    _ => Kind::Other,
+                },
+                Err(_) => Kind::Other,
+            };
+            entries.push((text.to_string(), kind));
+        }
+        // SAFETY: `dir` is a valid stream, closed once; it closes the duplicate with it.
+        unsafe { libc::closedir(dir) };
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
+    }
+
     pub(super) fn sync(held: &HeldDir) -> io::Result<()> {
         at::sync(&held.fd)
     }
@@ -861,7 +987,7 @@ mod sys {
     use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
     use std::path::Path;
 
-    use super::{refused_link, HeldDir};
+    use super::{refused_link, HeldDir, Kind};
 
     const FILE_SHARE_READ: u32 = 0x1;
     const FILE_SHARE_WRITE: u32 = 0x2;
@@ -1006,6 +1132,36 @@ mod sys {
         std::fs::remove_file(held.path.join(name))
     }
 
+    pub(super) fn open_dir(held: &HeldDir, name: &str) -> io::Result<HeldDir> {
+        hold(&held.path.join(name))
+    }
+
+    pub(super) fn remove_dir(held: &HeldDir, name: &str) -> io::Result<()> {
+        std::fs::remove_dir(held.path.join(name))
+    }
+
+    /// Read by path: the held handle keeps the directory from being renamed or replaced.
+    pub(super) fn list(held: &HeldDir) -> io::Result<Vec<(String, Kind)>> {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(&held.path)? {
+            let entry = entry?;
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let kind = match std::fs::symlink_metadata(entry.path()) {
+                Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+                    Kind::Link
+                }
+                Ok(meta) if meta.is_dir() => Kind::Dir,
+                Ok(meta) if meta.is_file() => Kind::File,
+                _ => Kind::Other,
+            };
+            entries.push((name, kind));
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(entries)
+    }
+
     #[allow(clippy::unnecessary_wraps)]
     pub(super) fn sync(_: &HeldDir) -> io::Result<()> {
         Ok(())
@@ -1015,6 +1171,31 @@ mod sys {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A held directory lists its entries as what they are, opens a directory in it but no link,
+    /// and removes an empty directory.
+    #[test]
+    fn a_held_directory_lists_opens_and_removes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("f"), b"x").expect("write");
+        std::fs::create_dir(dir.path().join("d")).expect("mkdir");
+        std::os::unix::fs::symlink("/", dir.path().join("l")).expect("link");
+        let held = HeldDir::open(dir.path()).expect("held");
+        assert_eq!(
+            held.list().expect("list"),
+            vec![
+                ("d".to_string(), Kind::Dir),
+                ("f".to_string(), Kind::File),
+                ("l".to_string(), Kind::Link)
+            ]
+        );
+        assert!(held.open_dir("d").is_ok());
+        assert!(held.open_dir("l").is_err(), "a link is not entered");
+        assert!(held.open_dir("missing").is_err(), "nothing is created");
+        held.remove_dir("d").expect("an empty directory goes");
+        assert!(held.remove_dir("l").is_err(), "a link is no directory");
+        assert_eq!(held.list().expect("list").len(), 2);
+    }
 
     /// A link at the file's own name is refused for a path the account's file offered, and
     /// followed for the administrator's; a file over the bound is refused, naming the bound.

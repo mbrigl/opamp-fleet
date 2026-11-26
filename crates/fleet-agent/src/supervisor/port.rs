@@ -28,6 +28,20 @@ pub enum Root {
     /// The directory the live program lives in: the program's own directory for a single file,
     /// the tree's root for a tree.
     Program,
+    /// The Supervisor's `data/` directory, which the Managed Process writes into, shared with the
+    /// process account's group.
+    Data,
+    /// The Supervisor's `state/` directory: the Plugin's own, which the Client alone reads and
+    /// writes.
+    State,
+}
+
+impl Root {
+    /// Whether a Plugin may write in this root (CLT-wrappers-act-through-the-core §3).
+    #[must_use]
+    pub fn writable(self) -> bool {
+        matches!(self, Root::Data | Root::State)
+    }
 }
 
 /// A file named by its root and a path relative to it, `/`-separated, with no `..`.
@@ -76,6 +90,47 @@ pub struct Entry {
     pub digest: Vec<u8>,
 }
 
+/// What an entry of a listed directory is itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A regular file.
+    Regular,
+    Directory,
+    /// A link, which no host function follows.
+    Link,
+    Other,
+}
+
+/// A program a Plugin runs once from its [`Root::Program`] root, under the same account and
+/// through the same path as the Managed Process (CLT-wrappers-act-through-the-core §4).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Run {
+    /// The program's path in the `program` root.
+    pub program: String,
+    pub args: Vec<Value>,
+    pub env: Vec<(String, Value)>,
+    /// `None` runs it in the directory the Managed Process starts in.
+    pub working_dir: Option<RootPath>,
+}
+
+/// How a program run once ended.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Ran {
+    /// The exit code; `None` where a signal ended the program.
+    pub status: Option<i32>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// The host facts a Plugin may ask for (CLT-wrappers-act-through-the-core §4).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Facts {
+    /// The host's fully qualified name, or its plain name where the host knows no domain.
+    pub host_name: Option<String>,
+    /// The account the Supervisor's programs run under.
+    pub account: Option<String>,
+}
+
 /// What a kind states about itself, the same for every block of it
 /// (CLT-wrappers-act-through-the-core §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +169,8 @@ pub enum Input {
     Restart,
     /// The Supervisor is retired for good.
     Uninstall,
+    /// The timer the instance set under `id` fired.
+    Timer { id: u64 },
 }
 
 /// The host functions an instance acts through (CLT-wrappers-act-through-the-core §4). Each
@@ -131,6 +188,53 @@ pub trait Host: Send + Sync {
     fn restart(&self) -> Call<'_, ()>;
     /// Stops the Managed Process for good and answers the uninstall (§9).
     fn uninstall(&self) -> Call<'_, ()>;
+
+    /// The content of `file`.
+    fn read(&self, _file: RootPath) -> Call<'_, Vec<u8>> {
+        refused("read")
+    }
+    /// Writes `contents` as `file`, whole, in a root a Plugin may write.
+    fn write(&self, _file: RootPath, _contents: Vec<u8>) -> Call<'_, ()> {
+        refused("write")
+    }
+    /// Renames `from` to `to`, both in one directory of a root a Plugin may write.
+    fn rename(&self, _from: RootPath, _to: RootPath) -> Call<'_, ()> {
+        refused("rename")
+    }
+    /// Removes the file or the empty directory `file`, in a root a Plugin may write.
+    fn remove(&self, _file: RootPath) -> Call<'_, ()> {
+        refused("remove")
+    }
+    /// The entries of the directory `dir`, by name.
+    fn list(&self, _dir: RootPath) -> Call<'_, Vec<(String, EntryKind)>> {
+        refused("list")
+    }
+    /// Creates the directory `dir` and what is missing above it, in a root a Plugin may write.
+    fn create_dir(&self, _dir: RootPath) -> Call<'_, ()> {
+        refused("create_dir")
+    }
+    /// Runs a program once and answers how it ended.
+    fn run(&self, _run: Run) -> Call<'_, Ran> {
+        refused("run")
+    }
+    /// Sets the timer `id` to fire once after `after_ms` milliseconds, as an [`Input::Timer`];
+    /// a timer set again under the same `id` replaces it.
+    fn set_timer(&self, _id: u64, _after_ms: u64) -> Call<'_, ()> {
+        refused("set_timer")
+    }
+    /// Cancels the timer `id`: it never arrives, even where it fired already.
+    fn cancel_timer(&self, _id: u64) -> Call<'_, ()> {
+        refused("cancel_timer")
+    }
+    /// The host facts.
+    fn facts(&self) -> Call<'_, Facts> {
+        refused("facts")
+    }
+}
+
+/// The answer of a host that does not carry out `function`.
+fn refused<'a, T: Send + 'a>(function: &'static str) -> Call<'a, T> {
+    Box::pin(async move { Err(format!("the host carries out no `{function}`")) })
 }
 
 /// A Supervisor Plugin: the kind, as compiled into the Client (CLT-wrappers-act-through-the-core §1).
@@ -204,6 +308,7 @@ pub async fn default_handling(
         Input::ApplyPackage { hash, .. } => host.install(hash).await,
         Input::Restart => host.restart().await,
         Input::Uninstall => host.uninstall().await,
+        Input::Timer { .. } => Ok(()),
     }
 }
 
