@@ -25,8 +25,8 @@ The forces:
 
 - **The Server manages the Supervisor set.** A Supervisor removed from the set is purged, its
   directory deleted, installed-package record included
-  ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). A floor kept in the
-  Supervisor's directory is one a compromised Server can reset by sending a set without the
+  ([CLT-server-manages-the-supervisor-set](CLT-server-manages-the-supervisor-set.md)). A floor kept
+  in the Supervisor's directory is one a compromised Server can reset by sending a set without the
   Supervisor and then one that adds it back, under the same name or another.
 - **A version that does not compare cannot be refused by order.** `precedence` in
   `crates/fleet-core/src/version.rs` returns `None` for any value that is not SemVer. If an
