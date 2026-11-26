@@ -1,4 +1,4 @@
-//! The `command` plugin: the example Custom Supervisor (CLT-supervisor-mode-and-kinds). It brings a Foreign Agent —
+//! The `command` plugin: the example Custom Supervisor (CLT-wrappers-act-through-the-core). It brings a Foreign Agent —
 //! any process started by a command-line invocation — under management: spawned as configured,
 //! restarted when a remote configuration arrives (the files land in the Supervisor's
 //! `config/` directory for the process to re-read), health derived from the outside.
@@ -6,11 +6,9 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
-use tokio::sync::mpsc;
-use tracing::debug;
 
-use crate::supervisor::ports::{parse_settings, Plugin, ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
+use crate::supervisor::port::{Instance, Manifest, Plugin, Process, Spec, Value};
+use crate::supervisor::ports::{parse_settings, KindDefaults};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per DEV-six-crates-tokio-axum.
 ///
@@ -54,132 +52,62 @@ const RETIRED: &[(&str, &str)] = &[
 ];
 
 /// The `command` kind. Its [`Spawner`] is the one the registry hands every plugin (CLT-accounts-service-runs-under).
+/// The `command` kind, on the Plugin port of CLT-wrappers-act-through-the-core: it states how
+/// the Foreign Agent runs, and the core does the rest.
 #[derive(Default)]
-pub struct CommandPlugin {
-    pub spawner: Spawner,
-}
+pub struct Command;
 
-impl Plugin for CommandPlugin {
-    fn kind(&self) -> &'static str {
-        "command"
-    }
-
-    fn program_key(&self) -> &'static str {
-        "command"
-    }
-
-    /// Nothing at all. This is the kind for an agent nobody has written a wrapper for, so every
-    /// value is the operator's to state (CLT-supervisor-mode-and-kinds).
-    fn defaults(&self) -> crate::supervisor::ports::KindDefaults {
-        crate::supervisor::ports::KindDefaults::none()
-    }
-
-    fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
-        // Taken out rather than consumed with `ctx`, because the placeholder expansion below is a
-        // method on the context and needs it whole.
-        let settings: CommandSettings = parse_settings(
-            &ctx.name,
-            self.kind(),
-            RETIRED,
-            std::mem::take(&mut ctx.settings),
-        )?;
-        // Everything the operator wrote about *where* things are goes through the placeholders
-        // (CLT-supervisor-mode-and-kinds) — the program itself deliberately does not.
-        let args: Vec<String> = settings.args.iter().map(|a| ctx.expand(a)).collect();
-        let env: Vec<(String, String)> = settings
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), ctx.expand(v)))
-            .collect();
-        let command = ctx.program;
-        let install = ctx.install;
-        let (commands, command_rx) = mpsc::channel(16);
-        // Asked at startup and again after every package swap, so a Foreign Agent the Server
-        // updated describes the version it now runs rather than the one it replaced.
-        let version_probe = settings.version_args.clone().map(|args| VersionProbe {
-            program: command.clone(),
-            args,
-            working_dir: None,
-            // A Foreign Agent's version flag is its own convention, and so is its banner: the
-            // strict SemVer read stays the default here (CLT-supervisor-mode-and-kinds §55).
-            parse: None,
-            env: Vec::new(),
-        });
-        // The same arguments, asked of the *staged* program before the running one is stopped
-        // (CLT-supervisor-mode-and-kinds). This kind knows no argument of its own to be safe to run — but an operator
-        // who set `version_args` has named one: the contract on that key is that the command may
-        // be invoked with exactly these and will print its version, which is precisely a check
-        // that is cheap and touches no state. Nothing new is asked of anyone; the arguments that
-        // already run after every swap now also run before one, where a refusal is free.
-        //
-        // Unset, this stays `None` and the kind behaves exactly as it did. No environment either,
-        // for the reason the probe has none: these arguments have always been invoked bare, so any
-        // that need one to succeed report no version today.
-        let preflight = settings.version_args.clone().map(|args| Preflight {
-            args,
-            env: Vec::new(),
-            working_dir: None,
-        });
-        // What this Foreign Agent will actually be invoked with, after the placeholders were
-        // expanded (CLT-supervisor-mode-and-kinds). The spawn line names the program; the arguments are where a
-        // placeholder that did not resolve — or a working directory that is not the one the
-        // operator meant — becomes visible, and the process itself usually reports neither.
-        //
-        // **The environment is logged by key, never by value.** Both are the operator's, and a
-        // Foreign Agent's environment is exactly where a token or a password is handed to it
-        // (SEC-admission-by-client-certificate's reasoning, applied to a Managed Process). Which variables are set answers
-        // "did my configuration reach it"; their contents answer nothing this line is for.
-        debug!(
-            supervisor = %ctx.name,
-            program = %command.display(),
-            args = ?args,
-            env = ?env.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>(),
-            "foreign agent invocation"
-        );
-        let runner = Runner {
-            endpoint_token: ctx.endpoint_token.clone(),
-            name: ctx.name,
-            stop_timeout: ctx.stop_timeout,
-            apply_grace: ctx.apply_grace,
-            retain_previous: ctx.retain_previous,
-            // A package (PKG-signed-packages-and-delivery) swaps this command's program — one file, or a whole tree.
-            install: Some(install),
-            archive_key: ctx.archive_key,
-            version_probe,
-            preflight,
-            // Not this kind's to know (CLT-supervisor-mode-and-kinds): an agent nobody wrote a wrapper for applies a
-            // configuration by restarting, which is CLT-supervisor-mode-and-kinds's generic behaviour.
-            reload_signal: None,
-            // The Client itself, or the second service where a process account is registered
-            // (CLT-accounts-service-runs-under §18): the registry says which.
-            spawner: self.spawner.clone(),
-            process_account_group: ctx.process_account_group,
-            supervisor_dir: ctx.supervisor_dir.clone(),
-            events: ctx.events,
-            commands: command_rx,
-            // A Foreign Agent has its own configuration until told otherwise: it always runs.
-            build: Box::new(move || {
-                Some(ProcessSpec {
-                    program: command.clone(),
-                    args: args.clone(),
-                    env: env.clone(),
-                    // The program's own directory (CLT-supervisor-mode-and-kinds), resolved at the spawn.
-                    working_dir: None,
-                    // Whatever the operator points this at is supervised as one process.
-                    own_process_group: false,
-                    // Nothing: this kind knows no agent, so it knows no directory an
-                    // agent of it would write into. An operator whose Foreign Agent needs one
-                    // states the path in its own configuration, where the agent can make it.
-                    ensure_dirs: Vec::new(),
-                })
-            }),
-        };
-        tokio::spawn(runner.run(ctx.shutdown));
-        Ok(commands)
+impl Plugin for Command {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            kind: "command",
+            program_key: "command",
+            defaults: KindDefaults::none(),
+        }
     }
 
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
-        parse_settings::<CommandSettings>(name, self.kind(), RETIRED, settings).map(|_| ())
+        parse_settings::<CommandSettings>(name, "command", RETIRED, settings).map(|_| ())
+    }
+
+    fn instantiate(&self, name: &str, settings: toml::Table) -> Result<Box<dyn Instance>, String> {
+        let settings = parse_settings(name, "command", RETIRED, settings)?;
+        Ok(Box::new(CommandInstance { settings }))
+    }
+}
+
+/// One `command` Supervisor: its block's arguments, environment and version arguments.
+struct CommandInstance {
+    settings: CommandSettings,
+}
+
+impl Instance for CommandInstance {
+    fn process(&self) -> Process {
+        Process {
+            version_args: self.settings.version_args.clone(),
+            reload_signal: None,
+        }
+    }
+
+    /// The operator's arguments and environment, as written, the placeholders of the
+    /// Supervisor's own directories expanded by the core (CLT-wrappers-act-through-the-core §31).
+    fn spec(&self) -> Spec {
+        Spec {
+            args: self
+                .settings
+                .args
+                .iter()
+                .map(|a| Value::Template(a.clone()))
+                .collect(),
+            env: self
+                .settings
+                .env
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::Template(v.clone())))
+                .collect(),
+            working_dir: None,
+            own_process_group: false,
+        }
     }
 }
 
@@ -219,11 +147,84 @@ mod tests {
             ("reload_signal", "reload_signal = \"HUP\""),
         ] {
             let table: toml::Table = toml::from_str(line).expect("table");
-            let err = CommandPlugin::default()
-                .check("agent", table)
-                .expect_err(key);
+            let err = Command.check("agent", table).expect_err(key);
             assert!(err.contains(key), "{err}");
             assert!(err.contains("no longer a supervisor key"), "{err}");
         }
+    }
+
+    /// What `command` asks of the host for each input: it starts, applies, installs, restarts
+    /// and uninstalls through the host function of the same name, and starts its program on the
+    /// operator's arguments and environment as templates.
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[tokio::test]
+    async fn command_acts_only_through_the_host() {
+        use crate::supervisor::port::{Call, Host, Input};
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Recorded(Mutex<Vec<String>>);
+        impl Recorded {
+            fn push(&self, call: String) -> Call<'_, ()> {
+                self.0.lock().expect("calls").push(call);
+                Box::pin(async { Ok(()) })
+            }
+        }
+        impl Host for Recorded {
+            fn start(&self, spec: Spec) -> Call<'_, ()> {
+                self.push(format!("start {:?} {:?}", spec.args, spec.env))
+            }
+            fn apply_config(&self, hash: Vec<u8>) -> Call<'_, ()> {
+                self.push(format!("apply_config {hash:?}"))
+            }
+            fn install(&self, hash: Vec<u8>) -> Call<'_, ()> {
+                self.push(format!("install {hash:?}"))
+            }
+            fn restart(&self) -> Call<'_, ()> {
+                self.push("restart".to_string())
+            }
+            fn uninstall(&self) -> Call<'_, ()> {
+                self.push("uninstall".to_string())
+            }
+        }
+
+        let table: toml::Table =
+            toml::from_str("args = [\"-c\", \"${config_dir}/a\"]\n[env]\nK = \"v\"\n")
+                .expect("table");
+        let mut instance = Command.instantiate("agent", table).expect("instance");
+        let host = Recorded::default();
+        for input in [
+            Input::Start,
+            Input::ApplyConfig { hash: vec![1] },
+            Input::ApplyPackage {
+                version: "1.0.0".to_string(),
+                hash: vec![2],
+            },
+            Input::Restart,
+            Input::Uninstall,
+        ] {
+            instance.handle(input, &host).await.expect("handled");
+        }
+        let template = |s: &str| format!("{:?}", Value::Template(s.to_string()));
+        assert_eq!(
+            *host.0.lock().expect("calls"),
+            vec![
+                format!(
+                    "start [{}, {}] [(\"K\", {})]",
+                    template("-c"),
+                    template("${config_dir}/a"),
+                    template("v")
+                ),
+                "apply_config [1]".to_string(),
+                "install [2]".to_string(),
+                "restart".to_string(),
+                "uninstall".to_string(),
+            ]
+        );
+        assert_eq!(
+            instance.process(),
+            Process::default(),
+            "no version arguments, no reload signal"
+        );
     }
 }

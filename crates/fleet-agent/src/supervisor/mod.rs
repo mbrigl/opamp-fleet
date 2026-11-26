@@ -12,6 +12,8 @@ pub mod collector;
 pub mod command;
 pub mod delivered;
 pub mod endpoint;
+pub mod host;
+pub mod port;
 pub mod ports;
 pub mod process;
 pub mod restart;
@@ -50,9 +52,7 @@ fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
         Box::new(collector::CollectorPlugin {
             spawner: spawner.clone(),
         }),
-        Box::new(command::CommandPlugin {
-            spawner: spawner.clone(),
-        }),
+        Box::new(host::Hosted::new(command::Command, spawner.clone())),
     ]
 }
 

@@ -222,6 +222,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("supervisor::agent::remote_config", Core),
             ("supervisor::block", Core),
             ("supervisor::delivered", Core),
+            // The Plugin port of CLT-wrappers-act-through-the-core: plain data and calls.
+            ("supervisor::port", Core),
             ("supervisor::ports", Core),
             ("supervisor::restart", Core),
             ("update", Core),
@@ -260,6 +262,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("supervisor::collector", Adapter),
             ("supervisor::command", Adapter),
             ("supervisor::endpoint", Adapter),
+            // The core's side of the Plugin port, over the process runner.
+            ("supervisor::host", Adapter),
             ("supervisor::process", Adapter),
             ("telemetry", Adapter),
             // Test-only: the log capture the unit tests share, bound to `tracing_subscriber`.

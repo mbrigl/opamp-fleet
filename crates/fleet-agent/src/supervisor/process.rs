@@ -27,6 +27,7 @@ use crate::supervisor::restart::{AfterFailure, RestartPolicy};
 use opamp::client::Backoff;
 
 /// How a plugin wants its Managed Process invoked, rebuilt whenever the configuration changed.
+#[derive(Clone)]
 pub struct ProcessSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
