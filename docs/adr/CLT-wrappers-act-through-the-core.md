@@ -1,4 +1,4 @@
-# CLT-wrappers-act-through-the-core: A Plugin is a state machine that acts only through the core, over a port of plain data
+# CLT-wrappers-act-through-the-core: A Plugin is an event handler that acts only through the core, over a port of plain data
 
 - **Status:** 🟡 proposed
 - **Date:** 2026-11-26
