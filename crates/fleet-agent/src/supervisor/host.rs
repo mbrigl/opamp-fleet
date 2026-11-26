@@ -703,6 +703,7 @@ mod tests {
     }
 
     /// A Supervisor's roots in a temporary directory, its `config/` and `program/` made.
+    #[cfg(unix)]
     fn made_roots(dir: &Path) -> Roots {
         let supervisor_dir = dir.join("agent");
         std::fs::create_dir_all(supervisor_dir.join("config")).expect("config");
@@ -717,6 +718,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn core_host(roots: Roots, spawner: Spawner) -> CoreHost {
         let (runner, _gone) = mpsc::channel(1);
         let (timers, _fired) = Timers::new();
