@@ -46,12 +46,8 @@ pub const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
 /// its feature is, so what a build carries, reports (CLT-supervisor-mode-and-kinds §18) and refuses as unknown all
 /// follow from this one list.
 ///
-/// Every plugin is handed `spawner`, which starts its Managed Processes (CLT-accounts-service-runs-under §18).
-fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
-    vec![
-        Box::new(host::Hosted::new(collector::Collector, spawner.clone())),
-        Box::new(host::Hosted::new(command::Command, spawner.clone())),
-    ]
+fn registry() -> Vec<Box<dyn Plugin>> {
+    vec![Box::new(collector::Collector), Box::new(command::Command)]
 }
 
 /// The [`registry`] of a run: its plugins with the [`Spawner`] the composition root chose from the
@@ -70,7 +66,17 @@ impl Registry {
 
 impl PluginRegistry for Registry {
     fn plugins(&self) -> Vec<Box<dyn Plugin>> {
-        registry(&self.spawner)
+        registry()
+    }
+
+    /// Through the core's host, whose programs start through this run's spawner
+    /// (CLT-accounts-service-runs-under §18).
+    fn start(
+        &self,
+        plugin: &dyn Plugin,
+        ctx: SupervisorContext,
+    ) -> Result<mpsc::Sender<ports::ProcessCommand>, String> {
+        host::start(plugin, &self.spawner, ctx)
     }
 
     fn purge<'a>(
@@ -91,7 +97,7 @@ impl PluginRegistry for Registry {
 /// The compiled-in plugins, for what reads a block — its kind, its program, its settings — and
 /// starts nothing.
 fn kinds() -> Vec<Box<dyn Plugin>> {
-    registry(&Spawner::Local)
+    registry()
 }
 
 /// The kinds this Client was compiled with, as attributes of its own Agent (CLT-supervisor-mode-and-kinds §18).
@@ -326,9 +332,9 @@ pub fn start_supervisor(
     event_tx: &mpsc::Sender<(usize, ProcessEvent)>,
     shutdown: &Shutdown,
     marks: &Arc<dyn HighWaterMarks>,
-    plugins: &dyn PluginRegistry,
+    registry: &dyn PluginRegistry,
 ) -> Result<EngineAgent, String> {
-    let plugins = plugins.plugins();
+    let plugins = registry.plugins();
     let Resolved {
         plugin,
         settings,
@@ -433,22 +439,25 @@ pub fn start_supervisor(
         endpoint_token.clone(),
     )?;
 
-    let commands = plugin.start(SupervisorContext {
-        endpoint_token,
-        name: block.name.clone(),
-        supervisor_dir,
-        config_dir,
-        program: program.path,
-        install,
-        stop_timeout: timing.stop_timeout,
-        apply_grace: timing.apply_grace,
-        retain_previous: timing.retain_previous,
-        archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
-        process_account_group: config.process_account_group,
-        settings,
-        events: EventSender::new(index, event_tx.clone()),
-        shutdown: stop,
-    })?;
+    let commands = registry.start(
+        plugin,
+        SupervisorContext {
+            endpoint_token,
+            name: block.name.clone(),
+            supervisor_dir,
+            config_dir,
+            program: program.path,
+            install,
+            stop_timeout: timing.stop_timeout,
+            apply_grace: timing.apply_grace,
+            retain_previous: timing.retain_previous,
+            archive_key: config.packages.as_ref().and_then(|p| p.archive_key.clone()),
+            process_account_group: config.process_account_group,
+            settings,
+            events: EventSender::new(index, event_tx.clone()),
+            shutdown: stop,
+        },
+    )?;
     Ok(EngineAgent {
         state,
         commands: Some(commands),

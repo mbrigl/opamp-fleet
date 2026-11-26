@@ -283,31 +283,4 @@ mod tests {
             }
         );
     }
-
-    /// The module of `collector` names no storage, file, process or network module: what it
-    /// reads arrives as an input, and what it runs, the host starts.
-    /// Verifies: CLT-wrappers-act-through-the-core
-    #[test]
-    fn a_plugin_names_only_the_port() {
-        let source = include_str!("collector.rs");
-        let shipped = source.split("#[cfg(test)]").next().unwrap_or_default();
-        let code: String = shipped
-            .lines()
-            .map(|line| line.split("//").next().unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join("\n");
-        for module in [
-            "storage", "fs", "process", "net", "tokio", "libc", "Runner", "Spawner",
-        ] {
-            let named = code.match_indices(module).any(|(at, _)| {
-                let before = code[..at].chars().next_back();
-                let after = &code[at + module.len()..];
-                !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
-                    && (after.starts_with("::")
-                        || (module.starts_with(char::is_uppercase)
-                            && !after.starts_with(|c: char| c.is_alphanumeric() || c == '_')))
-            });
-            assert!(!named, "collector names `{module}`");
-        }
-    }
 }

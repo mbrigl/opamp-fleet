@@ -1,11 +1,11 @@
-//! The Managed-Process-facing Port (CLT-supervisor-mode-and-kinds): the boundary the supervision domain defines and
-//! depends on. A Plugin is an adapter behind it — a factory that validates its block's settings
-//! and starts a task driving one Managed Process.
+//! The Managed-Process-facing ports of the supervision core: the commands it sends a Supervisor's
+//! adapter task and the events it receives back, the registry of compiled-in kinds, and the host
+//! facts. A Plugin is no part of them: it implements the port of
+//! [`port`](crate::supervisor::port) alone, and the core starts it through
+//! [`PluginRegistry::start`] (CLT-wrappers-act-through-the-core §1).
 //!
-//! The Port is a message pair, not a trait with async methods: commands flow to the adapter,
-//! events flow back. That keeps the [`Plugin`] trait object-safe without an `async-trait`
-//! dependency, makes every adapter a plain tokio task, and keeps the domain core free of
-//! process handles.
+//! The adapter task is a message pair, not a trait with async methods: commands flow to it,
+//! events flow back, which keeps the domain core free of process handles.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,6 +17,7 @@ use opamp::uid::InstanceUid;
 use tokio::sync::mpsc;
 
 use crate::shutdown::Shutdown;
+pub use crate::supervisor::port::Plugin;
 
 /// The health status a Supervisor reports while the second service cannot be reached (CLT-accounts-service-runs-under §17).
 pub const UNREACHABLE: &str = "the second service cannot be reached";
@@ -322,7 +323,8 @@ pub trait HostFacts: Send + Sync {
     fn process_id(&self) -> u32;
 }
 
-/// Everything a plugin needs to start its adapter task.
+/// Everything the core starts a Supervisor's adapter task with. The core's own record: its host
+/// adapter reads it, and no Plugin sees it (CLT-wrappers-act-through-the-core §2).
 pub struct SupervisorContext {
     /// The Supervisor's name (the TOML `name`; the Agent's `service.name`).
     pub name: String,
@@ -478,6 +480,18 @@ pub trait PluginRegistry: Send + Sync {
     /// Every compiled-in plugin.
     fn plugins(&self) -> Vec<Box<dyn Plugin>>;
 
+    /// Starts the Supervisor `ctx` describes on `plugin`, returning the command side of its
+    /// adapter task. The core's host carries out what the Plugin asks
+    /// (CLT-wrappers-act-through-the-core §4); the Plugin never sees `ctx`.
+    ///
+    /// # Errors
+    /// Returns an error when the settings do not parse — startup fails loudly, nothing spawns.
+    fn start(
+        &self,
+        plugin: &dyn Plugin,
+        ctx: SupervisorContext,
+    ) -> Result<mpsc::Sender<ProcessCommand>, String>;
+
     /// Removes what the Managed Processes wrote in each of `removed` — a Supervisor's name and its
     /// directory — that the Client cannot remove itself, before the purge deletes the rest
     /// (PKG-versions-high-water-mark-floor §13, CLT-accounts-service-runs-under §20), all of them within one wait (CLT-accounts-service-runs-under §17).
@@ -491,57 +505,8 @@ pub trait PluginRegistry: Send + Sync {
     }
 }
 
-/// A compiled-in Supervisor Plugin (CLT-supervisor-mode-and-kinds): the adapter factory on the Managed-Process side.
-/// A new process kind is a new implementation and one line in
-/// [`registry`](crate::supervisor::registry).
-pub trait Plugin {
-    /// The TOML `type` value this plugin serves.
-    fn kind(&self) -> &'static str;
-
-    /// What this kind knows about its agent, so a block need not repeat it (CLT-supervisor-mode-and-kinds). Stated by
-    /// every plugin rather than defaulted, because "this kind knows nothing" is an answer worth
-    /// writing down where a reader of the plugin will see it.
-    fn defaults(&self) -> KindDefaults;
-
-    /// The block key naming this plugin's Managed Process — `binary` for a Collector, `command`
-    /// for the example Custom Supervisor. The core takes that key out of the settings, applies
-    /// CLT-supervisor-mode-and-kinds's path rule to it, and hands the result back as
-    /// [`SupervisorContext::program`]; the plugin never sees the raw value.
-    fn program_key(&self) -> &'static str;
-
-    /// Validate the settings and start the adapter task, returning the command side of the Port.
-    ///
-    /// # Errors
-    /// Returns an error when the settings do not parse — startup fails loudly, nothing spawns.
-    fn start(&self, ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String>;
-
-    /// The strict settings parse [`start`](Self::start) performs, without the side effects
-    /// (CLT-supervisor-mode-and-kinds): what validates an offered Supervisor set *before* any running process is
-    /// touched. `settings` is the block's table with the program key already taken out, exactly
-    /// as `start` receives it.
-    ///
-    /// # Errors
-    /// Returns an error when the settings do not parse.
-    fn check(&self, name: &str, settings: toml::Table) -> Result<(), String>;
-
-    /// What a Server-delivered block of this kind may not say beyond the generic rule on `env` and
-    /// `args` (CLT-supervisor-mode-and-kinds §36): a kind whose settings name files the Supervisor reads confines
-    /// them here. `running` is the settings of the running block of the same name, if any. By
-    /// default a kind names no such file.
-    ///
-    /// # Errors
-    /// Returns the reason the delivered block is refused.
-    fn check_delivered(
-        &self,
-        _settings: &toml::Table,
-        _running: Option<&toml::Table>,
-    ) -> Result<(), String> {
-        Ok(())
-    }
-}
-
 /// The strict second-stage parse of a block's plugin settings, shared by every plugin's
-/// [`start`](Plugin::start) and [`check`](Plugin::check) so the two cannot disagree (CLT-supervisor-mode-and-kinds).
+/// instance and its [`check`](Plugin::check) so the two cannot disagree (CLT-supervisor-mode-and-kinds).
 ///
 /// A key the kind has `retired` is refused by name first, with what answers it now — a block
 /// carrying one was written against a Client that needed it, and the operator deleting the line

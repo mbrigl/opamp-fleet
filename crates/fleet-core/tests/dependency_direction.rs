@@ -26,6 +26,9 @@ enum Role {
     Adapter,
     /// Composition root: wires adapters to the core and may depend on everything.
     Root,
+    /// A Supervisor Plugin: names the Plugin port and nothing of the host
+    /// (CLT-wrappers-act-through-the-core §1); [`a_plugin_names_only_the_port`] holds it.
+    Plugin,
 }
 use Role::*;
 
@@ -259,8 +262,8 @@ const ROLES: &[(&str, &[(&str, Role)])] = &[
             ("storage", Adapter),
             ("supervisor::channel", Adapter),
             ("supervisor::channel::windows", Adapter),
-            ("supervisor::collector", Adapter),
-            ("supervisor::command", Adapter),
+            ("supervisor::collector", Plugin),
+            ("supervisor::command", Plugin),
             ("supervisor::endpoint", Adapter),
             // The core's side of the Plugin port, over the process runner.
             ("supervisor::host", Adapter),
@@ -804,6 +807,129 @@ fn the_core_depends_on_no_adapter_and_no_technology() {
     assert!(
         broken.is_empty(),
         "a core module depends on an adapter or a technology: {broken:#?}"
+    );
+}
+
+/// The modules of its own crate a Plugin may name: the Plugin port, and the ports of the core it
+/// shares the settings parse and the kind's defaults with.
+const PLUGIN_REACH: &[&str] = &["supervisor::port", "supervisor::ports"];
+
+/// The crates a Plugin may name: the settings it parses are TOML through serde.
+const PLUGIN_CRATES: &[&str] = &["serde", "toml"];
+
+/// Why each path a Plugin module `module` of `krate` names breaks its rule, if it does: a module
+/// of its crate beyond the port, a technology of the standard library, or a crate beyond
+/// [`PLUGIN_CRATES`], `tokio`, `libc` and `nix` among them.
+fn plugin_breaks(
+    krate: &'static str,
+    module: &str,
+    tokens: &[(Token, usize)],
+    locked: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut found = Vec::new();
+    for Named { segments, line, .. } in paths(tokens) {
+        let shown = segments.join("::");
+        let why = match resolve(krate, module, &segments) {
+            Target::Internal(target, segments) => {
+                let named = segments.join("::");
+                let reached = target == krate
+                    && (within(&named, module)
+                        || PLUGIN_REACH.iter().any(|port| within(&named, port)));
+                (!reached).then(|| "beyond the Plugin port".to_owned())
+            }
+            Target::External(path) => {
+                let root = path.first().map(String::as_str).unwrap_or_default();
+                match root {
+                    "std" | "core" | "alloc" => path
+                        .get(1)
+                        .filter(|m| STD_TECHNOLOGY.contains(&m.as_str()))
+                        .map(|_| "a technology of the standard library".to_owned()),
+                    "tokio" | "libc" | "nix" => Some(format!("the technology crate {root}")),
+                    _ => (locked.contains(root) && !PLUGIN_CRATES.contains(&root))
+                        .then(|| format!("the crate {root}")),
+                }
+            }
+        };
+        if let Some(why) = why {
+            found.push(format!("{line}: {shown}: {why}"));
+        }
+    }
+    found
+}
+
+/// A Plugin names the Plugin port and nothing of the host: no file, process, network or storage
+/// module, no runtime, no system call (CLT-wrappers-act-through-the-core §1).
+/// Verifies: CLT-wrappers-act-through-the-core
+#[test]
+fn a_plugin_names_only_the_port() {
+    let locked = locked_crates();
+    let mut found = Vec::new();
+    let mut plugins = 0;
+    for &(krate, roles) in ROLES {
+        let src = crates_dir().join(krate).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        files.sort();
+        for file in files {
+            let module = module_path(&src, &file);
+            if !roles.iter().any(|&(m, role)| m == module && role == Plugin) {
+                continue;
+            }
+            plugins += 1;
+            let tokens = tokenize(&fs::read_to_string(&file).unwrap());
+            found.extend(
+                plugin_breaks(krate, &module, &tokens, &locked)
+                    .into_iter()
+                    .map(|why| {
+                        format!(
+                            "{}:{why}",
+                            file.strip_prefix(crates_dir()).unwrap().display()
+                        )
+                    }),
+            );
+        }
+    }
+    assert!(plugins >= 2, "the Plugin modules are found");
+    assert!(
+        found.is_empty(),
+        "a Plugin names more than the port: {found:#?}"
+    );
+}
+
+/// The Plugin rule fails a Plugin that names a file, process or network module, the runtime, a
+/// system call or the storage module, and passes one that names the port and its settings.
+#[test]
+fn the_plugin_rule_finds_what_reaches_past_the_port() {
+    let locked: BTreeSet<String> = ["tokio", "toml", "serde", "libc", "reqwest"]
+        .map(String::from)
+        .into();
+    let src = r#"
+        use std::collections::BTreeMap;
+        use serde::Deserialize;
+        use crate::supervisor::port::{Instance, Spec};
+        use crate::supervisor::ports::parse_settings;
+        fn f(t: toml::Table) {}
+        use std::fs::read;
+        use std::process::Command;
+        use std::net::TcpStream;
+        fn g() { tokio::spawn(async {}); libc::getpid(); nix::unistd::getpid(); }
+        use crate::storage::config_entries;
+        use crate::supervisor::process::Runner;
+    "#;
+    let found = plugin_breaks(
+        "fleet-agent",
+        "supervisor::command",
+        &tokenize(src),
+        &locked,
+    );
+    let lines: Vec<&str> = found
+        .iter()
+        .map(|f| f.split(':').next().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        lines,
+        ["7", "8", "9", "10", "10", "10", "11", "12"],
+        "{found:#?}"
     );
 }
 

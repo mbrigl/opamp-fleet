@@ -242,6 +242,21 @@ pub trait Plugin: Send + Sync {
     /// What the kind states about itself.
     fn manifest(&self) -> Manifest;
 
+    /// The TOML `type` value this Plugin serves.
+    fn kind(&self) -> &'static str {
+        self.manifest().kind
+    }
+
+    /// What the kind knows about its agent.
+    fn defaults(&self) -> KindDefaults {
+        self.manifest().defaults
+    }
+
+    /// The block key naming the program.
+    fn program_key(&self) -> &'static str {
+        self.manifest().program_key
+    }
+
     /// The strict parse of a block's settings, without side effects. `settings` is the block's
     /// table with the program key already taken out.
     ///
@@ -424,5 +439,21 @@ mod tests {
         let names = identifiers("pub struct S { p: std::path::PathBuf } // Span\n");
         assert!(names.iter().any(|n| n == "PathBuf"));
         assert!(!names.iter().any(|n| n == "Span"), "a comment is no code");
+        // A path, a handle, a channel, a span and a secret, each held by a port type.
+        for (field, resource) in [
+            ("std::path::PathBuf", "PathBuf"),
+            ("std::fs::File", "File"),
+            ("tokio::sync::mpsc::Sender<u8>", "Sender"),
+            ("tracing::Span", "Span"),
+            ("zeroize::Zeroizing<String>", "Zeroizing"),
+        ] {
+            let names = identifiers(&format!("pub enum Input {{ A {{ x: {field} }} }}\n"));
+            assert!(
+                names
+                    .iter()
+                    .any(|n| HOST_RESOURCES.contains(&n.as_str()) && n == resource),
+                "{resource} is found"
+            );
+        }
     }
 }

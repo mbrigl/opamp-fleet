@@ -2039,6 +2039,14 @@ mod tests {
             fn plugins(&self) -> Vec<Box<dyn Plugin>> {
                 Vec::new()
             }
+            fn start(
+                &self,
+                _plugin: &dyn Plugin,
+                _ctx: crate::supervisor::ports::SupervisorContext,
+            ) -> Result<tokio::sync::mpsc::Sender<crate::supervisor::ports::ProcessCommand>, String>
+            {
+                Err("this registry starts nothing".to_string())
+            }
             fn purge<'a>(&'a self, removed: &'a [(String, std::path::PathBuf)]) -> Purged<'a> {
                 self.asked
                     .lock()

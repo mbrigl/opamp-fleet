@@ -19,7 +19,7 @@ async fn the_harness_drives_a_kind_and_the_stub_reads_its_side_file() {
         toml::Value::Array(vec![toml::Value::String("--version".to_string())]),
     );
     let mut harness = wrapped::start_with(
-        &fleet_agent::supervisor::host::Hosted::<fleet_agent::supervisor::command::Command>::default(),
+        &fleet_agent::supervisor::command::Command,
         "agent",
         settings,
         &["--touch".to_string(), marker.display().to_string()],
@@ -57,7 +57,7 @@ async fn the_stub_records_each_sighup_and_survives_it() {
         toml::Value::Array(vec![toml::Value::String("--version".to_string())]),
     );
     let mut harness = wrapped::start_with(
-        &fleet_agent::supervisor::host::Hosted::<fleet_agent::supervisor::command::Command>::default(),
+        &fleet_agent::supervisor::command::Command,
         "agent",
         settings,
         &[

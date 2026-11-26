@@ -2,9 +2,7 @@
 //! a Plugin instance its inputs, one at a time, and carries out the host functions the instance
 //! calls over the [`Runner`], which keeps the whole lifecycle of the Managed Process.
 //!
-//! [`Hosted`] serves a [`port::Plugin`] behind the older factory port of [`ports::Plugin`], so
-//! the registry, the block parse and the Supervisor-set apply reach both kinds of Plugin the same
-//! way while the kinds move onto the new port one by one.
+//! [`start`] is how the core starts a Supervisor on its Plugin; the Plugin sees only the port.
 
 mod files;
 mod timers;
@@ -22,7 +20,7 @@ use crate::shutdown::Shutdown;
 use crate::supervisor::port::{
     self, Call, Entry, EntryKind, Facts, Host, Input, Instance, Ran, Root, RootPath, Run, Spec,
 };
-use crate::supervisor::ports::{self, KindDefaults, ProcessCommand, SupervisorContext};
+use crate::supervisor::ports::{ProcessCommand, SupervisorContext};
 use crate::supervisor::process::{Launch, Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
 
 use files::Roots;
@@ -30,124 +28,91 @@ use timers::{Fired, Timers};
 
 pub use files::{DATA_DIR, READ_LIMIT, STATE_DIR};
 
-/// A [`port::Plugin`] as the core starts it: with the [`Spawner`] the run chose, which starts its
-/// programs (CLT-accounts-service-runs-under §18).
-#[derive(Default)]
-pub struct Hosted<P> {
-    pub plugin: P,
-    pub spawner: Spawner,
-}
-
-impl<P> Hosted<P> {
-    #[must_use]
-    pub fn new(plugin: P, spawner: Spawner) -> Self {
-        Hosted { plugin, spawner }
-    }
-}
-
-impl<P: port::Plugin + 'static> ports::Plugin for Hosted<P> {
-    fn kind(&self) -> &'static str {
-        self.plugin.manifest().kind
-    }
-
-    fn defaults(&self) -> KindDefaults {
-        self.plugin.manifest().defaults
-    }
-
-    fn program_key(&self) -> &'static str {
-        self.plugin.manifest().program_key
-    }
-
-    fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
-        self.plugin.check(name, settings)
-    }
-
-    fn check_delivered(
-        &self,
-        settings: &toml::Table,
-        running: Option<&toml::Table>,
-    ) -> Result<(), String> {
-        self.plugin.check_delivered(settings, running)
-    }
-
-    fn start(&self, mut ctx: SupervisorContext) -> Result<mpsc::Sender<ProcessCommand>, String> {
-        let instance = self
-            .plugin
-            .instantiate(&ctx.name, std::mem::take(&mut ctx.settings))?;
-        let process = instance.process();
-        let roots = Roots::of(&ctx);
-        let first = Input::Start {
-            entries: entries(&roots.config),
-        };
-        let spec = Arc::new(Mutex::new(None::<ProcessSpec>));
-        let (to_runner, runner_commands) = mpsc::channel(16);
-        let version_probe = process.version_args.clone().map(|args| VersionProbe {
-            program: ctx.program.clone(),
-            args,
-            working_dir: None,
-            parse: None,
-            env: Vec::new(),
-        });
-        let preflight = process.version_args.map(|args| Preflight {
-            args,
-            env: Vec::new(),
-            working_dir: None,
-        });
-        let built = Arc::clone(&spec);
-        let runner = Runner {
-            endpoint_token: ctx.endpoint_token.clone(),
-            name: ctx.name.clone(),
-            stop_timeout: ctx.stop_timeout,
-            apply_grace: ctx.apply_grace,
-            retain_previous: ctx.retain_previous,
-            install: Some(ctx.install),
-            archive_key: ctx.archive_key,
-            version_probe,
-            preflight,
-            reload_signal: process.reload_signal,
-            spawner: self.spawner.clone(),
-            process_account_group: ctx.process_account_group,
-            supervisor_dir: ctx.supervisor_dir,
-            events: ctx.events,
-            commands: runner_commands,
-            build: Box::new(move || built.lock().ok()?.clone()),
-        };
-        let (timers, fired) = Timers::new();
-        let host = Arc::new(CoreHost {
-            name: ctx.name,
-            roots,
-            program: ctx.program,
-            spec,
-            runner: to_runner,
-            running: AtomicBool::new(false),
-            configs: Mutex::new(HashMap::new()),
-            packages: Mutex::new(HashMap::new()),
-            spawner: self.spawner.clone(),
-            timers: Arc::clone(&timers),
-            account: tokio::sync::OnceCell::new(),
-        });
-        let (commands, command_rx) = mpsc::channel(16);
-        let (to_instance, inputs) = mpsc::channel(16);
-        tokio::spawn(front(command_rx, Arc::clone(&host), to_instance));
-        let runner_shutdown = ctx.shutdown.clone();
-        let started = Arc::clone(&host);
-        tokio::spawn(drive(
-            instance,
-            host,
-            first,
-            move || {
-                started.running.store(true, Ordering::SeqCst);
-                tokio::spawn(runner.run(runner_shutdown));
-            },
-            Fed {
-                inputs,
-                timers,
-                fired,
-            },
-            ctx.shutdown,
-        ));
-        Ok(commands)
-    }
+/// Starts the Supervisor `ctx` describes on `plugin`: makes its instance, the `Runner` of its
+/// Managed Process with programs started through `spawner` (CLT-accounts-service-runs-under §18),
+/// and the tasks that feed the instance its inputs and carry out its host functions.
+///
+/// # Errors
+/// Returns an error when the block's settings do not parse.
+pub fn start(
+    plugin: &dyn port::Plugin,
+    spawner: &Spawner,
+    mut ctx: SupervisorContext,
+) -> Result<mpsc::Sender<ProcessCommand>, String> {
+    let instance = plugin.instantiate(&ctx.name, std::mem::take(&mut ctx.settings))?;
+    let process = instance.process();
+    let roots = Roots::of(&ctx);
+    let first = Input::Start {
+        entries: entries(&roots.config),
+    };
+    let spec = Arc::new(Mutex::new(None::<ProcessSpec>));
+    let (to_runner, runner_commands) = mpsc::channel(16);
+    let version_probe = process.version_args.clone().map(|args| VersionProbe {
+        program: ctx.program.clone(),
+        args,
+        working_dir: None,
+        parse: None,
+        env: Vec::new(),
+    });
+    let preflight = process.version_args.map(|args| Preflight {
+        args,
+        env: Vec::new(),
+        working_dir: None,
+    });
+    let built = Arc::clone(&spec);
+    let runner = Runner {
+        endpoint_token: ctx.endpoint_token.clone(),
+        name: ctx.name.clone(),
+        stop_timeout: ctx.stop_timeout,
+        apply_grace: ctx.apply_grace,
+        retain_previous: ctx.retain_previous,
+        install: Some(ctx.install),
+        archive_key: ctx.archive_key,
+        version_probe,
+        preflight,
+        reload_signal: process.reload_signal,
+        spawner: spawner.clone(),
+        process_account_group: ctx.process_account_group,
+        supervisor_dir: ctx.supervisor_dir,
+        events: ctx.events,
+        commands: runner_commands,
+        build: Box::new(move || built.lock().ok()?.clone()),
+    };
+    let (timers, fired) = Timers::new();
+    let host = Arc::new(CoreHost {
+        name: ctx.name,
+        roots,
+        program: ctx.program,
+        spec,
+        runner: to_runner,
+        running: AtomicBool::new(false),
+        configs: Mutex::new(HashMap::new()),
+        packages: Mutex::new(HashMap::new()),
+        spawner: spawner.clone(),
+        timers: Arc::clone(&timers),
+        account: tokio::sync::OnceCell::new(),
+    });
+    let (commands, command_rx) = mpsc::channel(16);
+    let (to_instance, inputs) = mpsc::channel(16);
+    tokio::spawn(front(command_rx, Arc::clone(&host), to_instance));
+    let runner_shutdown = ctx.shutdown.clone();
+    let started = Arc::clone(&host);
+    tokio::spawn(drive(
+        instance,
+        host,
+        first,
+        move || {
+            started.running.store(true, Ordering::SeqCst);
+            tokio::spawn(runner.run(runner_shutdown));
+        },
+        Fed {
+            inputs,
+            timers,
+            fired,
+        },
+        ctx.shutdown,
+    ));
+    Ok(commands)
 }
 
 /// The configuration entries written in `config_dir`, by name, each with its role and digest

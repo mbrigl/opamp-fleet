@@ -1,4 +1,4 @@
-//! Drives a Supervisor kind through `Plugin::start` the way the core drives it (CLT-supervisor-mode-and-kinds), with
+//! Drives a Supervisor kind through the core's host the way the core drives it (CLT-supervisor-mode-and-kinds), with
 //! the stub standing in for its agent — the harness each kind's integration tests share.
 //!
 //! The unit tests in each module check what a kind *builds* — the program's name per platform, the
@@ -19,6 +19,7 @@ use fleet_agent::shutdown::shutdown_channel;
 use fleet_agent::supervisor::ports::{
     EventSender, InstallTarget, Plugin, ProcessCommand, ProcessEvent, SupervisorContext,
 };
+use fleet_agent::supervisor::process::Spawner;
 use opamp::proto::AgentRemoteConfig;
 use tokio::sync::mpsc;
 
@@ -121,7 +122,8 @@ pub fn start_with(
         events: EventSender::new(0, event_tx),
         shutdown,
     };
-    let commands = plugin.start(ctx).expect("the adapter starts on its block");
+    let commands = fleet_agent::supervisor::host::start(plugin, &Spawner::Local, ctx)
+        .expect("the adapter starts on its block");
     Harness {
         commands,
         events,
