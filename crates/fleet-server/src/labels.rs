@@ -230,7 +230,7 @@ pub fn ignored_labels(labels: &BTreeMap<String, String>) -> Vec<String> {
         .collect()
 }
 
-/// Whether this is a Client's own Agent: it alone reports `supervisor.kind.*` (CLT-supervisor-mode-and-kinds §18,
+/// Whether this is a Client's own Agent: it alone reports `supervisor.kind.*` (CLT-wrappers-act-through-the-core §24,
 /// SRV-fleet-record-agents-hosts §19).
 pub fn is_client_agent(description: Option<&AgentDescription>) -> bool {
     description.is_some_and(|description| {

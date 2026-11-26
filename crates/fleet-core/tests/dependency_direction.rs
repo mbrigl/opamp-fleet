@@ -308,10 +308,10 @@ const CORE_CRATES: &[&str] = &[
 ];
 
 /// What the core may name of a technology, by path prefix. `tokio::sync` is channels, which need
-/// no runtime and do no I/O — and CLT-supervisor-mode-and-kinds makes a Port a message pair over them; `tokio::select`
+/// no runtime and do no I/O — and CLT-wrappers-act-through-the-core makes a Port a message pair over them; `tokio::select`
 /// and `tokio::pin` are how the core waits on several of them, control flow over futures that
 /// starts no task and touches nothing outside the process. `toml::Table` and
-/// `toml::Value` are the configuration's values (SRV-configuration-toml-and-environment §1), which CLT-supervisor-mode-and-kinds hands a
+/// `toml::Value` are the configuration's values (SRV-configuration-toml-and-environment §1), which CLT-wrappers-act-through-the-core hands a
 /// Plugin as its block; reading and parsing the file stays at the edge. An address is a value, and
 /// `env::consts` is fixed at compile time.
 const CORE_PREFIXES: &[&[&str]] = &[

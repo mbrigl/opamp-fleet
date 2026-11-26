@@ -32,7 +32,7 @@ pub const SERVICE_VERSION: &str = "service.version";
 /// `[attributes]` may state (CLT-what-an-agent-reports §8 and §10).
 pub const SUPERVISOR_PREFIX: &str = "supervisor.";
 /// The prefix of the kinds a Client's own Agent reports, one `supervisor.kind.<kind> = "true"` per
-/// kind its build carries (CLT-supervisor-mode-and-kinds §18). Only the Client Agent reports a key under it, and
+/// kind its build carries (CLT-wrappers-act-through-the-core §24). Only the Client Agent reports a key under it, and
 /// the Server recognises the Client Agent by it (SRV-fleet-record-agents-hosts §19).
 pub const SUPERVISOR_KIND_PREFIX: &str = "supervisor.kind.";
 /// The version of the Package a Supervisor installed for its Managed Process — the Supervisor's

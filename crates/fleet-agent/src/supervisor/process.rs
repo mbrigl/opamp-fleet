@@ -1,11 +1,11 @@
 //! The shared child runner every plugin drives — the generic implementation of the whole
-//! lifecycle vocabulary (CLT-supervisor-mode-and-kinds): spawn, watch, restart with backoff, apply a new
+//! lifecycle vocabulary (CLT-wrappers-act-through-the-core): spawn, watch, restart with backoff, apply a new
 //! configuration by respawning — or, when the plugin declared a reload mechanism, in place —
 //! stop gracefully within the budget, and answer an uninstall before the core purges. Plus the
 //! version probe a plugin uses to learn a Managed Process's own version, run at startup and
 //! after every swap.
 //!
-//! Mirrors the reference `opampsupervisor` (CLT-supervisor-mode-and-kinds): SIGTERM → bounded wait → kill on Unix,
+//! Mirrors the reference `opampsupervisor` (CLT-wrappers-act-through-the-core): SIGTERM → bounded wait → kill on Unix,
 //! `Child::kill` on Windows (which has no SIGTERM equivalent), and exponential backoff for a
 //! process that keeps exiting.
 
@@ -33,7 +33,7 @@ pub struct ProcessSpec {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     /// Where the process starts. `None` means **the directory the program lives in**, which the
-    /// spawn resolves (CLT-supervisor-mode-and-kinds): a single-file package's `program/`, a tree package's tree root —
+    /// spawn resolves (CLT-wrappers-act-through-the-core): a single-file package's `program/`, a tree package's tree root —
     /// the latter being exactly what some agents' own Windows launchers do by hand. Before
     /// that rule the process inherited whatever directory the service manager left this Client in,
     /// typically `/`: a default nobody chose. A kind that needs another directory still names one.
@@ -55,7 +55,7 @@ pub struct ProcessSpec {
     /// outside `program/` precisely because a package swap replaces that whole.
     pub ensure_dirs: Vec<PathBuf>,
     /// Start the process as the leader of its own process group, so the bounded stop can signal
-    /// the **group** rather than one pid (CLT-supervisor-mode-and-kinds §53). A daemon that runs a worker of its
+    /// the **group** rather than one pid (CLT-wrappers-act-through-the-core §32). A daemon that runs a worker of its
     /// own, as an umbrella process does, otherwise leaves that worker orphaned and running when the
     /// stop escalates to a kill, holding the very state directory and port the Supervisor manages.
     /// Off by default: a process with no children of its own gains nothing from it.
@@ -250,7 +250,7 @@ fn spawn_local(launch: &Launch) -> std::io::Result<Child> {
     // If the runner is dropped without a graceful stop, take the process along.
     command.kill_on_drop(true);
     // Its own process group, so `stop` can signal the group and leave no worker behind
-    // (CLT-supervisor-mode-and-kinds). Unix-only: what Windows offers instead is a job object, which the stop
+    // (CLT-wrappers-act-through-the-core). Unix-only: what Windows offers instead is a job object, which the stop
     // there does not use yet.
     #[cfg(unix)]
     if launch.own_process_group {
@@ -421,7 +421,7 @@ impl ManagedChild {
     }
 
     /// Sends `signal` to the process — with `group`, to its whole process group where it leads
-    /// one (CLT-supervisor-mode-and-kinds). Nothing to do once it has been waited for.
+    /// one (CLT-wrappers-act-through-the-core). Nothing to do once it has been waited for.
     async fn signal(&self, signal: i32, group: bool) -> Result<(), String> {
         match self {
             ManagedChild::Local(child) => {
@@ -514,7 +514,7 @@ impl InstallTarget {
 
     /// Unpacks the verified artifact **beside** what runs, without touching it.
     ///
-    /// Splitting this from [`commit`](Self::commit) is what buys the preflight of CLT-supervisor-mode-and-kinds §54: the
+    /// Splitting this from [`commit`](Self::commit) is what buys the preflight of CLT-wrappers-act-through-the-core §33: the
     /// staged program can be proved to run *before* the running one is stopped, so a package that
     /// could never have worked costs no downtime at all.
     ///
@@ -667,7 +667,7 @@ impl InstallTarget {
 /// What an unpacked, not-yet-installed package looks like on disk.
 ///
 /// It exists so the two halves of an install — unpack beside, then rename over — can be separated
-/// by a check (CLT-supervisor-mode-and-kinds).
+/// by a check (CLT-wrappers-act-through-the-core).
 #[derive(Debug, Clone)]
 pub struct Staged {
     /// The staged tree's root, or the staged file's directory. [`STAGED`] in a [`Preflight`]
@@ -684,13 +684,13 @@ pub struct Staged {
 /// The check is a start, because a start is the definition of "does this run here": it catches a
 /// library the host does not have and a libc too old for the build in one go, and the dynamic
 /// linker's own message — *"version `GLIBC_2.39' not found"* — is what the fleet gets told
-/// (CLT-supervisor-mode-and-kinds). Whatever is run must be cheap and must not touch state; `--version` is the shape.
+/// (CLT-wrappers-act-through-the-core). Whatever is run must be cheap and must not touch state; `--version` is the shape.
 ///
 /// [`STAGED`] resolves to the staged tree's root wherever it appears — in an argument, in a value
 /// of the environment, in the working directory — so a tree carrying its own libraries, or a
 /// program that is handed paths into its own tree, is checked against **those** rather than
 /// against the ones the running version happens to leave behind
-/// (CLT-supervisor-mode-and-kinds §57).
+/// (CLT-wrappers-act-through-the-core §34).
 pub struct Preflight {
     pub args: Vec<String>,
     /// Environment for the check.
@@ -705,7 +705,7 @@ pub struct Preflight {
 pub const STAGED: &str = "${staged}";
 
 /// The health status while `build` yields no process. It carries no reason of its own — the Runner
-/// does not know why — so a kind that does may add one on its way to the core (CLT-supervisor-mode-and-kinds).
+/// does not know why — so a kind that does may add one on its way to the core (CLT-wrappers-act-through-the-core).
 pub const AWAITING_CONFIGURATION: &str = "awaiting configuration";
 
 /// How to ask a Managed Process for its own version — the program to run and the arguments that
@@ -716,17 +716,17 @@ pub struct VersionProbe {
     pub args: Vec<String>,
     /// Where the probe starts; `None` inherits. A kind whose program needs its tree root to run at
     /// all names it here as it does for the start, or the probe asks a program that is not the
-    /// one the Supervisor runs (CLT-supervisor-mode-and-kinds §57).
+    /// one the Supervisor runs (CLT-wrappers-act-through-the-core §34).
     pub working_dir: Option<PathBuf>,
     /// How to read a version out of what the program printed. `None` is [`find_semver`], the strict
     /// Semantic Versioning read. A program whose version banner is not SemVer, such as
     /// `r2.14.6-1`, would report none at all, so a kind that knows its program's convention says
-    /// so here (CLT-supervisor-mode-and-kinds).
+    /// so here (CLT-wrappers-act-through-the-core).
     pub parse: Option<fn(&str) -> Option<String>>,
     /// Environment for the probe, empty by default. A kind whose start hands its program an
     /// environment it needs to run at all — a tree's own library path — hands the probe the same,
     /// or the probe asks a program that cannot start
-    /// (CLT-supervisor-mode-and-kinds §57).
+    /// (CLT-wrappers-act-through-the-core §34).
     pub env: Vec<(String, String)>,
 }
 
@@ -746,7 +746,7 @@ pub struct Runner {
     pub endpoint_token: zeroize::Zeroizing<String>,
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
-    /// (CLT-supervisor-mode-and-kinds's health-gated acknowledgement); zero acknowledges on start.
+    /// (CLT-wrappers-act-through-the-core's health-gated acknowledgement); zero acknowledges on start.
     pub apply_grace: Duration,
     /// What an `ApplyPackage` swap replaces (PKG-signed-packages-and-delivery) — one file, or a whole tree (PKG-signed-packages-and-delivery).
     /// `None` for a plugin with nothing swappable, which then reports a package `InstallFailed`.
@@ -758,10 +758,10 @@ pub struct Runner {
     pub archive_key: Option<zeroize::Zeroizing<String>>,
     /// How to learn the Managed Process's own version, when the plugin knows how to ask.
     pub version_probe: Option<VersionProbe>,
-    /// How to prove a staged package runs before it replaces what does (CLT-supervisor-mode-and-kinds §54). `None` proves
+    /// How to prove a staged package runs before it replaces what does (CLT-wrappers-act-through-the-core §33). `None` proves
     /// nothing in advance: the swap is the first thing that finds out.
     pub preflight: Option<Preflight>,
-    /// The signal that makes the running process re-read its configuration in place (CLT-supervisor-mode-and-kinds);
+    /// The signal that makes the running process re-read its configuration in place (CLT-wrappers-act-through-the-core);
     /// `None` — the generic behaviour — applies a configuration by restarting. A reload that
     /// fails, or a process that dies on it, falls back to the restart (`reload-or-restart`).
     pub reload_signal: Option<i32>,
@@ -771,7 +771,7 @@ pub struct Runner {
     /// directories the Managed Process writes into and the preflight's staging belong to it
     /// (CLT-accounts-service-runs-under §21).
     pub process_account_group: Option<crate::supervisor::ports::ProcessAccountGroup>,
-    /// The Supervisor's own directory (CLT-supervisor-mode-and-kinds): beneath it, no link is followed on the way to a
+    /// The Supervisor's own directory (CLT-wrappers-act-through-the-core): beneath it, no link is followed on the way to a
     /// directory the Managed Process writes into.
     pub supervisor_dir: PathBuf,
     pub events: EventSender,
@@ -828,7 +828,7 @@ impl Runner {
                         }
                         continue;
                     }
-                    // What a restart command started acknowledges nothing (CLT-supervisor-mode-and-kinds §8).
+                    // What a restart command started acknowledges nothing (CLT-wrappers-act-through-the-core §5).
                     stop(&mut s.child, self.stop_timeout, &self.name).await;
                     let started = tokio::select! {
                         started = self.spawn_if_due(&mut s.waiting) => started,
@@ -854,7 +854,7 @@ impl Runner {
                             }
                             continue;
                         }
-                        // In place first (CLT-supervisor-mode-and-kinds): a kind that declared a reload keeps its
+                        // In place first (CLT-wrappers-act-through-the-core): a kind that declared a reload keeps its
                         // process — and its in-flight state — across the change; anything short
                         // of a survived grace falls back to the restart below.
                         match self
@@ -900,7 +900,7 @@ impl Runner {
                             self.discard(&superseded);
                         }
                         // Unpack beside what runs and prove it starts, *before* anything is
-                        // stopped (CLT-supervisor-mode-and-kinds): a package that could never have run costs no
+                        // stopped (CLT-wrappers-act-through-the-core): a package that could never have run costs no
                         // downtime, and the reason it could not is the linker's own.
                         //
                         // The install's trace came with the command (CLT-what-an-agent-reports): every phase below
@@ -934,7 +934,7 @@ impl Runner {
                             break;
                         }
                     }
-                    // A respawn on the current files, and nothing more (CLT-supervisor-mode-and-kinds §8): it
+                    // A respawn on the current files, and nothing more (CLT-wrappers-act-through-the-core §5): it
                     // acknowledges no configuration and swaps in no package that waits for the
                     // second service. Unless it found the service away, the retry for what waits
                     // is due at once (CLT-accounts-service-runs-under §17).
@@ -951,10 +951,10 @@ impl Runner {
                         }
                     }
                     Some(ProcessCommand::Uninstall) => {
-                        // Retired for good (CLT-supervisor-mode-and-kinds): the generic uninstall is exactly the
+                        // Retired for good (CLT-wrappers-act-through-the-core): the generic uninstall is exactly the
                         // graceful stop — nothing the generic Runner installs lives outside the
                         // Supervisor's directory, and that directory is the core's to purge
-                        // (CLT-supervisor-mode-and-kinds) once this answer is out.
+                        // (CLT-wrappers-act-through-the-core) once this answer is out.
                         stop(&mut s.child, self.stop_timeout, &self.name).await;
                         self.events
                             .send(ProcessEvent::Uninstalled { result: Ok(()) })
@@ -1008,7 +1008,7 @@ impl Runner {
     }
 
     /// Unpacks the artifact beside what runs and — when the plugin said how — proves the staged
-    /// program starts. Nothing that runs is touched here; that is the whole point (CLT-supervisor-mode-and-kinds).
+    /// program starts. Nothing that runs is touched here; that is the whole point (CLT-wrappers-act-through-the-core).
     /// The `stage` phase of an install's trace (CLT-what-an-agent-reports); the preflight below is its own child.
     ///
     /// Beside the staged package: whether the preflight ran. One that did not reach the second
@@ -1038,7 +1038,7 @@ impl Runner {
         }
     }
 
-    /// Runs the plugin's preflight on `staged`, where it has one (CLT-supervisor-mode-and-kinds §54).
+    /// Runs the plugin's preflight on `staged`, where it has one (CLT-wrappers-act-through-the-core §33).
     async fn check(&self, staged: &Staged) -> Preflighted {
         match &self.preflight {
             Some(preflight) => run_preflight(&self.spawner, &self.name, staged, preflight).await,
@@ -1388,7 +1388,7 @@ impl Runner {
 
     /// Takes in a program just started — by an apply, by the retry after the second service was
     /// not reached, or after a failed package — and, where a configuration is owed its
-    /// acknowledgement, gates it and settles it (CLT-supervisor-mode-and-kinds's health-gated acknowledgement): applying
+    /// acknowledgement, gates it and settles it (CLT-wrappers-act-through-the-core's health-gated acknowledgement): applying
     /// means running on the new files and surviving the apply grace. A start that did not reach
     /// the service leaves it owed (CLT-accounts-service-runs-under §17). Returns `true` when shutdown was requested
     /// meanwhile.
@@ -1524,7 +1524,7 @@ impl Runner {
     }
 
     /// The `gate` phase: the apply-grace health gate a configuration apply and a package swap
-    /// share (CLT-supervisor-mode-and-kinds). A freshly started process must survive `apply_grace` to count as applied;
+    /// share (CLT-wrappers-act-through-the-core). A freshly started process must survive `apply_grace` to count as applied;
     /// exiting within it fails, and so does a process that never started. `child` is left holding
     /// the running process on success.
     #[instrument(name = "gate", skip_all, fields(supervisor = %self.name))]
@@ -1578,7 +1578,7 @@ impl Runner {
         }
     }
 
-    /// The in-place apply (CLT-supervisor-mode-and-kinds): sends the declared reload signal to the running process,
+    /// The in-place apply (CLT-wrappers-act-through-the-core): sends the declared reload signal to the running process,
     /// which must then survive the apply grace — the same standard the restart path holds a
     /// fresh process to, and the only outside-observable evidence a reload leaves. Everything
     /// short of that is `NotApplied`, and the caller restarts on the new files instead
@@ -1728,8 +1728,8 @@ impl Runner {
                 )));
             }
         }
-        // The program's own directory where nothing else was said (CLT-supervisor-mode-and-kinds). A bare relative
-        // name — which CLT-supervisor-mode-and-kinds's path rule does not produce — yields an empty parent, and an
+        // The program's own directory where nothing else was said (CLT-wrappers-act-through-the-core). A bare relative
+        // name — which CLT-wrappers-act-through-the-core's path rule does not produce — yields an empty parent, and an
         // empty `current_dir` fails the spawn, so that case keeps inheriting as it did.
         let derived = spec
             .program
@@ -1906,7 +1906,7 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
         }
         warn!(supervisor = %name, "process ignored SIGTERM; killing it");
         // The group too, so a worker the child spawned does not survive the escalation and go on
-        // holding what the Supervisor manages (CLT-supervisor-mode-and-kinds §53). `Child::kill` below only reaps the one.
+        // holding what the Supervisor manages (CLT-wrappers-act-through-the-core §32). `Child::kill` below only reaps the one.
         let _ = c.signal(libc::SIGKILL, true).await;
     }
     #[cfg(not(unix))]
@@ -1915,7 +1915,7 @@ async fn stop(child: &mut Option<ManagedChild>, timeout: Duration, name: &str) {
     info!(supervisor = %name, "process stopped");
 }
 
-/// Runs a plugin's preflight against a staged package (CLT-supervisor-mode-and-kinds §54).
+/// Runs a plugin's preflight against a staged package (CLT-wrappers-act-through-the-core §33).
 ///
 /// Bounded like the version probe, because this is the same shape of question asked of a program
 /// nobody has run yet. The message on failure is the program's own — a linker error names the
@@ -1995,7 +1995,7 @@ enum Preflighted {
 /// Leading a group is what a plugin asks for with [`ProcessSpec::own_process_group`], so the test
 /// is the fact rather than a flag threaded through the Runner: a child whose process group id is
 /// its own pid is a group the Supervisor created for it, and everything in it descends from the
-/// process it started. Anything else is signalled alone (CLT-supervisor-mode-and-kinds).
+/// process it started. Anything else is signalled alone (CLT-wrappers-act-through-the-core).
 #[cfg(unix)]
 fn signal_child(pid: u32, signal: i32) {
     let pid = pid as libc::pid_t;
@@ -2006,7 +2006,7 @@ fn signal_child(pid: u32, signal: i32) {
     }
 }
 
-/// The result of an in-place reload attempt (CLT-supervisor-mode-and-kinds).
+/// The result of an in-place reload attempt (CLT-wrappers-act-through-the-core).
 enum Reloaded {
     /// Signalled and survived the grace — applied, the process kept running.
     Applied,
@@ -2018,7 +2018,7 @@ enum Reloaded {
 }
 
 /// `SIGHUP` where the platform has signals, `None` where it has none — the reload a kind declares
-/// for an agent that re-reads its configuration on `SIGHUP` (CLT-supervisor-mode-and-kinds). Off Unix the Runner then
+/// for an agent that re-reads its configuration on `SIGHUP` (CLT-wrappers-act-through-the-core). Off Unix the Runner then
 /// applies by restarting, so one block serves every platform.
 #[cfg(unix)]
 #[allow(
@@ -2038,7 +2038,7 @@ pub(crate) fn sighup() -> Option<i32> {
     None
 }
 
-/// Delivers the reload signal (CLT-supervisor-mode-and-kinds). Unix-only in substance: a kind declares one only
+/// Delivers the reload signal (CLT-wrappers-act-through-the-core). Unix-only in substance: a kind declares one only
 /// through [`sighup`], which names none anywhere else, so the other arm exists for the compiler,
 /// not for a host.
 #[cfg(unix)]
@@ -2082,7 +2082,7 @@ enum GraceOutcome {
 /// leaves a half-written program where one is about to be started.
 ///
 /// A raw artifact is **moved** rather than copied when it can be: the download is staged in the
-/// same Supervisor directory the program lives in (CLT-supervisor-mode-and-kinds), so the two are normally on one
+/// same Supervisor directory the program lives in (CLT-wrappers-act-through-the-core), so the two are normally on one
 /// filesystem and the install costs a metadata update instead of a second full write of several
 /// hundred megabytes. The move consumes the artifact — the caller's cleanup of it is best-effort
 /// for exactly this reason. A rename across filesystems fails, and so does one out of a staging
@@ -2351,7 +2351,7 @@ mod tests {
     /// waits it out instead of reporting a program that cannot run — the race a staged package
     /// meets when another thread forks while it is being written.
     /// Linux alone refuses to exec a file held open for writing, so the race exists only there.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-wrappers-act-through-the-core
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_program_busy_for_a_moment_is_run_once_it_is_free() {
@@ -3107,7 +3107,7 @@ mod tests {
         assert_eq!(find_semver("no version at all"), None);
     }
 
-    /// CLT-supervisor-mode-and-kinds stages the download in the same directory the program lives in, so installing a
+    /// CLT-wrappers-act-through-the-core stages the download in the same directory the program lives in, so installing a
     /// raw artifact is a move and not a second full write of several hundred megabytes. What makes
     /// that observable is *why* the artifact is gone: it became the program, rather than being
     /// copied and deleted.
@@ -3409,8 +3409,8 @@ mod tests {
     /// the Client — the program it names is not even on this host — in the working directory and
     /// with the environment its kind names, and what the service relays of its output is what the
     /// version is read from
-    /// (CLT-accounts-service-runs-under §18, CLT-supervisor-mode-and-kinds §57).
-    /// Verifies: CLT-accounts-service-runs-under, CLT-supervisor-mode-and-kinds
+    /// (CLT-accounts-service-runs-under §18, CLT-wrappers-act-through-the-core §34).
+    /// Verifies: CLT-accounts-service-runs-under, CLT-wrappers-act-through-the-core
     #[cfg(unix)]
     #[tokio::test]
     async fn the_version_probe_runs_through_the_second_service() {
@@ -3460,8 +3460,8 @@ mod tests {
     /// With a process account registered, the preflight of a staged package is run by the second
     /// service, with `${staged}` resolved in its arguments, its environment and its working
     /// directory, and what the program said through the service is the reason it is refused
-    /// (CLT-accounts-service-runs-under §18, CLT-supervisor-mode-and-kinds §57).
-    /// Verifies: CLT-accounts-service-runs-under, CLT-supervisor-mode-and-kinds
+    /// (CLT-accounts-service-runs-under §18, CLT-wrappers-act-through-the-core §34).
+    /// Verifies: CLT-accounts-service-runs-under, CLT-wrappers-act-through-the-core
     #[cfg(unix)]
     #[tokio::test]
     async fn the_preflight_runs_through_the_second_service() {

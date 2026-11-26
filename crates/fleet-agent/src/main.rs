@@ -679,7 +679,7 @@ fn install(
 
         // The handover (CLT-accounts-service-runs-under §1), on every registration that runs under an account — a
         // kept one and root included: both roots belong to it — config and state because the
-        // service reads and rewrites them (CLT-supervisor-mode-and-kinds), the executable layout because the
+        // service reads and rewrites them (CLT-wrappers-act-through-the-core), the executable layout because the
         // self-update that stages into it *is* the service (CLT-self-update-signed-package). The state directory is
         // created first: the daemon must not need rights on its parent to begin. Where a process
         // account is registered, what it keeps there stays its own (CLT-accounts-service-runs-under §1): every

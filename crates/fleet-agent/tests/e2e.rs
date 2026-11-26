@@ -1,10 +1,10 @@
-//! End to end (CLT-supervisor-mode-and-kinds): the real Server in-process, the real Client binary with two
+//! End to end (CLT-wrappers-act-through-the-core): the real Server in-process, the real Client binary with two
 //! Supervisors — a Collector-type on the stub and a command-type Foreign Agent — over one
 //! WebSocket connection. A configuration change reaches both Agents, restarts their processes
 //! on the written files, and comes back `APPLIED` and in sync. A Configuration typed for the
-//! Client itself then changes its Supervisor set at runtime (CLT-supervisor-mode-and-kinds): an added block starts
+//! Client itself then changes its Supervisor set at runtime (CLT-server-manages-the-supervisor-set): an added block starts
 //! and appears as a new Agent, unchanged ones ride through untouched, a removed one stops,
-//! says goodbye, and its directory is purged (CLT-supervisor-mode-and-kinds) — and `supervisor.toml` is rewritten around
+//! says goodbye, and its directory is purged (CLT-server-manages-the-supervisor-set) — and `supervisor.toml` is rewritten around
 //! the operator's globals each time.
 
 mod common;
@@ -170,7 +170,7 @@ const AGENTS: usize = 3;
 
 /// The stub binary's own file name — what a **bare** program name resolves to inside a Supervisor's
 /// owned `program/` directory. Blocks below name their program bare (not by absolute path), because
-/// a Server-delivered Supervisor set may run only a program this Client owns (CLT-supervisor-mode-and-kinds), and the
+/// a Server-delivered Supervisor set may run only a program this Client owns (CLT-server-manages-the-supervisor-set), and the
 /// operator-local blocks use the same shape so the delivered set can restate them verbatim.
 fn stub_program_name() -> String {
     Path::new(env!("CARGO_BIN_EXE_stub_agent"))
@@ -181,7 +181,7 @@ fn stub_program_name() -> String {
 }
 
 /// Places the stub binary where a bare program name resolves — `<state_dir>/supervisors/<name>/
-/// program/<program>` (CLT-supervisor-mode-and-kinds) — standing in for the package install that would normally put it
+/// program/<program>` (CLT-wrappers-act-through-the-core) — standing in for the package install that would normally put it
 /// there. A Supervisor whose owned program is present starts it; one whose program is absent waits
 /// for a package, which is not what this test exercises.
 fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
@@ -200,8 +200,8 @@ fn stage_owned_program(state_dir: &Path, supervisor: &str, program: &str) {
     }
 }
 
-// Verifies: CLT-supervisor-mode-and-kinds, CLT-modes-and-gateway, G-1, G-6, G-7, G-14
-// Verifies: CLT-supervisor-mode-and-kinds
+// Verifies: CLT-wrappers-act-through-the-core, CLT-modes-and-gateway, G-1, G-6, G-7, G-14
+// Verifies: CLT-wrappers-act-through-the-core
 #[tokio::test]
 async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     let (server_addr, state, dir) = spawn_server().await;
@@ -246,7 +246,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
             "[attributes]\n",
             "env = \"prod\"\n\n",
             // The set the Server delivers below carries arguments; the operator consents to that
-            // here, where the Server cannot (CLT-supervisor-mode-and-kinds §35).
+            // here, where the Server cannot (CLT-server-manages-the-supervisor-set §10).
             "[supervisors]\n",
             "delivered_args = true\n\n",
             "{otelcol_block}\n",
@@ -262,7 +262,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         .expect("write supervisor.toml");
 
     // Both owned Supervisors have their program staged before the Client starts, so they run at
-    // once rather than waiting for a package (CLT-supervisor-mode-and-kinds makes the delivery path owned-only).
+    // once rather than waiting for a package (CLT-wrappers-act-through-the-core makes the delivery path owned-only).
     stage_owned_program(&state_dir, "otelcol", &program);
     stage_owned_program(&state_dir, "stub", &program);
 
@@ -320,7 +320,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     // The push is held back until each Supervisor's Agent has sent a heartbeat after the rollout.
     // Those heartbeats still name the old hash, so the Server answers them with the offer again,
     // and the same hash reaches each Agent twice: the second is a report, not a second apply
-    // (CLT-supervisor-mode-and-kinds §56).
+    // (CLT-server-manages-the-supervisor-set §28).
     common::save(&state, "fleet", "receivers: {}\n", otelcol_type);
     common::save(&state, "client-yaml", "receivers: {}\n", "supervisor");
     push_held.send_replace(true);
@@ -350,7 +350,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 
     // Both Supervisors acknowledge APPLIED and are in sync; the processes restarted on the
     // files. The Client's own Agent receives the one typed for it — its configuration is its
-    // Supervisor set (CLT-supervisor-mode-and-kinds), and a YAML body is not one: the Client refuses it loudly rather
+    // Supervisor set (CLT-server-manages-the-supervisor-set), and a YAML body is not one: the Client refuses it loudly rather
     // than pretend it took effect.
     common::wait_until("the supervised agents in sync, the client refusing", || {
         let snapshot = state.snapshot();
@@ -428,13 +428,13 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         );
         assert!(
             !agent.non_identifying_attributes.contains_key("role"),
-            "no block tags one Agent any more (CLT-supervisor-mode-and-kinds)"
+            "no block tags one Agent any more (CLT-wrappers-act-through-the-core)"
         );
     }
 
     // Tagging *one* Agent among several is the fleet's job now: one label, keyed by the Agent's
     // uid, matched by the same Selectors — and it takes effect without touching the host's file
-    // (SRV-fleet-record-agents-hosts, CLT-supervisor-mode-and-kinds).
+    // (SRV-fleet-record-agents-hosts, CLT-wrappers-act-through-the-core).
     let uid = opamp::uid::InstanceUid::parse(&stub.instance_uid).expect("the uid the Server holds");
     assert!(state
         .set_labels(&uid, [("role".to_string(), "edge".to_string())].into())
@@ -527,7 +527,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
     )
     .await;
 
-    // ——— The Server manages the Client's own Supervisor set (CLT-supervisor-mode-and-kinds) ———
+    // ——— The Server manages the Client's own Supervisor set (CLT-server-manages-the-supervisor-set) ———
 
     // The YAML Configuration typed for the Client keeps poisoning its composed map. A pinned
     // Configuration cannot be deleted (SRV-deployments-and-pinned-rollouts), and taking it out of the Deployment withdraws
@@ -575,7 +575,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         program = program,
         added_marker = added_marker.to_string_lossy(),
     );
-    // The added Supervisor is owned too (CLT-supervisor-mode-and-kinds): stage its program before the set is delivered,
+    // The added Supervisor is owned too (CLT-server-manages-the-supervisor-set): stage its program before the set is delivered,
     // so the block the Server pushes starts a process instead of waiting for a package.
     stage_owned_program(&state_dir, "added", &program);
     let stub_pid_before = stub_pid(&stub_marker).expect("the stub runs");
@@ -641,7 +641,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
         "the unchanged supervisors ride through the removal too"
     );
 
-    // A removed Supervisor is purged (CLT-supervisor-mode-and-kinds): its whole directory — identity, program, written
+    // A removed Supervisor is purged (CLT-wrappers-act-through-the-core): its whole directory — identity, program, written
     // configuration — goes with it, while the supervisors that stay keep theirs.
     common::wait_until("the removed supervisor's directory to be purged", || {
         (!state_dir.join("supervisors/added").exists()).then_some(())
@@ -656,7 +656,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 /// A delivered Supervisor set with one block the Client refuses is refused whole: the running
 /// Supervisor keeps its process, `supervisor.toml` keeps every byte, and the Client's own Agent
 /// reports the refusal.
-/// Verifies: CLT-supervisor-mode-and-kinds
+/// Verifies: CLT-wrappers-act-through-the-core
 #[tokio::test]
 async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
     let (addr, state, dir) = spawn_server().await;
@@ -741,11 +741,11 @@ async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
     );
 }
 
-/// CLT-supervisor-mode-and-kinds over one connection: a released Configuration reaches the unlisted Supervisor and not
+/// CLT-wrappers-act-through-the-core over one connection: a released Configuration reaches the unlisted Supervisor and not
 /// the listed one, whose Agent declares neither remote-configuration capability. Switched back on,
 /// the next start declares both, is offered what is released, and the stored offer replaces every
-/// file in `config/`, the operator's included (CLT-supervisor-mode-and-kinds §52).
-/// Verifies: CLT-supervisor-mode-and-kinds
+/// file in `config/`, the operator's included (CLT-server-manages-the-supervisor-set §27).
+/// Verifies: CLT-server-manages-the-supervisor-set
 #[tokio::test]
 async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
     let (addr, state, dir) = spawn_server().await;
@@ -851,12 +851,12 @@ async fn a_server_offers_no_configuration_to_a_listed_supervisor() {
     );
 }
 
-/// CLT-supervisor-mode-and-kinds over one connection: a host that keeps its Supervisor set is offered none. A released
+/// CLT-server-manages-the-supervisor-set over one connection: a host that keeps its Supervisor set is offered none. A released
 /// set that would add a block reaches neither `supervisor.toml` nor the running Supervisors, and
 /// the Client's own Agent declares neither remote-configuration capability and reports no status.
 /// Switched back on, the next start is offered the released set, and it replaces the
-/// `[[supervisor]]` array, the operator's block included (CLT-supervisor-mode-and-kinds §44).
-/// Verifies: CLT-supervisor-mode-and-kinds
+/// `[[supervisor]]` array, the operator's block included (CLT-server-manages-the-supervisor-set §19).
+/// Verifies: CLT-server-manages-the-supervisor-set
 #[tokio::test]
 async fn a_server_offers_no_supervisor_set_to_a_host_that_keeps_it() {
     let (addr, state, dir) = spawn_server().await;
@@ -970,7 +970,7 @@ fn running(pid: u32) -> bool {
 
 /// Dropping the Client under test stops it as its service manager would, so the programs it
 /// started itself end with it: a kill alone left them running after every test.
-/// Verifies: CLT-supervisor-mode-and-kinds
+/// Verifies: CLT-wrappers-act-through-the-core
 #[cfg(unix)]
 #[tokio::test]
 async fn a_dropped_client_leaves_none_of_its_programs_running() {

@@ -70,7 +70,7 @@ fn ensure_safe_package_name(name: &str) -> Result<(), String> {
 /// The artifact is a program — tens or hundreds of megabytes — so it is streamed to `staging_dir`
 /// and hashed as it arrives, never assembled in memory or read back: the signature covers the
 /// Agent type, the version and that hash, not the bytes themselves. `staging_dir` is the
-/// receiving Agent's own (CLT-supervisor-mode-and-kinds), so the install that follows is a rename inside one
+/// receiving Agent's own (CLT-wrappers-act-through-the-core), so the install that follows is a rename inside one
 /// filesystem.
 /// Verifies: PKG-signed-packages-and-delivery
 pub async fn download_and_verify(

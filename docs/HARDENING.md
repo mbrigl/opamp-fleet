@@ -16,8 +16,8 @@ The link this document is about is **Client ↔ Server**. In this project's voca
 lives *inside* the Client
 ([`crates/fleet-agent/src/supervisor/`](../crates/fleet-agent/src/supervisor/)) and
 does not speak to the Server itself — the Client carries every Supervisor's Agent over its one
-connection (CLT-modes-and-gateway, CLT-supervisor-mode-and-kinds). Where other OpAMP material says
-"Supervisor ↔ Server", this is the link it means.
+connection (CLT-modes-and-gateway, CLT-wrappers-act-through-the-core). Where other OpAMP material
+says "Supervisor ↔ Server", this is the link it means.
 
 One adjacent surface is in scope because it terminates on the same host and carries the same
 protocol: the **Supervisor Endpoint**, the loopback WebSocket each Supervisor serves for a Managed
@@ -198,9 +198,10 @@ has:
   created, restricted or handed over. The hand-over and the cut act on a link or junction itself on
   every platform.
 - **A delivered Supervisor block reaches no further than the package signature**
-  (CLT-supervisor-mode-and-kinds): no environment or arguments beyond what the running block has or
-  the operator allowed, and no file outside its own `config/` directory. Under
-  CLT-supervisor-mode-and-kinds §35's rule — no variable that steers which code a program loads, no
+  (CLT-server-manages-the-supervisor-set): no environment or arguments beyond what the running block
+  has or the operator allowed, and no file outside its own `config/` directory. Under
+  CLT-server-manages-the-supervisor-set §10's rule — no variable that steers which code a program
+  loads, no
   value pointing where the Server delivers unsigned files — the Client refuses the names and
   placeholders the clause lists, and further loader variables (`PATHEXT`, `COMSPEC`, `NODE_PATH`,
   `PYTHONHOME`, `PERLLIB`, `PERL5DB`, `RUBYLIB`) and new values that start with a path under the
@@ -411,20 +412,22 @@ Agent's host. They deserve at least as much attention as the transport, and argu
 through seven channels. It **can** write any files into a Supervisor's own `config/` directory and
 restart its process, except for a Supervisor the host lists in `[supervisors]
 remote_config_disabled`, whose Agent takes no remote configuration and whose delivered block must
-repeat the one it runs (CLT-supervisor-mode-and-kinds); add, change, purge and restart Supervisors
+repeat the one it runs (CLT-server-manages-the-supervisor-set); add, change, purge and restart
+Supervisors
 of the compiled-in kinds, each running a program from its own `program/` directory, except on a host
 that sets `[supervisors] server_manages_set = false`, whose own Agent takes no Supervisor set
-(CLT-supervisor-mode-and-kinds); install any package signed with the operator's key into a
+(CLT-server-manages-the-supervisor-set); install any package signed with the operator's key into a
 Supervisor, and a newer signed Client build into the Client itself; move the
 fleet to another TLS endpoint its trust accepts, install a certificate for
 the key the Client generated, and set its telemetry destinations; restart a Managed Process; and
 re-key an Agent's `instance_uid`. What an Agent's own configuration language allows — a command it
 names, a receiver bound to any port — it allows as the process's account; that is the product.
-The switch of CLT-supervisor-mode-and-kinds binds a name: while the Server manages the set, it can
-remove a listed Supervisor and deliver the same agent under a name that is not listed, whose
+The switch of CLT-server-manages-the-supervisor-set binds a name: while the Server manages the set,
+it can remove a listed Supervisor and deliver the same agent under a name that is not listed, whose
 configuration is then the Server's again. A host that also sets `server_manages_set = false` closes
 that: the Server can neither remove the listed Supervisor nor add another
-(CLT-supervisor-mode-and-kinds). Both keys hold against the Server only while every Supervisor whose
+(CLT-server-manages-the-supervisor-set). Both keys hold against the Server only while every
+Supervisor whose
 configuration language can run commands as the Client's account — a command an agent's configuration
 names, the configuration a `command` kind's program reads — is in `remote_config_disabled`;
 otherwise the Server can configure such a Supervisor to rewrite `supervisor.toml`, and the keys

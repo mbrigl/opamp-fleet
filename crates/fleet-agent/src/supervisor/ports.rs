@@ -78,11 +78,11 @@ pub enum ProcessCommand {
     Restart,
     /// Stop the Managed Process gracefully.
     Shutdown,
-    /// The Supervisor is retired for good (CLT-supervisor-mode-and-kinds): stop the Managed Process, undo whatever
+    /// The Supervisor is retired for good (CLT-wrappers-act-through-the-core): stop the Managed Process, undo whatever
     /// installing it left *outside* the Supervisor's directory — the generic implementation has
     /// nothing there, so its uninstall is exactly the graceful stop — answer with
     /// [`ProcessEvent::Uninstalled`], and exit. The directory itself is the core's to purge
-    /// (CLT-supervisor-mode-and-kinds), after the answer.
+    /// (CLT-wrappers-act-through-the-core), after the answer.
     Uninstall,
 }
 
@@ -95,7 +95,7 @@ pub enum ProcessEvent {
     /// The pid of the running Managed Process, or `None` once it is gone (CLT-what-an-agent-reports). It is what
     /// lets this Client sample the process's own CPU and memory from the outside, which is the
     /// only honest reading of "own telemetry" for a process whose configuration it must not touch
-    /// (CLT-supervisor-mode-and-kinds).
+    /// (CLT-wrappers-act-through-the-core).
     Pid(Option<u32>),
     /// Health — derived from the outside (spawned, exited, spawn failed) or self-reported.
     Health(ComponentHealth),
@@ -116,7 +116,7 @@ pub enum ProcessEvent {
         hash: Vec<u8>,
         result: Result<String, String>,
     },
-    /// Outcome of a [`ProcessCommand::Uninstall`] (CLT-supervisor-mode-and-kinds), the adapter's last event. The
+    /// Outcome of a [`ProcessCommand::Uninstall`] (CLT-wrappers-act-through-the-core), the adapter's last event. The
     /// Agent's goodbye carries no status, so the outcome is a log line — but an `Err` names what
     /// the retired kind could not undo, which the operator otherwise learns from nothing.
     Uninstalled { result: Result<(), String> },
@@ -333,13 +333,13 @@ pub struct SupervisorContext {
     /// when it is dropped (SEC-secrets-wiped-on-drop).
     pub endpoint_token: zeroize::Zeroizing<String>,
     /// Everything this Supervisor owns: its state, its `program/`, its package staging
-    /// (CLT-supervisor-mode-and-kinds). Placed by `supervisor_dir`, so nothing may assume where it is.
+    /// (CLT-wrappers-act-through-the-core). Placed by `supervisor_dir`, so nothing may assume where it is.
     pub supervisor_dir: PathBuf,
     /// Where the received remote configuration's entry files are written — what the Managed
     /// Process is pointed at.
     pub config_dir: PathBuf,
     /// The Managed Process itself, already resolved inside this Supervisor's own `program/`
-    /// directory (CLT-supervisor-mode-and-kinds). The plugin spawns this rather than reading its own
+    /// directory (CLT-wrappers-act-through-the-core). The plugin spawns this rather than reading its own
     /// `binary`/`command` key, so the path rule lives in one place instead of once per plugin.
     pub program: PathBuf,
     /// What an offered package replaces (PKG-signed-packages-and-delivery) — resolved beside `program` and for
@@ -349,7 +349,7 @@ pub struct SupervisorContext {
     /// Graceful-stop budget before the Managed Process is killed.
     pub stop_timeout: Duration,
     /// How long a freshly (re)started process must survive before `ApplyConfig` is acknowledged
-    /// `Ok` — the health-gated acknowledgement (CLT-supervisor-mode-and-kinds). Zero acknowledges on start.
+    /// `Ok` — the health-gated acknowledgement (CLT-wrappers-act-through-the-core). Zero acknowledges on start.
     pub apply_grace: Duration,
     /// How long the version a successful update supersedes is kept before deletion (PKG-signed-packages-and-delivery),
     /// resolved from the per-Supervisor override or the global `[updates]` default. Zero deletes on
@@ -370,7 +370,7 @@ pub struct SupervisorContext {
 }
 
 impl SupervisorContext {
-    /// Expands the placeholders naming this Supervisor's own directories (CLT-supervisor-mode-and-kinds):
+    /// Expands the placeholders naming this Supervisor's own directories (CLT-wrappers-act-through-the-core):
     /// `${supervisor_dir}` and `${config_dir}`.
     ///
     /// They exist because a Custom Supervisor is told where its configuration is *through its own
@@ -384,7 +384,7 @@ impl SupervisorContext {
     /// is the two names below; everything else is the process's business.
     ///
     /// Never applied to the program itself: that key is a bare file name the core resolves inside
-    /// this Supervisor's own `program/` directory (CLT-supervisor-mode-and-kinds), so there is no directory in it for a
+    /// this Supervisor's own `program/` directory (CLT-wrappers-act-through-the-core), so there is no directory in it for a
     /// placeholder to name.
     #[must_use]
     pub fn expand(&self, value: &str) -> String {
@@ -394,7 +394,7 @@ impl SupervisorContext {
     }
 }
 
-/// What a kind knows about its own agent, so a block does not have to say it (CLT-supervisor-mode-and-kinds).
+/// What a kind knows about its own agent, so a block does not have to say it (CLT-wrappers-act-through-the-core).
 ///
 /// Every field is a `&'static str` resolved **per platform** at compile time, which is the point:
 /// a constant can be asserted against the artifact this project packs, where a path written in a
@@ -406,7 +406,7 @@ impl SupervisorContext {
 /// quietly differs from what the fleet believes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KindDefaults {
-    /// The program's file name in this Supervisor's own `program/` directory (CLT-supervisor-mode-and-kinds).
+    /// The program's file name in this Supervisor's own `program/` directory (CLT-wrappers-act-through-the-core).
     /// `None` leaves it to the block's program key.
     pub program: Option<&'static str>,
     /// Where the program sits inside an unpacked package tree (PKG-signed-packages-and-delivery); `None` is a single-file
@@ -425,7 +425,7 @@ pub struct KindDefaults {
     /// name, which is what the block already said.
     pub service_name: Option<&'static str>,
     /// What this kind corrects about the fleet's timing policy, and whether its block may state
-    /// any of it at all (CLT-supervisor-mode-and-kinds). `None` — an unwrapped kind — leaves the three keys in the
+    /// any of it at all (CLT-wrappers-act-through-the-core). `None` — an unwrapped kind — leaves the three keys in the
     /// block, because no kind exists there to hold a value; `Some` takes them out of the block and
     /// states the kind's own corrections, each `None` meaning "the fleet's number is right".
     pub timing: Option<KindTiming>,
@@ -435,7 +435,7 @@ pub struct KindDefaults {
     pub endpoint_port: bool,
 }
 
-/// What a wrapped kind says about timing, over the fleet's own policy (CLT-supervisor-mode-and-kinds).
+/// What a wrapped kind says about timing, over the fleet's own policy (CLT-wrappers-act-through-the-core).
 ///
 /// Every field is an *agent's* property rather than a host's: how long it needs to shut down, how
 /// long a restart of it has to hold before the fleet may believe it, how long its superseded
@@ -472,7 +472,7 @@ impl KindDefaults {
 pub type Purged<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Result<(), String>>> + Send + 'a>>;
 
-/// The plugins a run starts its Supervisors with (CLT-supervisor-mode-and-kinds §2), as the composition root
+/// The plugins a run starts its Supervisors with (CLT-wrappers-act-through-the-core §14), as the composition root
 /// made them: every one starts its Managed Process the way the run does (CLT-accounts-service-runs-under §18). The
 /// Engine keeps it, so a Supervisor that a Supervisor-set apply starts later is started the same
 /// way as those started with the Client.
@@ -499,14 +499,14 @@ pub trait PluginRegistry: Send + Sync {
     ///
     /// # Errors
     /// Each answer, in the order of `removed`, is why something is left: the purge then leaves an
-    /// orphan, with a warning (CLT-supervisor-mode-and-kinds §34).
+    /// orphan, with a warning (CLT-server-manages-the-supervisor-set §9).
     fn purge<'a>(&'a self, removed: &'a [(String, std::path::PathBuf)]) -> Purged<'a> {
         Box::pin(std::future::ready(removed.iter().map(|_| Ok(())).collect()))
     }
 }
 
 /// The strict second-stage parse of a block's plugin settings, shared by every plugin's
-/// instance and its [`check`](Plugin::check) so the two cannot disagree (CLT-supervisor-mode-and-kinds).
+/// instance and its [`check`](Plugin::check) so the two cannot disagree (CLT-wrappers-act-through-the-core).
 ///
 /// A key the kind has `retired` is refused by name first, with what answers it now — a block
 /// carrying one was written against a Client that needed it, and the operator deleting the line
@@ -539,7 +539,7 @@ mod tests {
     use crate::shutdown::shutdown_channel;
 
     /// A per-Supervisor root that is absolute on *this* platform — on Windows that means naming a
-    /// drive (CLT-supervisor-mode-and-kinds), and it is why nothing below spells a path out with POSIX separators: what
+    /// drive (CLT-wrappers-act-through-the-core), and it is why nothing below spells a path out with POSIX separators: what
     /// a placeholder expands to is a `PathBuf`, so its separators are the platform's own.
     #[cfg(windows)]
     fn root(place: &str) -> PathBuf {
@@ -574,7 +574,7 @@ mod tests {
         }
     }
 
-    /// The case CLT-supervisor-mode-and-kinds exists for: the argument that points a Foreign Agent at its configuration
+    /// The case CLT-wrappers-act-through-the-core exists for: the argument that points a Foreign Agent at its configuration
     /// is derived from the same value the Client derives it from, so relocating `supervisor_dir`
     /// cannot leave the process reading a file nobody writes to.
     #[test]
@@ -610,7 +610,7 @@ mod tests {
 
     /// Anything else is left exactly as written. Fluent Bit's own configuration language uses
     /// `${…}` too, and a Client that ate or refused those would break a working deployment to
-    /// catch a typo — which is the trade CLT-supervisor-mode-and-kinds makes, deliberately and in this direction.
+    /// catch a typo — which is the trade CLT-wrappers-act-through-the-core makes, deliberately and in this direction.
     #[test]
     fn an_unknown_placeholder_is_passed_through_untouched() {
         let ctx = context(root("opt"));

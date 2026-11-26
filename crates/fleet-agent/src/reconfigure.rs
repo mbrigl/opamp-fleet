@@ -1,4 +1,4 @@
-//! The Supervisor-set apply (CLT-supervisor-mode-and-kinds): what the Client does with a remote configuration offered
+//! The Supervisor-set apply (CLT-server-manages-the-supervisor-set): what the Client does with a remote configuration offered
 //! to its **own** Agent.
 //!
 //! Only the `[[supervisor]]` blocks of the offered document are read — every other top-level key
@@ -6,7 +6,7 @@
 //! never write. The offered set is validated against the running configuration's globals first;
 //! then the Supervisors that left or changed are stopped, the merged document is written to
 //! `supervisor.toml` — surgically, so the operator's comments and layout survive — the removed
-//! Supervisors' directories are purged (CLT-supervisor-mode-and-kinds), and the changed and added Supervisors are
+//! Supervisors' directories are purged (CLT-server-manages-the-supervisor-set), and the changed and added Supervisors are
 //! started from the file just written. Unchanged Supervisors ride through untouched.
 
 use std::path::Path;
@@ -98,11 +98,11 @@ async fn apply_inner(
     for block in &blocks {
         validate_offered_block(&candidate, block).map_err(Refused)?;
         // Against what runs now: the operator's `[supervisors]` and the running block of the
-        // same name decide what a delivered block may bring (CLT-supervisor-mode-and-kinds §35 and §36).
+        // same name decide what a delivered block may bring (CLT-server-manages-the-supervisor-set §10 and §11).
         crate::supervisor::check_delivered_block(config, block).map_err(Refused)?;
     }
     // What will be written is rendered now, before anything stops, and must read back as exactly
-    // the set just checked: what is checked is what is written (CLT-supervisor-mode-and-kinds §27).
+    // the set just checked: what is checked is what is written (CLT-server-manages-the-supervisor-set §2).
     let rendered = render_supervisors(&path, tables)
         .and_then(|text| reads_back_as(&text, &blocks).map(|()| text))
         .map_err(Refused)?;
@@ -114,7 +114,7 @@ async fn apply_inner(
         removed,
     } = plan(&config.supervisors, &blocks);
 
-    // A removed Supervisor is uninstalled (CLT-supervisor-mode-and-kinds) — its adapter answers before the purge
+    // A removed Supervisor is uninstalled (CLT-server-manages-the-supervisor-set) — its adapter answers before the purge
     // below — while a changed one is only stopped and restarts under its name.
     let goodbyes = engine
         .retire_supervisors(&stopping, &removed)
@@ -141,7 +141,7 @@ async fn apply_inner(
     };
 
     // Written: the file no longer names the removed Supervisors, so their directories go with
-    // them (CLT-supervisor-mode-and-kinds) — program, packages, configuration, identity. The changed blocks in
+    // them (CLT-server-manages-the-supervisor-set) — program, packages, configuration, identity. The changed blocks in
     // `stopping` restart under their names and keep theirs.
     drop(write);
     {
@@ -180,7 +180,7 @@ async fn apply_inner(
     }
 }
 
-/// What applying an offered set does to the running one (CLT-supervisor-mode-and-kinds), by Supervisor name.
+/// What applying an offered set does to the running one (CLT-server-manages-the-supervisor-set), by Supervisor name.
 #[derive(Debug, PartialEq, Eq)]
 struct Plan {
     /// Removed and changed: stopped before the file is written.
@@ -245,7 +245,7 @@ struct Tomb {
 enum Aside {
     /// Nothing: a block that failed to start owns no directory yet, and purged is what it is.
     Nothing,
-    /// A link, which is removed as a link and never followed (CLT-supervisor-mode-and-kinds §33).
+    /// A link, which is removed as a link and never followed (CLT-server-manages-the-supervisor-set §8).
     Link,
     /// The directory, now under this tombstone name.
     Moved(String),
@@ -255,8 +255,8 @@ enum Aside {
 /// name no Supervisor can carry, so that whatever goes on removing from it after the purge gave up
 /// — the second service, past the purge's deadline — never reaches a Supervisor added again under
 /// the same name, which gets a fresh directory (PKG-versions-high-water-mark-floor §13). A link where a directory
-/// should be is removed, never followed (CLT-supervisor-mode-and-kinds §33). What cannot be moved is a warning,
-/// and stays an orphan (CLT-supervisor-mode-and-kinds §34). The tombstones earlier purges could not delete go with
+/// should be is removed, never followed (CLT-server-manages-the-supervisor-set §8). What cannot be moved is a warning,
+/// and stays an orphan (CLT-server-manages-the-supervisor-set §9). The tombstones earlier purges could not delete go with
 /// them: their names record that the Client meant to remove them (CLT-accounts-service-runs-under §25), and no other
 /// orphan is taken.
 fn entomb(config: &ClientConfig, removed: &[String]) -> Vec<Tomb> {
@@ -326,7 +326,7 @@ pub(crate) fn reap_tombstones(
 /// Moves the directory `name` beneath `root` aside to a fresh tombstone name, through the root's
 /// own handle: neither the entry nor anything beneath the root is followed as a link. So no
 /// directory whose resolved path lies outside the root is reached at all, and none is moved or
-/// removed (CLT-supervisor-mode-and-kinds §33): the entry is the root's own, and its tombstone stays beside it.
+/// removed (CLT-server-manages-the-supervisor-set §8): the entry is the root's own, and its tombstone stays beside it.
 #[cfg(unix)]
 fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
     use crate::storage::handle;
@@ -372,7 +372,7 @@ fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
 }
 
 /// Moves the directory `name` beneath `root` aside to a fresh tombstone name; a link is removed,
-/// and a directory whose resolved path lies outside the root is left alone (CLT-supervisor-mode-and-kinds §33).
+/// and a directory whose resolved path lies outside the root is left alone (CLT-server-manages-the-supervisor-set §8).
 #[cfg(not(unix))]
 fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
     let dir = root.join(name);
@@ -404,7 +404,7 @@ fn move_aside(root: &Path, name: &str) -> std::io::Result<Aside> {
 }
 
 /// Asks `plugins` — the second service, where a process account is registered — to remove what
-/// the Managed Processes wrote in each tomb and the Client cannot remove itself (CLT-accounts-service-runs-under §20). What is left is a warning, and the purge leaves it an orphan (CLT-supervisor-mode-and-kinds §34).
+/// the Managed Processes wrote in each tomb and the Client cannot remove itself (CLT-accounts-service-runs-under §20). What is left is a warning, and the purge leaves it an orphan (CLT-server-manages-the-supervisor-set §9).
 async fn release_removed(
     plugins: Option<&dyn crate::supervisor::ports::PluginRegistry>,
     tombs: &[Tomb],
@@ -428,13 +428,13 @@ async fn release_removed(
 }
 
 /// Deletes each tomb whole — program, packages, configuration, and the `instance-uid` whose Agent
-/// has already said its goodbye (CLT-supervisor-mode-and-kinds). It does not touch
+/// has already said its goodbye (CLT-server-manages-the-supervisor-set). It does not touch
 /// `<state_dir>/package-high-water.json` (PKG-versions-high-water-mark-floor §13): whatever a re-added Supervisor
 /// installs, under the same name or another, is held to the mark of its Agent type. Runs only after the
 /// rewritten `supervisor.toml` no longer names the Supervisor: a failed write restarts the stopped
 /// set from the old file, which needs the data intact. A directory that will not delete is a
 /// warning, never a `FAILED` apply — the set the Server asked for is running; the tombstone left
-/// is reported and removed again at the next start and with the next purge (CLT-supervisor-mode-and-kinds §34,
+/// is reported and removed again at the next start and with the next purge (CLT-server-manages-the-supervisor-set §9,
 /// CLT-accounts-service-runs-under §25).
 fn bury(tombs: &[Tomb]) {
     for tomb in tombs {
@@ -540,7 +540,7 @@ fn start(
     Ok(())
 }
 
-/// Reads the offered Supervisor set out of the composed config map (CLT-supervisor-mode-and-kinds): every entry is
+/// Reads the offered Supervisor set out of the composed config map (CLT-server-manages-the-supervisor-set): every entry is
 /// parsed as TOML, the union of their `[[supervisor]]` blocks is the set, and every other
 /// top-level key is ignored — the boundary is enforced by what the Client takes. Returns the
 /// parsed blocks beside their verbatim tables, which is what the write puts into `supervisor.toml`
@@ -620,15 +620,15 @@ pub fn offered_blocks(
 }
 
 /// Validates one offered `[[supervisor]]` block before any running process is touched: the startup
-/// loader's own checks (block schema, program-path resolution, ports, timeouts — CLT-supervisor-mode-and-kinds §27),
-/// and then the delivery-path constraint of CLT-supervisor-mode-and-kinds.
+/// loader's own checks (block schema, program-path resolution, ports, timeouts — CLT-server-manages-the-supervisor-set §2),
+/// and then the delivery-path constraint of CLT-server-manages-the-supervisor-set.
 ///
 /// A Server-delivered block may name only a program **this Client owns** — a bare file name, whose
 /// program lives in a directory this Client created and updates from signature-verified packages
-/// (CLT-supervisor-mode-and-kinds). Letting the Server spawn a program on the machine would be arbitrary code execution
+/// (CLT-server-manages-the-supervisor-set). Letting the Server spawn a program on the machine would be arbitrary code execution
 /// that never passes through package signing.
 ///
-/// That rule **cannot fire** (CLT-supervisor-mode-and-kinds): no block naming a program on the machine parses at all,
+/// That rule **cannot fire** (CLT-server-manages-the-supervisor-set): no block naming a program on the machine parses at all,
 /// from any principal, so every block reaching here already satisfies it. The check stays as
 /// defence in depth against a future shape nobody has thought of yet — deleting a guard because it
 /// currently cannot trigger is how it comes back — and `resolve_block_program` below is what
@@ -657,7 +657,7 @@ fn supervisor_tables(item: &toml_edit::Item) -> Option<Vec<toml_edit::Table>> {
 
 /// Replaces the `[[supervisor]]` blocks of `supervisor.toml` with the offered ones and leaves every
 /// other line of the file exactly as the operator wrote it — comments, ordering, formatting
-/// (CLT-supervisor-mode-and-kinds). A file that does not exist yet is created; the write goes through a sibling
+/// (CLT-server-manages-the-supervisor-set). A file that does not exist yet is created; the write goes through a sibling
 /// temporary file so a crash never leaves a half-written configuration. Returns the new text.
 #[cfg(test)]
 fn write_supervisors(
@@ -755,7 +755,7 @@ fn reads_back_as(text: &str, blocks: &[SupervisorBlock]) -> Result<(), String> {
 /// Through the one replacement of `supervisor.toml` ([`crate::config_file::replace`]), with the
 /// mode of the file it replaces, so the rename cannot loosen it: `supervisor.toml` may hold
 /// `[packages] archive_key` in cleartext and is created `0600`, and an operator's own mode, widened
-/// or narrowed deliberately, is kept (CLT-supervisor-mode-and-kinds §30). A file that does not exist yet takes
+/// or narrowed deliberately, is kept (CLT-server-manages-the-supervisor-set §5). A file that does not exist yet takes
 /// `0600`, the floor `config_init::write_new` uses. The apply runs as the service's own account in
 /// a directory that account owns (CLT-accounts-service-runs-under §21), so the owner is left as the account makes
 /// it.
@@ -803,7 +803,7 @@ mod tests {
         }
     }
 
-    /// CLT-supervisor-mode-and-kinds §26: only the `[[supervisor]]` blocks are read; a full
+    /// CLT-server-manages-the-supervisor-set §1: only the `[[supervisor]]` blocks are read; a full
     /// `supervisor.toml`-shaped document may be offered and exactly its fleet-manageable half takes
     /// effect.
     #[test]
@@ -841,7 +841,7 @@ mod tests {
 
     /// The set is stored as entry files once it applied, so entry names no host could store are
     /// refused before anything stops, not found out after the set already runs.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn an_offer_whose_entries_cannot_all_be_stored_is_refused() {
         let block = "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"agent\"\n";
@@ -887,7 +887,7 @@ mod tests {
     const AGENT: &str =
         "[[supervisor]]\ntype = \"command\"\nname = \"agent\"\ncommand = \"agent\"\n";
 
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_delivered_block_may_not_add_environment_the_operator_did_not_allow() {
         let block = delivered(&format!("{AGENT}env = {{ OTEL_RESOURCE = \"a\" }}\n"));
@@ -905,7 +905,7 @@ mod tests {
         crate::supervisor::check_delivered_block(&allowing, &block).expect("allowed by prefix");
     }
 
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_loader_variable_is_refused_whatever_the_operator_allowed() {
         let allowing = running("[supervisors]\ndelivered_env = [\"*\"]\n", AGENT);
@@ -930,7 +930,7 @@ mod tests {
 
     /// An allowed name still may not point at a file the Server delivered into the Supervisor's
     /// own directories — the OpenTelemetry Java agent would load a jar from there.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_delivered_value_may_not_point_into_its_own_directories() {
         let allowing = running("[supervisors]\ndelivered_env = [\"OTEL_*\"]\n", AGENT);
@@ -945,7 +945,7 @@ mod tests {
 
     /// The interpreters' and shells' own loader variables are refused like the dynamic loader's,
     /// in any case, whatever the operator allowed and whatever the value.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn an_interpreter_or_shell_loader_variable_is_refused_whatever_the_operator_allowed() {
         let allowing = running("[supervisors]\ndelivered_env = [\"*\"]\n", AGENT);
@@ -970,7 +970,7 @@ mod tests {
     /// A value naming a path under the Supervisors' root is refused as the placeholders are: the
     /// Server delivers files there that no one signed. `delivered_env = ["*"]` itself stands, a
     /// value the running block already carries stands, and a sibling of the root is not under it.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_delivered_value_may_not_name_a_path_under_the_supervisors_root() {
         let root = std::env::temp_dir().join("fleet-supervisors");
@@ -1008,7 +1008,7 @@ mod tests {
 
     /// Tables from two entries keep their sub-tables: what is written reads back as the set that
     /// was checked, and a `[supervisor.env]` never moves under another block's header.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn delivered_tables_from_two_entries_keep_their_sub_tables() {
         let offer = offer_of(&[
@@ -1041,7 +1041,7 @@ mod tests {
         );
     }
 
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_delivered_block_keeps_the_environment_it_already_runs_with() {
         let operators = format!("{AGENT}env = {{ LD_LIBRARY_PATH = \"/opt/vendor/lib\" }}\n");
@@ -1052,7 +1052,7 @@ mod tests {
         assert!(crate::supervisor::check_delivered_block(&config, &changed).is_err());
     }
 
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn delivered_arguments_need_the_operators_consent() {
         let with_args = delivered(&format!(
@@ -1076,8 +1076,8 @@ mod tests {
     /// With every argument and variable allowed, a listed Supervisor's delivered block still
     /// equals its running block whole: a changed `args`, `version_args`, `env` entry or core key,
     /// an added key and a dropped one are each refused naming the block and the key, and the
-    /// running block delivered back passes (CLT-supervisor-mode-and-kinds §51).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// running block delivered back passes (CLT-server-manages-the-supervisor-set §26).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_delivered_block_for_a_listed_supervisor_must_equal_the_running_block_whole() {
         let body = "args = [\"-c\", \"/etc/agent.conf\"]\nversion_args = [\"-v\"]\n\
@@ -1129,7 +1129,7 @@ mod tests {
         let err = crate::supervisor::check_delivered_block(&config, &other_kind)
             .expect_err("another kind under the listed name");
         assert!(err.contains("type"), "{err}");
-        // An unlisted Supervisor under the same consent takes them, as CLT-supervisor-mode-and-kinds lets it.
+        // An unlisted Supervisor under the same consent takes them, as CLT-server-manages-the-supervisor-set lets it.
         let unlisted = running(
             "[supervisors]\ndelivered_args = true\ndelivered_env = [\"*\"]\n",
             &operators,
@@ -1145,8 +1145,8 @@ mod tests {
 
     /// A listed Supervisor that does not run yet is added naming its program and nothing else:
     /// `type`, `name` and the kind's program key where the kind does not name its own pass, and
-    /// any further key — an empty one included — fails the offer naming it (CLT-supervisor-mode-and-kinds §51).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// any further key — an empty one included — fails the offer naming it (CLT-server-manages-the-supervisor-set §26).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn an_added_listed_supervisor_carries_only_what_names_its_program() {
         let config = running(LISTED_GLOBALS, "");
@@ -1262,8 +1262,8 @@ mod tests {
     /// The switch lives where the Server cannot write: a set that removes the listed block and
     /// delivers it again starts an Agent still without `AcceptsRemoteConfig`, the written file
     /// keeps `[supervisors]` byte for byte, and a block bringing arguments fails the whole offer
-    /// with the file untouched (CLT-supervisor-mode-and-kinds §45 and §51).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// with the file untouched (CLT-server-manages-the-supervisor-set §20 and §26).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[tokio::test]
     async fn a_delivered_set_cannot_switch_remote_config_back_on_for_a_listed_name() {
         use opamp::proto::{AgentCapabilities, RemoteConfigStatuses};
@@ -1339,7 +1339,7 @@ mod tests {
     /// keeps there fails startup, and an offered set carrying one is refused whole, naming the
     /// Supervisor and the entry, before anything stops or the file changes: a Supervisor `logs`
     /// would share the Client's log directory with the process account's group, and its purge
-    /// would delete it (CLT-accounts-service-runs-under §21, CLT-supervisor-mode-and-kinds §27).
+    /// would delete it (CLT-accounts-service-runs-under §21, CLT-server-manages-the-supervisor-set §2).
     /// Verifies: CLT-accounts-service-runs-under
     #[tokio::test]
     async fn a_supervisor_named_after_an_entry_of_the_clients_is_refused() {
@@ -1402,7 +1402,7 @@ mod tests {
         assert_eq!(engine.next_index(), 2, "the running set stays");
     }
 
-    /// CLT-supervisor-mode-and-kinds: a Server-delivered block that names an **absolute** program path is refused as a
+    /// CLT-server-manages-the-supervisor-set: a Server-delivered block that names an **absolute** program path is refused as a
     /// whole — that is the machine's own process, and letting the Server spawn one would run
     /// arbitrary code that never passed through package signing. The refusal names the block and the
     /// path, and (being a validation failure) leaves the running set and the file untouched.
@@ -1419,7 +1419,7 @@ mod tests {
 
     /// The attack this guard stands against: a Server that delivers a block spawning a program on
     /// the machine with arguments of its choosing. It is refused a step earlier and for a broader
-    /// reason (CLT-supervisor-mode-and-kinds) — no block naming a program on the machine parses, from any principal —
+    /// reason (CLT-server-manages-the-supervisor-set) — no block naming a program on the machine parses, from any principal —
     /// but the delivery path must still refuse it, which is what this asserts.
     #[test]
     fn a_server_delivered_block_may_not_name_an_absolute_program() {
@@ -1441,7 +1441,7 @@ mod tests {
         assert!(err.contains(program), "names the path: {err}");
     }
 
-    /// The counterpart: a bare file name is a program this Client owns (CLT-supervisor-mode-and-kinds), so a delivered
+    /// The counterpart: a bare file name is a program this Client owns (CLT-server-manages-the-supervisor-set), so a delivered
     /// block that names one is accepted — the only shape there is.
     #[test]
     fn a_server_delivered_block_naming_a_bare_program_is_accepted() {
@@ -1496,8 +1496,8 @@ mod tests {
     }
 
     /// The write replaces exactly the `[[supervisor]]` blocks. Everything the operator wrote —
-    /// comments, ordering, unrelated sections — survives byte for byte (CLT-supervisor-mode-and-kinds §30).
-    // Verifies: CLT-supervisor-mode-and-kinds
+    /// comments, ordering, unrelated sections — survives byte for byte (CLT-server-manages-the-supervisor-set §5).
+    // Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn the_write_replaces_blocks_and_keeps_the_operators_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1534,7 +1534,7 @@ mod tests {
     /// `allowed_sources`, the
     /// operator's consent in `[supervisors]`, self-update, Gateway Mode — the file keeps the
     /// operator's values and gains none of the offered ones.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_delivered_set_writes_nothing_beyond_the_supervisor_blocks() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1599,7 +1599,7 @@ mod tests {
 
     /// A delivered block of a kind this Client was not built with is refused, naming the kind —
     /// a Server cannot conjure a Supervisor type.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_delivered_block_of_an_unknown_type_is_refused() {
         let offer = offer_of(&[(
@@ -1619,7 +1619,7 @@ mod tests {
     /// Neither a delivered Supervisor name nor a delivered program name can leave the directories
     /// this Client owns: a name is one path component of a fixed grammar, and a program a bare
     /// file name inside `program/`.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_delivered_name_or_program_that_traverses_is_refused() {
         for name in ["..", "../etc", "a/b", "a\\b", "Agent"] {
@@ -1710,9 +1710,9 @@ mod tests {
     }
 
     /// An apply goes through the one replacement of `supervisor.toml`: the operator's own mode is
-    /// kept (CLT-supervisor-mode-and-kinds §30), and a link at the temporary name is replaced, never written
+    /// kept (CLT-server-manages-the-supervisor-set §5), and a link at the temporary name is replaced, never written
     /// through, as an install's rewrite replaces it.
-    /// Verifies: CLT-supervisor-mode-and-kinds, CLT-accounts-service-runs-under
+    /// Verifies: CLT-server-manages-the-supervisor-set, CLT-accounts-service-runs-under
     #[cfg(unix)]
     #[test]
     fn an_apply_keeps_the_operators_mode_and_writes_through_no_link() {
@@ -1749,10 +1749,10 @@ mod tests {
             .contains("name = \"new\""));
     }
 
-    /// CLT-supervisor-mode-and-kinds: the apply is a diff by name. An unchanged block rides through — neither stopped
+    /// CLT-server-manages-the-supervisor-set: the apply is a diff by name. An unchanged block rides through — neither stopped
     /// nor started — a changed one is stopped and started but keeps its directory, a vanished one
     /// is stopped and removed, and a new one is only started (point 14: removal is keyed by name).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn the_plan_is_a_diff_by_name_and_unchanged_blocks_ride_through() {
         let parse = |text: &str| -> Vec<SupervisorBlock> {
@@ -1779,10 +1779,10 @@ mod tests {
         );
     }
 
-    /// CLT-supervisor-mode-and-kinds: the purge deletes exactly the removed Supervisor's directory — whole, identity
+    /// CLT-server-manages-the-supervisor-set: the purge deletes exactly the removed Supervisor's directory — whole, identity
     /// included — leaves the neighbours untouched, and a directory that never materialized is
     /// nothing to report.
-    // Verifies: CLT-supervisor-mode-and-kinds
+    // Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn the_purge_deletes_exactly_the_removed_supervisors_directory() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2108,7 +2108,7 @@ mod tests {
     /// root the hand-over gave the Client, or `~/.local` → `/data` for `--user` — is purged
     /// through it: the link is the Client's, in a directory only the Client writes (PKG-versions-high-water-mark-floor §13,
     /// CLT-accounts-service-runs-under §21).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[cfg(unix)]
     #[test]
     fn a_root_reached_through_a_link_of_the_clients_own_is_purged() {
@@ -2223,9 +2223,9 @@ mod tests {
         }
     }
 
-    /// CLT-supervisor-mode-and-kinds hardening: the purge never recurses through a symlink planted where a Supervisor's
+    /// CLT-server-manages-the-supervisor-set hardening: the purge never recurses through a symlink planted where a Supervisor's
     /// directory should be — it removes the link, not what it points at. A `name` cannot itself
-    /// traverse (CLT-supervisor-mode-and-kinds), so this is the only way the delete could have escaped, and it does not.
+    /// traverse (CLT-server-manages-the-supervisor-set), so this is the only way the delete could have escaped, and it does not.
     #[cfg(unix)]
     #[test]
     fn the_purge_does_not_follow_a_symlink_out_of_the_supervisors_root() {

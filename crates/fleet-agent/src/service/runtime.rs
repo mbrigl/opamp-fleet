@@ -262,7 +262,7 @@ fn tls_posture(config: &ClientConfig) -> (String, String) {
 ///
 /// Without this, the net catches everything except the one failure a *new* version is most likely
 /// to bring: a file it refuses. A removed configuration key is exactly that
-/// ([CLT-supervisor-mode-and-kinds](../../../../docs/adr/CLT-supervisor-mode-and-kinds.md)),
+/// ([CLT-wrappers-act-through-the-core](../../../../docs/adr/CLT-wrappers-act-through-the-core.md)),
 /// and for some kinds there is no block both versions accept, so the cutover per host cannot be avoided — only caught.
 fn unreadable_config(spec: &RunSpec, error: String) -> Result<Exit, String> {
     let state_dir = recovery_state_dir(spec);

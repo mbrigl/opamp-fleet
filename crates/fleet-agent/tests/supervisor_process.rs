@@ -1,4 +1,4 @@
-//! The supervision `Runner` (CLT-supervisor-mode-and-kinds) across everything it does *to a host*: spawn and watchdog,
+//! The supervision `Runner` (CLT-wrappers-act-through-the-core) across everything it does *to a host*: spawn and watchdog,
 //! the health-gated apply, the binary swap and its rollback (PKG-signed-packages-and-delivery), and the tree install
 //! (PKG-signed-packages-and-delivery).
 //!
@@ -382,7 +382,7 @@ async fn the_directories_an_agent_writes_into_are_made_before_it_runs(via: Via) 
 both!(the_directories_an_agent_writes_into_are_made_before_it_runs);
 
 /// A program named by a **relative** path starts, though the process begins in its own directory
-/// (CLT-supervisor-mode-and-kinds).
+/// (CLT-wrappers-act-through-the-core).
 ///
 /// `Command` does `chdir` *before* `exec` on Unix, so a relative program is resolved against the
 /// directory it was just moved into: `<dir>/<dir>/<program>`, which is nothing. The Client's own
@@ -899,7 +899,7 @@ fn the_second_service_does_not_listen_while_it_is_traced() {
     assert!(!socket.exists(), "it listened while it was traced");
 }
 
-// ── Reload and uninstall (CLT-supervisor-mode-and-kinds) ──────────────────────────────────────────
+// ── Reload and uninstall (CLT-wrappers-act-through-the-core) ──────────────────────────────────────────
 
 /// The pid the spawn reported — how these tests tell a kept process from a fresh one.
 #[cfg(unix)]
@@ -1052,7 +1052,7 @@ async fn a_managed_process_whose_kind_declares_no_token_finds_none(via: Via) {
 }
 both!(a_managed_process_whose_kind_declares_no_token_finds_none);
 
-/// A kind that declared a reload applies a configuration in place (CLT-supervisor-mode-and-kinds): the process is
+/// A kind that declared a reload applies a configuration in place (CLT-wrappers-act-through-the-core): the process is
 /// signalled, survives the grace, and the apply is acknowledged without a restart — the process
 /// that was running is still the one running.
 #[cfg(unix)]
@@ -1103,10 +1103,10 @@ both!(
     a_declared_reload_applies_without_a_restart
 );
 
-/// `reload-or-restart` (CLT-supervisor-mode-and-kinds): a process that dies on its reload signal — the stub without
+/// `reload-or-restart` (CLT-wrappers-act-through-the-core): a process that dies on its reload signal — the stub without
 /// `--ignore-hup` keeps SIGHUP's default disposition, termination — is restarted on the new
 /// files, and the apply is acknowledged from that restart rather than failed.
-// Verifies: CLT-supervisor-mode-and-kinds
+// Verifies: CLT-wrappers-act-through-the-core
 #[cfg(unix)]
 async fn a_process_that_dies_on_the_reload_signal_is_restarted_instead(via: Via) {
     let mut harness = runner_full(
@@ -1137,9 +1137,9 @@ both!(
     a_process_that_dies_on_the_reload_signal_is_restarted_instead
 );
 
-/// The generic uninstall (CLT-supervisor-mode-and-kinds): the graceful stop plus the answer, which is the adapter's
+/// The generic uninstall (CLT-wrappers-act-through-the-core): the graceful stop plus the answer, which is the adapter's
 /// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
-/// coming last is what lets the core purge the directory only after the kind is done (CLT-supervisor-mode-and-kinds).
+/// coming last is what lets the core purge the directory only after the kind is done (CLT-wrappers-act-through-the-core).
 async fn an_uninstall_stops_the_process_answers_and_exits(via: Via) {
     let mut harness = start(via, || Some(spec(&stub_agent())));
     let health = next_health(&mut harness.events).await;
@@ -1352,7 +1352,7 @@ fn binary_harness(via: Via, binary: &Path, apply_grace: Duration) -> Harness {
     )
 }
 
-/// CLT-supervisor-mode-and-kinds §54: a package is *proved to run* before it replaces what runs. The check fails here, so
+/// CLT-wrappers-act-through-the-core §33: a package is *proved to run* before it replaces what runs. The check fails here, so
 /// nothing is swapped and — the point of the whole exercise — the running process is never stopped
 /// for an artifact that could never have worked. Before this, the sequence was stop, swap, fail to
 /// start, roll back, restart: an outage bought for nothing.
@@ -2700,10 +2700,10 @@ mod an_apply_while_the_second_service_is_away {
     }
 
     /// A restart command while a configuration and a package wait for the second service respawns
-    /// on the current files and does no more (CLT-supervisor-mode-and-kinds §8): its start, though it reaches the
+    /// on the current files and does no more (CLT-wrappers-act-through-the-core §5): its start, though it reaches the
     /// service, acknowledges nothing and swaps nothing in. The retry it makes due at once does
     /// both, with a start of its own that is gated.
-    /// Verifies: CLT-supervisor-mode-and-kinds, CLT-accounts-service-runs-under
+    /// Verifies: CLT-wrappers-act-through-the-core, CLT-accounts-service-runs-under
     #[tokio::test]
     async fn a_restart_while_something_waits_only_respawns_and_the_retry_decides() {
         let (mut away, service) = running(&stub_agent(), Duration::from_millis(500)).await;
@@ -3031,7 +3031,7 @@ mod an_apply_while_the_second_service_is_away {
 
     /// A package that waited for the second service without its preflight is refused by the
     /// preflight that runs once the service is back, before anything is stopped: it is reported
-    /// failed, and what ran stays in place (CLT-accounts-service-runs-under §18, CLT-supervisor-mode-and-kinds §54).
+    /// failed, and what ran stays in place (CLT-accounts-service-runs-under §18, CLT-wrappers-act-through-the-core §33).
     /// Verifies: CLT-accounts-service-runs-under
     #[tokio::test]
     async fn a_package_whose_preflight_found_the_service_away_is_refused_once_it_is_back() {

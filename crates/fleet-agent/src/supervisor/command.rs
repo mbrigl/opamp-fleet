@@ -12,7 +12,7 @@ use crate::supervisor::ports::{parse_settings, KindDefaults};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per DEV-six-crates-tokio-axum.
 ///
-/// `command` is not among them: the core takes it out and resolves it (CLT-supervisor-mode-and-kinds), and what
+/// `command` is not among them: the core takes it out and resolves it (CLT-wrappers-act-through-the-core), and what
 /// arrives here is [`SupervisorContext::program`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,7 +28,7 @@ struct CommandSettings {
     /// 2.0.0 version in its output becomes the Agent's `service.version`. A Foreign Agent's
     /// version flag is its own convention — hence opt-in, unlike the Collector's.
     ///
-    /// They are also this kind's **preflight** (CLT-supervisor-mode-and-kinds §54): a package's staged program is run with
+    /// They are also this kind's **preflight** (CLT-wrappers-act-through-the-core §33): a package's staged program is run with
     /// them before the running one is stopped, and a non-zero exit refuses the package with the
     /// program's own message. Same arguments, same contract — a check that is cheap and touches
     /// no state — asked where a refusal costs nothing rather than after the swap.
@@ -36,7 +36,7 @@ struct CommandSettings {
     version_args: Option<Vec<String>>,
 }
 
-/// The keys this kind does not take (CLT-supervisor-mode-and-kinds), each with what answers it. Refused by name rather
+/// The keys this kind does not take (CLT-wrappers-act-through-the-core), each with what answers it. Refused by name rather
 /// than met with serde's "unknown field", because a block carrying one expects a Client that needs
 /// it, and the operator deleting the line deserves to be told where the value went.
 const RETIRED: &[(&str, &str)] = &[
@@ -114,7 +114,7 @@ impl Instance for CommandInstance {
 mod tests {
     use super::*;
 
-    /// `command` is gone from these settings — the core resolves it (CLT-supervisor-mode-and-kinds) — so a block that
+    /// `command` is gone from these settings — the core resolves it (CLT-wrappers-act-through-the-core) — so a block that
     /// still carries it here would be an unknown key, which is exactly what must fail.
     #[test]
     fn settings_parse_strictly() {
@@ -135,8 +135,8 @@ mod tests {
         assert!(typo.try_into::<CommandSettings>().is_err());
     }
 
-    /// The two keys CLT-supervisor-mode-and-kinds retires are refused by name, on both sides of the seam: at startup,
-    /// and in an offered Supervisor set before any running process is touched (CLT-supervisor-mode-and-kinds). Each
+    /// The two keys CLT-server-manages-the-supervisor-set retires are refused by name, on both sides of the seam: at startup,
+    /// and in an offered Supervisor set before any running process is touched (CLT-server-manages-the-supervisor-set). Each
     /// message says what supplies the value now, because a block carrying one was written against
     /// a Client that took it.
     #[test]

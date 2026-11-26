@@ -401,7 +401,7 @@ no module.
   them. `api::paging` reads `limit` and `cursor`, encodes the opaque cursor, and writes
   `X-Total-Count` and the `Link` of the four lists that page.
 - **Client supervision** — `supervisor::ports` is the Port a Plugin implements
-  ([CLT-supervisor-mode-and-kinds](adr/CLT-supervisor-mode-and-kinds.md)),
+  ([CLT-wrappers-act-through-the-core](adr/CLT-wrappers-act-through-the-core.md)),
   and `shutdown` the handle every task stops on; the Plugins and the process runner are its
   adapters, among them the two Supervisors
   this project brings, the Collector's in `supervisor::collector` and the example Custom
@@ -553,7 +553,7 @@ the Supervisor's `config/` directory and restarts its process; the Agent reports
 Configuration typed for the Client
 itself carries `[[supervisor]]` blocks, which `reconfigure` checks and writes into
 `supervisor.toml` before it starts or stops anything
-([CLT-supervisor-mode-and-kinds](adr/CLT-supervisor-mode-and-kinds.md)).
+([CLT-wrappers-act-through-the-core](adr/CLT-wrappers-act-through-the-core.md)).
 
 **An Agent is placed under its Host.** Each Agent record names the Host it last arrived over — its
 own, or the Gateway's behind one. `fleet` derives from it, per Agent, what its effective description
