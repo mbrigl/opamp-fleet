@@ -63,6 +63,19 @@ pub struct Spec {
     pub own_process_group: bool,
 }
 
+/// A written configuration entry, as the core hands it to an instance
+/// (CLT-wrappers-act-through-the-core §10). The file lies in the [`Root::Config`] root under
+/// `name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    pub name: String,
+    /// The role the configuration gave it; `None` for an entry that is configuration itself
+    /// rather than supplementary content (SRV-configurations-compose-one-map).
+    pub role: Option<String>,
+    /// The SHA-256 of the entry's content.
+    pub digest: Vec<u8>,
+}
+
 /// What a kind states about itself, the same for every block of it
 /// (CLT-wrappers-act-through-the-core §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,10 +103,11 @@ pub struct Process {
 /// (CLT-wrappers-act-through-the-core §1 and §5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
-    /// The Supervisor starts: the instance starts its Managed Process.
-    Start,
+    /// The Supervisor starts, on the configuration entries already written: the instance starts
+    /// its Managed Process, where it has something to run on.
+    Start { entries: Vec<Entry> },
     /// A remote configuration was received and its entries written: apply it.
-    ApplyConfig { hash: Vec<u8> },
+    ApplyConfig { hash: Vec<u8>, entries: Vec<Entry> },
     /// A verified package waits to be installed.
     ApplyPackage { version: String, hash: Vec<u8> },
     /// The Server commanded a restart on the current files.
@@ -107,8 +121,10 @@ pub enum Input {
 pub trait Host: Send + Sync {
     /// Starts the Managed Process on `spec`, or restarts it on `spec` where it runs.
     fn start(&self, spec: Spec) -> Call<'_, ()>;
-    /// Applies the configuration of `hash` by restart or reload, health-gated, and answers it.
-    fn apply_config(&self, hash: Vec<u8>) -> Call<'_, ()>;
+    /// Applies the configuration of `hash` by restart or reload on `spec`, health-gated, and
+    /// answers it. `None`: the new configuration leaves nothing to run, and the Supervisor awaits
+    /// one.
+    fn apply_config(&self, hash: Vec<u8>, spec: Option<Spec>) -> Call<'_, ()>;
     /// Installs the package of `hash` by the core's swap, health-gated, and answers it (§8).
     fn install(&self, hash: Vec<u8>) -> Call<'_, ()>;
     /// Restarts the Managed Process on the current files.
@@ -154,29 +170,79 @@ pub trait Instance: Send {
     /// How the program is run, read once before the first input.
     fn process(&self) -> Process;
 
-    /// The process specification the default handling starts the Managed Process on.
-    fn spec(&self) -> Spec;
+    /// The process specification the default handling runs the Managed Process on, given the
+    /// written configuration entries. `None`: nothing to run on yet.
+    fn spec(&self, entries: &[Entry]) -> Option<Spec>;
 
     /// Handles one input through `host`. The default answers every input with the host
-    /// function of the same name, the start on [`spec`](Self::spec), which is all a kind needs
-    /// that only states how its program runs (CLT-wrappers-act-through-the-core §5).
+    /// function of the same name, the start and the apply on [`spec`](Self::spec), which is all a
+    /// kind needs that only states how its program runs (CLT-wrappers-act-through-the-core §5).
     fn handle<'a>(&'a mut self, input: Input, host: &'a dyn Host) -> Call<'a, ()> {
-        let spec = self.spec();
-        Box::pin(async move { default_handling(input, spec, host).await })
+        let spec = match &input {
+            Input::Start { entries } | Input::ApplyConfig { entries, .. } => self.spec(entries),
+            _ => None,
+        };
+        Box::pin(default_handling(input, spec, host))
     }
 }
 
-/// The host function each input asks for by default.
+/// The host function each input asks for by default. A start without a `spec` starts nothing.
 ///
 /// # Errors
 /// Returns what the host function returns.
-pub async fn default_handling(input: Input, spec: Spec, host: &dyn Host) -> Result<(), String> {
+pub async fn default_handling(
+    input: Input,
+    spec: Option<Spec>,
+    host: &dyn Host,
+) -> Result<(), String> {
     match input {
-        Input::Start => host.start(spec).await,
-        Input::ApplyConfig { hash } => host.apply_config(hash).await,
+        Input::Start { .. } => match spec {
+            Some(spec) => host.start(spec).await,
+            None => Ok(()),
+        },
+        Input::ApplyConfig { hash, .. } => host.apply_config(hash, spec).await,
         Input::ApplyPackage { hash, .. } => host.install(hash).await,
         Input::Restart => host.restart().await,
         Input::Uninstall => host.uninstall().await,
+    }
+}
+
+/// A host in memory that records each call, for the table tests of the kinds.
+#[cfg(test)]
+pub(crate) mod recorded {
+    use super::{Call, Host, Spec};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    pub(crate) struct Recorded(pub(crate) Mutex<Vec<String>>);
+
+    impl Recorded {
+        fn push(&self, call: String) -> Call<'_, ()> {
+            self.0.lock().expect("calls").push(call);
+            Box::pin(async { Ok(()) })
+        }
+
+        pub(crate) fn calls(&self) -> Vec<String> {
+            self.0.lock().expect("calls").clone()
+        }
+    }
+
+    impl Host for Recorded {
+        fn start(&self, spec: Spec) -> Call<'_, ()> {
+            self.push(format!("start {spec:?}"))
+        }
+        fn apply_config(&self, hash: Vec<u8>, spec: Option<Spec>) -> Call<'_, ()> {
+            self.push(format!("apply_config {hash:?} {spec:?}"))
+        }
+        fn install(&self, hash: Vec<u8>) -> Call<'_, ()> {
+            self.push(format!("install {hash:?}"))
+        }
+        fn restart(&self) -> Call<'_, ()> {
+            self.push("restart".to_string())
+        }
+        fn uninstall(&self) -> Call<'_, ()> {
+            self.push("uninstall".to_string())
+        }
     }
 }
 

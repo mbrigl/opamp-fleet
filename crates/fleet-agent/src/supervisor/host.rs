@@ -15,7 +15,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::shutdown::Shutdown;
-use crate::supervisor::port::{self, Call, Host, Input, Instance, Root, RootPath, Spec, Value};
+use crate::supervisor::port::{
+    self, Call, Entry, Host, Input, Instance, Root, RootPath, Spec, Value,
+};
 use crate::supervisor::ports::{
     self, InstallTarget, KindDefaults, ProcessCommand, SupervisorContext,
 };
@@ -67,6 +69,9 @@ impl<P: port::Plugin + 'static> ports::Plugin for Hosted<P> {
             .instantiate(&ctx.name, std::mem::take(&mut ctx.settings))?;
         let process = instance.process();
         let roots = Roots::of(&ctx);
+        let first = Input::Start {
+            entries: entries(&roots.config),
+        };
         let spec = Arc::new(Mutex::new(None::<ProcessSpec>));
         let (to_runner, runner_commands) = mpsc::channel(16);
         let version_probe = process.version_args.clone().map(|args| VersionProbe {
@@ -118,6 +123,7 @@ impl<P: port::Plugin + 'static> ports::Plugin for Hosted<P> {
         tokio::spawn(drive(
             instance,
             host,
+            first,
             move || {
                 started.running.store(true, Ordering::SeqCst);
                 tokio::spawn(runner.run(runner_shutdown));
@@ -191,6 +197,37 @@ impl Roots {
     }
 }
 
+/// The configuration entries written in `config_dir`, by name, each with its role and digest
+/// (CLT-wrappers-act-through-the-core §10). An unreadable directory holds none.
+fn entries(config_dir: &Path) -> Vec<Entry> {
+    let roles = crate::storage::entry_roles(config_dir);
+    let configuration = crate::storage::config_entries(config_dir)
+        .into_iter()
+        .filter_map(|path| Some((path.file_name()?.to_string_lossy().into_owned(), None)));
+    let supplementary = roles
+        .into_iter()
+        .filter(|(name, _)| {
+            std::fs::symlink_metadata(config_dir.join(name)).is_ok_and(|m| m.is_file())
+        })
+        .map(|(name, role)| (name, Some(role)));
+    let mut entries: Vec<Entry> = configuration
+        .chain(supplementary)
+        .map(|(name, role)| Entry {
+            digest: std::fs::read(config_dir.join(&name))
+                .map(|content| {
+                    ring::digest::digest(&ring::digest::SHA256, &content)
+                        .as_ref()
+                        .to_vec()
+                })
+                .unwrap_or_default(),
+            name,
+            role,
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
 /// The host functions of one Supervisor, carried out over its [`Runner`].
 struct CoreHost {
     name: String,
@@ -242,6 +279,15 @@ impl CoreHost {
         })
     }
 
+    /// What the `Runner` starts the Managed Process on from its next start on.
+    fn set(&self, spec: Option<ProcessSpec>) -> Result<(), String> {
+        *self
+            .spec
+            .lock()
+            .map_err(|_| "the process specification is lost".to_string())? = spec;
+        Ok(())
+    }
+
     async fn send(&self, command: ProcessCommand) -> Result<(), String> {
         self.runner
             .send(command)
@@ -265,11 +311,7 @@ impl CoreHost {
 impl Host for CoreHost {
     fn start(&self, spec: Spec) -> Call<'_, ()> {
         Box::pin(async move {
-            let resolved = self.resolve(&spec)?;
-            *self
-                .spec
-                .lock()
-                .map_err(|_| "the process specification is lost".to_string())? = Some(resolved);
+            self.set(Some(self.resolve(&spec)?))?;
             if self.running.load(Ordering::SeqCst) {
                 self.send(ProcessCommand::Restart).await?;
             }
@@ -277,9 +319,11 @@ impl Host for CoreHost {
         })
     }
 
-    fn apply_config(&self, hash: Vec<u8>) -> Call<'_, ()> {
+    fn apply_config(&self, hash: Vec<u8>, spec: Option<Spec>) -> Call<'_, ()> {
         Box::pin(async move {
             let command = Self::take(&self.configs, &hash, "configuration")?;
+            let resolved = spec.as_ref().map(|spec| self.resolve(spec)).transpose()?;
+            self.set(resolved)?;
             self.send(command).await
         })
     }
@@ -325,7 +369,10 @@ async fn front(
                 if let Ok(mut pending) = host.configs.lock() {
                     pending.insert(hash.clone(), ProcessCommand::ApplyConfig { config, span });
                 }
-                Input::ApplyConfig { hash }
+                Input::ApplyConfig {
+                    hash,
+                    entries: entries(&host.roots.config),
+                }
             }
             ProcessCommand::ApplyPackage {
                 staged,
@@ -366,12 +413,13 @@ async fn front(
 async fn drive(
     mut instance: Box<dyn Instance>,
     host: Arc<dyn Host>,
+    first: Input,
     started: impl FnOnce() + Send,
     mut inputs: mpsc::Receiver<Input>,
     mut shutdown: Shutdown,
 ) {
     let outcome = tokio::select! {
-        outcome = instance.handle(Input::Start, &*host) => outcome,
+        outcome = instance.handle(first, &*host) => outcome,
         () = shutdown.requested() => return,
     };
     if let Err(e) = outcome {
@@ -415,7 +463,7 @@ mod tests {
         fn start(&self, _spec: Spec) -> Call<'_, ()> {
             Box::pin(async { Ok(()) })
         }
-        fn apply_config(&self, _hash: Vec<u8>) -> Call<'_, ()> {
+        fn apply_config(&self, _hash: Vec<u8>, _spec: Option<Spec>) -> Call<'_, ()> {
             Box::pin(async { Ok(()) })
         }
         fn install(&self, _hash: Vec<u8>) -> Call<'_, ()> {
@@ -439,8 +487,8 @@ mod tests {
         fn process(&self) -> Process {
             Process::default()
         }
-        fn spec(&self) -> Spec {
-            Spec::default()
+        fn spec(&self, _entries: &[Entry]) -> Option<Spec> {
+            None
         }
         fn handle<'a>(&'a mut self, input: Input, _host: &'a dyn Host) -> Call<'a, ()> {
             Box::pin(async move {
@@ -451,6 +499,7 @@ mod tests {
                         self.gate.notified().await;
                         push("restart ends");
                     }
+                    Input::Start { .. } => push("Start"),
                     other => push(&format!("{other:?}")),
                 }
                 Ok(())
@@ -482,6 +531,9 @@ mod tests {
         let driven = tokio::spawn(drive(
             Box::new(instance),
             Arc::new(Idle),
+            Input::Start {
+                entries: Vec::new(),
+            },
             || {},
             inputs,
             shutdown,
@@ -516,6 +568,9 @@ mod tests {
         let driven = tokio::spawn(drive(
             Box::new(instance),
             Arc::new(Idle),
+            Input::Start {
+                entries: Vec::new(),
+            },
             || {},
             inputs,
             shutdown,
@@ -578,6 +633,37 @@ mod tests {
             roots.value(&Value::Text("${config_dir}".to_string())),
             Ok("${config_dir}".to_string()),
             "a text is passed as written"
+        );
+    }
+
+    /// The core hands an instance every written entry, by name, with its role and digest, and
+    /// none of its own bookkeeping.
+    #[test]
+    fn the_entries_carry_name_role_and_digest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(entries(dir.path()).is_empty(), "no configuration yet");
+        std::fs::write(dir.path().join("b"), b"service: {}\n").expect("write");
+        std::fs::write(dir.path().join("a"), b"x").expect("write");
+        std::fs::write(dir.path().join("ca"), b"pem").expect("write");
+        std::fs::write(
+            dir.path().join(crate::storage::SUPPLEMENTARY_FILE),
+            "ca\tcertificate\n",
+        )
+        .expect("write");
+        let found = entries(dir.path());
+        let named: Vec<(&str, Option<&str>)> = found
+            .iter()
+            .map(|e| (e.name.as_str(), e.role.as_deref()))
+            .collect();
+        assert_eq!(
+            named,
+            vec![("a", None), ("b", None), ("ca", Some("certificate"))]
+        );
+        assert_eq!(
+            found[0].digest,
+            ring::digest::digest(&ring::digest::SHA256, b"x")
+                .as_ref()
+                .to_vec()
         );
     }
 }

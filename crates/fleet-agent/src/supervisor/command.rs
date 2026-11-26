@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::supervisor::port::{Instance, Manifest, Plugin, Process, Spec, Value};
+use crate::supervisor::port::{Entry, Instance, Manifest, Plugin, Process, Spec, Value};
 use crate::supervisor::ports::{parse_settings, KindDefaults};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per DEV-six-crates-tokio-axum.
@@ -51,7 +51,6 @@ const RETIRED: &[(&str, &str)] = &[
     ),
 ];
 
-/// The `command` kind. Its [`Spawner`] is the one the registry hands every plugin (CLT-accounts-service-runs-under).
 /// The `command` kind, on the Plugin port of CLT-wrappers-act-through-the-core: it states how
 /// the Foreign Agent runs, and the core does the rest.
 #[derive(Default)]
@@ -91,8 +90,8 @@ impl Instance for CommandInstance {
 
     /// The operator's arguments and environment, as written, the placeholders of the
     /// Supervisor's own directories expanded by the core (CLT-wrappers-act-through-the-core §31).
-    fn spec(&self) -> Spec {
-        Spec {
+    fn spec(&self, _entries: &[Entry]) -> Option<Spec> {
+        Some(Spec {
             args: self
                 .settings
                 .args
@@ -107,7 +106,7 @@ impl Instance for CommandInstance {
                 .collect(),
             working_dir: None,
             own_process_group: false,
-        }
+        })
     }
 }
 
@@ -159,34 +158,8 @@ mod tests {
     /// Verifies: CLT-wrappers-act-through-the-core
     #[tokio::test]
     async fn command_acts_only_through_the_host() {
-        use crate::supervisor::port::{Call, Host, Input};
-        use std::sync::Mutex;
-
-        #[derive(Default)]
-        struct Recorded(Mutex<Vec<String>>);
-        impl Recorded {
-            fn push(&self, call: String) -> Call<'_, ()> {
-                self.0.lock().expect("calls").push(call);
-                Box::pin(async { Ok(()) })
-            }
-        }
-        impl Host for Recorded {
-            fn start(&self, spec: Spec) -> Call<'_, ()> {
-                self.push(format!("start {:?} {:?}", spec.args, spec.env))
-            }
-            fn apply_config(&self, hash: Vec<u8>) -> Call<'_, ()> {
-                self.push(format!("apply_config {hash:?}"))
-            }
-            fn install(&self, hash: Vec<u8>) -> Call<'_, ()> {
-                self.push(format!("install {hash:?}"))
-            }
-            fn restart(&self) -> Call<'_, ()> {
-                self.push("restart".to_string())
-            }
-            fn uninstall(&self) -> Call<'_, ()> {
-                self.push("uninstall".to_string())
-            }
-        }
+        use crate::supervisor::port::recorded::Recorded;
+        use crate::supervisor::port::Input;
 
         let table: toml::Table =
             toml::from_str("args = [\"-c\", \"${config_dir}/a\"]\n[env]\nK = \"v\"\n")
@@ -194,8 +167,13 @@ mod tests {
         let mut instance = Command.instantiate("agent", table).expect("instance");
         let host = Recorded::default();
         for input in [
-            Input::Start,
-            Input::ApplyConfig { hash: vec![1] },
+            Input::Start {
+                entries: Vec::new(),
+            },
+            Input::ApplyConfig {
+                hash: vec![1],
+                entries: Vec::new(),
+            },
             Input::ApplyPackage {
                 version: "1.0.0".to_string(),
                 hash: vec![2],
@@ -205,17 +183,20 @@ mod tests {
         ] {
             instance.handle(input, &host).await.expect("handled");
         }
-        let template = |s: &str| format!("{:?}", Value::Template(s.to_string()));
+        let spec = Spec {
+            args: vec![
+                Value::Template("-c".to_string()),
+                Value::Template("${config_dir}/a".to_string()),
+            ],
+            env: vec![("K".to_string(), Value::Template("v".to_string()))],
+            working_dir: None,
+            own_process_group: false,
+        };
         assert_eq!(
-            *host.0.lock().expect("calls"),
+            host.calls(),
             vec![
-                format!(
-                    "start [{}, {}] [(\"K\", {})]",
-                    template("-c"),
-                    template("${config_dir}/a"),
-                    template("v")
-                ),
-                "apply_config [1]".to_string(),
+                format!("start {spec:?}"),
+                format!("apply_config [1] {:?}", Some(&spec)),
                 "install [2]".to_string(),
                 "restart".to_string(),
                 "uninstall".to_string(),

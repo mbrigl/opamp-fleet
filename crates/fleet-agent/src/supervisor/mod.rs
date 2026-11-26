@@ -49,9 +49,7 @@ pub const SELF_AGENT_OFFSET: usize = SELF_AGENT_INDEX + 1;
 /// Every plugin is handed `spawner`, which starts its Managed Processes (CLT-accounts-service-runs-under §18).
 fn registry(spawner: &Spawner) -> Vec<Box<dyn Plugin>> {
     vec![
-        Box::new(collector::CollectorPlugin {
-            spawner: spawner.clone(),
-        }),
+        Box::new(host::Hosted::new(collector::Collector, spawner.clone())),
         Box::new(host::Hosted::new(command::Command, spawner.clone())),
     ]
 }
