@@ -41,8 +41,9 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 # CLT-server-manages-the-supervisor-set §5: the surgical `[[supervisor]]` rewrite of
-# `supervisor.toml` keeps the operator's half of the file — comments, ordering, formatting — exactly as written; the questionnaire's edit of an
-# existing file does the same (CLT-installed-service-and-state §24).
+# `supervisor.toml` keeps the operator's half of the file — comments, ordering, formatting —
+# exactly as written; the questionnaire's edit of an existing file does the same
+# (CLT-installed-service-and-state §24).
 toml_edit.workspace = true
 futures-util.workspace = true
 tracing.workspace = true

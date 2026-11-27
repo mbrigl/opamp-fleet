@@ -208,24 +208,31 @@ impl Roots {
     }
 
     /// Creates the directory and what is missing above it, never through a link.
-    /// In `data`, where a process account is registered, it is made as the Client makes a kind's
-    /// data directories: shared with that account's group, its mode set whatever the umask, and
-    /// an existing one corrected (CLT-accounts-service-runs-under §21). Elsewhere, and where none
-    /// is, it is the Client's alone, as the Managed Process then runs under the Client's account.
+    /// In `data`, where a process account is registered, each directory on the way is made as the
+    /// Client makes a kind's data directories: shared with that account's group, its mode set
+    /// whatever the umask, and an existing one corrected (CLT-accounts-service-runs-under §21).
+    /// Each is reached from the Supervisor's directory, which the process account does not write
+    /// in. Elsewhere, and where none is, it is the Client's alone, as the Managed Process then
+    /// runs under the Client's account.
     pub(super) fn create_dir(&self, dir: &RootPath) -> Result<(), String> {
         writable(dir)?;
         let names = components(dir)?;
         let mut held = self
             .held_root(dir.root)
             .map_err(|e| failed("reach", dir, &e))?;
-        if let (Root::Data, Some(group), false) = (dir.root, self.group, names.is_empty()) {
-            return crate::storage::create_shared_dir(
-                &self.data,
-                &self.path(dir)?,
-                Some(group),
-                Shared::Written,
-            )
-            .map_err(|e| failed("create", dir, &e));
+        if let (Root::Data, Some(group)) = (dir.root, self.group) {
+            let mut made = self.data.clone();
+            for name in &names {
+                made.push(name);
+                crate::storage::create_shared_dir(
+                    &self.supervisor_dir,
+                    &made,
+                    Some(group),
+                    Shared::Written,
+                )
+                .map_err(|e| failed("create", dir, &e))?;
+            }
+            return Ok(());
         }
         for name in &names {
             held = held
@@ -465,7 +472,7 @@ mod tests {
         roots
             .create_dir(&file(Root::Data, "narrow"))
             .expect("corrected");
-        for made in ["spool/in", "narrow"] {
+        for made in ["spool", "spool/in", "narrow"] {
             let made = meta(&roots.data.join(made));
             assert_eq!((made.gid(), made.mode() & 0o7777), (gid, 0o2770));
         }
