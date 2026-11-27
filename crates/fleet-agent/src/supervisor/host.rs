@@ -808,8 +808,17 @@ mod tests {
             shutdown,
         ));
         to_instance.send(Input::Restart).await.expect("send");
-        // timed: lets the restart's call begin; the assertion below sees whether it did.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The restart's call has begun, and holds at its gate, before the shutdown fires.
+        // timed: the waiter's own deadline, which only a defect reaches
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while log.lock().expect("log").len() < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the restart's call began"
+            );
+            // timed: a poll of the log, not a wait for the call
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let _ = stop.send(true);
         tokio::time::timeout(Duration::from_secs(5), driven)
             .await
