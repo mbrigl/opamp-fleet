@@ -8,13 +8,13 @@
 
 ## Context
 
-This ADR and [CLT-server-manages-the-supervisor-set](CLT-server-manages-the-supervisor-set.md)
-together supersede [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md). An ADR is
+This ADR supersedes [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md). An ADR is
 superseded whole. The revision below touches the port, the kinds and their lifecycle; it does not
 touch the Server-managed set, its two switches or the repeated offer. Those clauses move unchanged
-in meaning into the other ADR, and this ADR restates the rest, revising what the port decides.
-Every clause of the superseded ADR lives on in one of the two. The map, old clause to new, is in
-the hand-off of this change.
+in meaning into [CLT-server-manages-the-supervisor-set](CLT-server-manages-the-supervisor-set.md),
+which restates them, and this ADR restates the rest, revising what the port decides. Every clause
+of the superseded ADR lives on in one of the two. The map, old clause to new, is in the hand-off of
+this change. A status line names one successor, so this ADR alone carries the `Supersedes` field.
 
 **Why the port is revised.** The superseded ADR made a Plugin a factory that starts a tokio task
 of its own (its clause 1). The task receives `SupervisorContext`: absolute paths, the Endpoint
@@ -152,8 +152,9 @@ core grants.
    - The Plugin acts only through the host functions of clause 4. Each answers with its outcome or
      with the reason it was refused.
    - The core may cancel a running handler at shutdown and at an uninstall.
-   - The port keeps three calls: the manifest (clause 6), the side-effect-free `check` of a block's
-     settings, and the handler.
+   - A Plugin answers, without side effects, for its manifest (clause 6), the `check` of a block's
+     settings and of a delivered block, and the instance it makes for one Supervisor. The instance
+     answers what its program needs to run (clauses 6 and 11), and its handler acts.
 
 2. **The port carries plain data only.**
    - Every input, argument and result of a host function, manifest and setting is built from
@@ -172,10 +173,13 @@ core grants.
      - `data`: a directory the Managed Process writes into (clause 6), shared with the process
        account's group;
      - `state`: the Plugin's own directory, which the Client alone reads and writes.
-   - A relative path must name no absolute path, no `..` component and no empty component.
-   - The core resolves every path inside its root through the no-follow adapter
+   - A relative path is a list of plain names separated by `/`. It must not be absolute, and no
+     name may be empty, `.` or `..`. The empty path names the root itself.
+   - The core opens every path inside its root through the no-follow adapter
      ([CLT-accounts-service-runs-under §15](CLT-accounts-service-runs-under.md)). A path that
      would leave its root fails the call.
+   - A path the core hands a program, in a process specification or a probe, it checks by these
+     rules alone. The program opens it.
    - The `state` root lies in the Supervisor's directory. It is the Client's alone, as everything
      there is that [CLT-accounts-service-runs-under §21](CLT-accounts-service-runs-under.md) does
      not name.
@@ -190,9 +194,9 @@ core grants.
      - to read, write, rename or remove a file within a root the function may reach;
      - to list or create a directory within such a root;
      - to set or cancel a timer, which arrives as an input;
-     - to report health, a description or an effective configuration;
+     - to report health;
      - to answer the apply of a configuration or of a package, and to answer an uninstall.
-   - Host facts reach a Plugin through a host function the core answers from its host-facts port.
+   - Host facts reach a Plugin through a host function the core answers.
      Examples are the fully qualified host name and the account a program runs under.
    - The core must refuse a call outside the root it names. It fails only that call and returns
      the reason to the Plugin.
@@ -224,12 +228,14 @@ core grants.
    - whether a block may pin `endpoint_port`;
    - its reload signal, if its agent reloads on one;
    - whether its Managed Process leads its own process group (clause 32);
-   - its version arguments and preflight, with their working directory and environment
-     (clauses 33 and 34);
    - the directories its agent writes into, relative to the `data` root;
    - the block key naming its program, for `collector` and `command`.
 
    Beyond that:
+   - **Version probe:** an instance states once, at its start, how its program's version is
+     asked: the arguments, the environment and the working directory (clauses 33 and 34). It
+     states how the version is read too (clause 11). The probe is the instance's, not the
+     manifest's, because `command` takes its version arguments from its block.
    - **Working directory:** a Managed Process starts in the directory its program lives in,
      unless the process specification names another. That is `program/` for a single file and the
      tree root for a tree. No block sets it. Every path the core hands a process is absolute.
@@ -278,10 +284,11 @@ core grants.
     reload.
 
 11. **A Plugin reads its program's version from the probe's output.** The core runs the version
-    probe the manifest names and hands the Plugin its output as an input. The Plugin answers with
-    the version, or with none. The default reading is strict Semantic Versioning. A kind whose
-    program prints its version in another form reads it itself. Its ADR says how the form is
-    read.
+    probe the instance states (clause 6). It reads the version out of the output with the
+    instance's reading, which answers the version or none. The reading is a function of the text
+    alone, so the core may call it while the handler runs. The default reading is strict Semantic
+    Versioning. A kind whose program prints its version in another form reads it itself. Its ADR
+    says how the form is read.
 
 12. **The port is ready for a WebAssembly Plugin, and the build loads none.**
     - Today every Plugin is native Rust, compiled in and selected by `type` (clause 14).
@@ -533,19 +540,19 @@ core grants.
       line.
 
 34. **The version probe and the preflight ask the program as its start runs it.**
-    - `VersionProbe` and `Preflight` each take an optional working directory, inherited when none
-      is named.
-    - A kind that names a working directory for the start (clause 6) names it for both. The
+    - One probe serves both. It takes an optional working directory, inherited when none is named,
+      and an environment, empty by default.
+    - A kind that names a working directory for the start (clause 6) names it for the probe. The
       version is then asked of the program the Supervisor runs, and the preflight starts in the
       same place inside the staged tree.
-    - The staged tree's root is known only once the package is staged. A preflight therefore
-      writes `${staged}` for it. `${staged}` resolves to that root in the preflight's arguments, in
-      the values of its environment and in its working directory.
+    - The probe names paths in the `program` root. The core resolves them to the live program for
+      the version probe and to the staged one for the preflight. The staged tree's root is known
+      only once the package is staged, so the core resolves it then, in the arguments, in the
+      values of the environment and in the working directory.
     - A program handed paths into its own tree, or a tree carrying its own libraries, is thus proved
       against the staged tree rather than against what the running version leaves behind.
-    - `VersionProbe` takes an environment too, empty by default. A kind whose start hands its
-      program an environment the program needs to run at all hands the probe the same, pointing
-      into the live tree. The library path of a tree carrying its own libraries is such an
+    - A kind whose start hands its program an environment the program needs to run at all hands
+      the probe the same. The library path of a tree carrying its own libraries is such an
       environment.
     - `collector` and `command` name no working directory and no environment for either.
 
@@ -674,7 +681,7 @@ None.
   as written and the probe with no environment.** A program that needs its tree root or its
   environment to run would then answer as another program would, or not at all, and a preflight
   could not hand the program a path into the staged tree. Both run as the start runs the program,
-  and a preflight names the staged root `${staged}` (clause 34).
+  and a path in the `program` root names the staged tree in a preflight (clause 34).
 - **Leave an operator's `[attributes]` key under a kind's `supervisor.kind.*` key as written.** An
   operator could then claim for a Client a kind it was not compiled with, and a Selector would aim
   a Supervisor set at a Client that cannot run it. `[attributes]` refuses every `supervisor.*`
@@ -794,6 +801,8 @@ None.
   passes the core's checks, and every program a Plugin runs goes through the second service where
   a process account is registered. `icinga2` can then run under a process account.
 - Positive: a Plugin is tested against a host in memory, with no stub program and no file system.
+- Positive: an apply, an install or an uninstall a Plugin leaves unanswered is answered by the
+  core, so no Agent stays `APPLYING` for a kind's mistake.
 - Positive: a WebAssembly Plugin is one more adapter behind an unchanged core.
 - Positive: take-over has a place in the architecture and grants its rights in one place, the
   core.
@@ -804,14 +813,18 @@ None.
 - Negative / trade-offs: reading a large file through the port copies its bytes into the Plugin.
 - Negative / trade-offs: the `icinga2` kind is rewritten against the port. `glpi` and `telegraf`
   change their wiring only. All three branches must follow this ADR before they land.
-- Negative / trade-offs: the `state` directory is new in each Supervisor's directory. The tree in
-  [CLT-accounts-service-runs-under §24](CLT-accounts-service-runs-under.md) does not show it, and
-  [CLT-accounts-service-runs-under §21](CLT-accounts-service-runs-under.md) covers it only by its
-  rule for what the table does not name.
+- Negative / trade-offs: the `data` and `state` directories are new in each Supervisor's
+  directory. The tree in [CLT-accounts-service-runs-under §24](CLT-accounts-service-runs-under.md)
+  shows neither. [CLT-accounts-service-runs-under §21](CLT-accounts-service-runs-under.md) covers
+  `data` as a kind's data directory, and `state` only by its rule for what the table does not
+  name.
+- Negative / trade-offs: the Enforcement of
+  [DEV-ports-and-adapters](DEV-ports-and-adapters.md) names three roles, and the test now has a
+  fourth, `Plugin`.
 - Follow-ups (by topic): the ADR that loads a WebAssembly Plugin, with runtime, interface
   versioning and the trust in a component; the ADR that builds take-over; a host function for an
-  agent's API once a kind needs one; moving every citation of the superseded ADR to the clause
-  that now carries it; the `state` directory in the layout of the next normalization;
+  agent's API once a kind needs one; the `data` and `state` directories in the layout, and the
+  `Plugin` role in the Enforcement of the ports-and-adapters decision, at the next normalization;
   extension-configuration injection; plain-HTTP polling on the Endpoint; connection pools and
   their failure semantics; a verified-reload gate and making reload vs restart visible upstream;
   the kinds in `AvailableComponents` once it leaves *Development*; the next wrapped agent (Fluent
@@ -824,15 +837,25 @@ None.
 - The boundary of the Plugin, in `crates/fleet-core/tests/dependency_direction.rs`:
   `a_plugin_names_only_the_port`. Each kind's module has the role `Plugin`. It may name the port
   module, `serde`, `toml` and the parts of `std` that do no I/O. It fails on `std::fs`,
-  `std::process`, `std::net`, `tokio`, `libc`, `nix`, `crate::storage` and every other module of
-  the crate (clauses 1 and 4).
-- The port's data, in `crates/fleet-agent/src/supervisor/ports.rs`:
-  `the_port_carries_no_host_resource`. It reads the port's types and fails on a path, a handle, a
-  channel, a span or a secret type (clause 2).
-- The host functions, in `crates/fleet-agent/tests/supervisor_process.rs`:
-  `a_path_outside_its_root_fails_only_that_call`, `a_plugin_cannot_write_its_config_or_program`,
-  `a_program_a_plugin_runs_goes_through_the_second_service`, and
-  `the_handler_is_never_called_twice_at_once` (clauses 1, 3 and 4).
+  `std::process`, `std::net`, `std::io`, a clock read, `tokio`, `libc`, `nix`, `crate::storage`
+  and every other module of the crate, `supervisor::ports` among them (clauses 1 and 4).
+- The port's data, in the same file: `the_port_carries_no_host_resource`. It reads the port's
+  syntax, and the struct of another crate it embeds. It fails on a path, a handle, a channel, a
+  span or a secret type (clause 2).
+- The handler and the host functions, in `crates/fleet-agent/src/supervisor/host.rs`:
+  `the_handler_is_never_called_twice_at_once`,
+  `a_program_a_plugin_runs_goes_through_the_second_service`,
+  `the_core_answers_an_apply_the_plugin_left`,
+  `the_core_stops_the_process_on_an_uninstall_the_plugin_left`,
+  `a_reported_health_reaches_the_agent`, `the_manifest_reaches_the_process_specification` and
+  `a_probe_asks_the_live_program_and_the_preflight_the_staged_one`; in
+  `crates/fleet-agent/src/supervisor/host/files.rs`: `a_path_outside_its_root_fails_only_that_call`,
+  `a_plugin_cannot_write_its_config_or_program` and
+  `state_is_the_clients_alone_and_data_is_shared` (clauses 1, 3, 4, 5, 6 and 34).
+- A Plugin of the test tree, on the port alone, in
+  `crates/fleet-agent/tests/wrapped_supervisors.rs`:
+  `a_refused_call_fails_alone_and_the_plugin_keeps_running` and
+  `the_manifests_reload_signal_applies_a_configuration` (clauses 1, 4, 6 and 7).
 - Take-over and the network stay closed. The vocabulary of clause 4 has no function for either.
   `a_plugin_names_only_the_port` keeps a kind from reaching them itself (clauses 4 and 13).
 - **Not mechanically decidable:** that the port stays expressible in WIT (clauses 2 and 12). No WIT
@@ -898,7 +921,7 @@ None.
 - The probe and the preflight as the start runs them (clause 34):
   `the_version_probe_runs_through_the_second_service` (the probe's working directory and
   environment) and
-  `the_preflight_runs_through_the_second_service` (`${staged}` resolved in the arguments, the
+  `the_preflight_runs_through_the_second_service` (the staged root resolved in the arguments, the
   environment and the working directory), in `crates/fleet-agent/src/supervisor/process.rs`.
 - Directory and program, in `crates/fleet-agent/src/config.rs`:
   `the_supervisor_root_defaults_under_the_state_dir_and_is_relocatable` and

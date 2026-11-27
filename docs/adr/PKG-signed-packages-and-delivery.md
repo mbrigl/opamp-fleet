@@ -615,11 +615,10 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     packages.** With `[packages] verification_key` set, every Supervisor-backed Agent declares
     `AcceptsPackages` and `ReportsPackageStatuses` (every Managed Process is one this Client
     installed, [CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)). Without
-    it, no
-    Agent of this Client declares `AcceptsPackages`, neither a Supervisor nor the Client's own Agent
-    ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)), and the Client says so
-    at startup, once, naming `[packages] verification_key` as what to set. A package offered to
-    such an Agent regardless is ignored: nothing is downloaded, and an Agent that declared no
+    it, no Agent of this Client declares `AcceptsPackages`, neither a Supervisor nor the Client's
+    own Agent ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)), and the Client
+    says so at startup, once, naming `[packages] verification_key` as what to set. A package offered
+    to such an Agent regardless is ignored: nothing is downloaded, and an Agent that declared no
     package capability reports no package status. A verified artifact travels to the Supervisor as
     the Port command `ProcessCommand::ApplyPackage { staged, version, hash }`, answered by
     `ProcessEvent::PackageApplied`, beside `ApplyConfig`/`ConfigApplied`. No further process is
@@ -727,11 +726,11 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 56. **A `[[supervisor]]` block's `program_path` makes the package a directory tree.** It is a
     relative path *inside* the package, e.g. `bin/fluent-bit`; absent, the package is one file. It
-    is validated at startup (non-empty, relative, no `.` or `..`), and it says *where inside*,
-    never *whether*: the program's bare file name stays the consent
+    is validated at startup (non-empty, relative, no `.` or `..`), and it says *where inside*, never
+    *whether*: the program's bare file name stays the consent
     ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)). Being written in
-    the
-    configuration, the spawn path `program/tree/<program_path>` is known before any package exists.
+    the configuration, the spawn path `program/tree/<program_path>` is known before any package
+    exists.
     - `program_path` matches a member by its **trailing path components**, so `bin/fluent-bit`
       finds `fluent-bit-3.1.0/bin/fluent-bit` and stays right at the next release. No match fails
       naming what the archive holds; several matches fail naming them, answered by writing more of
@@ -768,16 +767,14 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     there rather than copied when it can be. A kind that declares a preflight proves the staged
     program runs before anything is stopped
     ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md), the preflight). Then
-    the
-    Managed Process is stopped, the live name renamed to the predecessor, the staged name renamed to
-    the live one, so the live name is always the old package or the new one, never a mixture, and
-    the process is spawned and must survive `apply_grace_secs`
+    the Managed Process is stopped, the live name renamed to the predecessor, the staged name
+    renamed to the live one, so the live name is always the old package or the new one, never a
+    mixture, and the process is spawned and must survive `apply_grace_secs`
     ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)). Surviving is
-    `Installed`,
-    after which the program is asked for its version again. A spawn failing with `ETXTBSY` right
-    after the swap is retried briefly rather than rolled back. When there is nothing to run yet (no
-    Configuration), the package is installed and reported `Installed`; the configuration that
-    arrives starts it.
+    `Installed`, after which the program is asked for its version again. A spawn failing with
+    `ETXTBSY` right after the swap is retried briefly rather than rolled back. When there is nothing
+    to run yet (no Configuration), the package is installed and reported `Installed`; the
+    configuration that arrives starts it.
 
 59. **A failed apply rolls back only to a predecessor.** If the process does not start or exits
     within the grace and a predecessor exists, the predecessor is renamed back over the live name

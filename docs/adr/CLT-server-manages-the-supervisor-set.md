@@ -4,7 +4,6 @@
 - **Date:** 2026-11-26
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), crates/fleet-agent/src/config.rs (the `server_manages_set` and `remote_config_disabled` keys), the capability set and the handling of a received or stored remote configuration of the Client Agent and of a Supervisor's Agent in crates/fleet-agent/src/supervisor/agent.rs and agent/remote_config.rs, the delivered-block check (`check_delivered_block`) in crates/fleet-agent/src/supervisor/mod.rs and what each kind states for it, the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[supervisors]` section of supervisor.toml (`delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`)
-- **Supersedes:** [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)
 
 ## Context
 
@@ -12,8 +11,9 @@ This ADR restates, unchanged in meaning, the clauses of
 [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md) that govern the Server-managed
 Supervisor set, the two switches `server_manages_set` and `remote_config_disabled`, and the repeated
 offer of a configuration. [CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)
-restates and revises the rest, and the two together supersede it. The split exists because an ADR
-is superseded whole, and the revision of the port does not touch these clauses.
+supersedes it, restates and revises the rest, and leaves these clauses to this ADR. The split
+exists because an ADR is superseded whole, and the revision of the port does not touch these
+clauses. A status line names one successor, so this ADR carries no `Supersedes` field.
 
 What the fleet needs to manage on a Client is which Supervisors it runs. Everything else in
 `supervisor.toml` ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), the
