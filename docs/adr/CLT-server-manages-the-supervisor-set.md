@@ -1,6 +1,6 @@
 # CLT-server-manages-the-supervisor-set: The Server manages a Client's Supervisor set, the host may keep it or one Supervisor's configuration, and a repeated offer is applied once
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-26
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/reconfigure.rs (the Supervisor-set apply), crates/fleet-agent/src/config.rs (the `server_manages_set` and `remote_config_disabled` keys), the capability set and the handling of a received or stored remote configuration of the Client Agent and of a Supervisor's Agent in crates/fleet-agent/src/supervisor/agent.rs and agent/remote_config.rs, the delivered-block check (`check_delivered_block`) in crates/fleet-agent/src/supervisor/mod.rs and what each kind states for it, the stored `remote-config.pb` and entry files in crates/fleet-agent/src/storage.rs, the `[supervisors]` section of supervisor.toml (`delivered_env`, `delivered_args`, `server_manages_set` and `remote_config_disabled`)

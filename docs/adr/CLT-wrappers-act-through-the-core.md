@@ -1,6 +1,6 @@
 # CLT-wrappers-act-through-the-core: A Plugin is an event handler that acts only through the core, over a port of plain data
 
-- **Status:** 🟡 proposed
+- **Status:** 🟢 accepted
 - **Date:** 2026-11-26
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, the Plugin port with its inputs and host functions, the core that carries out a host function, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and its manifest), the Client Agent in `build_engine`, crates/fleet-agent/src/config.rs (supervisor_dir, program resolution), the `[[supervisor]]` blocks of supervisor.toml apart from what CLT-server-manages-the-supervisor-set governs, the `[features]` table of crates/fleet-agent/Cargo.toml, the artifact documents under docs/artifacts/ each wrapped kind adds, the Plugin role in crates/fleet-core/tests/dependency_direction.rs
