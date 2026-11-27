@@ -9,8 +9,8 @@
 //! Every type here is plain data, so that a WebAssembly component can implement the port later
 //! (§2, §12): no host path, no handle, no channel, no span and no secret. The futures are boxed
 //! by hand, as the trait objects of the core need them, without a macro the core does not use.
-//! `the_port_carries_no_host_resource` in `crates/fleet-core/tests/dependency_direction.rs` holds
-//! the rule.
+//! `the_port_carries_no_host_resource` in `crates/fleet-agent/tests/plugin_port.rs` holds the
+//! rule.
 
 use std::future::Future;
 use std::pin::Pin;
