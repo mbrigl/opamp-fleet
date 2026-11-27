@@ -213,7 +213,8 @@ pub enum Input {
     ApplyPackage { version: String, hash: Vec<u8> },
     /// The Server commanded a restart on the current files.
     Restart,
-    /// The Supervisor is retired for good.
+    /// The Supervisor is retired for good, and its Managed Process has stopped: undo within the
+    /// roots what installing did, and answer (§9).
     Uninstall,
     /// The timer the instance set under `id` fired.
     Timer { id: u64 },
@@ -232,7 +233,9 @@ pub trait Host: Send + Sync {
     fn install(&self, hash: Vec<u8>) -> Call<'_, ()>;
     /// Restarts the Managed Process on the current files.
     fn restart(&self) -> Call<'_, ()>;
-    /// Stops the Managed Process for good and answers the uninstall (§9).
+    /// Answers the uninstall (§9). The core has stopped the Managed Process before the uninstall
+    /// reaches the instance, and answers it with the handler's outcome once the handler has
+    /// returned: an `Err` names what the Plugin left undone.
     fn uninstall(&self) -> Call<'_, ()>;
 
     /// The content of `file`.
