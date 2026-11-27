@@ -213,7 +213,7 @@ impl Instance for SteadyInstance {
                         b"undone".to_vec(),
                     )
                     .await?;
-                    Err("left x".to_string())
+                    Err("left x".into())
                 }
                 other => {
                     let spec = self.spec(&[]);

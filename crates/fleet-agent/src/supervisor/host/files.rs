@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use fleet_util::nofollow::{HeldDir, Kind};
 
-use crate::supervisor::port::{EntryKind, Root, RootPath, Value};
+use crate::supervisor::port::{EntryKind, Failure, FailureKind, Root, RootPath, Value};
 use crate::supervisor::ports::{InstallTarget, ProcessAccountGroup, SupervisorContext};
 
 /// The Supervisor's directory the Managed Process writes into, the [`Root::Data`] root.
@@ -76,7 +76,7 @@ impl Roots {
     /// The absolute path of `file`, refused where it would leave its root
     /// (CLT-wrappers-act-through-the-core §3). Lexical only: what is handed to a program as an
     /// argument is resolved by that program.
-    pub(super) fn path(&self, file: &RootPath) -> Result<PathBuf, String> {
+    pub(super) fn path(&self, file: &RootPath) -> Result<PathBuf, Failure> {
         let names = components(file)?;
         Ok(names
             .iter()
@@ -95,7 +95,7 @@ impl Roots {
             .replace("${config_dir}", &self.config.to_string_lossy())
     }
 
-    pub(super) fn value(&self, value: &Value) -> Result<String, String> {
+    pub(super) fn value(&self, value: &Value) -> Result<String, Failure> {
         match value {
             Value::Text(text) => Ok(text.clone()),
             Value::Template(text) => Ok(self.expand(text)),
@@ -132,10 +132,13 @@ impl Roots {
     }
 
     /// The held directory holding `file`, and the file's name in it.
-    fn parent(&self, file: &RootPath) -> Result<(HeldDir, String), String> {
+    fn parent(&self, file: &RootPath) -> Result<(HeldDir, String), Failure> {
         let mut names = components(file)?;
         let Some(name) = names.pop() else {
-            return Err(format!("{} names its root, not a file in it", shown(file)));
+            return Err(Failure::new(
+                FailureKind::Refused,
+                format!("{} names its root, not a file in it", shown(file)),
+            ));
         };
         let held = self
             .walk(file.root, &names)
@@ -143,14 +146,14 @@ impl Roots {
         Ok((held, name))
     }
 
-    pub(super) fn read(&self, file: &RootPath) -> Result<Vec<u8>, String> {
+    pub(super) fn read(&self, file: &RootPath) -> Result<Vec<u8>, Failure> {
         let (held, name) = self.parent(file)?;
         held.read(&name, READ_LIMIT)
             .map(|content| content.to_vec())
             .map_err(|e| failed("read", file, &e))
     }
 
-    pub(super) fn write(&self, file: &RootPath, contents: &[u8]) -> Result<(), String> {
+    pub(super) fn write(&self, file: &RootPath, contents: &[u8]) -> Result<(), Failure> {
         writable(file)?;
         let (held, name) = self.parent(file)?;
         held.write(&name, contents, file_mode(file.root))
@@ -159,18 +162,24 @@ impl Roots {
 
     /// Renames within one directory: a rename across directories would need two held parents,
     /// which no kind has asked for.
-    pub(super) fn rename(&self, from: &RootPath, to: &RootPath) -> Result<(), String> {
+    pub(super) fn rename(&self, from: &RootPath, to: &RootPath) -> Result<(), Failure> {
         writable(from)?;
         let mut from_names = components(from)?;
         let mut to_names = components(to)?;
         let (Some(from_name), Some(to_name)) = (from_names.pop(), to_names.pop()) else {
-            return Err("a rename names two files, not a root".to_string());
+            return Err(Failure::new(
+                FailureKind::Refused,
+                "a rename names two files, not a root",
+            ));
         };
         if from.root != to.root || from_names != to_names {
-            return Err(format!(
-                "{} and {} are not in one directory: a rename stays in its directory",
-                shown(from),
-                shown(to)
+            return Err(Failure::new(
+                FailureKind::Refused,
+                format!(
+                    "{} and {} are not in one directory: a rename stays in its directory",
+                    shown(from),
+                    shown(to)
+                ),
             ));
         }
         let held = self
@@ -181,7 +190,7 @@ impl Roots {
     }
 
     /// Removes a file, or an empty directory.
-    pub(super) fn remove(&self, file: &RootPath) -> Result<(), String> {
+    pub(super) fn remove(&self, file: &RootPath) -> Result<(), Failure> {
         writable(file)?;
         let (held, name) = self.parent(file)?;
         held.remove(&name)
@@ -189,7 +198,7 @@ impl Roots {
             .map_err(|e| failed("remove", file, &e))
     }
 
-    pub(super) fn list(&self, dir: &RootPath) -> Result<Vec<(String, EntryKind)>, String> {
+    pub(super) fn list(&self, dir: &RootPath) -> Result<Vec<(String, EntryKind)>, Failure> {
         let names = components(dir)?;
         let held = self
             .walk(dir.root, &names)
@@ -214,7 +223,7 @@ impl Roots {
     /// [`crate::storage::create_data_dir`]: where a process account is registered, every directory
     /// on the way shared with its group (CLT-accounts-service-runs-under §21). Elsewhere it is the
     /// Client's alone.
-    pub(super) fn create_dir(&self, dir: &RootPath) -> Result<(), String> {
+    pub(super) fn create_dir(&self, dir: &RootPath) -> Result<(), Failure> {
         writable(dir)?;
         let names = components(dir)?;
         if dir.root == Root::Data {
@@ -242,7 +251,7 @@ impl Roots {
 /// The plain names of `file`'s path, `/`-separated, refused where a name is empty, `.` or `..`,
 /// where the path is absolute, and on Windows where a name holds a separator or a drive
 /// (CLT-wrappers-act-through-the-core §3). The empty path names the root itself.
-pub(super) fn components(file: &RootPath) -> Result<Vec<String>, String> {
+pub(super) fn components(file: &RootPath) -> Result<Vec<String>, Failure> {
     if file.path.is_empty() {
         return Ok(Vec::new());
     }
@@ -260,21 +269,27 @@ pub(super) fn components(file: &RootPath) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn leaves(file: &RootPath) -> String {
-    format!(
-        "the path {:?} leaves its root: a Plugin names a file by a relative path of plain names",
-        file.path
+fn leaves(file: &RootPath) -> Failure {
+    Failure::new(
+        FailureKind::Refused,
+        format!(
+            "the path {:?} leaves its root: a Plugin names a file by a relative path of plain names",
+            file.path
+        ),
     )
 }
 
 /// A write is refused outside `data` and `state` (CLT-wrappers-act-through-the-core §3).
-fn writable(file: &RootPath) -> Result<(), String> {
+fn writable(file: &RootPath) -> Result<(), Failure> {
     if file.root.writable() {
         Ok(())
     } else {
-        Err(format!(
-            "{} is read-only to a Plugin: it writes in `data` and `state` alone",
-            shown(file)
+        Err(Failure::new(
+            FailureKind::Refused,
+            format!(
+                "{} is read-only to a Plugin: it writes in `data` and `state` alone",
+                shown(file)
+            ),
         ))
     }
 }
@@ -302,14 +317,23 @@ fn shown(file: &RootPath) -> String {
     format!("{root}:{}", file.path)
 }
 
-/// Why `what` failed on `file`, without the host path an I/O error carries.
-fn failed(what: &str, file: &RootPath, e: &io::Error) -> String {
-    let reason = if fleet_util::nofollow::is_refused_link(e) {
-        "a link stands on the way, which no host function follows".to_string()
+/// Why `what` failed on `file`, of the kind a Plugin tells it by, without the host path an I/O
+/// error carries.
+fn failed(what: &str, file: &RootPath, e: &io::Error) -> Failure {
+    let (kind, reason) = if fleet_util::nofollow::is_refused_link(e) {
+        (
+            FailureKind::Refused,
+            "a link stands on the way, which no host function follows".to_string(),
+        )
     } else {
-        e.kind().to_string()
+        let kind = match e.kind() {
+            io::ErrorKind::NotFound => FailureKind::NotFound,
+            io::ErrorKind::AlreadyExists => FailureKind::AlreadyExists,
+            _ => FailureKind::Other,
+        };
+        (kind, e.kind().to_string())
     };
-    format!("cannot {what} {}: {reason}", shown(file))
+    Failure::new(kind, format!("cannot {what} {}: {reason}", shown(file)))
 }
 
 #[cfg(test)]
@@ -583,6 +607,7 @@ mod tests {
             assert!(
                 !refused
                     .unwrap_err()
+                    .reason
                     .contains(&dir.path().display().to_string()),
                 "a reason names no host path"
             );
@@ -613,5 +638,41 @@ mod tests {
                 .is_err());
         }
         assert!(roots.config.join("fleet").exists());
+    }
+
+    /// A Plugin tells a failure by its kind, not its text: a file that is not there, one that is
+    /// there already, and a call the core refuses each have their own
+    /// (CLT-wrappers-act-through-the-core §4).
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_carries_its_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let roots = made(dir.path());
+        fn kind<T>(failed: Result<T, Failure>) -> Result<(), FailureKind> {
+            failed.map(drop).map_err(|e| e.kind)
+        }
+        assert_eq!(
+            kind(roots.read(&file(Root::State, "missing"))),
+            Err(FailureKind::NotFound)
+        );
+        assert_eq!(
+            kind(roots.remove(&file(Root::Data, "missing"))),
+            Err(FailureKind::NotFound)
+        );
+        assert_eq!(
+            kind(roots.write(&file(Root::Config, "x"), b"x")),
+            Err(FailureKind::Refused)
+        );
+        assert_eq!(
+            kind(roots.read(&file(Root::State, "../x"))),
+            Err(FailureKind::Refused)
+        );
+        roots.write(&file(Root::State, "f"), b"f").expect("f");
+        std::os::unix::fs::symlink(roots.state.join("f"), roots.state.join("link")).expect("link");
+        assert_eq!(
+            kind(roots.read(&file(Root::State, "link"))),
+            Err(FailureKind::Refused)
+        );
     }
 }

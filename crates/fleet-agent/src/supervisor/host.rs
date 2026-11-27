@@ -18,8 +18,8 @@ use tracing::{debug, warn};
 
 use crate::shutdown::Shutdown;
 use crate::supervisor::port::{
-    self, Call, Entry, EntryKind, Facts, Health, Host, Input, Instance, Probe, Ran, Root, RootPath,
-    Run, Spec, Value,
+    self, Call, Entry, EntryKind, Facts, Failure, Health, Host, Input, Instance, Probe, Ran, Root,
+    RootPath, Run, Spec, Value,
 };
 use crate::supervisor::ports::{EventSender, ProcessCommand, ProcessEvent, SupervisorContext};
 use crate::supervisor::process::{
@@ -47,12 +47,12 @@ pub fn start(
     let instance = plugin.instantiate(&ctx.name, std::mem::take(&mut ctx.settings))?;
     let process = instance.process();
     let roots = Roots::of(&ctx);
-    let ensure_dirs = data_dirs(&roots, manifest.data_dirs)?;
+    let ensure_dirs = data_dirs(&roots, manifest.data_dirs).map_err(|e| e.reason)?;
     let (version_probe, preflight) = match &process.probe {
         Some(probe) => {
-            let (args, env, working_dir) = probe_parts(&roots, probe)?;
+            let (args, env, working_dir) = probe_parts(&roots, probe).map_err(|e| e.reason)?;
             let staged = roots.with_program(PathBuf::from(STAGED));
-            let (pre_args, pre_env, pre_dir) = probe_parts(&staged, probe)?;
+            let (pre_args, pre_env, pre_dir) = probe_parts(&staged, probe).map_err(|e| e.reason)?;
             (
                 Some(VersionProbe {
                     program: ctx.program.clone(),
@@ -134,7 +134,7 @@ pub fn start(
 
 /// The directories a kind's agent writes into, beneath the `data` root
 /// (CLT-wrappers-act-through-the-core §6). The `Runner` makes each with every directory on the way.
-fn data_dirs(roots: &Roots, named: &[&str]) -> Result<Vec<PathBuf>, String> {
+fn data_dirs(roots: &Roots, named: &[&str]) -> Result<Vec<PathBuf>, Failure> {
     named
         .iter()
         .map(|dir| {
@@ -151,7 +151,7 @@ type ProbeParts = (Vec<String>, Vec<(String, String)>, Option<PathBuf>);
 
 /// A probe's arguments, environment and working directory, the paths in the `program` root
 /// expanded in `roots`.
-fn probe_parts(roots: &Roots, probe: &Probe) -> Result<ProbeParts, String> {
+fn probe_parts(roots: &Roots, probe: &Probe) -> Result<ProbeParts, Failure> {
     let args = values(roots, &probe.args)?;
     let env = environment(roots, &probe.env)?;
     let working_dir = probe
@@ -162,11 +162,11 @@ fn probe_parts(roots: &Roots, probe: &Probe) -> Result<ProbeParts, String> {
     Ok((args, env, working_dir))
 }
 
-fn values(roots: &Roots, values: &[Value]) -> Result<Vec<String>, String> {
+fn values(roots: &Roots, values: &[Value]) -> Result<Vec<String>, Failure> {
     values.iter().map(|v| roots.value(v)).collect()
 }
 
-fn environment(roots: &Roots, env: &[(String, Value)]) -> Result<Vec<(String, String)>, String> {
+fn environment(roots: &Roots, env: &[(String, Value)]) -> Result<Vec<(String, String)>, Failure> {
     env.iter()
         .map(|(k, v)| Ok((k.clone(), roots.value(v)?)))
         .collect()
@@ -240,7 +240,7 @@ struct CoreHost {
 }
 
 impl CoreHost {
-    fn resolve(&self, spec: &Spec) -> Result<ProcessSpec, String> {
+    fn resolve(&self, spec: &Spec) -> Result<ProcessSpec, Failure> {
         let args = values(&self.roots, &spec.args)?;
         let env = environment(&self.roots, &spec.env)?;
         let working_dir = spec
@@ -266,35 +266,35 @@ impl CoreHost {
     }
 
     /// What the `Runner` starts the Managed Process on from its next start on.
-    fn set(&self, spec: Option<ProcessSpec>) -> Result<(), String> {
+    fn set(&self, spec: Option<ProcessSpec>) -> Result<(), Failure> {
         *self
             .spec
             .lock()
-            .map_err(|_| "the process specification is lost".to_string())? = spec;
+            .map_err(|_| Failure::from("the process specification is lost"))? = spec;
         Ok(())
     }
 
     /// Carries out a file operation off the runtime's threads.
     async fn files<T: Send + 'static>(
         &self,
-        operation: impl FnOnce(&Roots) -> Result<T, String> + Send + 'static,
-    ) -> Result<T, String> {
+        operation: impl FnOnce(&Roots) -> Result<T, Failure> + Send + 'static,
+    ) -> Result<T, Failure> {
         let roots = self.roots.clone();
         tokio::task::spawn_blocking(move || operation(&roots))
             .await
-            .map_err(|_| "the file operation was cut short".to_string())?
+            .map_err(|_| Failure::from("the file operation was cut short"))?
     }
 
     /// Runs `launch` once through the spawner and answers how it ended.
-    async fn run_once(&self, launch: Launch, what: &str) -> Result<Ran, String> {
+    async fn run_once(&self, launch: Launch, what: &str) -> Result<Ran, Failure> {
         match self.spawner.output(&self.name, &launch).await {
             Some(Ok(output)) => Ok(Ran {
                 status: output.status.code(),
                 stdout: output.stdout,
                 stderr: output.stderr,
             }),
-            Some(Err(e)) => Err(format!("cannot run {what}: {}", e.kind())),
-            None => Err(format!("{what} did not end in time")),
+            Some(Err(e)) => Err(format!("cannot run {what}: {}", e.kind()).into()),
+            None => Err(format!("{what} did not end in time").into()),
         }
     }
 
@@ -320,23 +320,28 @@ impl CoreHost {
         (ran.status == Some(0) && !name.is_empty()).then_some(name)
     }
 
-    async fn send(&self, command: ProcessCommand) -> Result<(), String> {
+    async fn send(&self, command: ProcessCommand) -> Result<(), Failure> {
         self.runner
             .send(command)
             .await
-            .map_err(|_| "the process runner is gone".to_string())
+            .map_err(|_| Failure::from("the process runner is gone"))
     }
 
     fn take(
         pending: &Mutex<HashMap<Vec<u8>, ProcessCommand>>,
         hash: &[u8],
         what: &str,
-    ) -> Result<ProcessCommand, String> {
+    ) -> Result<ProcessCommand, Failure> {
         pending
             .lock()
-            .map_err(|_| format!("the pending {what} are lost"))?
+            .map_err(|_| Failure::from(format!("the pending {what} are lost")))?
             .remove(hash)
-            .ok_or_else(|| format!("no {what} of hash {} waits", hex::encode(hash)))
+            .ok_or_else(|| {
+                Failure::new(
+                    port::FailureKind::NotFound,
+                    format!("no {what} of hash {} waits", hex::encode(hash)),
+                )
+            })
     }
 }
 
@@ -476,7 +481,7 @@ impl Host for CoreHost {
 /// What the core does once the handler has returned from an input: it answers what the instance
 /// left unanswered (CLT-wrappers-act-through-the-core §5).
 trait Settles: Host {
-    fn settle<'a>(&'a self, _input: &'a Input, _outcome: &'a Result<(), String>) -> Call<'a, ()> {
+    fn settle<'a>(&'a self, _input: &'a Input, _outcome: &'a Result<(), Failure>) -> Call<'a, ()> {
         Box::pin(async { Ok(()) })
     }
 }
@@ -485,10 +490,10 @@ impl Settles for CoreHost {
     /// An apply or an install the instance did not hand on is answered as failed, with the
     /// handler's reason, so the Agent leaves `APPLYING`. An uninstall is answered with the
     /// handler's outcome: an `Err` names what the Plugin left undone (§9).
-    fn settle<'a>(&'a self, input: &'a Input, outcome: &'a Result<(), String>) -> Call<'a, ()> {
+    fn settle<'a>(&'a self, input: &'a Input, outcome: &'a Result<(), Failure>) -> Call<'a, ()> {
         Box::pin(async move {
             let reason = || match outcome {
-                Err(e) => e.clone(),
+                Err(e) => e.reason.clone(),
                 Ok(()) => "the Plugin left it unanswered".to_string(),
             };
             match input {
@@ -515,7 +520,7 @@ impl Settles for CoreHost {
                 Input::Uninstall => {
                     self.events
                         .send(ProcessEvent::Uninstalled {
-                            result: outcome.clone(),
+                            result: outcome.clone().map_err(|e| e.reason),
                         })
                         .await;
                 }
@@ -1000,7 +1005,7 @@ mod tests {
         drop(runner);
         assert_eq!(inputs.recv().await, Some(Input::Uninstall));
         assert!(!core.is_closed(), "the channel waits for the answer");
-        host.settle(&Input::Uninstall, &Err("left x".to_string()))
+        host.settle(&Input::Uninstall, &Err("left x".into()))
             .await
             .expect("settled");
         let Ok((_, ProcessEvent::Uninstalled { result })) = reported.try_recv() else {

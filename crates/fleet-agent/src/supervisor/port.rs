@@ -17,7 +17,64 @@ use std::pin::Pin;
 use std::time::Duration;
 
 /// A future a [`Host`] function or an [`Instance`] handler returns.
-pub type Call<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+pub type Call<'a, T> = Pin<Box<dyn Future<Output = Result<T, Failure>> + Send + 'a>>;
+
+/// Why a host function or a handler failed: its kind, which a Plugin tells failures apart by, and
+/// a reason for the log that names no host path (CLT-wrappers-act-through-the-core §4). Plain
+/// data, as the rest of the port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub kind: FailureKind,
+    pub reason: String,
+}
+
+/// The kinds of [`Failure`] a Plugin may act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FailureKind {
+    /// The file or directory named is not there.
+    NotFound,
+    /// What is to be created is there already.
+    AlreadyExists,
+    /// The core refuses the call: a path outside its root, a root the function may not change, or
+    /// a link on the way.
+    Refused,
+    /// The host carries out no such function.
+    Unsupported,
+    /// Anything else: the reason says what.
+    Other,
+}
+
+impl Failure {
+    /// A failure of `kind` for `reason`.
+    pub fn new(kind: FailureKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for Failure {}
+
+/// A reason alone is a failure of no kind a Plugin acts on.
+impl From<String> for Failure {
+    fn from(reason: String) -> Self {
+        Self::new(FailureKind::Other, reason)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(reason: &str) -> Self {
+        Self::new(FailureKind::Other, reason)
+    }
+}
 
 /// The directories a Plugin may name a file in (CLT-wrappers-act-through-the-core §3). The core
 /// resolves each to the Supervisor's own directory; a Plugin never learns where that is.
@@ -287,7 +344,12 @@ pub trait Host: Send + Sync {
 
 /// The answer of a host that does not carry out `function`.
 fn refused<'a, T: Send + 'a>(function: &'static str) -> Call<'a, T> {
-    Box::pin(async move { Err(format!("the host carries out no `{function}`")) })
+    Box::pin(async move {
+        Err(Failure::new(
+            FailureKind::Unsupported,
+            format!("the host carries out no `{function}`"),
+        ))
+    })
 }
 
 /// A Supervisor Plugin: the kind, as compiled into the Client (CLT-wrappers-act-through-the-core §1).
@@ -366,7 +428,7 @@ pub async fn default_handling(
     input: Input,
     spec: Option<Spec>,
     host: &dyn Host,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     match input {
         Input::Start { .. } => match spec {
             Some(spec) => host.start(spec).await,
