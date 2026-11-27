@@ -105,7 +105,7 @@ proves the certificate it rests on, which the Server decides as any enrolment.
 
 2. **Every Supervisor exposes a Supervisor Endpoint, unconditionally.**
    - It binds `127.0.0.1` on the block's `endpoint_port`
-     ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)) before the Managed
+     ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)) before the Managed
      Process starts, so a taken port fails startup.
    - It is WebSocket-only and declares `AcceptsStatus` and `AcceptsEffectiveConfig`.
    - It folds what the process reports into the owning Agent, whose `instance_uid` stays the

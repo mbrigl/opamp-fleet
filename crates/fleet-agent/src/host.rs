@@ -219,6 +219,55 @@ pub(crate) fn host_name() -> Option<&'static str> {
     NAME.get_or_init(read_host_name).as_deref()
 }
 
+/// The host's fully qualified name, read once: the canonical name the resolver gives the host's
+/// own name, or that name itself where the resolver knows no domain for it. A Plugin asks for it
+/// as a host fact (CLT-wrappers-act-through-the-core §4). The first call may wait for the
+/// resolver, so it is made off the runtime's threads.
+pub(crate) fn qualified_host_name() -> Option<String> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let name = host_name()?;
+        Some(canonical_name(name).unwrap_or_else(|| name.to_string()))
+    })
+    .clone()
+}
+
+#[cfg(unix)]
+fn canonical_name(name: &str) -> Option<String> {
+    let name = std::ffi::CString::new(name).ok()?;
+    // SAFETY: an all-zero `addrinfo` is a valid set of hints with no pointers set.
+    let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+    hints.ai_flags = libc::AI_CANONNAME;
+    hints.ai_family = libc::AF_UNSPEC;
+    let mut found: *mut libc::addrinfo = std::ptr::null_mut();
+    // SAFETY: a NUL-terminated name, no service, valid hints and a place for the result.
+    if unsafe { libc::getaddrinfo(name.as_ptr(), std::ptr::null(), &hints, &mut found) } != 0 {
+        return None;
+    }
+    // SAFETY: `getaddrinfo` succeeded, so `found` is a valid list; the first entry carries the
+    // canonical name where one was asked for, NUL-terminated.
+    let canonical = unsafe {
+        let canonical = (*found).ai_canonname;
+        (!canonical.is_null()).then(|| {
+            std::ffi::CStr::from_ptr(canonical)
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    // SAFETY: `found` came from `getaddrinfo` and is freed once.
+    unsafe { libc::freeaddrinfo(found) };
+    canonical.filter(|name| !name.is_empty())
+}
+
+/// The DNS domain the service's environment names, where it names one.
+#[cfg(windows)]
+fn canonical_name(name: &str) -> Option<String> {
+    let domain = std::env::var("USERDNSDOMAIN")
+        .ok()
+        .filter(|d| !d.is_empty())?;
+    Some(format!("{name}.{domain}").to_lowercase())
+}
+
 #[cfg(unix)]
 fn read_host_name() -> Option<String> {
     // HOST_NAME_MAX is 64 on Linux and 255 on macOS; 256 holds either. A name that had to be

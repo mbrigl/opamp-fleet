@@ -10,7 +10,7 @@
 The Client runs as a system service. Every program its Supervisors start runs under the account
 that starts it, and so does every command their configuration language can name: an exec input,
 a check command, a task that installs software
-([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). The Server sends those
+([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)). The Server sends those
 configurations. The account that starts a program is therefore the most a compromised or
 misconfigured Server reaches on a host.
 
@@ -385,7 +385,7 @@ placed.
    - **Every system unit** carries `ProtectControlGroups=yes`, which makes `/sys/fs/cgroup`
      read-only. It does not imply `NoNewPrivileges=`. None of the agents the core's kinds start
      writes the cgroup tree itself. A kind of its own states the same of its agent in its ADR
-     ([CLT-supervisor-mode-and-kinds §15](CLT-supervisor-mode-and-kinds.md)).
+     ([CLT-wrappers-act-through-the-core §21](CLT-wrappers-act-through-the-core.md)).
    - **A unit that runs as root** (`User=root`) also carries `ProtectKernelTunables=yes`,
      `LockPersonality=yes` and `RestrictRealtime=yes`. Under root they imply nothing, because the
      unit holds `CAP_SYS_ADMIN`. They make `/proc/sys` and `/sys` read-only, fix the execution
@@ -670,8 +670,8 @@ placed.
         the retry, that reaches the second service and survives the apply grace gives its
         acknowledgement.
       - A restart command's start acknowledges nothing and swaps nothing in
-        ([CLT-supervisor-mode-and-kinds §8](CLT-supervisor-mode-and-kinds.md)). The retry follows
-        it at once.
+        ([CLT-wrappers-act-through-the-core §5](CLT-wrappers-act-through-the-core.md)). The retry
+        follows it at once.
       - A Supervisor held after a package that failed leaves no Configuration waiting: it is
         reported `FAILED`.
       - Until then the package stays `Installing` and the Configuration `APPLYING`, each naming the
@@ -909,7 +909,7 @@ placed.
       `logs`, `gateway-packages`, `supervisors`. Otherwise `supervisor_dir` must not be or hold
       `state_dir`. The Client refuses at startup a block that would break either rule. An offered
       set that carries one fails as a whole
-      ([CLT-supervisor-mode-and-kinds §27](CLT-supervisor-mode-and-kinds.md)).
+      ([CLT-server-manages-the-supervisor-set §2](CLT-server-manages-the-supervisor-set.md)).
     - **On every host.** The rule holds with a process account or without one. A purge of such a
       Supervisor would delete the Client's own entry, and its share would expose that entry to the
       process account's group.

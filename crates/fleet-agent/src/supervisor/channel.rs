@@ -187,7 +187,7 @@ impl Captured {
 /// directories of the Supervisors one apply purges, all of them together and reaching the service
 /// included: as long as a program has to end when the Client's connection closes. However many
 /// Supervisors are purged and however much the process account wrote, a purge that
-/// outlasts it leaves an orphan, as one the Client cannot delete does (CLT-supervisor-mode-and-kinds §34), and
+/// outlasts it leaves an orphan, as one the Client cannot delete does (CLT-server-manages-the-supervisor-set §9), and
 /// the Client's management goes on (CLT-accounts-service-runs-under §17).
 pub(crate) const PURGE_ANSWER: Duration = CLOSE_GRACE;
 
@@ -3179,7 +3179,7 @@ mod tests {
     /// root's and the Client's account's — and not its own: it runs as the process account, which
     /// is not the Client's. Run unprivileged, a link of this test's own account is refused where
     /// the Client is another account; run as root, a link of the Client's account is followed and
-    /// one of a third account is refused (CLT-accounts-service-runs-under §20, CLT-supervisor-mode-and-kinds §33).
+    /// one of a third account is refused (CLT-accounts-service-runs-under §20, CLT-server-manages-the-supervisor-set §8).
     /// Verifies: CLT-accounts-service-runs-under
     #[test]
     fn a_purge_follows_the_clients_links_above_the_root_and_not_the_services() {
@@ -3220,7 +3220,7 @@ mod tests {
     /// so whoever serves the process account's socket holds it [`PURGE_ANSWER`] and no longer,
     /// however many entries the process account wrote: a service that answers each request just
     /// before the Client gives up on it is asked once, and one that never answers is given up on
-    /// (CLT-accounts-service-runs-under §17, CLT-supervisor-mode-and-kinds §34).
+    /// (CLT-accounts-service-runs-under §17, CLT-server-manages-the-supervisor-set §9).
     /// Verifies: CLT-accounts-service-runs-under
     #[tokio::test]
     async fn a_purge_waits_for_the_service_once_however_much_was_written() {

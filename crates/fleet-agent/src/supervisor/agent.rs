@@ -3,7 +3,7 @@
 //!
 //! Transport-agnostic on purpose (SEC-tls13-bounded-input-chosen-planes): the WebSocket and plain-HTTP loops feed the same
 //! state machine, so transport is carriage, never semantics. The [`Engine`](crate::engine)
-//! carries n of these over one connection (CLT-modes-and-gateway, CLT-supervisor-mode-and-kinds) — a Supervisor-backed Agent and
+//! carries n of these over one connection (CLT-modes-and-gateway, CLT-wrappers-act-through-the-core) — a Supervisor-backed Agent and
 //! the self-Agent fallback are the same state machine.
 
 mod connection_settings;
@@ -50,7 +50,7 @@ pub const AGENT_CAPABILITIES: u64 = AgentCapabilities::ReportsStatus as u64
     | AgentCapabilities::ReportsOwnLogs as u64;
 
 /// What a Supervisor's Agent declares when the operator switched its remote configuration off
-/// (CLT-supervisor-mode-and-kinds §47): the base set without either remote-configuration bit.
+/// (CLT-server-manages-the-supervisor-set §22): the base set without either remote-configuration bit.
 pub const AGENT_CAPABILITIES_WITHOUT_REMOTE_CONFIG: u64 = AGENT_CAPABILITIES
     & !(AgentCapabilities::AcceptsRemoteConfig as u64
         | AgentCapabilities::ReportsRemoteConfig as u64);
@@ -97,21 +97,22 @@ pub struct AgentState {
     storage: Box<dyn AgentStorage>,
     /// A received configuration awaiting dispatch to the process adapter.
     pending_apply: Option<AgentRemoteConfig>,
-    /// The self-Agent's configuration in flight (CLT-supervisor-mode-and-kinds): stored only once the apply succeeded,
-    /// so a Client restarted mid-apply reports nothing as applied and is re-offered — a status of
-    /// `APPLIED` on restart must mean the file was actually rewritten.
+    /// The self-Agent's configuration in flight (CLT-server-manages-the-supervisor-set §6): stored
+    /// only once the apply succeeded, so a Client restarted mid-apply reports nothing as applied
+    /// and is re-offered — a status of `APPLIED` on restart must mean the file was actually
+    /// rewritten.
     applying: Option<AgentRemoteConfig>,
     /// A Server-commanded restart awaiting dispatch to the process adapter.
     pending_restart: bool,
     /// The SHA-256 of each remote configuration hash ignored since start, when the operator
-    /// switched remote configuration off for this Agent (CLT-supervisor-mode-and-kinds); `None` when it takes
+    /// switched remote configuration off for this Agent (CLT-wrappers-act-through-the-core); `None` when it takes
     /// them. A digest and not the hash itself, and at most [`IGNORED_CONFIGS_CAP`] of them,
     /// because the hash is whatever the Server sends.
     ignored_configs: Option<std::collections::HashSet<[u8; 32]>>,
 }
 
 /// How many ignored remote configuration hashes a Supervisor with remote configuration switched
-/// off remembers before it starts over (CLT-supervisor-mode-and-kinds §48).
+/// off remembers before it starts over (CLT-server-manages-the-supervisor-set §23).
 const IGNORED_CONFIGS_CAP: usize = 1024;
 
 /// A Server-sent hash as a log field: hex, cut after its first 32 bytes, since its length is the
@@ -144,7 +145,7 @@ struct Local {
     /// A Managed Process stands behind this Agent: a received configuration is acknowledged
     /// `APPLYING` and handed to the process adapter; `APPLIED`/`FAILED` follow its outcome.
     managed: bool,
-    /// The Managed Process's health — derived or self-reported (CLT-supervisor-mode-and-kinds). Absent for the
+    /// The Managed Process's health — derived or self-reported (CLT-wrappers-act-through-the-core). Absent for the
     /// self-Agent, whose health is being alive.
     process_health: Option<ComponentHealth>,
     /// The Managed Process's self-reported description, folded into ours (goal 16).
@@ -230,7 +231,7 @@ impl AgentState {
         Self::restore(instance_name, storage, host, true)
     }
 
-    /// The Client's own Agent on a host that keeps its Supervisor set from the Server (CLT-supervisor-mode-and-kinds):
+    /// The Client's own Agent on a host that keeps its Supervisor set from the Server (CLT-server-manages-the-supervisor-set):
     /// it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores no stored
     /// set, and ignores a set that arrives anyway. Every other capability is the one
     /// [`new`](Self::new) declares.
@@ -243,7 +244,7 @@ impl AgentState {
     }
 
     /// [`new`](Self::new), with `remote_config` saying whether this Agent takes remote
-    /// configuration at all (CLT-supervisor-mode-and-kinds): without it the Agent declares neither remote-configuration
+    /// configuration at all (CLT-wrappers-act-through-the-core): without it the Agent declares neither remote-configuration
     /// capability, restores no stored configuration, and ignores every offer.
     fn restore(
         instance_name: String,
@@ -306,7 +307,7 @@ impl AgentState {
         })
     }
 
-    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, CLT-supervisor-mode-and-kinds). Only
+    /// An Agent with a Managed Process behind it (a Supervisor-backed Agent, CLT-wrappers-act-through-the-core). Only
     /// such an Agent accepts a restart command — the self-Agent has no process to restart.
     ///
     /// The type is a parameter rather than a builder default because there is no sensible default
@@ -323,7 +324,7 @@ impl AgentState {
     }
 
     /// A Supervisor-backed Agent whose remote configuration the operator switched off
-    /// (CLT-supervisor-mode-and-kinds): it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores
+    /// (CLT-server-manages-the-supervisor-set): it declares neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig`, restores
     /// no stored configuration, and ignores an offer that arrives anyway. Built without the bits
     /// rather than stripped of them afterwards, because a declared capability only ever grows.
     pub fn supervised_without_remote_config(
@@ -494,7 +495,7 @@ impl AgentState {
 
         if let Some(remote_config) = received.remote_config {
             if let Some(ignored) = &mut self.ignored_configs {
-                // Not declared, so not acted on and not reported (CLT-supervisor-mode-and-kinds §3 and §48); said once per hash, so a Server resending its offer on every exchange
+                // Not declared, so not acted on and not reported (CLT-wrappers-act-through-the-core §15 and CLT-server-manages-the-supervisor-set §23); said once per hash, so a Server resending its offer on every exchange
                 // does not flood the log.
                 use sha2::Digest as _;
                 let seen: [u8; 32] = sha2::Sha256::digest(&remote_config.config_hash).into();
@@ -512,7 +513,7 @@ impl AgentState {
                              off for this supervisor in [supervisors] remote_config_disabled"
                         );
                     } else {
-                        // The Client's own Agent, offered a Supervisor set (CLT-supervisor-mode-and-kinds §40).
+                        // The Client's own Agent, offered a Supervisor set (CLT-server-manages-the-supervisor-set §15).
                         warn!(
                             hash = %logged_hash(&remote_config.config_hash),
                             "ignoring a supervisor set: this Client keeps its supervisor set \
@@ -521,7 +522,7 @@ impl AgentState {
                     }
                 }
             } else {
-                // A repeat of the hash applying or applied is only reported (CLT-supervisor-mode-and-kinds §56).
+                // A repeat of the hash applying or applied is only reported (CLT-server-manages-the-supervisor-set §28).
                 if !self.report_a_repeated_offer(&remote_config.config_hash) {
                     self.apply(remote_config);
                 }
@@ -2832,7 +2833,7 @@ mod tests {
     }
 
     /// The self-Agent's offer is acknowledged `APPLYING` and left pending for the Engine's
-    /// Supervisor-set apply (CLT-supervisor-mode-and-kinds); the verdict closes the lifecycle, and only then does the
+    /// Supervisor-set apply (CLT-server-manages-the-supervisor-set); the verdict closes the lifecycle, and only then does the
     /// configuration echo as effective.
     /// Verifies: SEC-connection-settings-never-plaintext
     #[test]
@@ -2862,7 +2863,7 @@ mod tests {
     }
 
     /// A restart reports `APPLIED` only for a configuration whose apply actually finished
-    /// (CLT-supervisor-mode-and-kinds): the offer is persisted on the verdict, never on receipt, so a Client
+    /// (CLT-server-manages-the-supervisor-set): the offer is persisted on the verdict, never on receipt, so a Client
     /// restarted mid-apply reports nothing and the Server offers again.
     #[test]
     fn the_applied_config_survives_a_restart() {
@@ -2917,7 +2918,7 @@ mod tests {
     /// A Server answers a heartbeat that crossed its push with the offer again: the repeat of the
     /// hash a Supervisor's Agent is applying hands nothing to the process adapter, so the Managed
     /// Process is started once, and the next report carries `APPLYING` again.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_repeated_offer_of_the_hash_applying_is_reported_not_applied() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2942,7 +2943,7 @@ mod tests {
 
     /// Once applied and reported, a repeat of the hash restarts nothing and reports `APPLIED`
     /// again.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_repeated_offer_of_the_hash_applied_restarts_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2968,7 +2969,7 @@ mod tests {
 
     /// The Client's own Agent takes a repeat of its Supervisor set the same way: applying or
     /// applied, the set is handed to the Supervisor-set apply once.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn the_client_agent_applies_a_repeated_offer_of_its_set_once() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2998,7 +2999,7 @@ mod tests {
 
     /// An offer of another hash while one is applying is taken as before: handed over behind the
     /// first, which the process adapter's queue applies in order.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn an_offer_of_another_hash_is_applied_after_the_one_applying() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3027,7 +3028,7 @@ mod tests {
     /// repeat and is not handed over a second time. The newer hash's own verdict closes it. A
     /// Supervisor's Agent meets this sequence; the Client's own Agent cannot, since its apply holds
     /// the Engine until the verdict, and runs it to keep the newer offer it stores then.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-wrappers-act-through-the-core
     #[test]
     fn a_verdict_on_an_older_hash_leaves_the_status_of_the_one_applying() {
         let supervised_dir = tempfile::tempdir().expect("tempdir");
@@ -3075,7 +3076,7 @@ mod tests {
 
     /// A hash whose apply failed is applied again when offered again, so a host repaired after
     /// the failure takes it once more; for a Supervisor's Agent and for the Client's own.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_repeated_offer_of_a_hash_that_failed_is_applied_again() {
         let supervised_dir = tempfile::tempdir().expect("tempdir");
@@ -3179,8 +3180,8 @@ mod tests {
     }
 
     /// A listed Supervisor's Agent is built without either remote-configuration bit, and keeps
-    /// every other capability a Supervisor declares (CLT-supervisor-mode-and-kinds §47).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// every other capability a Supervisor declares (CLT-server-manages-the-supervisor-set §22).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_supervisor_with_remote_config_disabled_declares_neither_remote_config_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3204,8 +3205,8 @@ mod tests {
     }
 
     /// An offer that arrives anyway is ignored: nothing stored, no entry file, nothing pending for
-    /// the process adapter, and no status reported (CLT-supervisor-mode-and-kinds §48).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// the process adapter, and no status reported (CLT-server-manages-the-supervisor-set §23).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_remote_config_offered_anyway_is_neither_stored_nor_applied_nor_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3234,8 +3235,8 @@ mod tests {
         assert!(agent.next_report().remote_config_status.is_none());
     }
 
-    /// The warning about an ignored offer is said once per hash seen since start (CLT-supervisor-mode-and-kinds §30), so a Server resending the same offer does not flood the log.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// The warning about an ignored offer is said once per hash seen since start (CLT-server-manages-the-supervisor-set §5), so a Server resending the same offer does not flood the log.
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn an_ignored_remote_config_is_logged_once_per_hash() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3260,8 +3261,8 @@ mod tests {
 
     /// What an ignored offer leaves behind is bounded whatever the Server sends: at most
     /// `IGNORED_CONFIGS_CAP` remembered digests however many distinct hashes arrive, and a long
-    /// hash cut short in the log (CLT-supervisor-mode-and-kinds §48).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// hash cut short in the log (CLT-server-manages-the-supervisor-set §23).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn what_ignored_remote_configs_leave_behind_is_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3298,8 +3299,8 @@ mod tests {
 
     /// The Client's own Agent on a host that keeps its set is built without either
     /// remote-configuration bit and keeps everything else it declares, self-update included
-    /// (CLT-supervisor-mode-and-kinds §39).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// (CLT-server-manages-the-supervisor-set §14).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn the_own_agent_of_a_host_that_keeps_its_set_declares_neither_remote_config_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3327,8 +3328,8 @@ mod tests {
     }
 
     /// A set offered anyway is not stored, not handed to the Supervisor-set apply, and not
-    /// answered (CLT-supervisor-mode-and-kinds §40).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// answered (CLT-server-manages-the-supervisor-set §15).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_set_offered_anyway_to_a_host_that_keeps_it_is_neither_stored_nor_applied_nor_reported() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3360,8 +3361,8 @@ mod tests {
     }
 
     /// The warning about an ignored set is said once per hash and names the key that keeps the
-    /// set on the host (CLT-supervisor-mode-and-kinds §40).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// set on the host (CLT-server-manages-the-supervisor-set §15).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[test]
     fn a_set_ignored_by_a_host_that_keeps_it_is_logged_once_per_hash() {
         let dir = tempfile::tempdir().expect("tempdir");

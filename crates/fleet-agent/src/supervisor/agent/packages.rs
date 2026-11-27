@@ -113,7 +113,7 @@ impl AgentState {
 
     /// Whether this Agent takes Server-offered packages (PKG-signed-packages-and-delivery) — the self-Agent unless
     /// `[packages] self_update = false` withdraws the consent (CLT-self-update-signed-package), and every Supervisor, since every Managed
-    /// Process is one this Client installs (CLT-supervisor-mode-and-kinds). Read without side effects, so a startup
+    /// Process is one this Client installs (CLT-wrappers-act-through-the-core). Read without side effects, so a startup
     /// check can ask it before anything is polled.
     pub fn accepts_packages(&self) -> bool {
         self.protocol.declares(AgentCapabilities::AcceptsPackages)

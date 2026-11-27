@@ -121,8 +121,8 @@ On the Agent:
 - **A running process cannot reliably replace its own binary,** so the work crosses a process
   boundary. For a Managed Process that boundary exists: the Supervisor owns its process's stop,
   spawn and apply-grace health gate
-  ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). The Client's own binary is
-  the other case ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
+  ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)). The Client's own
+  binary is the other case ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)).
 - **Verification protects the host; the origin bounds what is exposed.** What stands between the
   bytes and an executed program is the content hash and an Ed25519 signature made with a key the
   operator holds (the Baseline's *Code Signing* leaves the method to the Agent). The `ring`
@@ -614,11 +614,11 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 48. **The Supervisor is the updater, and only a Client holding a verification key takes
     packages.** With `[packages] verification_key` set, every Supervisor-backed Agent declares
     `AcceptsPackages` and `ReportsPackageStatuses` (every Managed Process is one this Client
-    installed, [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). Without it, no
-    Agent of this Client declares `AcceptsPackages`, neither a Supervisor nor the Client's own Agent
-    ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)), and the Client says so
-    at startup, once, naming `[packages] verification_key` as what to set. A package offered to
-    such an Agent regardless is ignored: nothing is downloaded, and an Agent that declared no
+    installed, [CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)). Without
+    it, no Agent of this Client declares `AcceptsPackages`, neither a Supervisor nor the Client's
+    own Agent ([CLT-self-update-signed-package](CLT-self-update-signed-package.md)), and the Client
+    says so at startup, once, naming `[packages] verification_key` as what to set. A package offered
+    to such an Agent regardless is ignored: nothing is downloaded, and an Agent that declared no
     package capability reports no package status. A verified artifact travels to the Supervisor as
     the Port command `ProcessCommand::ApplyPackage { staged, version, hash }`, answered by
     `ProcessEvent::PackageApplied`, beside `ApplyConfig`/`ConfigApplied`. No further process is
@@ -726,10 +726,11 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 56. **A `[[supervisor]]` block's `program_path` makes the package a directory tree.** It is a
     relative path *inside* the package, e.g. `bin/fluent-bit`; absent, the package is one file. It
-    is validated at startup (non-empty, relative, no `.` or `..`), and it says *where inside*,
-    never *whether*: the program's bare file name stays the consent
-    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). Being written in the
-    configuration, the spawn path `program/tree/<program_path>` is known before any package exists.
+    is validated at startup (non-empty, relative, no `.` or `..`), and it says *where inside*, never
+    *whether*: the program's bare file name stays the consent
+    ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)). Being written in
+    the configuration, the spawn path `program/tree/<program_path>` is known before any package
+    exists.
     - `program_path` matches a member by its **trailing path components**, so `bin/fluent-bit`
       finds `fluent-bit-3.1.0/bin/fluent-bit` and stays right at the next release. No match fails
       naming what the archive holds; several matches fail naming them, answered by writing more of
@@ -765,15 +766,15 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
     The artifact is unpacked to the staged name first, beside what runs; a raw artifact is moved
     there rather than copied when it can be. A kind that declares a preflight proves the staged
     program runs before anything is stopped
-    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md), the preflight). Then the
-    Managed Process is stopped, the live name renamed to the predecessor, the staged name renamed to
-    the live one, so the live name is always the old package or the new one, never a mixture, and
-    the process is spawned and must survive `apply_grace_secs`
-    ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)). Surviving is `Installed`,
-    after which the program is asked for its version again. A spawn failing with `ETXTBSY` right
-    after the swap is retried briefly rather than rolled back. When there is nothing to run yet (no
-    Configuration), the package is installed and reported `Installed`; the configuration that
-    arrives starts it.
+    ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md), the preflight). Then
+    the Managed Process is stopped, the live name renamed to the predecessor, the staged name
+    renamed to the live one, so the live name is always the old package or the new one, never a
+    mixture, and the process is spawned and must survive `apply_grace_secs`
+    ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)). Surviving is
+    `Installed`, after which the program is asked for its version again. A spawn failing with
+    `ETXTBSY` right after the swap is retried briefly rather than rolled back. When there is nothing
+    to run yet (no Configuration), the package is installed and reported `Installed`; the
+    configuration that arrives starts it.
 
 59. **A failed apply rolls back only to a predecessor.** If the process does not start or exits
     within the grace and a predecessor exists, the predecessor is renamed back over the live name

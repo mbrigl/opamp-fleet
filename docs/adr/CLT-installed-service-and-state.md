@@ -65,8 +65,8 @@ Forces:
   reaches and anything that compromises the Client. The next upgrade would hand that tree to the
   service's account: a privilege escalation from that account to arbitrary file access, on every
   platform. A Server cannot write those keys, since it delivers `[[supervisor]]` blocks only
-  ([CLT-supervisor-mode-and-kinds §26](CLT-supervisor-mode-and-kinds.md)). A compromised service
-  account can. The registration (`/etc/systemd/system/<PRODUCT_NAME>.service`,
+  ([CLT-server-manages-the-supervisor-set §1](CLT-server-manages-the-supervisor-set.md)). A
+  compromised service account can. The registration (`/etc/systemd/system/<PRODUCT_NAME>.service`,
   `/Library/LaunchDaemons/<PRODUCT_NAME>.plist`, or the SCM's entry) is what the Client wrote as
   root, and only an administrator can change it.
 - **A Supervisors' root is relocatable**, on purpose: it keeps programs off a `noexec` or
@@ -163,7 +163,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
    - The release a fleet uploads for its Clients is therefore a Package for Agent type
      `supervisor`. No per-host setting is needed.
    - A Configuration carrying the Client's `[[supervisor]]` blocks is typed `supervisor` as well
-     ([CLT-supervisor-mode-and-kinds §26](CLT-supervisor-mode-and-kinds.md)).
+     ([CLT-server-manages-the-supervisor-set §1](CLT-server-manages-the-supervisor-set.md)).
 
 6. **The program is `supervisor`**, `supervisor.exe` on Windows. The name covers:
    - the binary Cargo builds (`[[bin]] name = "supervisor"` in the package `fleet-agent`);

@@ -17,7 +17,7 @@ publish.workspace = true
 name = "supervisor"
 path = "src/main.rs"
 
-# CLT-supervisor-mode-and-kinds §2: each wrapped Supervisor kind is a feature named after its `type`, all of them
+# CLT-wrappers-act-through-the-core §14: each wrapped Supervisor kind is a feature named after its `type`, all of them
 # in the published build. `collector` and `command` are the core's own and always compiled in.
 [features]
 default = []
@@ -40,9 +40,10 @@ prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-# CLT-supervisor-mode-and-kinds: the surgical `[[supervisor]]` rewrite of `supervisor.toml` keeps the operator's half of
-# the file — comments, ordering, formatting — exactly as written; the questionnaire's edit of an
-# existing file does the same (CLT-installed-service-and-state §24).
+# CLT-server-manages-the-supervisor-set §5: the surgical `[[supervisor]]` rewrite of
+# `supervisor.toml` keeps the operator's half of the file — comments, ordering, formatting —
+# exactly as written; the questionnaire's edit of an existing file does the same
+# (CLT-installed-service-and-state §24).
 toml_edit.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
@@ -78,7 +79,7 @@ axum.workspace = true
 # (SEC-tls13-bounded-input-chosen-planes).
 zeroize.workspace = true
 
-# CLT-supervisor-mode-and-kinds: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
+# CLT-wrappers-act-through-the-core: the graceful SIGTERM → wait → kill stop of Managed Processes. Not compiled on Windows,
 # which has no SIGTERM equivalent (there, kill is the stop).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -167,7 +168,7 @@ rustls.workspace = true
 # `fleet-util`'s (DEV-six-crates-tokio-axum).
 flate2.workspace = true
 tar.workspace = true
-# CLT-supervisor-mode-and-kinds: the end-to-end test runs the real Server in-process against the real Client binary.
+# CLT-wrappers-act-through-the-core: the end-to-end test runs the real Server in-process against the real Client binary.
 fleet-server = { path = "../fleet-server" }
 # The test of the Client's two homes for `*at` system calls reads its sources and `fleet-util`'s
 # as a syntax tree.

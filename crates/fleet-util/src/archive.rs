@@ -1738,7 +1738,7 @@ mod tests {
     }
 
     /// The next release renames the wrapper, and the configuration must not have to follow it —
-    /// that drift is what CLT-supervisor-mode-and-kinds exists to make unspellable, and it applies here too.
+    /// that drift is what CLT-wrappers-act-through-the-core exists to make unspellable, and it applies here too.
     /// Verifies: PKG-signed-packages-and-delivery
     #[test]
     fn the_same_program_path_finds_the_program_under_any_wrapper() {

@@ -1,4 +1,4 @@
-//! Drives a Supervisor kind through `Plugin::start` the way the core drives it (CLT-supervisor-mode-and-kinds), with
+//! Drives a Supervisor kind through the core's host the way the core drives it (CLT-wrappers-act-through-the-core), with
 //! the stub standing in for its agent — the harness each kind's integration tests share.
 //!
 //! The unit tests in each module check what a kind *builds* — the program's name per platform, the
@@ -19,6 +19,7 @@ use fleet_agent::shutdown::shutdown_channel;
 use fleet_agent::supervisor::ports::{
     EventSender, InstallTarget, Plugin, ProcessCommand, ProcessEvent, SupervisorContext,
 };
+use fleet_agent::supervisor::process::Spawner;
 use opamp::proto::AgentRemoteConfig;
 use tokio::sync::mpsc;
 
@@ -58,7 +59,7 @@ pub fn start(plugin: &dyn Plugin, name: &str, stub_args: &[String]) -> Harness {
 ///
 /// The program is put where the kind's `defaults()` say the install puts it: inside the unpacked
 /// tree for a kind that names a `program_path`, else as a single file named `name` in this
-/// Supervisor's own `program/` directory (CLT-supervisor-mode-and-kinds), found in its archive at the place the kind
+/// Supervisor's own `program/` directory (CLT-wrappers-act-through-the-core), found in its archive at the place the kind
 /// names (PKG-signed-packages-and-delivery §55). This is the install's side of the
 /// same agreement, so a kind whose path disagreed with the install would spawn nothing here.
 ///
@@ -121,7 +122,8 @@ pub fn start_with(
         events: EventSender::new(0, event_tx),
         shutdown,
     };
-    let commands = plugin.start(ctx).expect("the adapter starts on its block");
+    let commands = fleet_agent::supervisor::host::start(plugin, &Spawner::Local, ctx)
+        .expect("the adapter starts on its block");
     Harness {
         commands,
         events,

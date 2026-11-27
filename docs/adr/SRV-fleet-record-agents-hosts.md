@@ -350,7 +350,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 19. **An Agent inherits the labels of its Client Agent.**
     - The Client Agent is the Agent a Client presents for itself, recognised by the
       `supervisor.kind.*` attributes it alone reports
-      ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)).
+      ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)).
     - Its labels hold for the other Agents of the same Client:
       - on a direct connection, the Agents bound to the same Host;
       - behind a Gateway, the Agents arriving over the same Gateway Host that report the same
@@ -561,7 +561,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
   memory and offers no persistence design to follow.
 - On the host a certificate names, renewal, and that a Gateway hides its downstream certificates:
   [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md);
-  [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md) on `supervisor.kind.*`;
+  [CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md) on `supervisor.kind.*`;
   [CLT-what-an-agent-reports](CLT-what-an-agent-reports.md): `host.name`, `host.id`, `host.ip` and
   `host.mac` are reported attributes.
 - The code: `check_report` and `prune` in `crates/fleet-server/src/revocation.rs`, the host minted

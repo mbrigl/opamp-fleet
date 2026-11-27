@@ -340,7 +340,7 @@ carries a date once its tag exists.
   without a host is not re-keyed by its own reconnect.
   **What to do:** nothing.
 - **A configuration offered twice restarts its Managed Process once**
-  ([CLT-supervisor-mode-and-kinds §56](docs/adr/CLT-supervisor-mode-and-kinds.md)).
+  ([CLT-server-manages-the-supervisor-set §28](docs/adr/CLT-server-manages-the-supervisor-set.md)).
   A heartbeat that left the Client before the Server's push of a rollout arrived still
   named the old hash, the Server answered it with the offer again, and the Client applied both:
   the Managed Process restarted once more after reporting `APPLIED`, and the Client's own Agent
@@ -2242,7 +2242,8 @@ carries a date once its tag exists.
 - **A Gateway frees what it kept for an Agent once that Agent is gone**: a departed socket's pool
   places and routes, and the route of an exchange that ends without its reply. A plain-HTTP
   Agent's pool place still lasts until its upstream connection drops. **What to do:** nothing.
-- **A delivered Supervisor block is held to more of CLT-supervisor-mode-and-kinds §35's rule.** The
+- **A delivered Supervisor block is held to more of CLT-server-manages-the-supervisor-set §10's
+  rule.** The
   clause refuses, whatever `[supervisors] delivered_env` allows, a variable that steers which code a
   program loads and a value pointing where the Server delivers files no one signed. Beyond the names
   and placeholders the clause lists, the Client now applies that rule to `PATHEXT`, `COMSPEC`,
@@ -2385,7 +2386,7 @@ carries a date once its tag exists.
   `heartbeat_interval_secs` is short raises `messages_per_sec`; the Server warns at startup when
   one host cannot report for 256 Agents at that interval.
 - **Remote configuration can be switched off per Supervisor**
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)).
+  ([CLT-server-manages-the-supervisor-set](docs/adr/CLT-server-manages-the-supervisor-set.md)).
   `[supervisors] remote_config_disabled` in `supervisor.toml` lists Supervisor names whose Agents
   declare neither `AcceptsRemoteConfig` nor `ReportsRemoteConfig` and run only on the files placed
   in `<supervisor_dir>/<name>/config/`. A delivered block brings a listed Supervisor no `args`,
@@ -2397,7 +2398,7 @@ carries a date once its tag exists.
   move anything there you want to keep, since the first delivered configuration replaces every
   file in it.
 - **A host can keep its Supervisor set from the Server**
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)).
+  ([CLT-server-manages-the-supervisor-set](docs/adr/CLT-server-manages-the-supervisor-set.md)).
   `[supervisors] server_manages_set = false` in `supervisor.toml` builds the Client's own Agent
   without `AcceptsRemoteConfig` and `ReportsRemoteConfig`, so the Server offers it no Supervisor
   set; one that arrives anyway is ignored and logged once per hash. Every other capability stays,
@@ -2483,7 +2484,8 @@ carries a date once its tag exists.
   naming the entry.
 
 - **A Server-delivered `[[supervisor]]` block brings nothing that reaches past the package
-  signature** ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)).
+  signature**
+  ([CLT-server-manages-the-supervisor-set](docs/adr/CLT-server-manages-the-supervisor-set.md)).
   It may set `env`, `args` and `version_args` only as the running block of the same name already
   has them, or as the new `[supervisors] delivered_env` and `delivered_args` allow; never `PATH`,
   `LD_*` or `DYLD_*`.
@@ -2953,7 +2955,7 @@ carries a date once its tag exists.
   not only counted; the Collector
   Supervisor states which config-map entries it hands the Collector on every (re)start; and the
   `command` Supervisor states the fully expanded invocation of its Foreign Agent
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)) — its
+  ([CLT-wrappers-act-through-the-core](docs/adr/CLT-wrappers-act-through-the-core.md)) — its
   environment by variable name only, never by value. **What to do:** nothing, unless you are
   chasing one of those, in which case `RUST_LOG=debug` now answers it.
 
@@ -3288,7 +3290,8 @@ carries a date once its tag exists.
 - **A `[[supervisor]]` block can no longer name a program on the machine.** `binary` and `command`
   take a bare file name and nothing else; an absolute path — and the Windows drive-relative form
   with it — is refused at startup with a message naming the way across
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)). A Managed Process is
+  ([CLT-wrappers-act-through-the-core](docs/adr/CLT-wrappers-act-through-the-core.md)). A Managed
+  Process is
   always one this Client installed, so every Supervisor now declares `AcceptsPackages` and the
   capability is a constant of the Client rather than something derived from a path.
   **What to do:** an agent the machine carries
@@ -3564,7 +3567,8 @@ carries a date once its tag exists.
   **What to do:** nothing; it is a new tool beside `opamp-package-sign`, which still builds an
   artifact out of any program you have.
 - **A `command` Supervisor can reload instead of restart**
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)). A `[[supervisor]]`
+  ([CLT-wrappers-act-through-the-core](docs/adr/CLT-wrappers-act-through-the-core.md)). A
+  `[[supervisor]]`
   block of `type = "command"` may set `reload_signal = "HUP"` (`"USR1"` and `"USR2"` are also
   accepted, with or without a `SIG` prefix): a configuration change is then applied by sending that
   signal, and the process keeps running with its in-flight state. If the signal cannot be delivered
@@ -3576,8 +3580,8 @@ carries a date once its tag exists.
 ### Changed
 
 - **Removing a Supervisor now deletes its directory**
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)). When an applied
-  Supervisor set removes a Supervisor, the Client stops it as before and then deletes
+  ([CLT-server-manages-the-supervisor-set](docs/adr/CLT-server-manages-the-supervisor-set.md)). When
+  an applied Supervisor set removes a Supervisor, the Client stops it as before and then deletes
   `<supervisor_dir>/<name>/` whole — the Client-owned program, staged packages, written
   configuration entries, and the `instance-uid`. Re-adding the same name later starts a genuinely
   fresh Agent with a new identity; the Server keeps the old Agent's record as disconnected. A
@@ -3644,9 +3648,10 @@ carries a date once its tag exists.
 ### Security
 
 - **A Server-delivered `[[supervisor]]` block may name only a program the Client owns**
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)).
+  ([CLT-server-manages-the-supervisor-set](docs/adr/CLT-server-manages-the-supervisor-set.md)).
   A Configuration typed `opamp-fleet-client` that pushes a Supervisor set
-  (CLT-supervisor-mode-and-kinds) is now refused (`FAILED`, nothing stopped or written) if any block
+  (CLT-server-manages-the-supervisor-set) is now refused (`FAILED`, nothing stopped or written) if
+  any block
   names its program by an **absolute path** — that would let the Server spawn a machine binary that
   never passed through package signing. A bare file name — the Client-owned, package-updatable case
   — is unaffected, as is an absolute-path Supervisor an operator writes in `client.toml` by hand.
@@ -3693,7 +3698,7 @@ carries a date once its tag exists.
   one extra publication call.
 
 - **A configuration offered to the Client's own Agent now means something — its Supervisor set**
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)). A
+  ([CLT-server-manages-the-supervisor-set](docs/adr/CLT-server-manages-the-supervisor-set.md)). A
   Configuration typed `opamp-fleet-client` carries `[[supervisor]]` blocks; a matching Client
   stops what left the set, writes the blocks into its own `client.toml` (preserving the
   operator's comments and everything outside them), and starts what arrived — unchanged
@@ -4375,7 +4380,7 @@ carries a date once its tag exists.
   the Agent's identifying attributes, so one host's several Agents stay apart at the receiving end.
 
   **What it does not send:** a Collector's *internal* telemetry. This Client must not touch a
-  Managed Process's configuration (CLT-supervisor-mode-and-kinds), so what it reports is what it
+  Managed Process's configuration (CLT-wrappers-act-through-the-core), so what it reports is what it
   observes from the outside. Configure the Collector for its own internals as you would without
   OpAMP.
 
@@ -4472,7 +4477,8 @@ carries a date once its tag exists.
   nothing migrates automatically.
 
 - **`${supervisor_dir}` and `${config_dir}` in a `command` Supervisor's `args`, `working_dir`, and
-  `env` values** ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)),
+  `env` values**
+  ([CLT-wrappers-act-through-the-core](docs/adr/CLT-wrappers-act-through-the-core.md)),
   so a Foreign Agent's command line is derived from the same place the Client derives it from:
 
   ```toml
@@ -4864,7 +4870,7 @@ carries a date once its tag exists.
 - **`accepts_packages` is no longer a `[[supervisor]]` key** and a configuration still carrying it
   **fails at startup**. Whether a Managed Process takes Server-offered package updates is now
   decided by how its program is named
-  ([CLT-supervisor-mode-and-kinds](docs/adr/CLT-supervisor-mode-and-kinds.md)):
+  ([CLT-wrappers-act-through-the-core](docs/adr/CLT-wrappers-act-through-the-core.md)):
 
   | `binary` / `command` | Meaning |
   |---|---|

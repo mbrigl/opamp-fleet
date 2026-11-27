@@ -253,7 +253,7 @@ impl AgentKind {
                 body: include_str!("../../../config/examples/otelcol-contrib-conf.yaml"),
             }],
             // None. A Client is configured by `supervisor.toml` on its host — the one file the fleet
-            // deliberately does not own (CLT-supervisor-mode-and-kinds admits only `[[supervisor]]` blocks), and none
+            // deliberately does not own (CLT-wrappers-act-through-the-core admits only `[[supervisor]]` blocks), and none
             // of it has a default this tool could put on a Server.
             AgentKind::Supervisor => &[],
         }
@@ -361,7 +361,7 @@ struct Plan {
     /// what `[packages] self_update` has to say, since nothing supervises that one. Printed at the end,
     /// because it is the next thing an operator needs.
     ///
-    /// For a **wrapped** agent it is the `type` alone (CLT-supervisor-mode-and-kinds): the Client's kind knows the
+    /// For a **wrapped** agent it is the `type` alone (CLT-wrappers-act-through-the-core): the Client's kind knows the
     /// program's name, where it sits in the tree, and how it is invoked, so this tool dictates no
     /// line for a host to transcribe. Those facts live in that agent's artifact document under
     /// `docs/artifacts/`, which the kind's own tests pin — the two ends of one artifact, kept in
@@ -528,7 +528,7 @@ pub async fn run(args: Args) -> Result<(), String> {
             version = package_version
         );
         // Silent for an agent that has none — the Client's own configuration is its host's
-        // (CLT-supervisor-mode-and-kinds), so there is nothing here to offer and nothing to apologise for.
+        // (CLT-wrappers-act-through-the-core), so there is nothing here to offer and nothing to apologise for.
         if !agent.default_configurations().is_empty() {
             eprintln!(
                 "  The default configuration ({}) is not uploaded either; an upload puts it there \
@@ -2074,7 +2074,7 @@ mod tests {
             );
         }
 
-        // Nothing to seed beside it: the Client's configuration is its host's (CLT-supervisor-mode-and-kinds).
+        // Nothing to seed beside it: the Client's configuration is its host's (CLT-wrappers-act-through-the-core).
         assert!(AgentKind::Supervisor.default_configurations().is_empty());
     }
 
@@ -2772,7 +2772,7 @@ mod tests {
             let service_name = agent.source().service_name;
             if matches!(agent, AgentKind::Supervisor) {
                 // The one package nothing supervises. A Client reads `supervisor.toml` on its own
-                // host, and the fleet owns only the `[[supervisor]]` half of it (CLT-supervisor-mode-and-kinds), so
+                // host, and the fleet owns only the `[[supervisor]]` half of it (CLT-server-manages-the-supervisor-set), so
                 // there is no body this tool could put on a Server — and an offer needs none: the
                 // consent that admits this package is already in that file (CLT-self-update-signed-package).
                 assert!(

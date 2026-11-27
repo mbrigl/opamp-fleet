@@ -1,6 +1,6 @@
 //! Integration: a `command` Supervisor brings a Foreign Agent (the stub) under management —
 //! the process is spawned from the configured command line, and a Client shutdown stops it
-//! first (CLT-supervisor-mode-and-kinds).
+//! first (CLT-wrappers-act-through-the-core).
 
 mod common;
 
@@ -29,7 +29,7 @@ fn spawn_client(config_path: &Path) -> Child {
         .expect("spawn the client")
 }
 
-/// Places the stub where a Managed Process must live (CLT-supervisor-mode-and-kinds): inside the Supervisor's own
+/// Places the stub where a Managed Process must live (CLT-wrappers-act-through-the-core): inside the Supervisor's own
 /// `program/` directory, under a bare name the configuration can spell. `root` is whatever
 /// `supervisor_dir` resolves to for the Client under test — `<state_dir>/supervisors` by default.
 ///
@@ -64,7 +64,7 @@ fn write_config(dir: &Path, marker: &Path) -> std::path::PathBuf {
     path
 }
 
-/// CLT-supervisor-mode-and-kinds end to end: what the Foreign Agent is actually invoked with. The stub writes every
+/// CLT-wrappers-act-through-the-core end to end: what the Foreign Agent is actually invoked with. The stub writes every
 /// argument it received into the marker, so this asserts on the expanded command line rather than
 /// on the substitution function — the argument has to survive all the way into `argv`, which is
 /// the only place the silent failure this prevents would show up.
@@ -264,10 +264,10 @@ fn a_collector_supervisor_leaves_supplementary_entries_out_of_its_config_flags()
     common::stop_client(&mut client);
 }
 
-/// CLT-supervisor-mode-and-kinds §50 end to end: a listed Collector runs on the files the operator placed in its
+/// CLT-server-manages-the-supervisor-set §25 end to end: a listed Collector runs on the files the operator placed in its
 /// `config/` directory, and the Server's last configuration stored there before the switch is not
 /// among what it is started with.
-/// Verifies: CLT-supervisor-mode-and-kinds
+/// Verifies: CLT-server-manages-the-supervisor-set
 #[test]
 fn a_listed_collector_runs_on_the_entries_the_operator_placed() {
     use fleet_agent::supervisor::ports::AgentStorage as _;

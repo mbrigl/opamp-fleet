@@ -97,7 +97,7 @@ metrics — "CPU or RAM usage" — as what own metrics are for.
 **"Own" cannot mean a Managed Process's internals.** Upstream's `opampsupervisor` answers the offer
 by configuring the Collector's internal telemetry. That road is closed here: a Supervisor passes a
 Configuration through without touching it
-([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)), and the specification's
+([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)), and the specification's
 non-goals forbid an abstraction over a Managed Process's configuration language. What this Client
 can honestly report is what it observes from outside: its own process, and the processes it spawned
 and holds the pids of.
@@ -149,7 +149,8 @@ what the Client admits.
 the version of the Package a Supervisor installed
 ([SRV-deployments-and-pinned-rollouts §25](SRV-deployments-and-pinned-rollouts.md)), and the Client
 Agent is told apart by the kinds it reports
-([CLT-supervisor-mode-and-kinds §18](CLT-supervisor-mode-and-kinds.md)). An operator who could state
+([CLT-wrappers-act-through-the-core §24](CLT-wrappers-act-through-the-core.md)). An operator who
+could state
 a key in that namespace could make every Agent of the host a Client Agent or choose the version a
 Package is held against.
 
@@ -165,7 +166,7 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
 
    | Source | When |
    |---|---|
-   | The kind's own type | a wrapped kind states it, the type of the one agent it wraps; a block of such a kind carrying `service_name` fails at startup naming the derived value ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)) |
+   | The kind's own type | a wrapped kind states it, the type of the one agent it wraps; a block of such a kind carrying `service_name` fails at startup naming the derived value ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)) |
    | The block key `service_name` | `collector` and `command`; must not be empty, and is not bound by the instance-name grammar, so a reverse FQDN is accepted |
    | The program's file name | the fallback: `otelcol`, `promtail` |
 
@@ -288,12 +289,12 @@ to the destinations the Server offers, in TLS 1.3 and in cleartext only to a loo
       block carrying an `attributes` table fails at startup with a message naming the Server's
       Label.
     - The Client Agent also reports the kinds it was compiled with
-      ([CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)).
+      ([CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)).
     - An `[attributes]` key that starts with `supervisor.` fails at startup with a message naming
       the key. That holds whether TOML spells it quoted, dotted, or as a sub-table under
       `[attributes.supervisor]`.
     - That namespace is the Supervisor's own statement: `supervisor.kind.*`
-      ([CLT-supervisor-mode-and-kinds §18](CLT-supervisor-mode-and-kinds.md)) and
+      ([CLT-wrappers-act-through-the-core §24](CLT-wrappers-act-through-the-core.md)) and
       `supervisor.package.version` (clause 5). An operator able to state one would make every Agent
       of the host a Client Agent, or choose the version a Package is held against.
 

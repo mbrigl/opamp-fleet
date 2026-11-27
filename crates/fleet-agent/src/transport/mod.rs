@@ -161,7 +161,7 @@ async fn flush_owed<S: ReportSink>(engine: &mut Engine, sink: &mut S) -> Result<
 /// 4. **The self-update restart, before anything is applied after it.** The `Installing` the
 ///    package step just owed is the last thing this version says (CLT-self-update-signed-package). It ends the run, so
 ///    `AfterReply::End` means exactly this.
-/// 5. The self-Agent's Supervisor set (CLT-supervisor-mode-and-kinds), whose retired Agents' goodbyes go out with it.
+/// 5. The self-Agent's Supervisor set (CLT-server-manages-the-supervisor-set), whose retired Agents' goodbyes go out with it.
 ///
 /// While `enrolling` over plain HTTP the request rides the enrolment report instead (CLT-modes-and-gateway).
 pub async fn after_reply<S: ReportSink>(
@@ -258,9 +258,9 @@ pub async fn process_package_downloads<S: ReportSink>(
             otel.status_code = tracing::field::Empty,
             otel.status_description = tracing::field::Empty,
         );
-        // Each Agent stages into its own directory (CLT-supervisor-mode-and-kinds), so the Supervisor's install is a
+        // Each Agent stages into its own directory (CLT-wrappers-act-through-the-core), so the Supervisor's install is a
         // rename beside the download rather than a copy across filesystems. Keyed by the block
-        // name behind the Agent, never by index — the Agent set can change at runtime (CLT-supervisor-mode-and-kinds).
+        // name behind the Agent, never by index — the Agent set can change at runtime (CLT-wrappers-act-through-the-core).
         let staging_dir = config.staging_dir_for(engine.block_name(index));
         let download =
             crate::packages::download_and_verify(&package, config, &staging_dir, &progress)
@@ -301,7 +301,7 @@ pub async fn process_package_downloads<S: ReportSink>(
     true
 }
 
-/// Applies the self-Agent's received configuration — its Supervisor set (CLT-supervisor-mode-and-kinds) — if one is
+/// Applies the self-Agent's received configuration — its Supervisor set (CLT-server-manages-the-supervisor-set) — if one is
 /// pending, and sends the retired Agents' goodbyes through `sink`. Returns whether an apply ran,
 /// so the caller flushes the owed status reports.
 pub async fn process_self_configuration<S: ReportSink>(
@@ -314,7 +314,7 @@ pub async fn process_self_configuration<S: ReportSink>(
         return false;
     };
     // A second gate behind the capability the Agent does not declare: on a host that keeps its
-    // set no path reaches the apply (CLT-supervisor-mode-and-kinds §40).
+    // set no path reaches the apply (CLT-server-manages-the-supervisor-set §15).
     if !config.server_manages_set() {
         tracing::warn!(
             hash = %hex::encode(&offer.config_hash),
@@ -660,8 +660,8 @@ mod tests {
     }
 
     /// The Supervisor-set apply refuses to run on a host that keeps its set, whatever put a set in
-    /// front of it: nothing is written and nothing is sent (CLT-supervisor-mode-and-kinds §40).
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// front of it: nothing is written and nothing is sent (CLT-server-manages-the-supervisor-set §15).
+    /// Verifies: CLT-server-manages-the-supervisor-set
     #[tokio::test]
     async fn the_supervisor_set_apply_refuses_to_run_on_a_host_that_keeps_its_set() {
         let dir = tempfile::tempdir().expect("tempdir");

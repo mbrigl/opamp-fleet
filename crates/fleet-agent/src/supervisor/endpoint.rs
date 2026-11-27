@@ -1,4 +1,4 @@
-//! The Supervisor Endpoint (CLT-modes-and-gateway, CLT-supervisor-mode-and-kinds): the loopback OpAMP endpoint every Supervisor
+//! The Supervisor Endpoint (CLT-modes-and-gateway, CLT-wrappers-act-through-the-core): the loopback OpAMP endpoint every Supervisor
 //! exposes, WebSocket-only — what a Managed Process carrying an OpAMP client of its own
 //! (notably the Collector's `opampextension`) connects to.
 //!
@@ -417,7 +417,7 @@ mod tests {
     /// A process that reports its components as a hash alone is asked for the map once per hash:
     /// not again when it answers without the map, again when the hash changes, and not when the
     /// map arrives.
-    /// Verifies: CLT-supervisor-mode-and-kinds
+    /// Verifies: CLT-wrappers-act-through-the-core
     #[tokio::test]
     async fn a_hash_without_the_map_is_asked_for_the_map_once() {
         let (event_tx, _events) = mpsc::channel(16);
