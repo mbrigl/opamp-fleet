@@ -2,7 +2,9 @@
 //! technology. Every source file of the workspace's library crates has a role in `ROLES`; the core
 //! files are read and every path they name is held to the rule. A new module fails until it is
 //! given a role, so where it belongs is decided when it is written, and a role whose module is
-//! gone fails until it is removed, so the table never names a module the tree lacks.
+//! gone fails until it is removed, so the table never names a module the tree lacks. A module
+//! with a role that `docs/ARCHITECTURE.md` names nowhere fails too, unless `OVERVIEW_EXEMPT` holds
+//! it with its reason.
 //!
 //! The test reads source text, not the compiled crate, so every `cfg` branch is checked whatever
 //! the host — the Windows and macOS paths included. Code under `#[cfg(test)]` is not checked.
@@ -1102,6 +1104,129 @@ fn a_role_without_a_source_file_is_reported() {
     let tokens = tokenize(src);
     assert_eq!(inline_modules("", &tokens), vec!["proto"]);
     assert_eq!(inline_modules("fs", &tokens), vec!["fs::proto"]);
+}
+
+/// The modules with a role that `docs/ARCHITECTURE.md` leaves out on purpose, by crate directory
+/// and module path, each with the reason. Every other module with a role is named there, so a new
+/// module reaches the overview in the change that adds it (NUC-documents-are-fixed §4).
+const OVERVIEW_EXEMPT: &[(&str, &str, &str)] = &[
+    (
+        "fleet-agent",
+        "bin::stub_agent",
+        "a stand-in agent the integration tests start; no part of the Client",
+    ),
+    (
+        "fleet-agent",
+        "bin::stub_crasher",
+        "a stand-in agent that crashes, for the integration tests; no part of the Client",
+    ),
+    (
+        "fleet-agent",
+        "test_support",
+        "fixtures the Client's tests share; built for tests alone",
+    ),
+    (
+        "fleet-server",
+        "test_support",
+        "fixtures the Server's tests share; built for tests alone",
+    ),
+];
+
+/// The spans of `text` that stand in backticks.
+fn code_spans(text: &str) -> BTreeSet<&str> {
+    text.split('`').skip(1).step_by(2).collect()
+}
+
+/// Whether the overview's code spans name `module`: its path, its path after a crate's name, its
+/// last segment, or an item by its path in it (`module::Item`).
+fn names_module(spans: &BTreeSet<&str>, module: &str) -> bool {
+    let last = module.rsplit("::").next().unwrap_or(module);
+    spans.iter().any(|span| {
+        *span == module
+            || *span == last
+            || span.ends_with(&format!("::{module}"))
+            || span.starts_with(&format!("{module}::"))
+    })
+}
+
+/// The modules with a role, crate roots aside, that the overview names nowhere and `exempt` does
+/// not hold; and the entries of `exempt` that name no module with a role.
+fn overview_gaps(
+    roles: &[(&str, &[(&str, Role)])],
+    exempt: &[(&str, &str, &str)],
+    overview: &str,
+) -> (Vec<String>, Vec<String>) {
+    let spans = code_spans(overview);
+    let unnamed = roles
+        .iter()
+        .flat_map(|&(krate, modules)| modules.iter().map(move |&(m, _)| (krate, m)))
+        .filter(|&(krate, m)| {
+            !m.is_empty()
+                && !names_module(&spans, m)
+                && !exempt.iter().any(|&(k, e, _)| k == krate && e == m)
+        })
+        .map(|(krate, m)| format!("{krate}: {m}"))
+        .collect();
+    let stale = exempt
+        .iter()
+        .filter(|&&(krate, m, reason)| {
+            reason.trim().is_empty()
+                || !roles
+                    .iter()
+                    .any(|&(k, modules)| k == krate && modules.iter().any(|&(r, _)| r == m))
+        })
+        .map(|&(krate, m, _)| format!("{krate}: {m}"))
+        .collect();
+    (unnamed, stale)
+}
+
+/// Every module with a role is named in the architecture overview, or exempt from it with a reason
+/// (NUC-documents-are-fixed §4).
+/// Verifies: NUC-documents-are-fixed
+#[test]
+fn the_overview_names_every_module_with_a_role() {
+    let overview = fs::read_to_string(crates_dir().join("../docs/ARCHITECTURE.md")).unwrap();
+    let (unnamed, stale) = overview_gaps(ROLES, OVERVIEW_EXEMPT, &overview);
+    assert!(
+        unnamed.is_empty(),
+        "modules docs/ARCHITECTURE.md names nowhere; name each there, or exempt it in \
+         OVERVIEW_EXEMPT with its reason: {unnamed:#?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "OVERVIEW_EXEMPT entries without a reason or a module with a role: {stale:#?}"
+    );
+}
+
+/// The overview check reports a module named nowhere and not exempt, takes a module as named by
+/// its path, its crate-qualified path, its last segment or an item in it, and reports an exemption
+/// whose module has no role or that gives no reason.
+#[test]
+fn the_overview_check_finds_an_unnamed_module_and_a_stale_exemption() {
+    let roles: &[(&str, &[(&str, Role)])] = &[(
+        "c",
+        &[
+            ("", Root),
+            ("a::named", Core),
+            ("qualified", Core),
+            ("deep::last", Core),
+            ("holds", Core),
+            ("missing", Adapter),
+            ("waived", Adapter),
+        ],
+    )];
+    let overview =
+        "`a::named` and `c::qualified` and `last` and `holds::Item`; missing in prose only.";
+    let exempt = [
+        ("c", "waived", "a reason"),
+        ("c", "gone", "a reason"),
+        ("d", "waived", "a reason"),
+    ];
+    let (unnamed, stale) = overview_gaps(roles, &exempt, overview);
+    assert_eq!(unnamed, vec!["c: missing"]);
+    assert_eq!(stale, vec!["c: gone", "d: waived"]);
+    let (_, stale) = overview_gaps(roles, &[("c", "waived", " ")], overview);
+    assert_eq!(stale, vec!["c: waived"]);
 }
 
 /// The reader the test stands on: a path in a string, a comment, or test code is not a

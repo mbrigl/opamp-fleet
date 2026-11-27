@@ -73,15 +73,19 @@ Six crates in one workspace
 - **`opamp`** — the OpAMP communication layer, publishable on its own
   ([DEV-six-crates-tokio-axum](adr/DEV-six-crates-tokio-axum.md)).
   Always the
-  generated types, framing and the endpoint's body rules. Behind `client`, an Agent's protocol state
-  machine, the two transports, and `client::connection`, which builds a connection, its TLS and its
-  HTTP client from a `Connection` the application fills in, and every other HTTPS client of the
-  Client through `ClientTls::https_client`: TLS 1.3, no redirect followed, bounded by its
-  `Timeouts`. The WebSocket driver ends a connection on which nothing arrived for one heartbeat
-  interval (`client::ws::Silence`)
+  generated types (`proto`), the framing of a WebSocket message behind its varint header (`frame`),
+  and the endpoint's body rules. Behind `client`, an Agent's protocol state machine
+  (`client::protocol`), the two transports — `client::http`, one POST per exchange, and
+  `client::ws`, one connection for every Agent of the session — and `client::connection`, which
+  builds a connection, its TLS and its HTTP client from a `Connection` the application fills in,
+  and every other HTTPS client of the Client through `ClientTls::https_client`: TLS 1.3, no
+  redirect followed, bounded by its `Timeouts`. The WebSocket driver ends a connection on which
+  nothing arrived for one heartbeat interval (`client::ws::Silence`)
   ([API-silent-websocket-is-ended](adr/API-silent-websocket-is-ended.md)),
   and both drivers draw their reconnects and their waits after a refusal or an `Unavailable` from
-  `client::backoff`. `uid` is the `InstanceUid` and `attributes` the attribute keys both sides use.
+  `client::backoff`. Both ends draw their spread from `random`: the Client's reconnect jitter and
+  the `Retry-After` of a Server that sheds load. `uid` is the `InstanceUid` and `attributes` the
+  attribute keys both sides use.
   Behind `server`, the endpoint around a `Handler`, which answers a WebSocket's pings while it
   handles a message, `server::listen`, the listener with its TLS and its bounds — among them a
   cap on the connections it holds and the new ones it takes a second, a deadline on the TLS
@@ -94,12 +98,14 @@ Six crates in one workspace
   `tls` reads PEM and installs the ring provider. It reads no file and knows nothing of this
   project.
 - **`fleet-core`** — what the Server and the Client implement identically beyond the protocol: the
-  version, the platform aliases, the statements a package signature and a floor cover
+  version taken apart (`version`), the platform aliases (`platform`), the statements a package
+  signature and a floor cover
   ([PKG-versions-high-water-mark-floor](adr/PKG-versions-high-water-mark-floor.md)), the
   renewal proof (`renewal`) and the bootstrap proof (`bootstrap_proof`) a CSR carries — read from
   a CSR by the adapter `csr` — the host a certificate that names none is taken for, when a
   certificate counts as ending, with its end read and put in the line `pki status` prints by the
-  adapter `ending::read`, for both programs and the running Server, what a certificate is called,
+  adapter `ending::read`, for both programs and the running Server, what a certificate is called
+  (`naming`),
   the token buckets the Server and a Gateway count a sender in (`rate`), where the Server serves
   the Gateways' revocation list and the shape of its body, which the Server writes and a Gateway
   reads (`revocation_list`),
@@ -159,7 +165,8 @@ and nothing of the host
 role is listed in
 [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs), which fails when a
 core module names an adapter or a technology, when a Plugin names more than its port, when a
-module has no role, and when a role names no module.
+module has no role, when a role names no module, and when this overview names a module with a role
+nowhere and the test does not exempt it.
 
 - **Server stores** — one port per domain in the core module it serves, shaped so a database or
   an object store could implement it, and speaking in domain types, never paths
@@ -180,8 +187,9 @@ module has no role, and when a role names no module.
   `FloorStore` under the `PackageFloors` in `floors`, the floor the operator signed per Agent type
   ([PKG-versions-high-water-mark-floor](adr/PKG-versions-high-water-mark-floor.md));
   `LedgerStore` in `revocation`; `AuditStore` in `audit_log`. The filesystem adapters are in `fs`,
-  which also opens the data directory and refuses anything its layout does not name. With
-  `[database] store = "postgres"` every port but the blob port has its PostgreSQL adapter in
+  which also opens the data directory and refuses anything its layout does not name; the Agent
+  records' is `fs::agents`. With `[database] store = "postgres"` every port but the blob port has
+  its PostgreSQL adapter in
   `postgres` instead (`postgres::agents`, with the query of a page in `postgres::agent_page`,
   `configs`, `deployments`, `packages`, `ledger`, `bootstrap`, `enrolment`, `floors`, `audit`),
   each write one transaction; every read of several statements that must agree — the load of the
@@ -522,8 +530,13 @@ module has no role, and when a role names no module.
   ([CLT-gateway-rate-limits-hosts](adr/CLT-gateway-rate-limits-hosts.md)).
 - **Client engine** — `engine` routes the Server's replies to the Agents over one connection
   ([CLT-modes-and-gateway](adr/CLT-modes-and-gateway.md)). The transports, the Gateway, telemetry
-  (`telemetry`) and the service runtime are adapters around it.
-- **Client service** — `service` is what makes the Client an OS service, but for its log on disk.
+  (`telemetry`) and the service runtime are adapters around it. `span` records an operation's
+  outcome on the span that measures it, which `telemetry` turns into the span status. `product`
+  holds the product's name and title, fixed at build time
+  ([CLT-installed-service-and-state](adr/CLT-installed-service-and-state.md)).
+- **Client service** — `service` is what makes the Client an OS service, but for its log on disk,
+  which `logging` writes while it runs as a service. On Windows `service::windows` is the SCM
+  runtime shim: it reports the service running and runs the same daemon body as the foreground.
   `service::manager` registers, starts, stops and deregisters the Client's
   service and, where a process account is named, the second service `<PRODUCT_NAME>-agents` beside
   it, and writes both systemd units, or both launchd plists, itself
