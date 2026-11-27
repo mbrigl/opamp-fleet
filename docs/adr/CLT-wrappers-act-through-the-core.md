@@ -164,6 +164,10 @@ core grants.
      tracing spans. It applies them while it carries out a host function.
    - The port must be expressible in WIT, with `async func` for the handler and the host
      functions, without a host resource.
+   - The one part of the port that is no data is an instance's reading of a version (clause 11).
+     It is a call of the Plugin, a function of the text alone that keeps no state. A WebAssembly
+     Plugin exports it, and the core calls it in an instance of the component of its own, so it is
+     no second call into the instance whose handler runs (clause 1).
 
 3. **A Plugin names files by root and relative path.**
    - The roots are:
@@ -860,7 +864,8 @@ None.
   `a_plugin_names_only_the_port` keeps a kind from reaching them itself (clauses 4 and 13).
 - **Not mechanically decidable:** that the port stays expressible in WIT (clauses 2 and 12). No WIT
   file exists until the ADR that loads a WebAssembly Plugin. `the_port_carries_no_host_resource`
-  decides the part a test can, and the review of a change to the port decides the rest.
+  decides the part a test can. The review of a change to the port decides the rest, the version
+  reading among it, which no test of names can see.
 - Registry, defaults and refusals, in `crates/fleet-agent/src/supervisor/mod.rs`:
   `every_wrapped_kinds_block_is_two_lines`, `an_unwrapped_kind_still_says_everything_itself`,
   `a_client_reports_the_kinds_it_was_compiled_with`,
