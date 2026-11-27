@@ -153,11 +153,13 @@ Inside the Server and the Client the code is ports and adapters
 ([DEV-ports-and-adapters](adr/DEV-ports-and-adapters.md)): a **core** that holds the domain and owns
 its **ports**, **adapters** that bind a port to a technology, and a **composition root** — `lib.rs`,
 `main.rs`, and on the Client `supervisor`, `service::runtime` and `service::enrol` — that wires the
-two. Every
-module's role is listed in
+two. On the Client a fourth role, the **Plugin**, is a Supervisor kind: it names the Plugin port
+and nothing of the host
+([CLT-wrappers-act-through-the-core](adr/CLT-wrappers-act-through-the-core.md)). Every module's
+role is listed in
 [`dependency_direction.rs`](../crates/fleet-core/tests/dependency_direction.rs), which fails when a
-core module names an adapter or a technology, when a module has no role, and when a role names
-no module.
+core module names an adapter or a technology, when a Plugin names more than its port, when a
+module has no role, and when a role names no module.
 
 - **Server stores** — one port per domain in the core module it serves, shaped so a database or
   an object store could implement it, and speaking in domain types, never paths
@@ -400,12 +402,18 @@ no module.
   the core's types — among them the fleet view `AgentView` — carry no schema, and `api` converts
   them. `api::paging` reads `limit` and `cursor`, encodes the opaque cursor, and writes
   `X-Total-Count` and the `Link` of the four lists that page.
-- **Client supervision** — `supervisor::ports` is the Port a Plugin implements
-  ([CLT-wrappers-act-through-the-core](adr/CLT-wrappers-act-through-the-core.md)),
-  and `shutdown` the handle every task stops on; the Plugins and the process runner are its
-  adapters, among them the two Supervisors
-  this project brings, the Collector's in `supervisor::collector` and the example Custom
-  Supervisor in `supervisor::command`. How a `[[supervisor]]` block is
+- **Client supervision** — `supervisor::port` is the Plugin port, plain data and asynchronous
+  calls: a Plugin states its manifest and makes an instance per Supervisor, an event handler that
+  acts only through the host functions it is handed
+  ([CLT-wrappers-act-through-the-core](adr/CLT-wrappers-act-through-the-core.md)). The Plugins
+  are the two Supervisors this project brings, the Collector's in `supervisor::collector` and the
+  example Custom Supervisor in `supervisor::command`. `supervisor::host` is the core's side of
+  that port, an adapter: it feeds an instance its inputs one at a time, answers what the instance
+  leaves unanswered, and carries out each host function over the process runner, the files in
+  the Supervisor's own roots through `supervisor::host::files` and the timers through
+  `supervisor::host::timers`. `supervisor::ports` holds the commands and events between the core
+  and a Supervisor's adapter task and the registry's port, and `shutdown` the handle every task
+  stops on. How a `[[supervisor]]` block is
   read — its plugin, program, Agent type and timings — is `supervisor::block`, and what a
   Server-delivered block may bring is `supervisor::delivered`; the registry of Plugins stays in
   `supervisor`, which knows the kinds and hands them to both, and which hands `delivered` the
@@ -418,7 +426,7 @@ no module.
   `supervisor::channel::windows`, which runs each program in a job object. The Windows system
   calls neither the standard library nor a dependency offers — the SIDs, the pipe's security
   descriptor and its two ends' identities, the job objects — are declared in `win32`. The
-  registry hands every plugin the one `Spawner`
+  registry starts every Supervisor's host on the one `Spawner`
   of the run, which `service::runtime` chooses once from the Client's command line — the unit
   or plist `service install --process-account` writes names the second service's socket there —
   and hands `build_engine`. The Engine keeps that registry behind the port `PluginRegistry` of

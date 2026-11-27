@@ -656,7 +656,7 @@ async fn a_config_change_reaches_both_supervised_agents_over_one_connection() {
 /// A delivered Supervisor set with one block the Client refuses is refused whole: the running
 /// Supervisor keeps its process, `supervisor.toml` keeps every byte, and the Client's own Agent
 /// reports the refusal.
-/// Verifies: CLT-wrappers-act-through-the-core
+/// Verifies: CLT-server-manages-the-supervisor-set
 #[tokio::test]
 async fn a_refused_supervisor_set_leaves_the_running_supervisors_untouched() {
     let (addr, state, dir) = spawn_server().await;

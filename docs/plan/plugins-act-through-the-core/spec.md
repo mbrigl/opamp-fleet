@@ -61,8 +61,8 @@ data only, so a WebAssembly Plugin can later implement it without a change to th
 - The core's executor of host functions sits beside the `Runner` and drives it. The `Runner`
   keeps spawn, watchdog, stop, apply gate, package swap, preflight and probe.
 - The manifest absorbs what the kind states today: the kind defaults, the program key, the
-  reload signal, the process group, the version arguments and preflight, and the data
-  directories.
+  reload signal, the process group and the data directories. The version probe, which also
+  serves as the preflight, stays with the instance, as `command` takes it from its block.
 - File host functions resolve a root and a relative path through the no-follow adapter. The
   `state` root is a new directory in each Supervisor's directory, owned by the Client alone.
 - A program a Plugin runs once goes the way of the version probe: through the second service
@@ -70,8 +70,8 @@ data only, so a WebAssembly Plugin can later implement it without a change to th
 - The configuration entries reach a Plugin as an input with each entry's name, role and digest.
 - Timers and host facts are host functions; time reaches a Plugin only as an input.
 - The block parse stays two-staged; `check` and `check_delivered` stay on the port.
-- The citations of CLT-supervisor-mode-and-kinds in code, tests and other ADRs move to the
-  clauses that now carry them, by the map in the commit that proposed the two successor ADRs.
+- The citations of the superseded Supervisor ADR in code, tests and other ADRs move to the
+  clauses that now carry them, by the map in the commit that proposed the two ADRs.
 
 ## Testing decisions
 
@@ -92,9 +92,10 @@ data only, so a WebAssembly Plugin can later implement it without a change to th
 
 ## ADR impact
 
-- Binding: CLT-wrappers-act-through-the-core (proposed, reviewed, implemented here) and
-  CLT-server-manages-the-supervisor-set (proposed, unchanged behaviour), which supersede
-  CLT-supervisor-mode-and-kinds on acceptance.
+- Binding: CLT-wrappers-act-through-the-core (proposed, reviewed, implemented here), which
+  supersedes the ADR of Supervisor Mode and its kinds on acceptance, and
+  CLT-server-manages-the-supervisor-set (proposed, unchanged behaviour), which restates its
+  Server-managed set.
 - Also binding: CLT-accounts-service-runs-under (second service, no-follow adapter, directory
   modes), PKG-signed-packages-and-delivery (swap, preflight, rollback), DEV-ports-and-adapters
   and DEV-six-crates-tokio-axum (module seams, dependency direction), SEC-secrets-wiped-on-drop

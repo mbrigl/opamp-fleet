@@ -97,9 +97,10 @@ pub struct AgentState {
     storage: Box<dyn AgentStorage>,
     /// A received configuration awaiting dispatch to the process adapter.
     pending_apply: Option<AgentRemoteConfig>,
-    /// The self-Agent's configuration in flight (CLT-wrappers-act-through-the-core): stored only once the apply succeeded,
-    /// so a Client restarted mid-apply reports nothing as applied and is re-offered — a status of
-    /// `APPLIED` on restart must mean the file was actually rewritten.
+    /// The self-Agent's configuration in flight (CLT-server-manages-the-supervisor-set §6): stored
+    /// only once the apply succeeded, so a Client restarted mid-apply reports nothing as applied
+    /// and is re-offered — a status of `APPLIED` on restart must mean the file was actually
+    /// rewritten.
     applying: Option<AgentRemoteConfig>,
     /// A Server-commanded restart awaiting dispatch to the process adapter.
     pending_restart: bool,
