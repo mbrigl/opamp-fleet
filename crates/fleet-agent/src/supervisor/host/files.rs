@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 
 use fleet_util::nofollow::{HeldDir, Kind};
 
-use crate::storage::Shared;
 use crate::supervisor::port::{EntryKind, Root, RootPath, Value};
 use crate::supervisor::ports::{InstallTarget, ProcessAccountGroup, SupervisorContext};
 
@@ -108,11 +107,11 @@ impl Roots {
         match root {
             Root::Config | Root::Program => HeldDir::open(self.root(root)),
             Root::Data => {
-                crate::storage::create_shared_dir(
+                crate::storage::create_data_dir(
                     &self.supervisor_dir,
                     &self.data,
+                    &self.data,
                     self.group,
-                    Shared::Written,
                 )?;
                 HeldDir::open(&self.data)
             }
@@ -208,32 +207,26 @@ impl Roots {
     }
 
     /// Creates the directory and what is missing above it, never through a link.
-    /// In `data`, where a process account is registered, each directory on the way is made as the
-    /// Client makes a kind's data directories: shared with that account's group, its mode set
-    /// whatever the umask, and an existing one corrected (CLT-accounts-service-runs-under §21).
-    /// Each is reached from the Supervisor's directory, which the process account does not write
-    /// in. Elsewhere, and where none is, it is the Client's alone, as the Managed Process then
-    /// runs under the Client's account.
+    /// In `data` it is made as the manifest's data directories are, by
+    /// [`crate::storage::create_data_dir`]: where a process account is registered, every directory
+    /// on the way shared with its group (CLT-accounts-service-runs-under §21). Elsewhere it is the
+    /// Client's alone.
     pub(super) fn create_dir(&self, dir: &RootPath) -> Result<(), String> {
         writable(dir)?;
         let names = components(dir)?;
+        if dir.root == Root::Data {
+            let path = self.path(dir)?;
+            return crate::storage::create_data_dir(
+                &self.supervisor_dir,
+                &self.data,
+                &path,
+                self.group,
+            )
+            .map_err(|e| failed("create", dir, &e));
+        }
         let mut held = self
             .held_root(dir.root)
             .map_err(|e| failed("reach", dir, &e))?;
-        if let (Root::Data, Some(group)) = (dir.root, self.group) {
-            let mut made = self.data.clone();
-            for name in &names {
-                made.push(name);
-                crate::storage::create_shared_dir(
-                    &self.supervisor_dir,
-                    &made,
-                    Some(group),
-                    Shared::Written,
-                )
-                .map_err(|e| failed("create", dir, &e))?;
-            }
-            return Ok(());
-        }
         for name in &names {
             held = held
                 .dir(name, PRIVATE_DIR_MODE)
@@ -458,8 +451,10 @@ mod tests {
         );
         let written = meta(&roots.data.join("d"));
         assert_eq!(written.gid(), gid, "the data file is the group's");
-        // A directory a Plugin creates in `data` is shared as the root is, whatever the umask
-        // narrows a new directory to, and one already there narrower is corrected.
+        // A directory a Plugin creates in `data` is made by `storage::create_data_dir`, as the
+        // manifest's directories are before a spawn: shared as the root is with every directory on
+        // the way, whatever the umask narrows a new directory to, and one already there narrower
+        // is corrected.
         roots
             .create_dir(&file(Root::Data, "spool/in"))
             .expect("create");

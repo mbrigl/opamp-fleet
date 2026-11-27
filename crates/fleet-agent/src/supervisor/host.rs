@@ -133,21 +133,18 @@ pub fn start(
     Ok(commands)
 }
 
-/// The directories a kind's agent writes into, beneath the `data` root, which comes first so that
-/// it is shared before anything is made in it (CLT-wrappers-act-through-the-core §6). None where
-/// the kind names none.
+/// The directories a kind's agent writes into, beneath the `data` root
+/// (CLT-wrappers-act-through-the-core §6). The `Runner` makes each with every directory on the way.
 fn data_dirs(roots: &Roots, named: &[&str]) -> Result<Vec<PathBuf>, String> {
-    if named.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut dirs = vec![roots.data.clone()];
-    for dir in named {
-        dirs.push(roots.path(&RootPath {
-            root: Root::Data,
-            path: (*dir).to_string(),
-        })?);
-    }
-    Ok(dirs)
+    named
+        .iter()
+        .map(|dir| {
+            roots.path(&RootPath {
+                root: Root::Data,
+                path: (*dir).to_string(),
+            })
+        })
+        .collect()
 }
 
 /// A probe's arguments, environment and working directory, as the `Runner` takes them.
@@ -1007,7 +1004,7 @@ mod tests {
     }
 
     /// The manifest's process group and data directories reach every specification the core
-    /// starts, the `data` root first; a data directory that would leave its root fails the start.
+    /// starts; a data directory that would leave its root fails the start.
     /// Verifies: CLT-wrappers-act-through-the-core
     #[test]
     fn the_manifest_reaches_the_process_specification() {
@@ -1015,11 +1012,7 @@ mod tests {
         let dirs = data_dirs(&roots, &["log", "lib/state"]).expect("dirs");
         assert_eq!(
             dirs,
-            vec![
-                roots.data.clone(),
-                roots.data.join("log"),
-                roots.data.join("lib").join("state"),
-            ]
+            vec![roots.data.join("log"), roots.data.join("lib").join("state"),]
         );
         assert_eq!(
             data_dirs(&roots, &[]),

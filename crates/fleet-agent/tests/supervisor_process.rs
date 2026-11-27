@@ -212,6 +212,33 @@ fn runner_full(
     reload_signal: Option<i32>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
+    runner_at(
+        std::env::temp_dir(),
+        via,
+        install,
+        apply_grace,
+        retain_previous,
+        version_probe,
+        preflight,
+        reload_signal,
+        build,
+    )
+}
+
+/// A Supervisor whose directory is `supervisor_dir`, where the directories an agent writes into
+/// lie beneath its `data` root.
+#[allow(clippy::too_many_arguments)]
+fn runner_at(
+    supervisor_dir: PathBuf,
+    via: Via,
+    install: Option<InstallTarget>,
+    apply_grace: Duration,
+    retain_previous: Duration,
+    version_probe: Option<VersionProbe>,
+    preflight: Option<Preflight>,
+    reload_signal: Option<i32>,
+    build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
+) -> Harness {
     let (event_tx, events) = mpsc::channel(64);
     let (commands, command_rx) = mpsc::channel(16);
     let (shutdown_tx, shutdown) = shutdown_channel();
@@ -228,7 +255,7 @@ fn runner_full(
         reload_signal,
         spawner: Spawner::Local,
         process_account_group: None,
-        supervisor_dir: std::env::temp_dir(),
+        supervisor_dir,
         events: EventSender::new(0, event_tx),
         commands: command_rx,
         build: Box::new(build),
@@ -338,26 +365,41 @@ async fn apply_package(
 /// otherwise a correct installation ends in a crash loop over a missing directory.
 async fn the_directories_an_agent_writes_into_are_made_before_it_runs(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
-    // Two levels deep and nested under a parent that does not exist either, because the failure
-    // this prevents is exactly the one nobody created a parent for.
-    let state = dir.path().join("agent-state").join("inventory");
+    // Two levels deep beneath the Supervisor's `data` root and nested under a parent that does not
+    // exist either, because the failure this prevents is exactly the one nobody created a parent
+    // for.
+    let state = dir
+        .path()
+        .join("data")
+        .join("agent-state")
+        .join("inventory");
     let program = PathBuf::from(env!("CARGO_BIN_EXE_stub_agent"));
     let marker = dir.path().join("started");
     assert!(!state.exists());
 
-    let mut harness = start(via, {
-        let (state, program, marker) = (state.clone(), program.clone(), marker.clone());
-        move || {
-            Some(ProcessSpec {
-                program: program.clone(),
-                args: vec!["--touch".to_string(), marker.display().to_string()],
-                env: Vec::new(),
-                working_dir: None,
-                own_process_group: false,
-                ensure_dirs: vec![state.clone()],
-            })
-        }
-    });
+    let mut harness = runner_at(
+        dir.path().to_path_buf(),
+        via,
+        None,
+        Duration::ZERO,
+        Duration::ZERO,
+        None,
+        None,
+        None,
+        {
+            let (state, program, marker) = (state.clone(), program.clone(), marker.clone());
+            move || {
+                Some(ProcessSpec {
+                    program: program.clone(),
+                    args: vec!["--touch".to_string(), marker.display().to_string()],
+                    env: Vec::new(),
+                    working_dir: None,
+                    own_process_group: false,
+                    ensure_dirs: vec![state.clone()],
+                })
+            }
+        },
+    );
     let _ = next_health(&mut harness.events).await;
     wait_until_started(&marker).await;
     assert!(
