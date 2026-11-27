@@ -868,16 +868,27 @@ impl Engine {
     }
 
     /// Absorbs process events until `commands`' receiving side — the adapter task — is gone.
+    ///
+    /// An event waiting is absorbed before the close is taken, and what is buffered when it is
+    /// taken is absorbed too: an adapter sends its last event, the uninstall's answer among them,
+    /// and then drops its receiver, and an answer taken after the Agent retired would be dropped,
+    /// with the warning an `Err` owes the operator (CLT-wrappers-act-through-the-core §9).
     async fn drain_events_until_closed(&mut self, commands: &mpsc::Sender<ProcessCommand>) {
         let closed = commands.closed();
         tokio::pin!(closed);
         loop {
             tokio::select! {
-                () = &mut closed => return,
+                biased;
                 event = self.events.recv() => match event {
                     Some((index, event)) => self.absorb(index, event),
                     None => return,
                 },
+                () = &mut closed => {
+                    while let Ok((index, event)) = self.events.try_recv() {
+                        self.absorb(index, event);
+                    }
+                    return;
+                }
             }
         }
     }
@@ -1066,6 +1077,52 @@ mod tests {
             !saw_uninstall[1].load(Ordering::SeqCst),
             "the changed adapter was only stopped"
         );
+    }
+
+    /// The answer an adapter sends just before it drops its receiver is absorbed while the Agent
+    /// still counts, so an uninstall's `Err` reaches the operator's log instead of arriving after
+    /// the retirement, where it is dropped (CLT-wrappers-act-through-the-core §9). Repeated,
+    /// since the close and the answer are both ready at once and a choice between them by chance
+    /// fails one round in two.
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[tokio::test]
+    async fn an_uninstalls_answer_is_absorbed_before_the_adapter_counts_as_gone() {
+        for round in 0..32 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (event_tx, events) = mpsc::channel(8);
+            let storage = Storage::new(dir.path().join("removed")).expect("storage");
+            let state = AgentState::new("removed".to_string(), storage, crate::host::SystemHost)
+                .expect("agent");
+            let (commands_tx, mut commands_rx) = mpsc::channel::<ProcessCommand>(4);
+            let (stop_tx, _stop) = crate::shutdown::shutdown_channel();
+            let answers = crate::supervisor::ports::EventSender::new(0, event_tx.clone());
+            tokio::spawn(async move {
+                if let Some(ProcessCommand::Uninstall) = commands_rx.recv().await {
+                    answers
+                        .send(ProcessEvent::Uninstalled {
+                            result: Err("left x".to_string()),
+                        })
+                        .await;
+                }
+            });
+            let mut engine = Engine::with_processes(
+                vec![EngineAgent {
+                    state,
+                    commands: Some(commands_tx),
+                    stop: Some(stop_tx),
+                    block_name: Some("removed".to_string()),
+                }],
+                events,
+                event_tx,
+            );
+            engine
+                .retire_supervisors(&["removed".to_string()], &["removed".to_string()])
+                .await;
+            assert!(
+                engine.events.try_recv().is_err(),
+                "round {round}: the answer was left for after the retirement"
+            );
+        }
     }
 
     #[test]

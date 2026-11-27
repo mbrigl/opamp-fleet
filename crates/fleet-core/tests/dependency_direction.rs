@@ -2,7 +2,9 @@
 //! technology. Every source file of the workspace's library crates has a role in `ROLES`; the core
 //! files are read and every path they name is held to the rule. A new module fails until it is
 //! given a role, so where it belongs is decided when it is written, and a role whose module is
-//! gone fails until it is removed, so the table never names a module the tree lacks.
+//! gone fails until it is removed, so the table never names a module the tree lacks. A module
+//! with a role that `docs/ARCHITECTURE.md` names nowhere fails too, unless `OVERVIEW_EXEMPT` holds
+//! it with its reason.
 //!
 //! The test reads source text, not the compiled crate, so every `cfg` branch is checked whatever
 //! the host — the Windows and macOS paths included. Code under `#[cfg(test)]` is not checked.
@@ -949,115 +951,65 @@ fn the_plugin_rule_finds_what_reaches_past_the_port() {
     );
 }
 
-/// The names a type of the Plugin port must not hold: a host path, a file or other handle, a
-/// channel, a task, a span, a time read or a secret (CLT-wrappers-act-through-the-core §2).
-const HOST_RESOURCES: &[&str] = &[
-    "PathBuf",
-    "Path",
-    "OsString",
-    "OsStr",
-    "File",
-    "TcpStream",
-    "Command",
-    "Child",
-    "mpsc",
-    "oneshot",
-    "watch",
-    "Sender",
-    "Receiver",
-    "JoinHandle",
-    "Span",
-    "Instant",
-    "SystemTime",
-    "Zeroizing",
-    "Shutdown",
-    "Arc",
-    "Mutex",
-];
+/// Whether shipped code implements the Plugin port's `Plugin` trait (`impl Plugin for …`, by any
+/// path to it).
+fn implements_plugin(tokens: &[(Token, usize)]) -> bool {
+    tokens.windows(2).any(|w| {
+        matches!(
+            (&w[0].0, &w[1].0),
+            (Token::Ident(name), Token::Ident(keyword)) if name == "Plugin" && keyword == "for"
+        )
+    })
+}
 
-/// Every name of a path in `file`'s shipped syntax, with the struct `only` alone where it is
-/// given: the code, never a comment, a string or a test.
-fn path_names(file: &syn::File, only: Option<&str>) -> Vec<String> {
-    use syn::visit::Visit;
-    struct Names(Vec<String>);
-    impl<'ast> Visit<'ast> for Names {
-        fn visit_path_segment(&mut self, segment: &'ast syn::PathSegment) {
-            self.0.push(segment.ident.to_string());
-            syn::visit::visit_path_segment(self, segment);
-        }
-    }
-    let mut names = Names(Vec::new());
-    match only {
-        None => names.visit_file(file),
-        Some(only) => {
-            for item in &file.items {
-                if let syn::Item::Struct(item) = item {
-                    if item.ident == only {
-                        names.visit_item_struct(item);
-                    }
-                }
+/// A module whose shipped code implements `Plugin` has the role `Plugin`, so a new kind cannot
+/// escape [`a_plugin_names_only_the_port`] by a role that does not hold it to the port
+/// (CLT-wrappers-act-through-the-core §1).
+/// Verifies: CLT-wrappers-act-through-the-core
+#[test]
+fn a_module_that_implements_a_plugin_has_the_role_plugin() {
+    let mut found = Vec::new();
+    let mut plugins = 0;
+    for &(krate, roles) in ROLES {
+        let src = crates_dir().join(krate).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        files.sort();
+        for file in files {
+            if !implements_plugin(&tokenize(&fs::read_to_string(&file).unwrap())) {
+                continue;
+            }
+            plugins += 1;
+            let module = module_path(&src, &file);
+            if !roles.iter().any(|&(m, role)| m == module && role == Plugin) {
+                found.push(format!("{krate}: {module}"));
             }
         }
     }
-    names.0
+    assert!(plugins >= 2, "the Plugin implementations are found");
+    assert!(
+        found.is_empty(),
+        "modules that implement Plugin without the role Plugin in ROLES: {found:#?}"
+    );
 }
 
-/// The host resources among `names`.
-fn host_resources(names: &[String]) -> Vec<String> {
-    names
-        .iter()
-        .filter(|n| HOST_RESOURCES.contains(&n.as_str()))
-        .cloned()
-        .collect()
-}
-
-/// The Plugin port is plain data: no type of it, nor the struct of another crate it embeds, names
-/// a host resource, so a WebAssembly component can implement it.
-/// Verifies: CLT-wrappers-act-through-the-core
+/// The reader of an implementation finds `impl Plugin for` by any path to the trait, and not the
+/// trait's own declaration, another trait implemented for a Plugin, or the word in a comment.
 #[test]
-fn the_port_carries_no_host_resource() {
-    let read = |path: &str| {
-        source::shipped(&fs::read_to_string(crates_dir().join(path)).unwrap()).unwrap()
-    };
-    let mut names = path_names(&read("fleet-agent/src/supervisor/port.rs"), None);
-    names.extend(path_names(
-        &read("fleet-util/src/tree.rs"),
-        Some("KeptLink"),
-    ));
-    assert!(names.iter().any(|n| n == "Manifest"), "the port is read");
-    let found = host_resources(&names);
-    assert!(found.is_empty(), "the port names host resources: {found:?}");
-}
-
-/// The reading above finds a host resource held by a port type, and not one in a comment, a
-/// string or a test, so its silence on the port means something.
-#[test]
-fn the_port_rule_finds_a_host_resource() {
-    for (field, resource) in [
-        ("std::path::PathBuf", "PathBuf"),
-        ("std::fs::File", "File"),
-        ("tokio::sync::mpsc::Sender<u8>", "Sender"),
-        ("tracing::Span", "Span"),
-        ("zeroize::Zeroizing<String>", "Zeroizing"),
+fn the_plugin_implementation_is_found_by_any_path() {
+    for src in [
+        "impl Plugin for Command {}",
+        "impl crate::supervisor::port::Plugin for Collector {}",
     ] {
-        let file = source::shipped(&format!("pub enum Input {{ A {{ x: {field} }} }}")).unwrap();
-        assert_eq!(
-            host_resources(&path_names(&file, None))
-                .last()
-                .map(String::as_str),
-            Some(resource)
-        );
+        assert!(implements_plugin(&tokenize(src)), "{src}");
     }
-    let quiet = source::shipped(
-        "/// A `PathBuf` in a comment.\n\
-         pub struct S { s: &'static str }\n\
-         const T: &str = \"Span\";\n\
-         #[cfg(test)] mod tests { struct P(std::path::PathBuf); }",
-    )
-    .unwrap();
-    assert!(host_resources(&path_names(&quiet, None)).is_empty());
-    let only = source::shipped("pub struct A(std::fs::File); pub struct B(u8);").unwrap();
-    assert!(host_resources(&path_names(&only, Some("B"))).is_empty());
+    for src in [
+        "pub trait Plugin: Send + Sync {}",
+        "impl Instance for Plugin {}",
+        "// impl Plugin for Command\nfn f() {}",
+    ] {
+        assert!(!implements_plugin(&tokenize(src)), "{src}");
+    }
 }
 
 /// The modules a file declares with a body of their own (`mod name { … }`), as module paths
@@ -1102,6 +1054,129 @@ fn a_role_without_a_source_file_is_reported() {
     let tokens = tokenize(src);
     assert_eq!(inline_modules("", &tokens), vec!["proto"]);
     assert_eq!(inline_modules("fs", &tokens), vec!["fs::proto"]);
+}
+
+/// The modules with a role that `docs/ARCHITECTURE.md` leaves out on purpose, by crate directory
+/// and module path, each with the reason. Every other module with a role is named there, so a new
+/// module reaches the overview in the change that adds it (NUC-documents-are-fixed §4).
+const OVERVIEW_EXEMPT: &[(&str, &str, &str)] = &[
+    (
+        "fleet-agent",
+        "bin::stub_agent",
+        "a stand-in agent the integration tests start; no part of the Client",
+    ),
+    (
+        "fleet-agent",
+        "bin::stub_crasher",
+        "a stand-in agent that crashes, for the integration tests; no part of the Client",
+    ),
+    (
+        "fleet-agent",
+        "test_support",
+        "fixtures the Client's tests share; built for tests alone",
+    ),
+    (
+        "fleet-server",
+        "test_support",
+        "fixtures the Server's tests share; built for tests alone",
+    ),
+];
+
+/// The spans of `text` that stand in backticks.
+fn code_spans(text: &str) -> BTreeSet<&str> {
+    text.split('`').skip(1).step_by(2).collect()
+}
+
+/// Whether the overview's code spans name `module`: its path, its path after a crate's name, its
+/// last segment, or an item by its path in it (`module::Item`).
+fn names_module(spans: &BTreeSet<&str>, module: &str) -> bool {
+    let last = module.rsplit("::").next().unwrap_or(module);
+    spans.iter().any(|span| {
+        *span == module
+            || *span == last
+            || span.ends_with(&format!("::{module}"))
+            || span.starts_with(&format!("{module}::"))
+    })
+}
+
+/// The modules with a role, crate roots aside, that the overview names nowhere and `exempt` does
+/// not hold; and the entries of `exempt` that name no module with a role.
+fn overview_gaps(
+    roles: &[(&str, &[(&str, Role)])],
+    exempt: &[(&str, &str, &str)],
+    overview: &str,
+) -> (Vec<String>, Vec<String>) {
+    let spans = code_spans(overview);
+    let unnamed = roles
+        .iter()
+        .flat_map(|&(krate, modules)| modules.iter().map(move |&(m, _)| (krate, m)))
+        .filter(|&(krate, m)| {
+            !m.is_empty()
+                && !names_module(&spans, m)
+                && !exempt.iter().any(|&(k, e, _)| k == krate && e == m)
+        })
+        .map(|(krate, m)| format!("{krate}: {m}"))
+        .collect();
+    let stale = exempt
+        .iter()
+        .filter(|&&(krate, m, reason)| {
+            reason.trim().is_empty()
+                || !roles
+                    .iter()
+                    .any(|&(k, modules)| k == krate && modules.iter().any(|&(r, _)| r == m))
+        })
+        .map(|&(krate, m, _)| format!("{krate}: {m}"))
+        .collect();
+    (unnamed, stale)
+}
+
+/// Every module with a role is named in the architecture overview, or exempt from it with a reason
+/// (NUC-documents-are-fixed §4).
+/// Verifies: NUC-documents-are-fixed
+#[test]
+fn the_overview_names_every_module_with_a_role() {
+    let overview = fs::read_to_string(crates_dir().join("../docs/ARCHITECTURE.md")).unwrap();
+    let (unnamed, stale) = overview_gaps(ROLES, OVERVIEW_EXEMPT, &overview);
+    assert!(
+        unnamed.is_empty(),
+        "modules docs/ARCHITECTURE.md names nowhere; name each there, or exempt it in \
+         OVERVIEW_EXEMPT with its reason: {unnamed:#?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "OVERVIEW_EXEMPT entries without a reason or a module with a role: {stale:#?}"
+    );
+}
+
+/// The overview check reports a module named nowhere and not exempt, takes a module as named by
+/// its path, its crate-qualified path, its last segment or an item in it, and reports an exemption
+/// whose module has no role or that gives no reason.
+#[test]
+fn the_overview_check_finds_an_unnamed_module_and_a_stale_exemption() {
+    let roles: &[(&str, &[(&str, Role)])] = &[(
+        "c",
+        &[
+            ("", Root),
+            ("a::named", Core),
+            ("qualified", Core),
+            ("deep::last", Core),
+            ("holds", Core),
+            ("missing", Adapter),
+            ("waived", Adapter),
+        ],
+    )];
+    let overview =
+        "`a::named` and `c::qualified` and `last` and `holds::Item`; missing in prose only.";
+    let exempt = [
+        ("c", "waived", "a reason"),
+        ("c", "gone", "a reason"),
+        ("d", "waived", "a reason"),
+    ];
+    let (unnamed, stale) = overview_gaps(roles, &exempt, overview);
+    assert_eq!(unnamed, vec!["c: missing"]);
+    assert_eq!(stale, vec!["c: gone", "d: waived"]);
+    let (_, stale) = overview_gaps(roles, &[("c", "waived", " ")], overview);
+    assert_eq!(stale, vec!["c: waived"]);
 }
 
 /// The reader the test stands on: a path in a string, a comment, or test code is not a

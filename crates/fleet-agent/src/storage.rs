@@ -554,6 +554,65 @@ pub(crate) fn create_shared_dir(
     Ok(())
 }
 
+/// Create `dir` and every directory on the way to it from `data`, a Supervisor's `data` root
+/// beneath its directory `supervisor_dir`, as a kind's data directories are made
+/// (CLT-accounts-service-runs-under §21): where a process account is registered, `data` and each
+/// directory beneath it up to `dir` are shared with its group, written ([`Shared::Written`]),
+/// each reached from `supervisor_dir` through no link. Where none is, each is the Client's alone,
+/// `0700`, made through the handle of the one before it and none through a link.
+///
+/// The manifest's directories before a spawn and a Plugin's call to make a directory both come
+/// here, so a directory in `data` is the same whoever asks for it. A `dir` that is not `data` or
+/// beneath it in plain names is refused.
+pub(crate) fn create_data_dir(
+    supervisor_dir: &Path,
+    data: &Path,
+    dir: &Path,
+    group: Option<ProcessAccountGroup>,
+) -> io::Result<()> {
+    let names = dir
+        .strip_prefix(data)
+        .ok()
+        .and_then(|rest| {
+            rest.components()
+                .map(|name| match name {
+                    std::path::Component::Normal(name) => name.to_str(),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} lies outside {}", dir.display(), data.display()),
+            )
+        })?;
+    if group.is_some() {
+        let mut made = data.to_path_buf();
+        create_shared_dir(supervisor_dir, &made, group, Shared::Written)?;
+        for name in names {
+            made.push(name);
+            create_shared_dir(supervisor_dir, &made, group, Shared::Written)?;
+        }
+        return Ok(());
+    }
+    let mut held = fleet_util::nofollow::HeldDir::create(data, 0o700)?;
+    for name in names {
+        held = held.dir(name, 0o700)?;
+        // One already there is narrowed too, through the handle just opened: a directory shared
+        // while a process account was registered is the Client's alone once none is.
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: fchmod(2) on a descriptor `held` owns for the call; it touches no memory.
+            if unsafe { libc::fchmod(held.as_raw_fd(), 0o700) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The ACEs that grant the process account `sid` what `shared` says, on Windows (CLT-accounts-service-runs-under §21):
 /// for the directory itself, for a directory and for a file already in it. `None` for
 /// `Traversed`: the process account passes through a directory of the Client's by the

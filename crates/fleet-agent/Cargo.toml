@@ -171,7 +171,7 @@ tar.workspace = true
 # CLT-wrappers-act-through-the-core: the end-to-end test runs the real Server in-process against the real Client binary.
 fleet-server = { path = "../fleet-server" }
 # The test of the Client's two homes for `*at` system calls reads its sources and `fleet-util`'s
-# as a syntax tree.
+# as a syntax tree, and the test of the Plugin port reads the port's.
 syn.workspace = true
 quote.workspace = true
 proc-macro2.workspace = true

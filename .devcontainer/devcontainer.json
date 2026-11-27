@@ -45,8 +45,8 @@
 
   // System packages the base image does not carry, installed once when the container is created.
   //
-  // All four are *developer tooling* — nothing shipped depends on them, which is why the first
-  // three need no ADR (NUC-decisions-are-proposed-then-accepted §2); the fourth is SEC-admission-by-client-certificate's below — and each earns
+  // All are *developer tooling* — nothing shipped depends on them, which is why all but softhsm2
+  // need no ADR (NUC-decisions-are-proposed-then-accepted §2); softhsm2 is SEC-admission-by-client-certificate's below — and each earns
   // its place:
   //
   //   shellcheck  the shell lint, from the base image's signed Debian archive, so the pre-push
@@ -57,13 +57,21 @@
   //             That check is not optional in practice: `#[cfg(unix)]` code is invisible to an
   //             ordinary local run, so a Windows-only compile error reaches CI instead of the
   //             author. See README → "Build, Test & Run".
+  //   clang, lld  the C compiler and linker `cargo xwin` drives for the C of `ring`, a
+  //             dependency of the Client's TLS; without them the Windows lint fails to build.
   //   softhsm2  the PKCS#11 token the tests of the Server's keys on a token run against, as the
   //             CI runner's do; scripts/check-rust.sh and scripts/check-store.sh give it a
   //             configuration and a token directory of their own, outside the repository
   //             (SEC-admission-by-client-certificate §39).
   //             Without it those tests skip locally.
+  //
+  // `xwin` installs cargo-xwin, pinned as release.yml pins its cargo tools, and the Windows target
+  // of the toolchain rust-toolchain.toml names, so scripts/check-client-platform.sh lints the
+  // Client for Windows here instead of skipping. Its first run downloads the Microsoft CRT and
+  // Windows SDK, under Microsoft's licence terms, which the maintainer accepted for the project.
   "postCreateCommand": {
-    "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm softhsm2"
+    "packages": "sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends shellcheck socat llvm clang lld softhsm2",
+    "xwin": "cargo install --locked cargo-xwin@0.24.2 && rustup target add x86_64-pc-windows-msvc"
   },
 
   // Runs inside the container on every start, so the settings are set again should a session

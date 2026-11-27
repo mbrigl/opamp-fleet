@@ -46,9 +46,10 @@ pub struct ProcessSpec {
     /// the kind that knows an agent names what that agent needs, and the spawn guarantees it.
     ///
     /// **Before every spawn, not once at install**, so a directory removed under a running fleet
-    /// comes back on the next restart rather than taking the Supervisor down. Created owner-only,
-    /// for the reason [`crate::storage::create_private_dir`] gives: what an agent writes about a
-    /// host is not for every local user to read.
+    /// comes back on the next restart rather than taking the Supervisor down. Each lies beneath the
+    /// Supervisor's `data` root and is made, with every directory on the way, by
+    /// [`crate::storage::create_data_dir`]: what an agent writes about a host is not for every
+    /// local user to read. One outside `data` fails the spawn.
     ///
     /// The program's own directories are **not** listed here — the install creates those
     /// ([`InstallTarget::prepare`]). This is for what the agent writes at run time, which lives
@@ -953,18 +954,10 @@ impl Runner {
                             s.waiting.due_now();
                         }
                     }
-                    Some(ProcessCommand::Uninstall) => {
-                        // Retired for good (CLT-wrappers-act-through-the-core): the generic uninstall is exactly the
-                        // graceful stop — nothing the generic Runner installs lives outside the
-                        // Supervisor's directory, and that directory is the core's to purge
-                        // (CLT-wrappers-act-through-the-core) once this answer is out.
-                        stop(&mut s.child, self.stop_timeout, &self.name).await;
-                        self.events
-                            .send(ProcessEvent::Uninstalled { result: Ok(()) })
-                            .await;
-                        return;
-                    }
-                    Some(ProcessCommand::Shutdown) | None => break,
+                    // The host stops the Runner before the Plugin handles an uninstall, and answers
+                    // the uninstall itself (CLT-wrappers-act-through-the-core §9): to the Runner
+                    // an uninstall is the bounded stop, as a shutdown is.
+                    Some(ProcessCommand::Shutdown | ProcessCommand::Uninstall) | None => break,
                 },
                 status = exited => {
                     // The program went with the second service, which the service manager brings
@@ -1714,15 +1707,15 @@ impl Runner {
         // like any other — reported in the health, and tried again with the next configuration,
         // package, or restart — rather than the process starting and exiting on a directory nobody
         // made.
+        let data = self.supervisor_dir.join(crate::supervisor::host::DATA_DIR);
         for dir in &spec.ensure_dirs {
-            // Written by the Managed Process, so shared with its group where a process account
-            // is registered (CLT-accounts-service-runs-under §21), and reached through no link beneath the
-            // Supervisor's directory.
-            if let Err(e) = crate::storage::create_shared_dir(
-                data_root(&self.supervisor_dir, &spec.ensure_dirs, dir),
+            // Written by the Managed Process, so made as every directory in `data` is, whoever
+            // asks for it (CLT-accounts-service-runs-under §21).
+            if let Err(e) = crate::storage::create_data_dir(
+                &self.supervisor_dir,
+                &data,
                 dir,
                 self.process_account_group,
-                crate::storage::Shared::Written,
             ) {
                 warn!(supervisor = %self.name, dir = %dir.display(), error = %e, "cannot prepare a directory the agent writes into");
                 return Err(std::io::Error::other(format!(
@@ -2212,21 +2205,6 @@ fn stage_tree(
         return Err(e);
     }
     Ok(staging)
-}
-
-/// The directory beneath which no link is followed on the way to `dir`, one of `ensure_dirs` a
-/// kind names: the Supervisor's directory where `dir` lies in it, else the outermost of
-/// `ensure_dirs` that holds `dir`, which an operator placed — `dir` itself where none does.
-fn data_root<'a>(
-    supervisor_dir: &'a std::path::Path,
-    ensure_dirs: &'a [PathBuf],
-    dir: &'a std::path::Path,
-) -> &'a std::path::Path {
-    std::iter::once(supervisor_dir)
-        .chain(ensure_dirs.iter().map(PathBuf::as_path))
-        .filter(|root| dir.starts_with(root))
-        .min_by_key(|root| root.components().count())
-        .unwrap_or(dir)
 }
 
 /// Gives what is staged at `staging` — the program, or every member of a tree — to the process
@@ -3618,13 +3596,17 @@ mod tests {
         let staged = target.stage(&artifact, None, None).expect("staged");
         assert_eq!(mode(&staged.root), mode(&reference));
 
-        let data = dir.path().join("data").join("inventory");
+        // A nested directory: each directory on the way is the process account's to write in as
+        // well, as `create_data_dir` makes it for a Plugin's call too.
+        let data = dir.path().join("data");
+        let nested = data.join("lib").join("state");
         let (event_tx, _events) = mpsc::channel(64);
         let (_commands, command_rx) = mpsc::channel(1);
         let program = exiting_at_once(dir.path());
         let mut runner = package_runner(program.clone(), Duration::ZERO, event_tx, command_rx);
+        runner.supervisor_dir = dir.path().to_path_buf();
         runner.process_account_group = Some(group);
-        let made = data.clone();
+        let made = nested.clone();
         runner.build = Box::new(move || {
             Some(ProcessSpec {
                 program: program.clone(),
@@ -3636,52 +3618,49 @@ mod tests {
             })
         });
         runner.try_spawn().await.expect("started");
-        assert_eq!(mode(&data), (0o2770, group.0));
+        for made in [&data, &data.join("lib"), &nested] {
+            assert_eq!(mode(made), (0o2770, group.0), "{}", made.display());
+        }
     }
 
-    /// Where the walk to a data directory begins, beneath which no link is followed: the
-    /// Supervisor's directory for one inside it, the outermost of the kind's directories that
-    /// holds one outside it, and the directory itself where none does. A `..` does not lift a
-    /// directory out of the Supervisor's: the walk from there refuses it (CLT-accounts-service-runs-under §21).
+    /// Without a process account, every directory on the way to a nested data directory is the
+    /// Client's alone, and a link on the way is refused rather than followed; a directory outside
+    /// `data` is refused (CLT-accounts-service-runs-under §21).
     /// Verifies: CLT-accounts-service-runs-under
+    #[cfg(unix)]
     #[test]
-    fn a_data_directory_is_walked_to_from_the_outermost_root_that_holds_it() {
-        use std::path::Path;
-        let supervisor = Path::new("/state/supervisors/agent");
-        let inside = supervisor.join("data").join("inventory");
-        let outer = PathBuf::from("/var/lib/agent");
-        let nested = outer.join("spool");
-        let alone = PathBuf::from("/srv/cache");
-        let escaping = supervisor.join("..").join("other").join("data");
-        let ensure_dirs = vec![
-            inside.clone(),
-            nested.clone(),
-            outer.clone(),
-            alone.clone(),
-            escaping.clone(),
-        ];
-        assert_eq!(data_root(supervisor, &ensure_dirs, &inside), supervisor);
-        assert_eq!(data_root(supervisor, &ensure_dirs, &nested), outer);
-        assert_eq!(data_root(supervisor, &ensure_dirs, &outer), outer);
-        assert_eq!(data_root(supervisor, &ensure_dirs, &alone), alone);
-        assert_eq!(data_root(supervisor, &ensure_dirs, &escaping), supervisor);
-
-        #[cfg(unix)]
-        {
-            // SAFETY: getegid(2) cannot fail and touches no memory.
-            let group = crate::supervisor::ports::ProcessAccountGroup(unsafe { libc::getegid() });
-            let dir = tempfile::tempdir().expect("tempdir");
-            let supervisor = dir.path().join("supervisors").join("agent");
-            std::fs::create_dir_all(&supervisor).expect("mkdir");
-            let escaping = supervisor.join("..").join("other");
-            let refused = crate::storage::create_shared_dir(
-                data_root(&supervisor, std::slice::from_ref(&escaping), &escaping),
-                &escaping,
-                Some(group),
-                crate::storage::Shared::Written,
-            );
-            assert!(refused.is_err());
-            assert!(!dir.path().join("supervisors").join("other").exists());
+    fn without_a_process_account_a_data_directory_is_the_clients_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let supervisor = dir.path().join("agent");
+        let data = supervisor.join("data");
+        let nested = data.join("lib").join("state");
+        crate::storage::create_data_dir(&supervisor, &data, &nested, None).expect("made");
+        for made in [&data, &data.join("lib"), &nested] {
+            let mode = std::fs::metadata(made).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o7777, 0o700, "{}", made.display());
+        }
+        // One left shared, while a process account was registered, is narrowed again.
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
+        crate::storage::create_data_dir(&supervisor, &data, &nested, None).expect("again");
+        let mode = std::fs::metadata(&nested)
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o700, "narrowed again");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).expect("mkdir");
+        std::os::unix::fs::symlink(&elsewhere, data.join("away")).expect("a link");
+        assert!(crate::storage::create_data_dir(
+            &supervisor,
+            &data,
+            &data.join("away").join("x"),
+            None
+        )
+        .is_err());
+        assert!(!elsewhere.join("x").exists());
+        for outside in [dir.path().join("other"), data.join("..").join("x")] {
+            assert!(crate::storage::create_data_dir(&supervisor, &data, &outside, None).is_err());
         }
     }
 

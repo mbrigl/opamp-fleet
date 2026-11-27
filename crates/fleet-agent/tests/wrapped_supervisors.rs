@@ -2,8 +2,9 @@
 //! on, held through the core's own `command` kind (CLT-wrappers-act-through-the-core): a kind that knows its agent states
 //! the arguments itself, so the stub takes the flags a test needs from a file beside it, and a kind
 //! that reloads by signal needs a stub that shows the signal arrived. A Plugin of this test tree,
-//! on the port alone, shows what the core does for any kind: a refused call fails alone, and the
-//! manifest's data directories and reload signal reach the process.
+//! on the port alone, shows what the core does for any kind: a refused call fails alone, the
+//! manifest's data directories and reload signal reach the process, and an uninstall reaches the
+//! Plugin after the stop and carries its answer.
 
 mod wrapped;
 
@@ -12,6 +13,7 @@ use fleet_agent::supervisor::port::{
     Spec, Value,
 };
 use fleet_agent::supervisor::ports::ProcessEvent;
+use std::sync::{Arc, Mutex};
 
 /// The harness starts a kind as the core does, the program where the install puts it, and the stub
 /// adds the flags of its `<program>.args` side-file to its own: the marker it writes holds them.
@@ -94,9 +96,23 @@ async fn the_stub_records_each_sighup_and_survives_it() {
 
 /// A Plugin of the test tree, on the port alone. At its start it tries to write into its
 /// `config` root, which the core refuses, reports the refusal as its health and starts its
-/// program anyway; a restart it answers by writing into its `state` root.
+/// program anyway; a restart it answers by writing into its `state` root. An uninstall it answers
+/// by recording what `watch` says of its Managed Process, writing into its `state` root, and
+/// failing with what it left undone.
 struct Steady {
     reload_signal: Option<i32>,
+    watch: Watch,
+}
+
+/// How a test asks whether the Managed Process runs.
+type Running = Box<dyn Fn() -> bool + Send>;
+
+/// What a test hands the Plugin to watch: how the test asks whether the Managed Process runs, and
+/// the answer at the moment the uninstall arrived; `None` where the test asks nothing.
+#[derive(Clone, Default)]
+struct Watch {
+    running: Arc<Mutex<Option<Running>>>,
+    alive_at_uninstall: Arc<Mutex<Option<bool>>>,
 }
 
 impl Plugin for Steady {
@@ -117,11 +133,15 @@ impl Plugin for Steady {
         _name: &str,
         _settings: toml::Table,
     ) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(SteadyInstance))
+        Ok(Box::new(SteadyInstance {
+            watch: self.watch.clone(),
+        }))
     }
 }
 
-struct SteadyInstance;
+struct SteadyInstance {
+    watch: Watch,
+}
 
 impl Instance for SteadyInstance {
     fn process(&self) -> Process {
@@ -176,6 +196,25 @@ impl Instance for SteadyInstance {
                     })
                     .await
                 }
+                Input::Uninstall => {
+                    let alive = self
+                        .watch
+                        .running
+                        .lock()
+                        .expect("watch")
+                        .as_ref()
+                        .map(|f| f());
+                    *self.watch.alive_at_uninstall.lock().expect("watch") = alive;
+                    host.write(
+                        RootPath {
+                            root: Root::State,
+                            path: "undone".to_string(),
+                        },
+                        b"undone".to_vec(),
+                    )
+                    .await?;
+                    Err("left x".into())
+                }
                 other => {
                     let spec = self.spec(&[]);
                     fleet_agent::supervisor::port::default_handling(other, spec, host).await
@@ -211,6 +250,7 @@ async fn a_refused_call_fails_alone_and_the_plugin_keeps_running() {
     let mut harness = wrapped::start(
         &Steady {
             reload_signal: None,
+            watch: Watch::default(),
         },
         "steady",
         &[],
@@ -249,6 +289,7 @@ async fn the_manifests_reload_signal_applies_a_configuration() {
     let mut harness = wrapped::start(
         &Steady {
             reload_signal: Some(libc::SIGHUP),
+            watch: Watch::default(),
         },
         "steady",
         &["--record-hup".to_string(), hups.display().to_string()],
@@ -259,4 +300,56 @@ async fn the_manifests_reload_signal_applies_a_configuration() {
     assert!(spawned.is_empty(), "applied in place: {spawned:?}");
     wrapped::wait_for_file(&hups, "hups=1").await;
     wrapped::stop(harness).await;
+}
+
+/// An uninstall reaches the Plugin once the core has stopped its Managed Process. What the Plugin
+/// writes while handling it is there before the answer, the answer carries the Plugin's `Err`, and
+/// the adapter's channel closes after it (CLT-wrappers-act-through-the-core §9).
+/// Verifies: CLT-wrappers-act-through-the-core
+#[cfg(unix)]
+#[tokio::test]
+async fn an_uninstall_reaches_the_plugin_after_the_stop_and_carries_its_answer() {
+    let watch = Watch::default();
+    let mut harness = wrapped::start(
+        &Steady {
+            reload_signal: None,
+            watch: watch.clone(),
+        },
+        "steady",
+        &[],
+    );
+    let (_, pid) = wrapped::wait_for_running_version(&mut harness).await;
+    // SAFETY: signal 0 probes existence only; no signal is delivered, no memory is touched.
+    let alive = move || unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    assert!(alive(), "the process runs before the uninstall");
+    *watch.running.lock().expect("watch") = Some(Box::new(alive));
+    harness
+        .commands
+        .send(fleet_agent::supervisor::ports::ProcessCommand::Uninstall)
+        .await
+        .expect("send");
+    // timed: the waiter's own deadline, which only a defect reaches
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    let result = loop {
+        let (_, event) = tokio::time::timeout_at(deadline, harness.events.recv())
+            .await
+            .expect("the answer in time")
+            .expect("an open channel");
+        if let ProcessEvent::Uninstalled { result } = event {
+            break result;
+        }
+    };
+    assert_eq!(
+        *watch.alive_at_uninstall.lock().expect("watch"),
+        Some(false),
+        "the process stopped before the uninstall reached the Plugin"
+    );
+    assert_eq!(
+        std::fs::read(harness.dir.path().join("state").join("undone")).expect("undone"),
+        b"undone"
+    );
+    assert_eq!(result, Err("left x".to_string()));
+    tokio::time::timeout_at(deadline, harness.commands.closed())
+        .await
+        .expect("the adapter exits after its answer");
 }

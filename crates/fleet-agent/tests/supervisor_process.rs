@@ -25,6 +25,8 @@ use fleet_agent::supervisor::process::{
 use opamp::proto::{AgentRemoteConfig, ComponentHealth};
 use tokio::sync::mpsc;
 
+mod wrapped;
+
 /// The program a Supervisor is configured with, named the way this platform needs it: Windows
 /// appends `.exe` when told a path without an extension, and would not find a file that lacks it.
 fn program_name(stem: &str) -> String {
@@ -212,6 +214,33 @@ fn runner_full(
     reload_signal: Option<i32>,
     build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
 ) -> Harness {
+    runner_at(
+        std::env::temp_dir(),
+        via,
+        install,
+        apply_grace,
+        retain_previous,
+        version_probe,
+        preflight,
+        reload_signal,
+        build,
+    )
+}
+
+/// A Supervisor whose directory is `supervisor_dir`, where the directories an agent writes into
+/// lie beneath its `data` root.
+#[allow(clippy::too_many_arguments)]
+fn runner_at(
+    supervisor_dir: PathBuf,
+    via: Via,
+    install: Option<InstallTarget>,
+    apply_grace: Duration,
+    retain_previous: Duration,
+    version_probe: Option<VersionProbe>,
+    preflight: Option<Preflight>,
+    reload_signal: Option<i32>,
+    build: impl Fn() -> Option<ProcessSpec> + Send + Sync + 'static,
+) -> Harness {
     let (event_tx, events) = mpsc::channel(64);
     let (commands, command_rx) = mpsc::channel(16);
     let (shutdown_tx, shutdown) = shutdown_channel();
@@ -228,7 +257,7 @@ fn runner_full(
         reload_signal,
         spawner: Spawner::Local,
         process_account_group: None,
-        supervisor_dir: std::env::temp_dir(),
+        supervisor_dir,
         events: EventSender::new(0, event_tx),
         commands: command_rx,
         build: Box::new(build),
@@ -338,26 +367,41 @@ async fn apply_package(
 /// otherwise a correct installation ends in a crash loop over a missing directory.
 async fn the_directories_an_agent_writes_into_are_made_before_it_runs(via: Via) {
     let dir = tempfile::tempdir().expect("tempdir");
-    // Two levels deep and nested under a parent that does not exist either, because the failure
-    // this prevents is exactly the one nobody created a parent for.
-    let state = dir.path().join("agent-state").join("inventory");
+    // Two levels deep beneath the Supervisor's `data` root and nested under a parent that does not
+    // exist either, because the failure this prevents is exactly the one nobody created a parent
+    // for.
+    let state = dir
+        .path()
+        .join("data")
+        .join("agent-state")
+        .join("inventory");
     let program = PathBuf::from(env!("CARGO_BIN_EXE_stub_agent"));
     let marker = dir.path().join("started");
     assert!(!state.exists());
 
-    let mut harness = start(via, {
-        let (state, program, marker) = (state.clone(), program.clone(), marker.clone());
-        move || {
-            Some(ProcessSpec {
-                program: program.clone(),
-                args: vec!["--touch".to_string(), marker.display().to_string()],
-                env: Vec::new(),
-                working_dir: None,
-                own_process_group: false,
-                ensure_dirs: vec![state.clone()],
-            })
-        }
-    });
+    let mut harness = runner_at(
+        dir.path().to_path_buf(),
+        via,
+        None,
+        Duration::ZERO,
+        Duration::ZERO,
+        None,
+        None,
+        None,
+        {
+            let (state, program, marker) = (state.clone(), program.clone(), marker.clone());
+            move || {
+                Some(ProcessSpec {
+                    program: program.clone(),
+                    args: vec!["--touch".to_string(), marker.display().to_string()],
+                    env: Vec::new(),
+                    working_dir: None,
+                    own_process_group: false,
+                    ensure_dirs: vec![state.clone()],
+                })
+            }
+        },
+    );
     let _ = next_health(&mut harness.events).await;
     wait_until_started(&marker).await;
     assert!(
@@ -1137,21 +1181,34 @@ both!(
     a_process_that_dies_on_the_reload_signal_is_restarted_instead
 );
 
-/// The generic uninstall (CLT-wrappers-act-through-the-core): the graceful stop plus the answer, which is the adapter's
-/// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
-/// coming last is what lets the core purge the directory only after the kind is done (CLT-wrappers-act-through-the-core).
-async fn an_uninstall_stops_the_process_answers_and_exits(via: Via) {
-    let mut harness = start(via, || Some(spec(&stub_agent())));
-    let health = next_health(&mut harness.events).await;
-    assert!(health.healthy);
-
+/// The generic uninstall, through the host every kind runs on (CLT-wrappers-act-through-the-core
+/// §9): the core stops the Managed Process, answers with `Ok` as the last event, and the adapter
+/// exits on the command itself, no shutdown ever fired. The answer coming last is what lets the
+/// core purge the directory only after the kind is done. The `Runner` alone takes an uninstall as
+/// its bounded stop, so this goes through `host::start`, as the core does.
+#[tokio::test]
+async fn an_uninstall_stops_the_process_answers_and_exits() {
+    let mut settings = toml::Table::new();
+    settings.insert(
+        "version_args".to_string(),
+        toml::Value::Array(vec![toml::Value::String("--version".to_string())]),
+    );
+    let mut harness = wrapped::start_with(
+        &fleet_agent::supervisor::command::Command,
+        "agent",
+        settings,
+        &[],
+    );
+    let (_, pid) = wrapped::wait_for_running_version(&mut harness).await;
     harness
         .commands
         .send(ProcessCommand::Uninstall)
         .await
         .expect("send the command");
+    // timed: the waiter's own deadline, which only a defect reaches
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let result = loop {
-        let (_, event) = tokio::time::timeout(Duration::from_secs(10), harness.events.recv())
+        let (_, event) = tokio::time::timeout_at(deadline, harness.events.recv())
             .await
             .expect("an event in time")
             .expect("an open channel");
@@ -1160,12 +1217,18 @@ async fn an_uninstall_stops_the_process_answers_and_exits(via: Via) {
         }
     };
     assert_eq!(result, Ok(()));
-    tokio::time::timeout(Duration::from_secs(10), harness.task)
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 probes existence only; no signal is delivered, no memory is touched.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        assert!(!alive, "the process stopped before the answer");
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+    tokio::time::timeout_at(deadline, harness.commands.closed())
         .await
-        .expect("the adapter exits on the command itself")
-        .expect("no panic");
+        .expect("the adapter exits on the command itself");
 }
-both!(an_uninstall_stops_the_process_answers_and_exits);
 
 // ── Supervision ──────────────────────────────────────────────────────────────
 

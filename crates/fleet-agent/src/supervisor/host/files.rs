@@ -12,8 +12,7 @@ use std::path::{Path, PathBuf};
 
 use fleet_util::nofollow::{HeldDir, Kind};
 
-use crate::storage::Shared;
-use crate::supervisor::port::{EntryKind, Root, RootPath, Value};
+use crate::supervisor::port::{EntryKind, Failure, FailureKind, Root, RootPath, Value};
 use crate::supervisor::ports::{InstallTarget, ProcessAccountGroup, SupervisorContext};
 
 /// The Supervisor's directory the Managed Process writes into, the [`Root::Data`] root.
@@ -77,7 +76,7 @@ impl Roots {
     /// The absolute path of `file`, refused where it would leave its root
     /// (CLT-wrappers-act-through-the-core §3). Lexical only: what is handed to a program as an
     /// argument is resolved by that program.
-    pub(super) fn path(&self, file: &RootPath) -> Result<PathBuf, String> {
+    pub(super) fn path(&self, file: &RootPath) -> Result<PathBuf, Failure> {
         let names = components(file)?;
         Ok(names
             .iter()
@@ -86,14 +85,17 @@ impl Roots {
             }))
     }
 
-    /// The placeholders naming the Supervisor's own directories, expanded in an operator's text
-    /// (CLT-wrappers-act-through-the-core §31); anything else in it stays as written.
+    /// The placeholders naming the Supervisor's own directories, `${supervisor_dir}` and
+    /// `${config_dir}`, expanded in an operator's text (CLT-wrappers-act-through-the-core §31), so
+    /// an argument that names them follows the Supervisor when its directory moves. Anything else
+    /// stays as written, an unknown `${…}` too: a Foreign Agent's own configuration language may
+    /// use the same syntax, and refusing it to catch a typo would break a working deployment.
     pub(super) fn expand(&self, text: &str) -> String {
         text.replace("${supervisor_dir}", &self.supervisor_dir.to_string_lossy())
             .replace("${config_dir}", &self.config.to_string_lossy())
     }
 
-    pub(super) fn value(&self, value: &Value) -> Result<String, String> {
+    pub(super) fn value(&self, value: &Value) -> Result<String, Failure> {
         match value {
             Value::Text(text) => Ok(text.clone()),
             Value::Template(text) => Ok(self.expand(text)),
@@ -108,11 +110,11 @@ impl Roots {
         match root {
             Root::Config | Root::Program => HeldDir::open(self.root(root)),
             Root::Data => {
-                crate::storage::create_shared_dir(
+                crate::storage::create_data_dir(
                     &self.supervisor_dir,
                     &self.data,
+                    &self.data,
                     self.group,
-                    Shared::Written,
                 )?;
                 HeldDir::open(&self.data)
             }
@@ -130,10 +132,13 @@ impl Roots {
     }
 
     /// The held directory holding `file`, and the file's name in it.
-    fn parent(&self, file: &RootPath) -> Result<(HeldDir, String), String> {
+    fn parent(&self, file: &RootPath) -> Result<(HeldDir, String), Failure> {
         let mut names = components(file)?;
         let Some(name) = names.pop() else {
-            return Err(format!("{} names its root, not a file in it", shown(file)));
+            return Err(Failure::new(
+                FailureKind::Refused,
+                format!("{} names its root, not a file in it", shown(file)),
+            ));
         };
         let held = self
             .walk(file.root, &names)
@@ -141,14 +146,14 @@ impl Roots {
         Ok((held, name))
     }
 
-    pub(super) fn read(&self, file: &RootPath) -> Result<Vec<u8>, String> {
+    pub(super) fn read(&self, file: &RootPath) -> Result<Vec<u8>, Failure> {
         let (held, name) = self.parent(file)?;
         held.read(&name, READ_LIMIT)
             .map(|content| content.to_vec())
             .map_err(|e| failed("read", file, &e))
     }
 
-    pub(super) fn write(&self, file: &RootPath, contents: &[u8]) -> Result<(), String> {
+    pub(super) fn write(&self, file: &RootPath, contents: &[u8]) -> Result<(), Failure> {
         writable(file)?;
         let (held, name) = self.parent(file)?;
         held.write(&name, contents, file_mode(file.root))
@@ -157,18 +162,24 @@ impl Roots {
 
     /// Renames within one directory: a rename across directories would need two held parents,
     /// which no kind has asked for.
-    pub(super) fn rename(&self, from: &RootPath, to: &RootPath) -> Result<(), String> {
+    pub(super) fn rename(&self, from: &RootPath, to: &RootPath) -> Result<(), Failure> {
         writable(from)?;
         let mut from_names = components(from)?;
         let mut to_names = components(to)?;
         let (Some(from_name), Some(to_name)) = (from_names.pop(), to_names.pop()) else {
-            return Err("a rename names two files, not a root".to_string());
+            return Err(Failure::new(
+                FailureKind::Refused,
+                "a rename names two files, not a root",
+            ));
         };
         if from.root != to.root || from_names != to_names {
-            return Err(format!(
-                "{} and {} are not in one directory: a rename stays in its directory",
-                shown(from),
-                shown(to)
+            return Err(Failure::new(
+                FailureKind::Refused,
+                format!(
+                    "{} and {} are not in one directory: a rename stays in its directory",
+                    shown(from),
+                    shown(to)
+                ),
             ));
         }
         let held = self
@@ -179,7 +190,7 @@ impl Roots {
     }
 
     /// Removes a file, or an empty directory.
-    pub(super) fn remove(&self, file: &RootPath) -> Result<(), String> {
+    pub(super) fn remove(&self, file: &RootPath) -> Result<(), Failure> {
         writable(file)?;
         let (held, name) = self.parent(file)?;
         held.remove(&name)
@@ -187,7 +198,7 @@ impl Roots {
             .map_err(|e| failed("remove", file, &e))
     }
 
-    pub(super) fn list(&self, dir: &RootPath) -> Result<Vec<(String, EntryKind)>, String> {
+    pub(super) fn list(&self, dir: &RootPath) -> Result<Vec<(String, EntryKind)>, Failure> {
         let names = components(dir)?;
         let held = self
             .walk(dir.root, &names)
@@ -208,32 +219,26 @@ impl Roots {
     }
 
     /// Creates the directory and what is missing above it, never through a link.
-    /// In `data`, where a process account is registered, each directory on the way is made as the
-    /// Client makes a kind's data directories: shared with that account's group, its mode set
-    /// whatever the umask, and an existing one corrected (CLT-accounts-service-runs-under §21).
-    /// Each is reached from the Supervisor's directory, which the process account does not write
-    /// in. Elsewhere, and where none is, it is the Client's alone, as the Managed Process then
-    /// runs under the Client's account.
-    pub(super) fn create_dir(&self, dir: &RootPath) -> Result<(), String> {
+    /// In `data` it is made as the manifest's data directories are, by
+    /// [`crate::storage::create_data_dir`]: where a process account is registered, every directory
+    /// on the way shared with its group (CLT-accounts-service-runs-under §21). Elsewhere it is the
+    /// Client's alone.
+    pub(super) fn create_dir(&self, dir: &RootPath) -> Result<(), Failure> {
         writable(dir)?;
         let names = components(dir)?;
+        if dir.root == Root::Data {
+            let path = self.path(dir)?;
+            return crate::storage::create_data_dir(
+                &self.supervisor_dir,
+                &self.data,
+                &path,
+                self.group,
+            )
+            .map_err(|e| failed("create", dir, &e));
+        }
         let mut held = self
             .held_root(dir.root)
             .map_err(|e| failed("reach", dir, &e))?;
-        if let (Root::Data, Some(group)) = (dir.root, self.group) {
-            let mut made = self.data.clone();
-            for name in &names {
-                made.push(name);
-                crate::storage::create_shared_dir(
-                    &self.supervisor_dir,
-                    &made,
-                    Some(group),
-                    Shared::Written,
-                )
-                .map_err(|e| failed("create", dir, &e))?;
-            }
-            return Ok(());
-        }
         for name in &names {
             held = held
                 .dir(name, PRIVATE_DIR_MODE)
@@ -246,7 +251,7 @@ impl Roots {
 /// The plain names of `file`'s path, `/`-separated, refused where a name is empty, `.` or `..`,
 /// where the path is absolute, and on Windows where a name holds a separator or a drive
 /// (CLT-wrappers-act-through-the-core §3). The empty path names the root itself.
-pub(super) fn components(file: &RootPath) -> Result<Vec<String>, String> {
+pub(super) fn components(file: &RootPath) -> Result<Vec<String>, Failure> {
     if file.path.is_empty() {
         return Ok(Vec::new());
     }
@@ -264,21 +269,27 @@ pub(super) fn components(file: &RootPath) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn leaves(file: &RootPath) -> String {
-    format!(
-        "the path {:?} leaves its root: a Plugin names a file by a relative path of plain names",
-        file.path
+fn leaves(file: &RootPath) -> Failure {
+    Failure::new(
+        FailureKind::Refused,
+        format!(
+            "the path {:?} leaves its root: a Plugin names a file by a relative path of plain names",
+            file.path
+        ),
     )
 }
 
 /// A write is refused outside `data` and `state` (CLT-wrappers-act-through-the-core §3).
-fn writable(file: &RootPath) -> Result<(), String> {
+fn writable(file: &RootPath) -> Result<(), Failure> {
     if file.root.writable() {
         Ok(())
     } else {
-        Err(format!(
-            "{} is read-only to a Plugin: it writes in `data` and `state` alone",
-            shown(file)
+        Err(Failure::new(
+            FailureKind::Refused,
+            format!(
+                "{} is read-only to a Plugin: it writes in `data` and `state` alone",
+                shown(file)
+            ),
         ))
     }
 }
@@ -306,14 +317,22 @@ fn shown(file: &RootPath) -> String {
     format!("{root}:{}", file.path)
 }
 
-/// Why `what` failed on `file`, without the host path an I/O error carries.
-fn failed(what: &str, file: &RootPath, e: &io::Error) -> String {
-    let reason = if fleet_util::nofollow::is_refused_link(e) {
-        "a link stands on the way, which no host function follows".to_string()
+/// Why `what` failed on `file`, of the kind a Plugin tells it by, without the host path an I/O
+/// error carries.
+fn failed(what: &str, file: &RootPath, e: &io::Error) -> Failure {
+    let (kind, reason) = if fleet_util::nofollow::is_refused_link(e) {
+        (
+            FailureKind::Refused,
+            "a link stands on the way, which no host function follows".to_string(),
+        )
     } else {
-        e.kind().to_string()
+        let kind = match e.kind() {
+            io::ErrorKind::NotFound => FailureKind::NotFound,
+            _ => FailureKind::Other,
+        };
+        (kind, e.kind().to_string())
     };
-    format!("cannot {what} {}: {reason}", shown(file))
+    Failure::new(kind, format!("cannot {what} {}: {reason}", shown(file)))
 }
 
 #[cfg(test)]
@@ -351,6 +370,91 @@ mod tests {
             supervisor_dir,
             group: None,
         }
+    }
+
+    /// A Supervisor's roots under `place`, absolute on this platform: on Windows a drive is
+    /// named, so nothing below spells a path with POSIX separators, as an expansion is a path of
+    /// the platform's own.
+    fn placed(place: &str) -> Roots {
+        #[cfg(windows)]
+        let supervisor_dir = PathBuf::from(format!("C:\\{place}\\supervisors\\fluent-bit"));
+        #[cfg(not(windows))]
+        let supervisor_dir = PathBuf::from(format!("/{place}/supervisors/fluent-bit"));
+        Roots {
+            config: supervisor_dir.join("config"),
+            program: supervisor_dir.join("program"),
+            data: supervisor_dir.join(DATA_DIR),
+            state: supervisor_dir.join(STATE_DIR),
+            supervisor_dir,
+            group: None,
+        }
+    }
+
+    /// The argument that points a Foreign Agent at its configuration is derived from the same
+    /// value the Client writes it to, so relocating `supervisor_dir` cannot leave the process
+    /// reading a file nobody writes to (CLT-wrappers-act-through-the-core §31).
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[test]
+    fn the_placeholders_name_this_supervisors_own_directories() {
+        let roots = placed("opt");
+        // The placeholder becomes the directory the Client itself writes to; what the operator
+        // wrote after it is a string and survives verbatim, separator included.
+        assert_eq!(
+            roots.expand("${config_dir}/fluent-bit-conf"),
+            format!("{}/fluent-bit-conf", roots.config.display())
+        );
+        let supervisor = roots.expand("${supervisor_dir}");
+        let config = roots.expand("${config_dir}");
+        assert_ne!(supervisor, config);
+        assert!(
+            config.starts_with(&supervisor),
+            "{config} must sit inside {supervisor}"
+        );
+        // Relocating the root moves the expansion with it.
+        let moved = placed("var");
+        assert_ne!(
+            moved.expand("${config_dir}/x"),
+            roots.expand("${config_dir}/x")
+        );
+        assert!(
+            moved
+                .expand("${config_dir}/x")
+                .starts_with(&moved.supervisor_dir.display().to_string()),
+            "the expansion follows the relocated root"
+        );
+        // A template value of a specification is expanded the same way.
+        assert_eq!(
+            roots.value(&Value::Template("${config_dir}".to_string())),
+            Ok(config)
+        );
+    }
+
+    /// Anything else is left exactly as written: a Foreign Agent's own configuration language may
+    /// use `${…}` too, and a Client that ate or refused those would break a working deployment to
+    /// catch a typo (CLT-wrappers-act-through-the-core §31).
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[test]
+    fn an_unknown_placeholder_is_passed_through_untouched() {
+        let roots = placed("opt");
+        for verbatim in [
+            "${FLB_LOG_LEVEL}",
+            "${config-dir}", // a typo: passed on, not refused
+            "-c",
+            "",
+            "$config_dir",
+            "${}",
+        ] {
+            assert_eq!(
+                roots.expand(verbatim),
+                verbatim,
+                "must pass through untouched"
+            );
+        }
+        // A known placeholder still expands when it sits beside an unknown one.
+        assert_eq!(
+            roots.expand("${config_dir}/${FLB_ENV}.conf"),
+            format!("{}/${{FLB_ENV}}.conf", roots.config.display())
+        );
     }
 
     /// A file a Plugin names resolves inside its root, and a path that would leave the root fails.
@@ -458,8 +562,10 @@ mod tests {
         );
         let written = meta(&roots.data.join("d"));
         assert_eq!(written.gid(), gid, "the data file is the group's");
-        // A directory a Plugin creates in `data` is shared as the root is, whatever the umask
-        // narrows a new directory to, and one already there narrower is corrected.
+        // A directory a Plugin creates in `data` is made by `storage::create_data_dir`, as the
+        // manifest's directories are before a spawn: shared as the root is with every directory on
+        // the way, whatever the umask narrows a new directory to, and one already there narrower
+        // is corrected.
         roots
             .create_dir(&file(Root::Data, "spool/in"))
             .expect("create");
@@ -500,6 +606,7 @@ mod tests {
             assert!(
                 !refused
                     .unwrap_err()
+                    .reason
                     .contains(&dir.path().display().to_string()),
                 "a reason names no host path"
             );
@@ -530,5 +637,41 @@ mod tests {
                 .is_err());
         }
         assert!(roots.config.join("fleet").exists());
+    }
+
+    /// A Plugin tells a failure by its kind, not its text: a file that is not there and a call the
+    /// core refuses, a link on the way among them, each have their own
+    /// (CLT-wrappers-act-through-the-core §4).
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[cfg(unix)]
+    #[test]
+    fn a_failure_carries_its_kind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let roots = made(dir.path());
+        fn kind<T>(failed: Result<T, Failure>) -> Result<(), FailureKind> {
+            failed.map(drop).map_err(|e| e.kind)
+        }
+        assert_eq!(
+            kind(roots.read(&file(Root::State, "missing"))),
+            Err(FailureKind::NotFound)
+        );
+        assert_eq!(
+            kind(roots.remove(&file(Root::Data, "missing"))),
+            Err(FailureKind::NotFound)
+        );
+        assert_eq!(
+            kind(roots.write(&file(Root::Config, "x"), b"x")),
+            Err(FailureKind::Refused)
+        );
+        assert_eq!(
+            kind(roots.read(&file(Root::State, "../x"))),
+            Err(FailureKind::Refused)
+        );
+        roots.write(&file(Root::State, "f"), b"f").expect("f");
+        std::os::unix::fs::symlink(roots.state.join("f"), roots.state.join("link")).expect("link");
+        assert_eq!(
+            kind(roots.read(&file(Root::State, "link"))),
+            Err(FailureKind::Refused)
+        );
     }
 }

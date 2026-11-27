@@ -9,15 +9,70 @@
 //! Every type here is plain data, so that a WebAssembly component can implement the port later
 //! (§2, §12): no host path, no handle, no channel, no span and no secret. The futures are boxed
 //! by hand, as the trait objects of the core need them, without a macro the core does not use.
-//! `the_port_carries_no_host_resource` in `crates/fleet-core/tests/dependency_direction.rs` holds
-//! the rule.
+//! `the_port_carries_no_host_resource` in `crates/fleet-agent/tests/plugin_port.rs` holds the
+//! rule.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
 /// A future a [`Host`] function or an [`Instance`] handler returns.
-pub type Call<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
+pub type Call<'a, T> = Pin<Box<dyn Future<Output = Result<T, Failure>> + Send + 'a>>;
+
+/// Why a host function or a handler failed: its kind, which a Plugin tells failures apart by, and
+/// a reason for the log that names no host path (CLT-wrappers-act-through-the-core §4). Plain
+/// data, as the rest of the port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub kind: FailureKind,
+    pub reason: String,
+}
+
+/// The kinds of [`Failure`] a Plugin may act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FailureKind {
+    /// The file or directory named is not there.
+    NotFound,
+    /// The core refuses the call: a path outside its root, a root the function may not change, or
+    /// a link on the way.
+    Refused,
+    /// The host carries out no such function.
+    Unsupported,
+    /// Anything else: the reason says what.
+    Other,
+}
+
+impl Failure {
+    /// A failure of `kind` for `reason`.
+    pub fn new(kind: FailureKind, reason: impl Into<String>) -> Self {
+        Self {
+            kind,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for Failure {}
+
+/// A reason alone is a failure of no kind a Plugin acts on.
+impl From<String> for Failure {
+    fn from(reason: String) -> Self {
+        Self::new(FailureKind::Other, reason)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(reason: &str) -> Self {
+        Self::new(FailureKind::Other, reason)
+    }
+}
 
 /// The directories a Plugin may name a file in (CLT-wrappers-act-through-the-core §3). The core
 /// resolves each to the Supervisor's own directory; a Plugin never learns where that is.
@@ -213,7 +268,8 @@ pub enum Input {
     ApplyPackage { version: String, hash: Vec<u8> },
     /// The Server commanded a restart on the current files.
     Restart,
-    /// The Supervisor is retired for good.
+    /// The Supervisor is retired for good, and its Managed Process has stopped: undo within the
+    /// roots what installing did, and answer (§9).
     Uninstall,
     /// The timer the instance set under `id` fired.
     Timer { id: u64 },
@@ -232,7 +288,10 @@ pub trait Host: Send + Sync {
     fn install(&self, hash: Vec<u8>) -> Call<'_, ()>;
     /// Restarts the Managed Process on the current files.
     fn restart(&self) -> Call<'_, ()>;
-    /// Stops the Managed Process for good and answers the uninstall (§9).
+    /// Does nothing, and is kept for the port's vocabulary (§4, §9): the core has stopped the
+    /// Managed Process before the uninstall reaches the instance, and answers the uninstall itself
+    /// with the handler's outcome once the handler has returned. An `Err` names what the Plugin
+    /// left undone.
     fn uninstall(&self) -> Call<'_, ()>;
 
     /// The content of `file`.
@@ -284,7 +343,12 @@ pub trait Host: Send + Sync {
 
 /// The answer of a host that does not carry out `function`.
 fn refused<'a, T: Send + 'a>(function: &'static str) -> Call<'a, T> {
-    Box::pin(async move { Err(format!("the host carries out no `{function}`")) })
+    Box::pin(async move {
+        Err(Failure::new(
+            FailureKind::Unsupported,
+            format!("the host carries out no `{function}`"),
+        ))
+    })
 }
 
 /// A Supervisor Plugin: the kind, as compiled into the Client (CLT-wrappers-act-through-the-core §1).
@@ -363,7 +427,7 @@ pub async fn default_handling(
     input: Input,
     spec: Option<Spec>,
     host: &dyn Host,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     match input {
         Input::Start { .. } => match spec {
             Some(spec) => host.start(spec).await,
