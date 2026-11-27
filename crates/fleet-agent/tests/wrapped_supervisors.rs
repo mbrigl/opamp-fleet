@@ -12,8 +12,7 @@ use fleet_agent::supervisor::port::{
     Call, Entry, Health, Host, Input, Instance, Manifest, Plugin, Probe, Process, Root, RootPath,
     Spec, Value,
 };
-use fleet_agent::supervisor::ports::{ProcessCommand, ProcessEvent};
-use std::sync::atomic::{AtomicU32, Ordering};
+use fleet_agent::supervisor::ports::ProcessEvent;
 use std::sync::{Arc, Mutex};
 
 /// The harness starts a kind as the core does, the program where the install puts it, and the stub
@@ -98,33 +97,22 @@ async fn the_stub_records_each_sighup_and_survives_it() {
 /// A Plugin of the test tree, on the port alone. At its start it tries to write into its
 /// `config` root, which the core refuses, reports the refusal as its health and starts its
 /// program anyway; a restart it answers by writing into its `state` root. An uninstall it answers
-/// by recording whether the process of `watch` still runs, writing into its `state` root, and
+/// by recording what `watch` says of its Managed Process, writing into its `state` root, and
 /// failing with what it left undone.
 struct Steady {
     reload_signal: Option<i32>,
     watch: Watch,
 }
 
-/// What a test hands the Plugin to watch: the pid of its Managed Process, and whether that process
-/// still ran when the uninstall arrived.
+/// How a test asks whether the Managed Process runs.
+type Running = Box<dyn Fn() -> bool + Send>;
+
+/// What a test hands the Plugin to watch: how the test asks whether the Managed Process runs, and
+/// the answer at the moment the uninstall arrived; `None` where the test asks nothing.
 #[derive(Clone, Default)]
 struct Watch {
-    pid: Arc<AtomicU32>,
+    running: Arc<Mutex<Option<Running>>>,
     alive_at_uninstall: Arc<Mutex<Option<bool>>>,
-}
-
-impl Watch {
-    #[cfg(unix)]
-    fn alive(&self) -> bool {
-        let pid = self.pid.load(Ordering::SeqCst);
-        // SAFETY: signal 0 probes existence only; no signal is delivered, no memory is touched.
-        pid != 0 && unsafe { libc::kill(pid as libc::pid_t, 0) } == 0
-    }
-
-    #[cfg(not(unix))]
-    fn alive(&self) -> bool {
-        false
-    }
 }
 
 impl Plugin for Steady {
@@ -209,8 +197,14 @@ impl Instance for SteadyInstance {
                     .await
                 }
                 Input::Uninstall => {
-                    *self.watch.alive_at_uninstall.lock().expect("watch") =
-                        Some(self.watch.alive());
+                    let alive = self
+                        .watch
+                        .running
+                        .lock()
+                        .expect("watch")
+                        .as_ref()
+                        .map(|f| f());
+                    *self.watch.alive_at_uninstall.lock().expect("watch") = alive;
                     host.write(
                         RootPath {
                             root: Root::State,
@@ -325,11 +319,13 @@ async fn an_uninstall_reaches_the_plugin_after_the_stop_and_carries_its_answer()
         &[],
     );
     let (_, pid) = wrapped::wait_for_running_version(&mut harness).await;
-    watch.pid.store(pid, Ordering::SeqCst);
-    assert!(watch.alive(), "the process runs before the uninstall");
+    // SAFETY: signal 0 probes existence only; no signal is delivered, no memory is touched.
+    let alive = move || unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    assert!(alive(), "the process runs before the uninstall");
+    *watch.running.lock().expect("watch") = Some(Box::new(alive));
     harness
         .commands
-        .send(ProcessCommand::Uninstall)
+        .send(fleet_agent::supervisor::ports::ProcessCommand::Uninstall)
         .await
         .expect("send");
     // timed: the waiter's own deadline, which only a defect reaches
