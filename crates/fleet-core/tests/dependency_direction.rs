@@ -951,6 +951,67 @@ fn the_plugin_rule_finds_what_reaches_past_the_port() {
     );
 }
 
+/// Whether shipped code implements the Plugin port's `Plugin` trait (`impl Plugin for …`, by any
+/// path to it).
+fn implements_plugin(tokens: &[(Token, usize)]) -> bool {
+    tokens.windows(2).any(|w| {
+        matches!(
+            (&w[0].0, &w[1].0),
+            (Token::Ident(name), Token::Ident(keyword)) if name == "Plugin" && keyword == "for"
+        )
+    })
+}
+
+/// A module whose shipped code implements `Plugin` has the role `Plugin`, so a new kind cannot
+/// escape [`a_plugin_names_only_the_port`] by a role that does not hold it to the port
+/// (CLT-wrappers-act-through-the-core §1).
+/// Verifies: CLT-wrappers-act-through-the-core
+#[test]
+fn a_module_that_implements_a_plugin_has_the_role_plugin() {
+    let mut found = Vec::new();
+    let mut plugins = 0;
+    for &(krate, roles) in ROLES {
+        let src = crates_dir().join(krate).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        files.sort();
+        for file in files {
+            if !implements_plugin(&tokenize(&fs::read_to_string(&file).unwrap())) {
+                continue;
+            }
+            plugins += 1;
+            let module = module_path(&src, &file);
+            if !roles.iter().any(|&(m, role)| m == module && role == Plugin) {
+                found.push(format!("{krate}: {module}"));
+            }
+        }
+    }
+    assert!(plugins >= 2, "the Plugin implementations are found");
+    assert!(
+        found.is_empty(),
+        "modules that implement Plugin without the role Plugin in ROLES: {found:#?}"
+    );
+}
+
+/// The reader of an implementation finds `impl Plugin for` by any path to the trait, and not the
+/// trait's own declaration, another trait implemented for a Plugin, or the word in a comment.
+#[test]
+fn the_plugin_implementation_is_found_by_any_path() {
+    for src in [
+        "impl Plugin for Command {}",
+        "impl crate::supervisor::port::Plugin for Collector {}",
+    ] {
+        assert!(implements_plugin(&tokenize(src)), "{src}");
+    }
+    for src in [
+        "pub trait Plugin: Send + Sync {}",
+        "impl Instance for Plugin {}",
+        "// impl Plugin for Command\nfn f() {}",
+    ] {
+        assert!(!implements_plugin(&tokenize(src)), "{src}");
+    }
+}
+
 /// The names a type of the Plugin port must not hold: a host path, a file or other handle, a
 /// channel, a task, a span, a time read or a secret (CLT-wrappers-act-through-the-core §2).
 const HOST_RESOURCES: &[&str] = &[
