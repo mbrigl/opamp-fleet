@@ -24,6 +24,12 @@ skimmed. The design revision drops what prevented nothing
   must be timed, such as the waiter's own poll, carries its reason as `// timed: <why>`, on its
   line or on a comment line right above it, which `scripts/sensor-timed-waits.sh` reads in place
   of listing it.
+- **A test fails where what it decides is gone** — before a test is handed off, its author asks
+  whether it would still pass without the path or the rule it names. One that takes the same
+  answer from two paths decides neither: the test that a Plugin's program runs through the second
+  service passed through the Client too, until it also asserted that nothing runs once the service
+  is gone (review of #231). An assert that a parse already guarantees decides nothing either
+  (66957b200).
 - **A commit that changes what a structural test expects lands before or with the code that needs
   it** — a review round that moves code under such a test revises the test in that commit or an
   earlier one, and puts its fixups in that order before the hand-off. The checks before a push see

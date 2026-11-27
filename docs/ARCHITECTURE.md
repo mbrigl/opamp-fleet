@@ -554,7 +554,9 @@ every Agent the Deployment's Selector claims with one release — the Package fo
 Configuration that fits its type, pinned by revision hash in `configs` — composes each Agent's
 configuration and pushes the offer over the Agent's WebSocket, or answers the next poll with it.
 On the Client, `engine` routes the offer to the Agent's Supervisor, which writes the entries into
-the Supervisor's `config/` directory and restarts its process; the Agent reports `APPLIED` or
+the Supervisor's `config/` directory and hands its Plugin each entry's name, role and digest; the
+Plugin answers with how its program runs on them, and `supervisor::host` restarts the process on
+that, or signals it where the kind's manifest names a reload signal; the Agent reports `APPLIED` or
 `FAILED` with the reason, and the Server stops offering once the reported hash matches
 ([SRV-configurations-compose-one-map](adr/SRV-configurations-compose-one-map.md),
 [SRV-deployments-and-pinned-rollouts](adr/SRV-deployments-and-pinned-rollouts.md)). A
@@ -630,7 +632,8 @@ instances of its own may serve
 ([SRV-instance-opens-chosen-planes](adr/SRV-instance-opens-chosen-planes.md)).
 
 **A Supervisor starts its program.** Without a process account the runner starts the Managed
-Process, its version probe and a package's preflight as the Client. Where `service install
+Process, its version probe and a package's preflight as the Client, and `supervisor::host` every
+program a Plugin runs once through the same `Spawner`. Where `service install
 --process-account` registered one, the Client's command line carries `--agents-socket` and the
 process account's uid (on Windows its SID), and `service::runtime` hands every Supervisor the
 `Spawner::Channel` of `supervisor::process`, over the `Channel` of `supervisor::channel`, instead:
@@ -667,6 +670,10 @@ reports; an
 installation an older Server wrote is moved there once by `server migrate`. The Client keeps its
 state
 under `state_dir`: the issued certificate and key, the connection settings the Server offered,
-and per Supervisor a directory with `config/` and `program/`. An installed Client runs from
+and per Supervisor a directory with `config/` and `program/`, and, once its kind or its Plugin
+first needs them, `data/`, which the Managed Process writes into, and `state/`, the Plugin's own
+and the Client's alone
+([CLT-wrappers-act-through-the-core](adr/CLT-wrappers-act-through-the-core.md)). An installed
+Client runs from
 `versions/<version>/` through the `current` pointer
 ([CLT-accounts-service-runs-under](adr/CLT-accounts-service-runs-under.md)).
