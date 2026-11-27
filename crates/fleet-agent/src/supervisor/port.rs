@@ -34,8 +34,6 @@ pub struct Failure {
 pub enum FailureKind {
     /// The file or directory named is not there.
     NotFound,
-    /// What is to be created is there already.
-    AlreadyExists,
     /// The core refuses the call: a path outside its root, a root the function may not change, or
     /// a link on the way.
     Refused,
@@ -290,9 +288,10 @@ pub trait Host: Send + Sync {
     fn install(&self, hash: Vec<u8>) -> Call<'_, ()>;
     /// Restarts the Managed Process on the current files.
     fn restart(&self) -> Call<'_, ()>;
-    /// Answers the uninstall (§9). The core has stopped the Managed Process before the uninstall
-    /// reaches the instance, and answers it with the handler's outcome once the handler has
-    /// returned: an `Err` names what the Plugin left undone.
+    /// Does nothing, and is kept for the port's vocabulary (§4, §9): the core has stopped the
+    /// Managed Process before the uninstall reaches the instance, and answers the uninstall itself
+    /// with the handler's outcome once the handler has returned. An `Err` names what the Plugin
+    /// left undone.
     fn uninstall(&self) -> Call<'_, ()>;
 
     /// The content of `file`.

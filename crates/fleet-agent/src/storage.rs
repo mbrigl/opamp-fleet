@@ -599,6 +599,16 @@ pub(crate) fn create_data_dir(
     let mut held = fleet_util::nofollow::HeldDir::create(data, 0o700)?;
     for name in names {
         held = held.dir(name, 0o700)?;
+        // One already there is narrowed too, through the handle just opened: a directory shared
+        // while a process account was registered is the Client's alone once none is.
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd as _;
+            // SAFETY: fchmod(2) on a descriptor `held` owns for the call; it touches no memory.
+            if unsafe { libc::fchmod(held.as_raw_fd(), 0o700) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
     }
     Ok(())
 }

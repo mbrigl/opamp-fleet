@@ -1044,6 +1044,22 @@ mod tests {
         assert_eq!(health.last_error, "the parent is down");
     }
 
+    /// A host function the host does not carry out fails as `Unsupported`, which a Plugin tells
+    /// from a refusal and from a missing file (CLT-wrappers-act-through-the-core §4).
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[tokio::test]
+    async fn a_function_the_host_does_not_carry_out_is_unsupported() {
+        let failed = Idle
+            .read(RootPath {
+                root: Root::State,
+                path: "x".to_string(),
+            })
+            .await
+            .expect_err("Idle carries out no read");
+        assert_eq!(failed.kind, port::FailureKind::Unsupported);
+        assert!(failed.reason.contains("read"), "{failed}");
+    }
+
     /// The manifest's process group and data directories reach every specification the core
     /// starts; a data directory that would leave its root fails the start.
     /// Verifies: CLT-wrappers-act-through-the-core

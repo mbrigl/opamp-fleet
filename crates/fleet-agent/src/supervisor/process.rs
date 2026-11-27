@@ -3640,6 +3640,14 @@ mod tests {
             let mode = std::fs::metadata(made).expect("meta").permissions().mode();
             assert_eq!(mode & 0o7777, 0o700, "{}", made.display());
         }
+        // One left shared, while a process account was registered, is narrowed again.
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o2770)).expect("chmod");
+        crate::storage::create_data_dir(&supervisor, &data, &nested, None).expect("again");
+        let mode = std::fs::metadata(&nested)
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o700, "narrowed again");
         let elsewhere = dir.path().join("elsewhere");
         std::fs::create_dir(&elsewhere).expect("mkdir");
         std::os::unix::fs::symlink(&elsewhere, data.join("away")).expect("a link");

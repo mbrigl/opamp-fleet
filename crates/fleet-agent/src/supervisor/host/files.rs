@@ -328,7 +328,6 @@ fn failed(what: &str, file: &RootPath, e: &io::Error) -> Failure {
     } else {
         let kind = match e.kind() {
             io::ErrorKind::NotFound => FailureKind::NotFound,
-            io::ErrorKind::AlreadyExists => FailureKind::AlreadyExists,
             _ => FailureKind::Other,
         };
         (kind, e.kind().to_string())
@@ -640,8 +639,8 @@ mod tests {
         assert!(roots.config.join("fleet").exists());
     }
 
-    /// A Plugin tells a failure by its kind, not its text: a file that is not there, one that is
-    /// there already, and a call the core refuses each have their own
+    /// A Plugin tells a failure by its kind, not its text: a file that is not there and a call the
+    /// core refuses, a link on the way among them, each have their own
     /// (CLT-wrappers-act-through-the-core §4).
     /// Verifies: CLT-wrappers-act-through-the-core
     #[cfg(unix)]
