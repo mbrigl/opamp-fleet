@@ -1290,8 +1290,8 @@ mod tests {
             },
             shutdown,
         ));
-        // timed: timer 1 fires 20 ms after the start's 50 ms call; 300 ms lets it arrive, and a
-        // cancelled one would have arrived as well.
+        // Timer 1 fires 20 ms after the start's 50 ms call, and a cancelled one would as well.
+        // timed: nothing signals that a cancelled timer stays away; 300 ms lets each arrive.
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(*log.lock().expect("log"), vec![1]);
         driven.abort();
