@@ -954,18 +954,10 @@ impl Runner {
                             s.waiting.due_now();
                         }
                     }
-                    Some(ProcessCommand::Uninstall) => {
-                        // Retired for good (CLT-wrappers-act-through-the-core): the generic uninstall is exactly the
-                        // graceful stop — nothing the generic Runner installs lives outside the
-                        // Supervisor's directory, and that directory is the core's to purge
-                        // (CLT-wrappers-act-through-the-core) once this answer is out.
-                        stop(&mut s.child, self.stop_timeout, &self.name).await;
-                        self.events
-                            .send(ProcessEvent::Uninstalled { result: Ok(()) })
-                            .await;
-                        return;
-                    }
-                    Some(ProcessCommand::Shutdown) | None => break,
+                    // The host stops the Runner before the Plugin handles an uninstall, and answers
+                    // the uninstall itself (CLT-wrappers-act-through-the-core §9): to the Runner
+                    // an uninstall is the bounded stop, as a shutdown is.
+                    Some(ProcessCommand::Shutdown | ProcessCommand::Uninstall) | None => break,
                 },
                 status = exited => {
                     // The program went with the second service, which the service manager brings

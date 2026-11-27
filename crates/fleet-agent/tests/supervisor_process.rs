@@ -25,6 +25,8 @@ use fleet_agent::supervisor::process::{
 use opamp::proto::{AgentRemoteConfig, ComponentHealth};
 use tokio::sync::mpsc;
 
+mod wrapped;
+
 /// The program a Supervisor is configured with, named the way this platform needs it: Windows
 /// appends `.exe` when told a path without an extension, and would not find a file that lacks it.
 fn program_name(stem: &str) -> String {
@@ -1179,21 +1181,34 @@ both!(
     a_process_that_dies_on_the_reload_signal_is_restarted_instead
 );
 
-/// The generic uninstall (CLT-wrappers-act-through-the-core): the graceful stop plus the answer, which is the adapter's
-/// last event — the adapter exits on the command itself, no shutdown ever fired. The answer
-/// coming last is what lets the core purge the directory only after the kind is done (CLT-wrappers-act-through-the-core).
-async fn an_uninstall_stops_the_process_answers_and_exits(via: Via) {
-    let mut harness = start(via, || Some(spec(&stub_agent())));
-    let health = next_health(&mut harness.events).await;
-    assert!(health.healthy);
-
+/// The generic uninstall, through the host every kind runs on (CLT-wrappers-act-through-the-core
+/// §9): the core stops the Managed Process, answers with `Ok` as the last event, and the adapter
+/// exits on the command itself, no shutdown ever fired. The answer coming last is what lets the
+/// core purge the directory only after the kind is done. The `Runner` alone takes an uninstall as
+/// its bounded stop, so this goes through `host::start`, as the core does.
+#[tokio::test]
+async fn an_uninstall_stops_the_process_answers_and_exits() {
+    let mut settings = toml::Table::new();
+    settings.insert(
+        "version_args".to_string(),
+        toml::Value::Array(vec![toml::Value::String("--version".to_string())]),
+    );
+    let mut harness = wrapped::start_with(
+        &fleet_agent::supervisor::command::Command,
+        "agent",
+        settings,
+        &[],
+    );
+    let (_, pid) = wrapped::wait_for_running_version(&mut harness).await;
     harness
         .commands
         .send(ProcessCommand::Uninstall)
         .await
         .expect("send the command");
+    // timed: the waiter's own deadline, which only a defect reaches
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let result = loop {
-        let (_, event) = tokio::time::timeout(Duration::from_secs(10), harness.events.recv())
+        let (_, event) = tokio::time::timeout_at(deadline, harness.events.recv())
             .await
             .expect("an event in time")
             .expect("an open channel");
@@ -1202,12 +1217,18 @@ async fn an_uninstall_stops_the_process_answers_and_exits(via: Via) {
         }
     };
     assert_eq!(result, Ok(()));
-    tokio::time::timeout(Duration::from_secs(10), harness.task)
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 probes existence only; no signal is delivered, no memory is touched.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        assert!(!alive, "the process stopped before the answer");
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+    tokio::time::timeout_at(deadline, harness.commands.closed())
         .await
-        .expect("the adapter exits on the command itself")
-        .expect("no panic");
+        .expect("the adapter exits on the command itself");
 }
-both!(an_uninstall_stops_the_process_answers_and_exits);
 
 // ── Supervision ──────────────────────────────────────────────────────────────
 

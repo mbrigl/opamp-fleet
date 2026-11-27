@@ -78,11 +78,11 @@ pub enum ProcessCommand {
     Restart,
     /// Stop the Managed Process gracefully.
     Shutdown,
-    /// The Supervisor is retired for good (CLT-wrappers-act-through-the-core): stop the Managed Process, undo whatever
-    /// installing it left *outside* the Supervisor's directory — the generic implementation has
-    /// nothing there, so its uninstall is exactly the graceful stop — answer with
-    /// [`ProcessEvent::Uninstalled`], and exit. The directory itself is the core's to purge
-    /// (CLT-wrappers-act-through-the-core), after the answer.
+    /// The Supervisor is retired for good (CLT-wrappers-act-through-the-core §9): the adapter
+    /// stops the Managed Process, then lets the Plugin undo within its roots what installing did,
+    /// answers with [`ProcessEvent::Uninstalled`] and the Plugin's outcome, and exits. The
+    /// directory itself is the core's to purge, after the answer. The `Runner` beneath the host
+    /// takes it as the bounded stop.
     Uninstall,
 }
 
