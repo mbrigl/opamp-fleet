@@ -7,13 +7,14 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::supervisor::port::{Entry, Instance, Manifest, Plugin, Process, Spec, Value};
-use crate::supervisor::ports::{parse_settings, KindDefaults};
+use crate::supervisor::port::{
+    parse_settings, Entry, Instance, Manifest, Plugin, Probe, Process, Spec, Value,
+};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per DEV-six-crates-tokio-axum.
 ///
-/// `command` is not among them: the core takes it out and resolves it (CLT-wrappers-act-through-the-core), and what
-/// arrives here is [`SupervisorContext::program`].
+/// `command` is not among them: the core takes it out and resolves it
+/// (CLT-wrappers-act-through-the-core §27), and starts what it resolved.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommandSettings {
@@ -58,11 +59,7 @@ pub struct Command;
 
 impl Plugin for Command {
     fn manifest(&self) -> Manifest {
-        Manifest {
-            kind: "command",
-            program_key: "command",
-            defaults: KindDefaults::none(),
-        }
+        Manifest::of("command", "command")
     }
 
     fn check(&self, name: &str, settings: toml::Table) -> Result<(), String> {
@@ -83,8 +80,11 @@ struct CommandInstance {
 impl Instance for CommandInstance {
     fn process(&self) -> Process {
         Process {
-            version_args: self.settings.version_args.clone(),
-            reload_signal: None,
+            probe: self.settings.version_args.as_ref().map(|args| Probe {
+                args: args.iter().cloned().map(Value::Text).collect(),
+                ..Probe::default()
+            }),
+            read_version: None,
         }
     }
 
@@ -105,7 +105,6 @@ impl Instance for CommandInstance {
                 .map(|(k, v)| (k.clone(), Value::Template(v.clone())))
                 .collect(),
             working_dir: None,
-            own_process_group: false,
         })
     }
 }
@@ -190,7 +189,6 @@ mod tests {
             ],
             env: vec![("K".to_string(), Value::Template("v".to_string()))],
             working_dir: None,
-            own_process_group: false,
         };
         assert_eq!(
             host.calls(),
@@ -202,10 +200,15 @@ mod tests {
                 "uninstall".to_string(),
             ]
         );
+        let process = instance.process();
+        assert!(
+            process.probe.is_none() && process.read_version.is_none(),
+            "no version arguments"
+        );
         assert_eq!(
-            instance.process(),
-            Process::default(),
-            "no version arguments, no reload signal"
+            Command.manifest(),
+            Manifest::of("command", "command"),
+            "no reload signal"
         );
     }
 }

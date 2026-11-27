@@ -18,10 +18,13 @@ use tracing::{debug, warn};
 
 use crate::shutdown::Shutdown;
 use crate::supervisor::port::{
-    self, Call, Entry, EntryKind, Facts, Host, Input, Instance, Ran, Root, RootPath, Run, Spec,
+    self, Call, Entry, EntryKind, Facts, Health, Host, Input, Instance, Probe, Ran, Root, RootPath,
+    Run, Spec, Value,
 };
-use crate::supervisor::ports::{ProcessCommand, SupervisorContext};
-use crate::supervisor::process::{Launch, Preflight, ProcessSpec, Runner, Spawner, VersionProbe};
+use crate::supervisor::ports::{EventSender, ProcessCommand, ProcessEvent, SupervisorContext};
+use crate::supervisor::process::{
+    Launch, Preflight, ProcessSpec, Runner, Spawner, VersionProbe, STAGED,
+};
 
 use files::Roots;
 use timers::{Fired, Timers};
@@ -33,32 +36,42 @@ pub use files::{DATA_DIR, READ_LIMIT, STATE_DIR};
 /// and the tasks that feed the instance its inputs and carry out its host functions.
 ///
 /// # Errors
-/// Returns an error when the block's settings do not parse.
+/// Returns an error when the block's settings do not parse, or the kind names a path that would
+/// leave its root.
 pub fn start(
     plugin: &dyn port::Plugin,
     spawner: &Spawner,
     mut ctx: SupervisorContext,
 ) -> Result<mpsc::Sender<ProcessCommand>, String> {
+    let manifest = plugin.manifest();
     let instance = plugin.instantiate(&ctx.name, std::mem::take(&mut ctx.settings))?;
     let process = instance.process();
     let roots = Roots::of(&ctx);
-    let first = Input::Start {
-        entries: entries(&roots.config),
+    let ensure_dirs = data_dirs(&roots, manifest.data_dirs)?;
+    let (version_probe, preflight) = match &process.probe {
+        Some(probe) => {
+            let (args, env, working_dir) = probe_parts(&roots, probe)?;
+            let staged = roots.with_program(PathBuf::from(STAGED));
+            let (pre_args, pre_env, pre_dir) = probe_parts(&staged, probe)?;
+            (
+                Some(VersionProbe {
+                    program: ctx.program.clone(),
+                    args,
+                    working_dir,
+                    parse: process.read_version.map(Arc::from),
+                    env,
+                }),
+                Some(Preflight {
+                    args: pre_args,
+                    env: pre_env,
+                    working_dir: pre_dir.map(|dir| dir.to_string_lossy().into_owned()),
+                }),
+            )
+        }
+        None => (None, None),
     };
     let spec = Arc::new(Mutex::new(None::<ProcessSpec>));
     let (to_runner, runner_commands) = mpsc::channel(16);
-    let version_probe = process.version_args.clone().map(|args| VersionProbe {
-        program: ctx.program.clone(),
-        args,
-        working_dir: None,
-        parse: None,
-        env: Vec::new(),
-    });
-    let preflight = process.version_args.map(|args| Preflight {
-        args,
-        env: Vec::new(),
-        working_dir: None,
-    });
     let built = Arc::clone(&spec);
     let runner = Runner {
         endpoint_token: ctx.endpoint_token.clone(),
@@ -70,19 +83,24 @@ pub fn start(
         archive_key: ctx.archive_key,
         version_probe,
         preflight,
-        reload_signal: process.reload_signal,
+        reload_signal: manifest.reload_signal,
         spawner: spawner.clone(),
         process_account_group: ctx.process_account_group,
         supervisor_dir: ctx.supervisor_dir,
-        events: ctx.events,
+        events: ctx.events.clone(),
         commands: runner_commands,
         build: Box::new(move || built.lock().ok()?.clone()),
     };
     let (timers, fired) = Timers::new();
+    let config_dir = roots.config.clone();
     let host = Arc::new(CoreHost {
         name: ctx.name,
         roots,
         program: ctx.program,
+        own_process_group: manifest.own_process_group,
+        ensure_dirs,
+        events: ctx.events,
+        uninstalled: AtomicBool::new(false),
         spec,
         runner: to_runner,
         running: AtomicBool::new(false),
@@ -100,12 +118,12 @@ pub fn start(
     tokio::spawn(drive(
         instance,
         host,
-        first,
         move || {
             started.running.store(true, Ordering::SeqCst);
             tokio::spawn(runner.run(runner_shutdown));
         },
         Fed {
+            config: config_dir,
             inputs,
             timers,
             fired,
@@ -113,6 +131,56 @@ pub fn start(
         ctx.shutdown,
     ));
     Ok(commands)
+}
+
+/// The directories a kind's agent writes into, beneath the `data` root, which comes first so that
+/// it is shared before anything is made in it (CLT-wrappers-act-through-the-core §6). None where
+/// the kind names none.
+fn data_dirs(roots: &Roots, named: &[&str]) -> Result<Vec<PathBuf>, String> {
+    if named.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut dirs = vec![roots.data.clone()];
+    for dir in named {
+        dirs.push(roots.path(&RootPath {
+            root: Root::Data,
+            path: (*dir).to_string(),
+        })?);
+    }
+    Ok(dirs)
+}
+
+/// A probe's arguments, environment and working directory, as the `Runner` takes them.
+type ProbeParts = (Vec<String>, Vec<(String, String)>, Option<PathBuf>);
+
+/// A probe's arguments, environment and working directory, the paths in the `program` root
+/// expanded in `roots`.
+fn probe_parts(roots: &Roots, probe: &Probe) -> Result<ProbeParts, String> {
+    let args = values(roots, &probe.args)?;
+    let env = environment(roots, &probe.env)?;
+    let working_dir = probe
+        .working_dir
+        .as_ref()
+        .map(|dir| roots.path(dir))
+        .transpose()?;
+    Ok((args, env, working_dir))
+}
+
+fn values(roots: &Roots, values: &[Value]) -> Result<Vec<String>, String> {
+    values.iter().map(|v| roots.value(v)).collect()
+}
+
+fn environment(roots: &Roots, env: &[(String, Value)]) -> Result<Vec<(String, String)>, String> {
+    env.iter()
+        .map(|(k, v)| Ok((k.clone(), roots.value(v)?)))
+        .collect()
+}
+
+/// The configuration entries written in `config_dir`, read off the runtime's threads.
+async fn entries_of(config_dir: PathBuf) -> Vec<Entry> {
+    tokio::task::spawn_blocking(move || entries(&config_dir))
+        .await
+        .unwrap_or_default()
 }
 
 /// The configuration entries written in `config_dir`, by name, each with its role and digest
@@ -151,6 +219,15 @@ struct CoreHost {
     name: String,
     roots: Roots,
     program: PathBuf,
+    /// The kind leads its own process group (CLT-wrappers-act-through-the-core §32).
+    own_process_group: bool,
+    /// What the core creates before every spawn (§6).
+    ensure_dirs: Vec<PathBuf>,
+    /// Where a reported health and the answers the core gives itself go.
+    events: EventSender,
+    /// Whether the instance asked for the uninstall, so that the core stops the process itself
+    /// where it did not (§9).
+    uninstalled: AtomicBool,
     /// What the `Runner` starts the Managed Process on; `None` until the instance starts it.
     spec: Arc<Mutex<Option<ProcessSpec>>>,
     runner: mpsc::Sender<ProcessCommand>,
@@ -171,16 +248,8 @@ struct CoreHost {
 
 impl CoreHost {
     fn resolve(&self, spec: &Spec) -> Result<ProcessSpec, String> {
-        let args = spec
-            .args
-            .iter()
-            .map(|a| self.roots.value(a))
-            .collect::<Result<Vec<_>, _>>()?;
-        let env = spec
-            .env
-            .iter()
-            .map(|(k, v)| Ok((k.clone(), self.roots.value(v)?)))
-            .collect::<Result<Vec<_>, String>>()?;
+        let args = values(&self.roots, &spec.args)?;
+        let env = environment(&self.roots, &spec.env)?;
         let working_dir = spec
             .working_dir
             .as_ref()
@@ -198,8 +267,8 @@ impl CoreHost {
             args,
             env,
             working_dir,
-            own_process_group: spec.own_process_group,
-            ensure_dirs: Vec::new(),
+            own_process_group: self.own_process_group,
+            ensure_dirs: self.ensure_dirs.clone(),
         })
     }
 
@@ -289,10 +358,12 @@ impl Host for CoreHost {
         })
     }
 
+    /// A specification the core refuses leaves the apply waiting, and the core answers it with the
+    /// reason once the handler has returned ([`Settles::settle`]).
     fn apply_config(&self, hash: Vec<u8>, spec: Option<Spec>) -> Call<'_, ()> {
         Box::pin(async move {
-            let command = Self::take(&self.configs, &hash, "configuration")?;
             let resolved = spec.as_ref().map(|spec| self.resolve(spec)).transpose()?;
+            let command = Self::take(&self.configs, &hash, "configuration")?;
             self.set(resolved)?;
             self.send(command).await
         })
@@ -310,6 +381,7 @@ impl Host for CoreHost {
     }
 
     fn uninstall(&self) -> Call<'_, ()> {
+        self.uninstalled.store(true, Ordering::SeqCst);
         Box::pin(self.send(ProcessCommand::Uninstall))
     }
 
@@ -346,16 +418,8 @@ impl Host for CoreHost {
                 root: Root::Program,
                 path: run.program.clone(),
             })?;
-            let args = run
-                .args
-                .iter()
-                .map(|a| self.roots.value(a))
-                .collect::<Result<Vec<_>, _>>()?;
-            let env = run
-                .env
-                .iter()
-                .map(|(k, v)| Ok((k.clone(), self.roots.value(v)?)))
-                .collect::<Result<Vec<_>, String>>()?;
+            let args = values(&self.roots, &run.args)?;
+            let env = environment(&self.roots, &run.env)?;
             let working_dir = match &run.working_dir {
                 Some(dir) => self.roots.path(dir)?,
                 None => self.roots.program.clone(),
@@ -397,6 +461,70 @@ impl Host for CoreHost {
             Ok(Facts { host_name, account })
         })
     }
+
+    fn report_health(&self, health: Health) -> Call<'_, ()> {
+        Box::pin(async move {
+            self.events
+                .send(ProcessEvent::Health(opamp::proto::ComponentHealth {
+                    healthy: health.healthy,
+                    status: health.status,
+                    last_error: health.last_error,
+                    status_time_unix_nano: crate::supervisor::process::now_ns(),
+                    ..Default::default()
+                }))
+                .await;
+            Ok(())
+        })
+    }
+}
+
+/// What the core does once the handler has returned from an input: it answers what the instance
+/// left unanswered (CLT-wrappers-act-through-the-core §5).
+trait Settles: Host {
+    fn settle<'a>(&'a self, _input: &'a Input, _outcome: &'a Result<(), String>) -> Call<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl Settles for CoreHost {
+    /// An apply or an install the instance did not hand on is answered as failed, with the
+    /// handler's reason, so the Agent leaves `APPLYING`. An uninstall the instance did not ask for
+    /// is the generic one, the bounded stop (§9).
+    fn settle<'a>(&'a self, input: &'a Input, outcome: &'a Result<(), String>) -> Call<'a, ()> {
+        Box::pin(async move {
+            let reason = || match outcome {
+                Err(e) => e.clone(),
+                Ok(()) => "the Plugin left it unanswered".to_string(),
+            };
+            match input {
+                Input::ApplyConfig { hash, .. } => {
+                    if Self::take(&self.configs, hash, "configuration").is_ok() {
+                        self.events
+                            .send(ProcessEvent::ConfigApplied {
+                                hash: hash.clone(),
+                                result: Err(reason()),
+                            })
+                            .await;
+                    }
+                }
+                Input::ApplyPackage { hash, .. } => {
+                    if Self::take(&self.packages, hash, "package").is_ok() {
+                        self.events
+                            .send(ProcessEvent::PackageApplied {
+                                hash: hash.clone(),
+                                result: Err(reason()),
+                            })
+                            .await;
+                    }
+                }
+                Input::Uninstall if !self.uninstalled.load(Ordering::SeqCst) => {
+                    self.send(ProcessCommand::Uninstall).await?;
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+    }
 }
 
 /// Turns the core's commands into the instance's inputs, keeping what an input stands for in the
@@ -426,7 +554,7 @@ async fn front(
                 }
                 Input::ApplyConfig {
                     hash,
-                    entries: entries(&host.roots.config),
+                    entries: entries_of(host.roots.config.clone()).await,
                 }
             }
             ProcessCommand::ApplyPackage {
@@ -462,30 +590,36 @@ async fn front(
     }
 }
 
-/// Feeds `instance` its inputs, one at a time: the start first, then `started`, then each input
-/// once the call before it has returned (CLT-wrappers-act-through-the-core §1). A shutdown cancels
-/// the call in progress; the `Runner` stops the Managed Process on the same signal.
 /// What feeds an instance after its start: the inputs of the core's commands and the timers it
 /// set.
 struct Fed {
+    /// The `config` root, whose entries the start carries.
+    config: PathBuf,
     inputs: mpsc::Receiver<Input>,
     timers: Arc<Timers>,
     fired: mpsc::UnboundedReceiver<Fired>,
 }
 
-async fn drive(
+/// Feeds `instance` its inputs, one at a time: the start first, on the entries written, then
+/// `started`, then each input once the call before it has returned and the core has settled it
+/// (CLT-wrappers-act-through-the-core §1). A shutdown cancels the call in progress; the `Runner`
+/// stops the Managed Process on the same signal.
+async fn drive<H: Settles + 'static>(
     mut instance: Box<dyn Instance>,
-    host: Arc<dyn Host>,
-    first: Input,
+    host: Arc<H>,
     started: impl FnOnce() + Send,
     fed: Fed,
     mut shutdown: Shutdown,
 ) {
     let Fed {
+        config,
         mut inputs,
         timers,
         mut fired,
     } = fed;
+    let first = Input::Start {
+        entries: entries_of(config).await,
+    };
     let outcome = tokio::select! {
         outcome = instance.handle(first, &*host) => outcome,
         () = shutdown.requested() => return,
@@ -510,11 +644,14 @@ async fn drive(
         };
         let last = input == Input::Uninstall;
         let outcome = tokio::select! {
-            outcome = instance.handle(input, &*host) => outcome,
+            outcome = instance.handle(input.clone(), &*host) => outcome,
             () = shutdown.requested() => return,
         };
-        if let Err(e) = outcome {
+        if let Err(e) = &outcome {
             warn!(error = %e, "the Plugin's host function failed");
+        }
+        if let Err(e) = host.settle(&input, &outcome).await {
+            warn!(error = %e, "the core could not settle an input the Plugin left");
         }
         if last {
             return;
@@ -551,6 +688,8 @@ mod tests {
         }
     }
 
+    impl Settles for Idle {}
+
     /// An instance that records each input it handles, and holds a restart until `gate` opens.
     struct Recording {
         log: Arc<Mutex<Vec<String>>>,
@@ -584,6 +723,7 @@ mod tests {
     fn fed(inputs: mpsc::Receiver<Input>) -> Fed {
         let (timers, fired) = Timers::new();
         Fed {
+            config: PathBuf::from("no-config-here"),
             inputs,
             timers,
             fired,
@@ -614,15 +754,13 @@ mod tests {
         let driven = tokio::spawn(drive(
             Box::new(instance),
             Arc::new(Idle),
-            Input::Start {
-                entries: Vec::new(),
-            },
             || {},
             fed(inputs),
             shutdown,
         ));
         to_instance.send(Input::Restart).await.expect("send");
         to_instance.send(Input::Uninstall).await.expect("send");
+        // timed: the uninstall must not be handled; nothing signals what does not happen.
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(
             *log.lock().expect("log"),
@@ -651,14 +789,12 @@ mod tests {
         let driven = tokio::spawn(drive(
             Box::new(instance),
             Arc::new(Idle),
-            Input::Start {
-                entries: Vec::new(),
-            },
             || {},
             fed(inputs),
             shutdown,
         ));
         to_instance.send(Input::Restart).await.expect("send");
+        // timed: lets the restart's call begin; the assertion below sees whether it did.
         tokio::time::sleep(Duration::from_millis(50)).await;
         let _ = stop.send(true);
         tokio::time::timeout(Duration::from_secs(5), driven)
@@ -720,12 +856,29 @@ mod tests {
 
     #[cfg(unix)]
     fn core_host(roots: Roots, spawner: Spawner) -> CoreHost {
-        let (runner, _gone) = mpsc::channel(1);
+        wired(roots, spawner).0
+    }
+
+    /// A core host whose commands to the `Runner` and whose events the test reads.
+    fn wired(
+        roots: Roots,
+        spawner: Spawner,
+    ) -> (
+        CoreHost,
+        mpsc::Receiver<ProcessCommand>,
+        mpsc::Receiver<(usize, ProcessEvent)>,
+    ) {
+        let (runner, commands) = mpsc::channel(4);
         let (timers, _fired) = Timers::new();
-        CoreHost {
+        let (events, reported) = mpsc::channel(4);
+        let host = CoreHost {
             name: "agent".to_string(),
             program: roots.program.join("agent"),
             roots,
+            own_process_group: false,
+            ensure_dirs: Vec::new(),
+            events: EventSender::new(0, events),
+            uninstalled: AtomicBool::new(false),
             spec: Arc::new(Mutex::new(None)),
             runner,
             running: AtomicBool::new(false),
@@ -734,19 +887,220 @@ mod tests {
             spawner,
             timers,
             account: tokio::sync::OnceCell::new(),
+        };
+        (host, commands, reported)
+    }
+
+    /// Roots that name directories nobody made, for what touches no file.
+    fn unmade() -> Roots {
+        let supervisor_dir = PathBuf::from("no-such-supervisor");
+        Roots {
+            config: supervisor_dir.join("config"),
+            program: supervisor_dir.join("program"),
+            data: supervisor_dir.join(DATA_DIR),
+            state: supervisor_dir.join(STATE_DIR),
+            supervisor_dir,
+            group: None,
         }
+    }
+
+    fn apply(hash: &[u8]) -> ProcessCommand {
+        ProcessCommand::ApplyConfig {
+            config: opamp::proto::AgentRemoteConfig {
+                config_hash: hash.to_vec(),
+                ..Default::default()
+            },
+            span: tracing::Span::none(),
+        }
+    }
+
+    /// An apply the instance leaves unanswered, or answers with a specification the core refuses,
+    /// is answered as failed by the core, so the Agent does not stay `APPLYING`; one the instance
+    /// handed on is not answered twice.
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[tokio::test]
+    async fn the_core_answers_an_apply_the_plugin_left() {
+        let (host, mut commands, mut reported) = wired(unmade(), Spawner::Local);
+        for hash in [[1u8], [2], [3]] {
+            host.configs
+                .lock()
+                .expect("configs")
+                .insert(hash.to_vec(), apply(&hash));
+        }
+        let left = Input::ApplyConfig {
+            hash: vec![1],
+            entries: Vec::new(),
+        };
+        host.settle(&left, &Ok(())).await.expect("settled");
+        let refused = host
+            .apply_config(
+                vec![2],
+                Some(Spec {
+                    args: vec![Value::Rooted(RootPath {
+                        root: Root::Config,
+                        path: "../x".to_string(),
+                    })],
+                    ..Spec::default()
+                }),
+            )
+            .await;
+        assert!(refused.is_err(), "the path leaves its root");
+        let input = Input::ApplyConfig {
+            hash: vec![2],
+            entries: Vec::new(),
+        };
+        host.settle(&input, &refused).await.expect("settled");
+        host.apply_config(vec![3], None).await.expect("handed on");
+        let input = Input::ApplyConfig {
+            hash: vec![3],
+            entries: Vec::new(),
+        };
+        host.settle(&input, &Ok(())).await.expect("settled");
+        let mut answers = Vec::new();
+        while let Ok((_, event)) = reported.try_recv() {
+            if let ProcessEvent::ConfigApplied { hash, result } = event {
+                answers.push((hash, result.is_err()));
+            }
+        }
+        assert_eq!(answers, vec![(vec![1], true), (vec![2], true)]);
+        assert!(
+            matches!(commands.try_recv(), Ok(ProcessCommand::ApplyConfig { .. })),
+            "the apply handed on reaches the Runner"
+        );
+    }
+
+    /// An uninstall the instance did not ask for is the generic one: the core stops the process.
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[tokio::test]
+    async fn the_core_stops_the_process_on_an_uninstall_the_plugin_left() {
+        let (host, mut commands, _reported) = wired(unmade(), Spawner::Local);
+        host.settle(&Input::Uninstall, &Err("failed early".to_string()))
+            .await
+            .expect("settled");
+        assert!(matches!(commands.try_recv(), Ok(ProcessCommand::Uninstall)));
+        host.uninstall().await.expect("asked");
+        host.settle(&Input::Uninstall, &Ok(()))
+            .await
+            .expect("settled");
+        assert!(matches!(commands.try_recv(), Ok(ProcessCommand::Uninstall)));
+        assert!(commands.try_recv().is_err(), "not stopped twice");
+    }
+
+    /// A health a Plugin reports is the Supervisor's Agent's health.
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[tokio::test]
+    async fn a_reported_health_reaches_the_agent() {
+        let (host, _commands, mut reported) = wired(unmade(), Spawner::Local);
+        host.report_health(Health {
+            healthy: false,
+            status: "awaiting the certificate".to_string(),
+            last_error: "the parent is down".to_string(),
+        })
+        .await
+        .expect("reported");
+        let Ok((_, ProcessEvent::Health(health))) = reported.try_recv() else {
+            panic!("a health event");
+        };
+        assert!(!health.healthy);
+        assert_eq!(health.status, "awaiting the certificate");
+        assert_eq!(health.last_error, "the parent is down");
+    }
+
+    /// The manifest's process group and data directories reach every specification the core
+    /// starts, the `data` root first; a data directory that would leave its root fails the start.
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[test]
+    fn the_manifest_reaches_the_process_specification() {
+        let roots = unmade();
+        let dirs = data_dirs(&roots, &["log", "lib/state"]).expect("dirs");
+        assert_eq!(
+            dirs,
+            vec![
+                roots.data.clone(),
+                roots.data.join("log"),
+                roots.data.join("lib").join("state"),
+            ]
+        );
+        assert_eq!(
+            data_dirs(&roots, &[]),
+            Ok(Vec::new()),
+            "none named, none made"
+        );
+        assert!(data_dirs(&roots, &["../x"]).is_err());
+        let (mut host, _commands, _reported) = wired(roots, Spawner::Local);
+        host.own_process_group = true;
+        host.ensure_dirs.clone_from(&dirs);
+        let spec = host.resolve(&Spec::default()).expect("resolved");
+        assert!(spec.own_process_group);
+        assert_eq!(spec.ensure_dirs, dirs);
+    }
+
+    /// A probe's path in the `program` root names the live program for the version probe and the
+    /// staged one for the preflight (CLT-wrappers-act-through-the-core §34).
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[test]
+    fn a_probe_asks_the_live_program_and_the_preflight_the_staged_one() {
+        let roots = unmade();
+        let probe = Probe {
+            args: vec![
+                Value::Rooted(RootPath {
+                    root: Root::Program,
+                    path: "lib".to_string(),
+                }),
+                Value::Text("--version".to_string()),
+            ],
+            env: vec![(
+                "LD_LIBRARY_PATH".to_string(),
+                Value::Rooted(RootPath {
+                    root: Root::Program,
+                    path: "lib".to_string(),
+                }),
+            )],
+            working_dir: Some(RootPath {
+                root: Root::Program,
+                path: String::new(),
+            }),
+        };
+        let live = roots.program.join("lib").to_string_lossy().into_owned();
+        assert_eq!(
+            probe_parts(&roots, &probe),
+            Ok((
+                vec![live.clone(), "--version".to_string()],
+                vec![("LD_LIBRARY_PATH".to_string(), live)],
+                Some(roots.program.clone()),
+            ))
+        );
+        let staged = PathBuf::from(STAGED);
+        let in_staged = staged.join("lib").to_string_lossy().into_owned();
+        assert_eq!(
+            probe_parts(&roots.with_program(staged.clone()), &probe),
+            Ok((
+                vec![in_staged.clone(), "--version".to_string()],
+                vec![("LD_LIBRARY_PATH".to_string(), in_staged)],
+                Some(staged),
+            ))
+        );
     }
 
     /// The second service, run in this process on a socket in `dir` under this test's own uid,
     /// and the spawner that starts programs through it.
     #[cfg(unix)]
-    async fn second_service(dir: &Path) -> (Spawner, tokio::task::AbortHandle) {
+    async fn second_service(
+        dir: &Path,
+    ) -> (
+        Spawner,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<crate::supervisor::channel::Served>,
+    ) {
         use crate::supervisor::channel::{bind, serve, Channel, ServiceProcess};
         let socket = dir.join("agents.sock");
         let listener = bind(&socket).expect("bind");
         // SAFETY: getuid(2) cannot fail and touches no memory.
         let uid = unsafe { libc::getuid() };
-        let service = tokio::spawn(serve(listener, uid, || false, std::future::pending()));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let service = tokio::spawn(serve(listener, uid, || false, async {
+            let _ = stopped.await;
+        }));
         let channel = Channel::connect(
             &socket,
             uid,
@@ -754,7 +1108,7 @@ mod tests {
         )
         .await
         .expect("connect");
-        (Spawner::Channel(channel), service.abort_handle())
+        (Spawner::Channel(channel), stop, service)
     }
 
     /// A program a Plugin runs once comes from its `program` root, starts in that root, and
@@ -804,15 +1158,31 @@ mod tests {
     }
 
     /// Where a process account is registered, a program a Plugin runs goes through the second
-    /// service, as the Managed Process does (CLT-accounts-service-runs-under §18).
+    /// service, as the Managed Process does (CLT-accounts-service-runs-under §18): once the
+    /// service is gone, the program does not run, where the Client could start it itself.
     /// Verifies: CLT-wrappers-act-through-the-core
     #[cfg(unix)]
     #[tokio::test]
     async fn a_program_a_plugin_runs_goes_through_the_second_service() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (spawner, service) = second_service(dir.path()).await;
-        a_program_runs_once(spawner, dir.path()).await;
-        service.abort();
+        let (spawner, stop, service) = second_service(dir.path()).await;
+        a_program_runs_once(spawner.clone(), dir.path()).await;
+        let _ = stop.send(());
+        tokio::time::timeout(Duration::from_secs(10), service)
+            .await
+            .expect("the service stops")
+            .expect("the service task");
+        let host = core_host(made_roots(dir.path()), spawner);
+        let ran = host
+            .run(Run {
+                program: "tool".to_string(),
+                ..Run::default()
+            })
+            .await;
+        assert!(
+            ran.is_err(),
+            "without the second service nothing runs: {ran:?}"
+        );
     }
 
     /// The host facts name the host and the account a program runs under, as that program states
@@ -827,7 +1197,7 @@ mod tests {
             .output()
             .expect("id");
         let expected = String::from_utf8_lossy(&expected.stdout).trim().to_string();
-        let (spawner, service) = second_service(dir.path()).await;
+        let (spawner, _stop, service) = second_service(dir.path()).await;
         for spawner in [Spawner::Local, spawner] {
             let host = core_host(made_roots(dir.path()), spawner);
             let facts = host.facts().await.expect("facts");
@@ -866,6 +1236,8 @@ mod tests {
         }
     }
 
+    impl Settles for Timed {}
+
     /// An instance that sets three timers at its start and cancels two of them, one after it has
     /// fired, and records each timer that arrives.
     struct Timing(Arc<Mutex<Vec<u64>>>);
@@ -886,6 +1258,7 @@ mod tests {
                         host.set_timer(3, 0).await?;
                         host.cancel_timer(2).await?;
                         // Timer 3 fires while this call runs, and waits for it to return.
+                        // timed: a call that outlasts timer 3's firing, which nothing signals.
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         host.cancel_timer(3).await?;
                     }
@@ -908,17 +1281,17 @@ mod tests {
         let driven = tokio::spawn(drive(
             Box::new(Timing(Arc::clone(&log))),
             Arc::new(Timed(Arc::clone(&timers))),
-            Input::Start {
-                entries: Vec::new(),
-            },
             || {},
             Fed {
+                config: PathBuf::from("no-config-here"),
                 inputs,
                 timers,
                 fired,
             },
             shutdown,
         ));
+        // timed: timer 1 fires 20 ms after the start's 50 ms call; 300 ms lets it arrive, and a
+        // cancelled one would have arrived as well.
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(*log.lock().expect("log"), vec![1]);
         driven.abort();

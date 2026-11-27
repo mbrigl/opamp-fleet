@@ -509,10 +509,34 @@ fn check_name(name: &str) -> io::Result<()> {
 
 /// The error for a link where a plain entry was required.
 fn refused_link(path: &Path) -> io::Error {
-    io::Error::other(format!(
-        "{} is a link, which is refused: the service's account could have put it there",
-        path.display()
-    ))
+    io::Error::other(RefusedLink(path.to_path_buf()))
+}
+
+/// A link found where a plain entry was required, as the error of [`refused_link`] carries it.
+#[derive(Debug)]
+struct RefusedLink(std::path::PathBuf);
+
+impl std::fmt::Display for RefusedLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is a link, which is refused: the service's account could have put it there",
+            self.0.display()
+        )
+    }
+}
+
+impl std::error::Error for RefusedLink {}
+
+/// Whether `e` is the refusal of a link where a plain entry was required: the refusal of this
+/// module, or the system's own `ELOOP` of a path opened without following its last link.
+#[must_use]
+pub fn is_refused_link(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    if e.raw_os_error() == Some(libc::ELOOP) {
+        return true;
+    }
+    e.get_ref().is_some_and(|inner| inner.is::<RefusedLink>())
 }
 
 /// The `*at` system calls this module and the Client share on Unix, each wrapped once here: a

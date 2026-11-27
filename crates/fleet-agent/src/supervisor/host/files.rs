@@ -8,7 +8,7 @@
 //! path, since a Plugin never learns where its roots lie.
 
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use fleet_util::nofollow::{HeldDir, Kind};
 
@@ -54,6 +54,14 @@ impl Roots {
             data: ctx.supervisor_dir.join(DATA_DIR),
             state: ctx.supervisor_dir.join(STATE_DIR),
             group: ctx.process_account_group,
+        }
+    }
+
+    /// The same roots with `program` elsewhere: where a preflight finds the staged program.
+    pub(super) fn with_program(&self, program: PathBuf) -> Self {
+        Roots {
+            program,
+            ..self.clone()
         }
     }
 
@@ -200,44 +208,58 @@ impl Roots {
     }
 
     /// Creates the directory and what is missing above it, never through a link.
+    /// In `data`, where a process account is registered, it is made as the Client makes a kind's
+    /// data directories: shared with that account's group, its mode set whatever the umask, and
+    /// an existing one corrected (CLT-accounts-service-runs-under §21). Elsewhere, and where none
+    /// is, it is the Client's alone, as the Managed Process then runs under the Client's account.
     pub(super) fn create_dir(&self, dir: &RootPath) -> Result<(), String> {
         writable(dir)?;
         let names = components(dir)?;
         let mut held = self
             .held_root(dir.root)
             .map_err(|e| failed("reach", dir, &e))?;
+        if let (Root::Data, Some(group), false) = (dir.root, self.group, names.is_empty()) {
+            return crate::storage::create_shared_dir(
+                &self.data,
+                &self.path(dir)?,
+                Some(group),
+                Shared::Written,
+            )
+            .map_err(|e| failed("create", dir, &e));
+        }
         for name in &names {
             held = held
-                .dir(name, dir_mode(dir.root))
+                .dir(name, PRIVATE_DIR_MODE)
                 .map_err(|e| failed("create", dir, &e))?;
         }
         Ok(())
     }
 }
 
-/// The plain names of `file`'s path, refused where it would leave its root: an absolute path, a
-/// `..`, a backslash or a drive (CLT-wrappers-act-through-the-core §3). `.` and empty
-/// components are skipped, so `""` names the root.
+/// The plain names of `file`'s path, `/`-separated, refused where a name is empty, `.` or `..`,
+/// where the path is absolute, and on Windows where a name holds a separator or a drive
+/// (CLT-wrappers-act-through-the-core §3). The empty path names the root itself.
 pub(super) fn components(file: &RootPath) -> Result<Vec<String>, String> {
-    if file.path.contains('\\') {
-        return Err(leaves(file));
+    if file.path.is_empty() {
+        return Ok(Vec::new());
     }
-    let mut names = Vec::new();
-    for component in Path::new(&file.path).components() {
-        match component {
-            Component::Normal(name) => {
-                names.push(name.to_str().ok_or_else(|| leaves(file))?.to_string())
+    file.path
+        .split('/')
+        .map(|name| {
+            let plain =
+                !matches!(name, "" | "." | "..") && !(cfg!(windows) && name.contains(['\\', ':']));
+            if plain {
+                Ok(name.to_string())
+            } else {
+                Err(leaves(file))
             }
-            Component::CurDir => {}
-            _ => return Err(leaves(file)),
-        }
-    }
-    Ok(names)
+        })
+        .collect()
 }
 
 fn leaves(file: &RootPath) -> String {
     format!(
-        "the path {:?} leaves its root: a Plugin names a file by a relative path without `..`",
+        "the path {:?} leaves its root: a Plugin names a file by a relative path of plain names",
         file.path
     )
 }
@@ -263,14 +285,8 @@ fn file_mode(root: Root) -> u32 {
     }
 }
 
-/// The mode of a directory a Plugin creates, as CLT-accounts-service-runs-under §21 names it for
-/// a kind's data directories, and the Client's alone in `state`.
-fn dir_mode(root: Root) -> u32 {
-    match root {
-        Root::Data => 0o2770,
-        _ => 0o700,
-    }
-}
+/// The mode of a directory a Plugin creates that is not shared: the Client's alone.
+const PRIVATE_DIR_MODE: u32 = 0o700;
 
 /// `file` as a Plugin named it.
 fn shown(file: &RootPath) -> String {
@@ -285,22 +301,12 @@ fn shown(file: &RootPath) -> String {
 
 /// Why `what` failed on `file`, without the host path an I/O error carries.
 fn failed(what: &str, file: &RootPath, e: &io::Error) -> String {
-    let reason = if e.raw_os_error() == Some(libc_eloop()) || e.to_string().contains("is a link") {
+    let reason = if fleet_util::nofollow::is_refused_link(e) {
         "a link stands on the way, which no host function follows".to_string()
     } else {
         e.kind().to_string()
     };
     format!("cannot {what} {}: {reason}", shown(file))
-}
-
-#[cfg(unix)]
-fn libc_eloop() -> i32 {
-    libc::ELOOP
-}
-
-#[cfg(not(unix))]
-fn libc_eloop() -> i32 {
-    -1
 }
 
 #[cfg(test)]
@@ -353,16 +359,18 @@ mod tests {
             roots.path(&file(Root::Program, "")),
             Ok(PathBuf::from("/s/agent/program"))
         );
-        assert_eq!(
-            roots.path(&file(Root::State, "./x")),
-            Ok(PathBuf::from("/s/agent/state/x"))
-        );
-        for escape in ["../x", "a/../../x", "/etc/passwd", "a\\..\\x"] {
+        for escape in ["../x", "a/../../x", "/etc/passwd", "./x", "a//b", "a/", "."] {
             assert!(
                 roots.path(&file(Root::Config, escape)).is_err(),
-                "{escape} leaves its root"
+                "{escape} is refused"
             );
         }
+        // A backslash separates on Windows alone; elsewhere it is part of a plain name, as an
+        // operator's file in `config/` may carry one.
+        assert_eq!(
+            roots.path(&file(Root::Config, "a\\..\\x")).is_err(),
+            cfg!(windows)
+        );
     }
 
     /// An operator's template expands the two placeholders and leaves any other `${…}` as written.
@@ -443,6 +451,24 @@ mod tests {
         );
         let written = meta(&roots.data.join("d"));
         assert_eq!(written.gid(), gid, "the data file is the group's");
+        // A directory a Plugin creates in `data` is shared as the root is, whatever the umask
+        // narrows a new directory to, and one already there narrower is corrected.
+        roots
+            .create_dir(&file(Root::Data, "spool/in"))
+            .expect("create");
+        std::fs::create_dir(roots.data.join("narrow")).expect("narrow");
+        std::fs::set_permissions(
+            roots.data.join("narrow"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("mode");
+        roots
+            .create_dir(&file(Root::Data, "narrow"))
+            .expect("corrected");
+        for made in ["spool/in", "narrow"] {
+            let made = meta(&roots.data.join(made));
+            assert_eq!((made.gid(), made.mode() & 0o7777), (gid, 0o2770));
+        }
     }
 
     /// A path with `..`, an absolute path or a link out of its root fails that call alone; the

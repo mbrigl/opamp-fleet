@@ -73,3 +73,14 @@ impl Timers {
         false
     }
 }
+
+impl Drop for Timers {
+    /// The timers of an instance that is gone fire for nobody: each armed one is disarmed.
+    fn drop(&mut self) {
+        if let Ok(armed) = self.armed.get_mut() {
+            for (_, task) in armed.values() {
+                task.abort();
+            }
+        }
+    }
+}

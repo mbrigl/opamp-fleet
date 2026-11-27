@@ -17,7 +17,7 @@ use opamp::uid::InstanceUid;
 use tokio::sync::mpsc;
 
 use crate::shutdown::Shutdown;
-pub use crate::supervisor::port::Plugin;
+pub use crate::supervisor::port::{parse_settings, KindDefaults, KindTiming, Plugin};
 
 /// The health status a Supervisor reports while the second service cannot be reached (CLT-accounts-service-runs-under §17).
 pub const UNREACHABLE: &str = "the second service cannot be reached";
@@ -339,8 +339,8 @@ pub struct SupervisorContext {
     /// Process is pointed at.
     pub config_dir: PathBuf,
     /// The Managed Process itself, already resolved inside this Supervisor's own `program/`
-    /// directory (CLT-wrappers-act-through-the-core). The plugin spawns this rather than reading its own
-    /// `binary`/`command` key, so the path rule lives in one place instead of once per plugin.
+    /// directory (CLT-wrappers-act-through-the-core §27). The core starts this rather than a
+    /// Plugin reading its own `binary`/`command` key, so the path rule lives in one place.
     pub program: PathBuf,
     /// What an offered package replaces (PKG-signed-packages-and-delivery) — resolved beside `program` and for
     /// the same reason: a plugin that decided this for itself could disagree with where the core
@@ -394,80 +394,6 @@ impl SupervisorContext {
     }
 }
 
-/// What a kind knows about its own agent, so a block does not have to say it (CLT-wrappers-act-through-the-core).
-///
-/// Every field is a `&'static str` resolved **per platform** at compile time, which is the point:
-/// a constant can be asserted against the artifact this project packs, where a path written in a
-/// manual can only be believed. A kind that knows nothing — `collector`, `command` — returns
-/// [`KindDefaults::none`] and its blocks keep saying what they always said.
-///
-/// A value supplied here is not a default the block may override. It is the answer, and a block
-/// naming the key is refused: two sources of truth for a value this Client computes is how a host
-/// quietly differs from what the fleet believes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KindDefaults {
-    /// The program's file name in this Supervisor's own `program/` directory (CLT-wrappers-act-through-the-core).
-    /// `None` leaves it to the block's program key.
-    pub program: Option<&'static str>,
-    /// Where the program sits inside an unpacked package tree (PKG-signed-packages-and-delivery); `None` is a single-file
-    /// package, or a kind that leaves the question to the block.
-    pub program_path: Option<&'static str>,
-    /// Where a single-file package's archive holds the program, as trailing path components
-    /// (`usr/bin/agent`), for an archive that carries more than one file of the program's name.
-    /// `None` finds the member by its file name alone (PKG-signed-packages-and-delivery §55).
-    pub member: Option<&'static str>,
-    /// The absolute links a tree package of this kind keeps as links, each by its exact path in
-    /// the tree and its exact target: the only links the tree's install creates, and the only
-    /// links leading out that `opamp-fleetctl` packs
-    /// (PKG-signed-packages-and-delivery §57). Empty for nearly every kind.
-    pub tree_links: &'static [fleet_util::tree::KeptLink],
-    /// The Agent *type* this kind presents (CLT-what-an-agent-reports). `None` falls back to the program's file
-    /// name, which is what the block already said.
-    pub service_name: Option<&'static str>,
-    /// What this kind corrects about the fleet's timing policy, and whether its block may state
-    /// any of it at all (CLT-wrappers-act-through-the-core). `None` — an unwrapped kind — leaves the three keys in the
-    /// block, because no kind exists there to hold a value; `Some` takes them out of the block and
-    /// states the kind's own corrections, each `None` meaning "the fleet's number is right".
-    pub timing: Option<KindTiming>,
-    /// Whether a block of this kind may pin the Supervisor Endpoint's port. The Endpoint is bound
-    /// for every Supervisor (CLT-modes-and-gateway); pinning it only means something where a Managed Process
-    /// connects to it, which in practice is a Collector carrying the `opampextension`.
-    pub endpoint_port: bool,
-}
-
-/// What a wrapped kind says about timing, over the fleet's own policy (CLT-wrappers-act-through-the-core).
-///
-/// Every field is an *agent's* property rather than a host's: how long it needs to shut down, how
-/// long a restart of it has to hold before the fleet may believe it, how long its superseded
-/// version is worth keeping. A kind that has nothing to correct states three `None`s and still
-/// takes the keys out of its block — the value is the fleet's, and there is no host-level answer
-/// to a question about an agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct KindTiming {
-    /// Overrides `[supervisors] stop_timeout_secs`.
-    pub stop_timeout: Option<Duration>,
-    /// Overrides `[supervisors] apply_grace_secs`.
-    pub apply_grace: Option<Duration>,
-    /// Overrides `[updates] retain_previous_secs` (PKG-signed-packages-and-delivery).
-    pub retain_previous: Option<Duration>,
-}
-
-impl KindDefaults {
-    /// A kind that knows nothing about its agent: the block says everything, as it always has.
-    #[must_use]
-    pub const fn none() -> Self {
-        KindDefaults {
-            program: None,
-            program_path: None,
-            member: None,
-            tree_links: &[],
-            service_name: None,
-            timing: None,
-            endpoint_port: false,
-        }
-    }
-}
-
 /// What [`PluginRegistry::purge`] answers, once for each Supervisor it was asked about.
 pub type Purged<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Result<(), String>>> + Send + 'a>>;
@@ -503,34 +429,6 @@ pub trait PluginRegistry: Send + Sync {
     fn purge<'a>(&'a self, removed: &'a [(String, std::path::PathBuf)]) -> Purged<'a> {
         Box::pin(std::future::ready(removed.iter().map(|_| Ok(())).collect()))
     }
-}
-
-/// The strict second-stage parse of a block's plugin settings, shared by every plugin's
-/// instance and its [`check`](Plugin::check) so the two cannot disagree (CLT-wrappers-act-through-the-core).
-///
-/// A key the kind has `retired` is refused by name first, with what answers it now — a block
-/// carrying one was written against a Client that needed it, and the operator deleting the line
-/// deserves to be told where the value went rather than meet serde's "unknown field".
-///
-/// # Errors
-/// Returns an error naming the block when a retired key is present or the settings do not parse.
-pub fn parse_settings<T: serde::de::DeserializeOwned>(
-    name: &str,
-    kind: &str,
-    retired: &[(&str, &str)],
-    settings: toml::Table,
-) -> Result<T, String> {
-    for (key, answer) in retired {
-        if settings.contains_key(*key) {
-            return Err(format!(
-                "supervisor {name:?}: `{key}` is no longer a supervisor key for type {kind:?} \
-                 — {answer}; remove the line"
-            ));
-        }
-    }
-    settings
-        .try_into()
-        .map_err(|e| format!("supervisor {name:?}: {e}"))
 }
 
 #[cfg(test)]

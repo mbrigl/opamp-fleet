@@ -708,6 +708,9 @@ pub const STAGED: &str = "${staged}";
 /// does not know why — so a kind that does may add one on its way to the core (CLT-wrappers-act-through-the-core).
 pub const AWAITING_CONFIGURATION: &str = "awaiting configuration";
 
+/// A reading of a version out of what a program printed, shared by every probe of one Supervisor.
+pub type ReadsVersion = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// How to ask a Managed Process for its own version — the program to run and the arguments that
 /// make it print one. `None` on a Runner whose plugin has no such convention.
 #[derive(Clone)]
@@ -722,7 +725,7 @@ pub struct VersionProbe {
     /// Semantic Versioning read. A program whose version banner is not SemVer, such as
     /// `r2.14.6-1`, would report none at all, so a kind that knows its program's convention says
     /// so here (CLT-wrappers-act-through-the-core).
-    pub parse: Option<fn(&str) -> Option<String>>,
+    pub parse: Option<ReadsVersion>,
     /// Environment for the probe, empty by default. A kind whose start hands its program an
     /// environment it needs to run at all — a tree's own library path — hands the probe the same,
     /// or the probe asks a program that cannot start
@@ -1862,7 +1865,11 @@ pub async fn probe_version(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    match parse.unwrap_or(find_semver)(&text) {
+    let version = match &parse {
+        Some(parse) => parse(&text),
+        None => find_semver(&text),
+    };
+    match version {
         Some(version) => {
             info!(program = %program.display(), version = %version, "version probed");
             events

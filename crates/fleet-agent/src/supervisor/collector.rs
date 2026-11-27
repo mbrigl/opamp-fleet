@@ -17,9 +17,9 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::supervisor::port::{
-    Entry, Instance, Manifest, Plugin, Process, Root, RootPath, Spec, Value,
+    parse_settings, Entry, Instance, KindDefaults, Manifest, Plugin, Probe, Process, Root,
+    RootPath, Spec, Value,
 };
-use crate::supervisor::ports::{parse_settings, KindDefaults};
 
 /// The block's plugin-specific keys, parsed strictly — a typo fails startup, per
 /// DEV-six-crates-tokio-axum.
@@ -46,17 +46,17 @@ pub struct Collector;
 
 impl Plugin for Collector {
     fn manifest(&self) -> Manifest {
+        // Nothing else: a Collector's distribution is a decision the block states. The one
+        // exception: something *does* connect to a Collector's Endpoint, the `opampextension`, so
+        // pinning its port is a decision that has a place. One process with no worker of its
+        // own, applied by restart, writing nowhere the core prepares
+        // (CLT-wrappers-act-through-the-core §6, §7 and §32).
         Manifest {
-            kind: "collector",
-            program_key: "binary",
-            // Nothing else: a Collector's distribution is a decision the block states, and a
-            // Foreign Agent is by definition one nobody has written a wrapper for. The one
-            // exception: something *does* connect to a Collector's Endpoint, the
-            // `opampextension`, so pinning its port is a decision that has a place.
             defaults: KindDefaults {
                 endpoint_port: true,
                 ..KindDefaults::none()
             },
+            ..Manifest::of("collector", "binary")
         }
     }
 
@@ -80,11 +80,11 @@ impl Instance for CollectorInstance {
     /// which never self-reports, shows its own version rather than none. The same `--version` is
     /// asked of a staged program before the running one is stopped
     /// (CLT-wrappers-act-through-the-core §33): a build the host cannot run is refused before
-    /// anything stops. A configuration is applied by restart, as the reference supervisor does.
+    /// anything stops.
     fn process(&self) -> Process {
         Process {
-            version_args: Some(vec!["--version".to_string()]),
-            reload_signal: None,
+            probe: Some(version_probe()),
+            read_version: None,
         }
     }
 
@@ -116,10 +116,15 @@ impl Instance for CollectorInstance {
                 .map(|(k, v)| (k.clone(), Value::Template(v.clone())))
                 .collect(),
             working_dir: None,
-            // One process, no worker of its own: signalling a group would gain nothing
-            // (CLT-wrappers-act-through-the-core §32).
-            own_process_group: false,
         })
+    }
+}
+
+/// `--version`, in the directory the probe's caller runs in, with no environment of its own.
+fn version_probe() -> Probe {
+    Probe {
+        args: vec![Value::Text("--version".to_string())],
+        ..Probe::default()
     }
 }
 
@@ -237,7 +242,6 @@ mod tests {
                     Value::Template("${config_dir}/o".to_string()),
                 )],
                 working_dir: None,
-                own_process_group: false,
             });
             let mut expected = Vec::new();
             if let Some(spec) = &spec {
@@ -275,12 +279,18 @@ mod tests {
         let instance = Collector
             .instantiate("otel", toml::Table::new())
             .expect("instance");
+        let process = instance.process();
         assert_eq!(
-            instance.process(),
-            Process {
-                version_args: Some(vec!["--version".to_string()]),
-                reload_signal: None,
-            }
+            process.probe,
+            Some(Probe {
+                args: vec![Value::Text("--version".to_string())],
+                env: Vec::new(),
+                working_dir: None,
+            })
+        );
+        assert!(
+            process.read_version.is_none(),
+            "read as Semantic Versioning"
         );
     }
 }
