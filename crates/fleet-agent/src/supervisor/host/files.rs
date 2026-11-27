@@ -85,8 +85,11 @@ impl Roots {
             }))
     }
 
-    /// The placeholders naming the Supervisor's own directories, expanded in an operator's text
-    /// (CLT-wrappers-act-through-the-core §31); anything else in it stays as written.
+    /// The placeholders naming the Supervisor's own directories, `${supervisor_dir}` and
+    /// `${config_dir}`, expanded in an operator's text (CLT-wrappers-act-through-the-core §31), so
+    /// an argument that names them follows the Supervisor when its directory moves. Anything else
+    /// stays as written, an unknown `${…}` too: a Foreign Agent's own configuration language may
+    /// use the same syntax, and refusing it to catch a typo would break a working deployment.
     pub(super) fn expand(&self, text: &str) -> String {
         text.replace("${supervisor_dir}", &self.supervisor_dir.to_string_lossy())
             .replace("${config_dir}", &self.config.to_string_lossy())
@@ -344,6 +347,91 @@ mod tests {
             supervisor_dir,
             group: None,
         }
+    }
+
+    /// A Supervisor's roots under `place`, absolute on this platform: on Windows a drive is
+    /// named, so nothing below spells a path with POSIX separators, as an expansion is a path of
+    /// the platform's own.
+    fn placed(place: &str) -> Roots {
+        #[cfg(windows)]
+        let supervisor_dir = PathBuf::from(format!("C:\\{place}\\supervisors\\fluent-bit"));
+        #[cfg(not(windows))]
+        let supervisor_dir = PathBuf::from(format!("/{place}/supervisors/fluent-bit"));
+        Roots {
+            config: supervisor_dir.join("config"),
+            program: supervisor_dir.join("program"),
+            data: supervisor_dir.join(DATA_DIR),
+            state: supervisor_dir.join(STATE_DIR),
+            supervisor_dir,
+            group: None,
+        }
+    }
+
+    /// The argument that points a Foreign Agent at its configuration is derived from the same
+    /// value the Client writes it to, so relocating `supervisor_dir` cannot leave the process
+    /// reading a file nobody writes to (CLT-wrappers-act-through-the-core §31).
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[test]
+    fn the_placeholders_name_this_supervisors_own_directories() {
+        let roots = placed("opt");
+        // The placeholder becomes the directory the Client itself writes to; what the operator
+        // wrote after it is a string and survives verbatim, separator included.
+        assert_eq!(
+            roots.expand("${config_dir}/fluent-bit-conf"),
+            format!("{}/fluent-bit-conf", roots.config.display())
+        );
+        let supervisor = roots.expand("${supervisor_dir}");
+        let config = roots.expand("${config_dir}");
+        assert_ne!(supervisor, config);
+        assert!(
+            config.starts_with(&supervisor),
+            "{config} must sit inside {supervisor}"
+        );
+        // Relocating the root moves the expansion with it.
+        let moved = placed("var");
+        assert_ne!(
+            moved.expand("${config_dir}/x"),
+            roots.expand("${config_dir}/x")
+        );
+        assert!(
+            moved
+                .expand("${config_dir}/x")
+                .starts_with(&moved.supervisor_dir.display().to_string()),
+            "the expansion follows the relocated root"
+        );
+        // A template value of a specification is expanded the same way.
+        assert_eq!(
+            roots.value(&Value::Template("${config_dir}".to_string())),
+            Ok(config)
+        );
+    }
+
+    /// Anything else is left exactly as written: a Foreign Agent's own configuration language may
+    /// use `${…}` too, and a Client that ate or refused those would break a working deployment to
+    /// catch a typo (CLT-wrappers-act-through-the-core §31).
+    /// Verifies: CLT-wrappers-act-through-the-core
+    #[test]
+    fn an_unknown_placeholder_is_passed_through_untouched() {
+        let roots = placed("opt");
+        for verbatim in [
+            "${FLB_LOG_LEVEL}",
+            "${config-dir}", // a typo: passed on, not refused
+            "-c",
+            "",
+            "$config_dir",
+            "${}",
+        ] {
+            assert_eq!(
+                roots.expand(verbatim),
+                verbatim,
+                "must pass through untouched"
+            );
+        }
+        // A known placeholder still expands when it sits beside an unknown one.
+        assert_eq!(
+            roots.expand("${config_dir}/${FLB_ENV}.conf"),
+            format!("{}/${{FLB_ENV}}.conf", roots.config.display())
+        );
     }
 
     /// A file a Plugin names resolves inside its root, and a path that would leave the root fails.
