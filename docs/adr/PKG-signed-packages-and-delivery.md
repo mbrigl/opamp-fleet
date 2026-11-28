@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-15
 - **Deciders:** Markus Brigl
-- **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/fs/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, signature, Deployment-package and download routes of `crates/fleet-server/src/api.rs` with the handler `download_package`, the package limits and the `[packages]` section of `server.toml` in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, the `download.refused` audit entry, the platform table in `crates/fleet-core/src/platform.rs` and `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI in `crates/fleet-server/static/index.html`, the signing file `opamp-fleet-signing-v1`, the `package sign` command of `opamp-fleetctl` in `crates/fleet-tools/src/package.rs` and `crates/fleet-tools/src/signing.rs`, the Gateway's package cache in `crates/fleet-agent/src/gateway/` and its directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs`, `crates/fleet-util/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the `member` a kind states in `KindDefaults` in `crates/fleet-agent/src/supervisor/ports.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, the kept-link rule in `crates/fleet-util/src/tree.rs`, and every document that tells an operator how to add, sign or deliver an artifact
+- **Applies to:** `crates/fleet-server/src/packages.rs`, `crates/fleet-server/src/fs/packages.rs`, `crates/fleet-server/src/deployments.rs`, the package, signature, Deployment-package routes of `crates/fleet-server/src/api.rs`, the download route of `crates/fleet-server/src/transport.rs` with the handler `download_package`, its guard and artifact in `crates/fleet-server/src/agent_cases.rs`, the package limits and the `[packages]` section of `server.toml` in `crates/fleet-server/src/config.rs`, the package assignment in `crates/fleet-server/src/fleet.rs` and `crates/fleet-server/src/agent_store.rs`, the `download.refused` audit entry, the platform table in `crates/fleet-core/src/platform.rs` and `crates/opamp/src/attributes.rs`, the `host.arch` the Client reports, the Packages and Deployments tabs of the bundled UI in `crates/fleet-server/static/index.html`, the signing file `opamp-fleet-signing-v1`, the `package sign` command of `opamp-fleetctl` in `crates/fleet-tools/src/package.rs` and `crates/fleet-tools/src/signing.rs`, the Gateway's package cache in `crates/fleet-agent/src/gateway/` and its directory under the Client's `state_dir`, `crates/fleet-agent/src/packages.rs`, `crates/fleet-util/src/archive.rs`, `crates/fleet-agent/src/install.rs`, `crates/fleet-agent/src/supervisor/process.rs`, the `member` a kind states in `KindDefaults` in `crates/fleet-agent/src/supervisor/ports.rs`, the package handling in `crates/fleet-agent/src/supervisor/agent.rs`, the `[packages]` and `[updates]` sections, the `[gateway] package_cache_bytes` key and the `program_path` and `retain_previous_secs` keys of `supervisor.toml` in `crates/fleet-agent/src/config.rs`, `crates/fleet-core/src/package.rs`, the kept-link rule in `crates/fleet-util/src/tree.rs`, and every document that tells an operator how to add, sign or deliver an artifact
 
 ## Context
 
@@ -31,7 +31,7 @@ version is written and the floors below which nothing is taken are
 The store, and which held artifact can be meant for an Agent:
 
 - **A release is one version across several artifacts.** The release pipeline
-  ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)) publishes
+  ([OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md)) publishes
   five platform builds of one version, and upstream projects release more. The store needs an object
   that *is* that release, or "which version is this at" has one answer per platform and a
   half-finished upload looks like a rollout in progress.
@@ -127,9 +127,9 @@ On the Agent:
   bytes and an executed program is the content hash and an Ed25519 signature made with a key the
   operator holds (the Baseline's *Code Signing* leaves the method to the Agent). The `ring`
   provider the build carries
-  ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)) verifies Ed25519.
-  The transport still decides what a download exposes: the Client's certificate is its fleet
-  identity, and an offered header is a credential.
+  ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)) verifies
+  Ed25519. The transport still decides what a download exposes: the Client's certificate is its
+  fleet identity, and an offered header is a credential.
 - **Many agents are more than one file.** Fluent Bit ships an executable plus the shared objects
   and plugins it loads. A package that unpacks into a tree gives the archive a say in where bytes
   land, a security boundary this decision creates. The protocol carries one file per package and
@@ -208,7 +208,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
    - the Client reports `host.arch` as `amd64`/`arm64`/`arm32` and `os.type` as `darwin`, mapping
      Rust's constants, so a Supervisor and a Collector's `opampextension` report the same string;
    - the release artifacts carry the same two tokens in their file names (the file-name format is
-     [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)'s), so the
+     [OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md)'s), so the
      upload of a release is a loop over the Client's archives with `os` and `arch` read straight out
      of each name.
 
@@ -432,7 +432,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 33. **Uploaded artifacts are served on the Agent plane, and offered as a path.** The download
     route is the one `/api/v1` route on the Agent-plane listener
-    ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), not on the
+    ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)), not on the
     Operator plane and not in the OpenAPI document. It streams the file and never holds it in
     memory. The offered `download_url` is always a path, which the Client resolves against its own
     OpAMP endpoint. There is no `advertised_url`: a `server.toml` that names it fails startup,
@@ -504,8 +504,8 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 
 39. **Each download request is counted against the requesting host's rate.** It costs one token
     from that host's bucket
-    ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)). A download names
-    no `instance_uid`, so for a host marked as a Gateway the token comes from the Gateway's
+    ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)). A download
+    names no `instance_uid`, so for a host marked as a Gateway the token comes from the Gateway's
     aggregate bucket ([CLT-modes-and-gateway](CLT-modes-and-gateway.md)). That bucket bounds how
     often a Gateway's request can scan the fleet's records under the fleet lock.
 
@@ -596,15 +596,15 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
 47. **A Client waits as its own Server origin asks before it reports a download failed.** A `429`
     or `503` with a `Retry-After` in seconds, answered by the Client's own Server origin (the
     Gateway behind one, otherwise the Server, whose rate limit answers `429` with
-    `Retry-After: 30` ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md))
-    and whose admission throttle answers `429` with the seconds of back-off left
-    ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md))),
-    is waited out and the
-    download sent again. Each wait is the `Retry-After`, at least 1 second and at most 60 seconds.
-    The asking stops 30 minutes after the first request of the download, counting the requests as
-    well as the waits: a wait that would end past that point is not begun. Past it, or for a
-    `429`/`503` without a `Retry-After` in seconds (an HTTP date, none, or an unreadable one), or
-    from any other host, a redirect target off the Server's origin included, the download fails
+    `Retry-After: 30`
+    ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)) and whose
+    admission throttle answers `429` with the seconds of back-off left
+    ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md))), is waited out
+    and the download sent again. Each wait is the `Retry-After`, at least 1 second and at most 60
+    seconds. The asking stops 30 minutes after the first request of the download, counting the
+    requests as well as the waits: a wait that would end past that point is not begun. Past it, or
+    for a `429`/`503` without a `Retry-After` in seconds (an HTTP date, none, or an unreadable one),
+    or from any other host, a redirect target off the Server's origin included, the download fails
     and is reported `InstallFailed` (clause 50). While it waits the status stays `Downloading`.
     The bound is on asking, not on a transfer that has begun, which keeps no total timeout
     (clause 51). A Client that shuts down stops waiting and reports nothing for that download.
@@ -672,7 +672,7 @@ swapped in by rename, health-gated and rolled back only to a real predecessor.
       logged source URL drops its query, fragment and credentials.
     - The Client presents its client certificate only to the Server's own origin, whose download
       route is reached through the Agent plane's TLS handshake and stays outside the credential
-      check ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md),
+      check ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md),
       [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)).
       An identity belongs to
       the Server, not to whoever hosts an artifact.
@@ -1205,9 +1205,10 @@ documented; a reproducible tree mode for `opamp-fleetctl package pack`.
   in `crates/fleet-server/src/packages.rs`; `packages_offer` in
   `crates/fleet-server/src/fleet/delivery.rs` and `AgentRecord` in
   `crates/fleet-server/src/fleet.rs`; `check_report` and `Host` in
-  `crates/fleet-server/src/revocation.rs`; `download_package` in `crates/fleet-server/src/api.rs`;
-  `admit_download` and `Proofs` in `crates/fleet-server/src/transport.rs`; `resolve_url` and
-  `send_download` in `crates/fleet-agent/src/packages.rs`; the Gateway's router in
+  `crates/fleet-server/src/revocation.rs`; `download_package` in
+  `crates/fleet-server/src/transport.rs`; `admit_download`, `artifact` and `Proofs` in
+  `crates/fleet-server/src/agent_cases.rs`; `resolve_url` and `send_download` in
+  `crates/fleet-agent/src/packages.rs`; the Gateway's router in
   `crates/fleet-agent/src/gateway/mod.rs`.
 - The code read for the Gateway clauses: `Forwarding`, `run_on_timed` and `server_tls` in
   `crates/fleet-agent/src/gateway/mod.rs`; `Registry::deliver` in

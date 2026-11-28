@@ -42,7 +42,7 @@ The oracle meets three further facts:
 - **Plaintext runs alone check the endpoint as a test builds it, not as it ships.** They run on
   the loopback with an open admission, as the rest of the suite does. The shipped Server refuses
   plaintext beyond the loopback. It admits by a client certificate in a TLS 1.3 handshake alone
-  ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md),
+  ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md),
   [SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)), and the Client
   presents one on both transports. Every installation depends on whether `opamp-go` can speak to
   that endpoint, and ours to an `opamp-go` Server that requires the same.

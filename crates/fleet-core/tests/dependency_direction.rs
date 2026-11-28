@@ -1132,7 +1132,7 @@ fn overview_gaps(
 
 /// Every module with a role is named in the architecture overview, or exempt from it with a reason
 /// (NUC-documents-are-fixed §4).
-/// Verifies: NUC-documents-are-fixed
+/// Verifies: NUC-documents-are-fixed, DEV-ports-and-adapters
 #[test]
 fn the_overview_names_every_module_with_a_role() {
     let overview = fs::read_to_string(crates_dir().join("../docs/ARCHITECTURE.md")).unwrap();

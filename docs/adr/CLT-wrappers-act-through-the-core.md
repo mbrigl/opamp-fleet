@@ -4,24 +4,22 @@
 - **Date:** 2026-11-26
 - **Deciders:** Markus Brigl
 - **Applies to:** crates/fleet-agent/src/supervisor/ (core, ports, the Plugin port with its inputs and host functions, the core that carries out a host function, process runner with its preflight, version probe and process-group stop, endpoint, placeholders, start, every kind and its manifest), the Client Agent in `build_engine`, crates/fleet-agent/src/config.rs (supervisor_dir, program resolution), the `[[supervisor]]` blocks of supervisor.toml apart from what CLT-server-manages-the-supervisor-set governs, the `[features]` table of crates/fleet-agent/Cargo.toml, the artifact documents under docs/artifacts/ each wrapped kind adds, the Plugin role in crates/fleet-core/tests/dependency_direction.rs
-- **Supersedes:** [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md)
 
 ## Context
 
-This ADR supersedes [CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md). An ADR is
-superseded whole. The revision below touches the port, the kinds and their lifecycle; it does not
-touch the Server-managed set, its two switches or the repeated offer. Those clauses move unchanged
-in meaning into [CLT-server-manages-the-supervisor-set](CLT-server-manages-the-supervisor-set.md),
-which restates them, and this ADR restates the rest, revising what the port decides. Every clause
-of the superseded ADR lives on in one of the two. The map, old clause to new, is in the hand-off of
-this change. A status line names one successor, so this ADR alone carries the `Supersedes` field.
+A Plugin implements one kind of Managed Process behind the core's ports (G-8). How it reaches the
+host decides whether the core's checks hold for every kind: Q-5 keeps a Plugin, as it keeps a
+remote configuration, inside its Supervisor, reaching files, processes, the host and the network
+only through the core. The Server-managed set, its two switches and the repeated offer of a
+configuration are decided in
+[CLT-server-manages-the-supervisor-set](CLT-server-manages-the-supervisor-set.md).
 
-**Why the port is revised.** The superseded ADR made a Plugin a factory that starts a tokio task
-of its own (its clause 1). The task receives `SupervisorContext`: absolute paths, the Endpoint
-token, the archive key, the process account's group, the event channel and the shutdown signal.
-Each kind builds its own `Runner` from them. Nothing keeps a kind from reaching past the core:
+**Why the port is what it is.** A Plugin was once a factory that started a tokio task of its own.
+The task received absolute paths, the Endpoint token, the archive key, the process account's
+group, the event channel and the shutdown signal, and each kind built its own `Runner` from them.
+Nothing kept a kind from reaching past the core:
 
-- `collector` lists its configuration directory itself (`crate::storage::config_entries`).
+- `collector` listed its configuration directory itself (`crate::storage::config_entries`).
 - The `icinga2` kind on its feature branch reads, writes, copies, renames and removes files with
   `std::fs` in about 25 places. It starts its own subcommands with `tokio::process::Command`, asks
   `libc::getaddrinfo` for the host's name and runs `id` for its own account. It intercepts the
@@ -150,7 +148,7 @@ core grants.
      process, resolve a host name or open a connection.
    - The Plugin must not spawn a task and must not read a clock. Time reaches it as an input.
    - The Plugin acts only through the host functions of clause 4. Each answers with its outcome or
-     with the reason it was refused.
+     with a failure: its kind, which is not found, refused, unsupported or other, and the reason.
    - The core may cancel a running handler at shutdown and at an uninstall.
    - A Plugin answers, without side effects, for its manifest (clause 6), the `check` of a block's
      settings and of a delivered block, and the instance it makes for one Supervisor. The instance
@@ -199,7 +197,9 @@ core grants.
      - to list or create a directory within such a root;
      - to set or cancel a timer, which arrives as an input;
      - to report health;
-     - to answer the apply of a configuration or of a package, and to answer an uninstall.
+     - to answer the apply of a configuration or of a package.
+   - An uninstall is answered by the core, with the outcome the Plugin's handler returns
+     (clause 9).
    - Host facts reach a Plugin through a host function the core answers.
      Examples are the fully qualified host name and the account a program runs under.
    - The core must refuse a call outside the root it names. It fails only that call and returns
@@ -215,7 +215,8 @@ core grants.
    - The core translates each command into an input for the Plugin, and each host function into
      the work of the `Runner`.
    - The `Runner` implements spawn and watchdog, the bounded stop, restart as the configuration
-     apply, swap-and-gate as the package install, and the stop as uninstall.
+     apply and swap-and-gate as the package install. Before an uninstall the core stops the
+     `Runner` with the bounded stop, as at a shutdown (clause 9).
    - The events the core reports for a Supervisor carry description, pid, health, effective
      configuration and available components. They carry the outcomes of an apply, an install and
      an uninstall too.
@@ -243,10 +244,12 @@ core grants.
    - **Working directory:** a Managed Process starts in the directory its program lives in,
      unless the process specification names another. That is `program/` for a single file and the
      tree root for a tree. No block sets it. Every path the core hands a process is absolute.
-   - **Directories the agent writes into:** the core creates them, open to their owning account
-     alone, before every spawn. A directory removed under a running fleet so returns on the next
-     restart. They lie outside `program/`, which a package swap replaces whole. An installation
-     that fails for want of a directory is this Client's failure, not the operator's.
+   - **Directories the agent writes into:** the core creates them under the `data` root before
+     every spawn. Each is shared with the process account's group where one is registered, as the
+     `data` root is (clause 3), and the Client's alone where none is. A directory removed under a
+     running fleet so returns on the next restart. They lie outside `program/`, which a package swap
+     replaces whole. An installation that fails for want of a directory is this Client's failure,
+     not the operator's.
 
 7. **Reload is an apply strategy, not a command.**
    - `ApplyConfig` is the only configuration operation.
@@ -274,7 +277,8 @@ core grants.
    - A Supervisor removed from the set receives `Uninstall` before its directory is purged
      ([PKG-versions-high-water-mark-floor](PKG-versions-high-water-mark-floor.md)).
    - The core stops the Managed Process. The Plugin then receives the uninstall as an input. It
-     may call what clause 4 offers within its roots, and answers the uninstall.
+     may call what clause 4 offers within its roots. The outcome its handler returns is the answer
+     to the uninstall, which the core reports.
    - The generic uninstall is exactly the bounded graceful stop.
    - The Client logs an `Err` answer with what was left undone. It does not hold up the removal.
    - A Supervisor that is only changed is stopped, never uninstalled.
@@ -586,6 +590,13 @@ None.
 
 ## Alternatives considered
 
+- **A Plugin is a factory that starts a task of its own.** The core handed each kind a context
+  of host paths, the Endpoint token, the archive key, the process account's group, an event
+  channel and a shutdown signal, and the kind built its own `Runner`. The trait needed no boxed
+  future, and a kind did what its agent needed in the way it chose. Nothing kept a kind from
+  reaching past the core, so no check of the core held for it, a kind that started programs itself
+  could not keep a registered process account, and the port carried host resources a WebAssembly
+  Plugin cannot take. Rejected for the event handler that acts through the host (clause 1).
 - **A synchronous state machine without I/O (sans-I/O).** The Plugin would answer each input with
   a list of requests, and the core would feed back each outcome as a new input, as `quinn-proto`
   does beneath `quinn`. Its effects are data, its tests are tables, and its guest needs no async
@@ -595,7 +606,7 @@ None.
   only what the host offers. A kind with several steps in a row, as `icinga2` enrols, reads as
   code with a host it awaits. As a state machine every await becomes a state, and every future
   Plugin author pays for that. A fake host in memory tests the handler without stub programs.
-- **A `Supervisor` trait with async lifecycle methods, as the superseded ADR rejected it.** It
+- **A `Supervisor` trait with async lifecycle methods, as the factory design rejected it.** It
   rejected async trait objects because they need `async-trait` or hand-rolled boxing, and because
   a core that awaits adapter methods couples itself to adapter timing. This ADR accepts the boxing.
   It bounds the timing by one handler call at a time per Plugin instance, by time arriving only as
@@ -813,28 +824,21 @@ None.
 - Negative / trade-offs: the port is a public interface in the making. Each new capability of a
   Plugin is a host function and costs an ADR that supersedes this one.
 - Negative / trade-offs: the handler is a boxed future, so the trait needs the boxing the
-  superseded ADR avoided. Timing between handler calls is the core's to keep honest.
+  factory avoided. Timing between handler calls is the core's to keep honest.
 - Negative / trade-offs: reading a large file through the port copies its bytes into the Plugin.
 - Negative / trade-offs: the `icinga2` kind is rewritten against the port. `glpi` and `telegraf`
   change their wiring only. All three branches must follow this ADR before they land.
-- Negative / trade-offs: the `data` and `state` directories are new in each Supervisor's
-  directory. The tree in [CLT-accounts-service-runs-under §24](CLT-accounts-service-runs-under.md)
-  shows neither. [CLT-accounts-service-runs-under §21](CLT-accounts-service-runs-under.md) covers
-  `data` as a kind's data directory, and `state` only by its rule for what the table does not
-  name.
-- Negative / trade-offs: the Enforcement of
-  [DEV-ports-and-adapters](DEV-ports-and-adapters.md) names three roles, and the test now has a
-  fourth, `Plugin`.
+- Negative / trade-offs: each Supervisor's directory holds two more directories, `data` and
+  `state` ([CLT-accounts-service-runs-under §24](CLT-accounts-service-runs-under.md)), and the
+  module roles a fourth, `Plugin` ([DEV-ports-and-adapters](DEV-ports-and-adapters.md)).
 - Follow-ups (by topic): the ADR that loads a WebAssembly Plugin, with runtime, interface
   versioning and the trust in a component; the ADR that builds take-over; a host function for an
-  agent's API once a kind needs one; the `data` and `state` directories in the layout, and the
-  `Plugin` role in the Enforcement of the ports-and-adapters decision, at the next normalization;
-  extension-configuration injection; plain-HTTP polling on the Endpoint; connection pools and
-  their failure semantics; a verified-reload gate and making reload vs restart visible upstream;
-  the kinds in `AvailableComponents` once it leaves *Development*; the next wrapped agent (Fluent
-  Bit is the documented candidate); a machine-readable artifact manifest if wrapped agents
-  multiply; pruning stale `.rollback` files on a schedule; a supervise-only mode as its own
-  decision.
+  agent's API once a kind needs one; extension-configuration injection; plain-HTTP polling on the
+  Endpoint; connection pools and their failure semantics; a verified-reload gate and making reload
+  vs restart visible upstream; the kinds in `AvailableComponents` once it leaves *Development*; the
+  next wrapped agent (Fluent Bit is the documented candidate); a machine-readable artifact manifest
+  if wrapped agents multiply; pruning stale `.rollback` files on a schedule; a supervise-only mode
+  as its own decision.
 
 ## Enforcement
 
@@ -843,7 +847,11 @@ None.
   module, `serde`, `toml` and the parts of `std` that do no I/O. It fails on `std::fs`,
   `std::process`, `std::net`, `std::io`, a clock read, `tokio`, `libc`, `nix`, `crate::storage`
   and every other module of the crate, `supervisor::ports` among them (clauses 1 and 4).
-- The port's data, in the same file: `the_port_carries_no_host_resource`. It reads the port's
+  `a_module_that_implements_a_plugin_has_the_role_plugin` fails on a module that implements
+  `Plugin` without that role, and `the_plugin_implementation_is_found_by_any_path` shows it finds
+  the implementation however the trait is named.
+- The port's data, in `crates/fleet-agent/tests/plugin_port.rs`:
+  `the_port_carries_no_host_resource`. It reads the port's
   syntax, and the struct of another crate it embeds. It fails on a path, a handle, a channel, a
   span or a secret type (clause 2).
 - The handler and the host functions, in `crates/fleet-agent/src/supervisor/host.rs`:
@@ -852,14 +860,20 @@ None.
   `the_core_answers_an_apply_the_plugin_left`,
   `the_core_stops_the_process_on_an_uninstall_the_plugin_left`,
   `a_reported_health_reaches_the_agent`, `the_manifest_reaches_the_process_specification` and
-  `a_probe_asks_the_live_program_and_the_preflight_the_staged_one`; in
+  `a_probe_asks_the_live_program_and_the_preflight_the_staged_one`,
+  `a_function_the_host_does_not_carry_out_is_unsupported`; in
   `crates/fleet-agent/src/supervisor/host/files.rs`: `a_path_outside_its_root_fails_only_that_call`,
   `a_plugin_cannot_write_its_config_or_program` and
-  `state_is_the_clients_alone_and_data_is_shared` (clauses 1, 3, 4, 5, 6 and 34).
+  `state_is_the_clients_alone_and_data_is_shared`, `a_failure_carries_its_kind`; in
+  `crates/fleet-agent/src/supervisor/process.rs`:
+  `without_a_process_account_a_data_directory_is_the_clients_alone` (clauses 1, 3, 4, 5, 6
+  and 34).
 - A Plugin of the test tree, on the port alone, in
   `crates/fleet-agent/tests/wrapped_supervisors.rs`:
   `a_refused_call_fails_alone_and_the_plugin_keeps_running` and
-  `the_manifests_reload_signal_applies_a_configuration` (clauses 1, 4, 6 and 7).
+  `the_manifests_reload_signal_applies_a_configuration` and
+  `an_uninstall_reaches_the_plugin_after_the_stop_and_carries_its_answer` (clauses 1, 4, 6, 7
+  and 9).
 - Take-over and the network stay closed. The vocabulary of clause 4 has no function for either.
   `a_plugin_names_only_the_port` keeps a kind from reaching them itself (clauses 4 and 13).
 - **Not mechanically decidable:** that the port stays expressible in WIT (clauses 2 and 12). No WIT
@@ -907,7 +921,8 @@ None.
   `an_uninstall_stops_the_process_answers_and_exits`,
   `the_directories_an_agent_writes_into_are_made_before_it_runs`,
   `a_program_named_by_a_relative_path_still_starts_in_its_own_directory`; and
-  `retiring_uninstalls_the_removed_and_only_stops_the_changed` (`engine.rs`),
+  `retiring_uninstalls_the_removed_and_only_stops_the_changed` and
+  `an_uninstalls_answer_is_absorbed_before_the_adapter_counts_as_gone` (`engine.rs`),
   `a_collector_supervisor_passes_each_config_entry_as_a_config_flag`,
   `sigterm_stops_the_managed_process_and_the_client_cleanly`
   (`crates/fleet-agent/tests/supervisor.rs`).
@@ -944,6 +959,6 @@ None.
   ([CLT-accounts-service-runs-under §25](CLT-accounts-service-runs-under.md)).
 - Placeholders: `the_placeholders_name_this_supervisors_own_directories` and
   `an_unknown_placeholder_is_passed_through_untouched`
-  (`crates/fleet-agent/src/supervisor/ports.rs`),
+  (`crates/fleet-agent/src/supervisor/host/files.rs`),
   `a_command_supervisors_arguments_are_expanded_to_its_own_directories`
   (`crates/fleet-agent/tests/supervisor.rs`), `the_spec_carries_the_environment` (`collector.rs`).

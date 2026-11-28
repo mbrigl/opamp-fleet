@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-08
 - **Deciders:** Markus Brigl
-- **Applies to:** Admission on `/v1/opamp`, the package download route and `/v1/gateway/revocations` in `crates/fleet-server/src/transport.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential and guard in `crates/fleet-server/src/credentials.rs` and `api.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the WebSocket session loop and the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the `/api/v1/revocations` route, the reading of a CSR in `crates/fleet-server/src/ca.rs` and its handling in `crates/fleet-server/src/fleet/approval.rs`, the Client's identity, CSR and renewal in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity it presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, the Server's `hash-credential` and `pki status` commands in `crates/fleet-server/src/main.rs`, the `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` and every PKCS#11 adapter beside the local CA in `crates/fleet-server/src/pkcs11.rs` and `crates/fleet-core/src/pkcs11.rs`, the signing of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the `[pkcs11]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `pki init`, `pki token-init` and `pki bootstrap-ca` commands in `crates/fleet-tools/src/pki.rs`, the `cryptoki` dependency of the Server and of `crates/fleet-tools` in `Cargo.toml` and `deny.toml`, SoftHSM2 with its `softhsm2.conf` and token directory in the Dev Container and on the CI runner, `docs/ARCHITECTURE.md`, and every document that tells an operator where the CA keys live
+- **Applies to:** Admission on `/v1/opamp`, the package download route and `/v1/gateway/revocations` in `crates/fleet-server/src/transport.rs`, their guard and the list's composition in `crates/fleet-server/src/agent_cases.rs`, the list's path and body in `crates/fleet-core/src/revocation_list.rs`, `tls.rs` and `ca.rs`, the Operator plane's credential and guard in `crates/fleet-server/src/credentials.rs`, `crates/fleet-server/src/api.rs` and `crates/fleet-server/src/operator_cases.rs`, admission throttling in `crates/fleet-server/src/throttle.rs`, the WebSocket session loop and the close frame `crates/opamp/src/server.rs` sends, the serial numbers `crates/fleet-server/src/ca.rs` assigns, the revocation list in `crates/fleet-server/src/revocation.rs` and `crates/fleet-server/src/fs/revocation.rs`, the `/api/v1/revocations` route, the reading of a CSR in `crates/fleet-server/src/ca.rs` and its handling in `crates/fleet-server/src/fleet/approval.rs`, the Client's identity, CSR and renewal in `crates/fleet-agent/src/config.rs`, `tls.rs` and `csr.rs`, the identity it presents on a download in `crates/fleet-agent/src/packages.rs`, the `[tls]`, `[client_ca]`, `[enrolment]`, `[admission_throttle]` and `[rest.auth]` sections of `server.toml`, the `[tls]` section of `supervisor.toml`, an `[auth]` section in either file, the Server's `hash-credential` and `pki status` commands in `crates/fleet-server/src/main.rs`, the `CertificateSigner` port in `crates/fleet-server/src/fleet.rs` and every PKCS#11 adapter beside the local CA in `crates/fleet-server/src/pkcs11.rs` and `crates/fleet-core/src/pkcs11.rs`, the signing of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the `[pkcs11]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, the `pki init`, `pki token-init` and `pki bootstrap-ca` commands in `crates/fleet-tools/src/pki.rs`, the `cryptoki` dependency of the Server and of `crates/fleet-tools` in `Cargo.toml` and `deny.toml`, SoftHSM2 with its `softhsm2.conf` and token directory in the Dev Container and on the CI runner, `docs/ARCHITECTURE.md`, and every document that tells an operator where the CA keys live
 
 ## Context
 
@@ -12,8 +12,8 @@ in its handshake. It asks that the Server admit an Agent only over an unrevoked 
 fleet's client CA, and that a certificate speak only for the Agents of its own host. The
 [specification](../SPECIFICATION.md)'s Strategy *Security before convenience* and Q-1 *Secure by
 default* ask for a refusal that names the setting wherever a configuration would weaken this. TLS
-([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)) protects the channel
-and authenticates nobody.
+([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)) protects the
+channel and authenticates nobody.
 
 The Baseline treats authentication as transport-level: methods MAY be used and `401` MUST be
 returned on failure. Its CSR flow keeps the private key on the host: a regular TLS connection, a
@@ -124,10 +124,10 @@ signs two kinds of certificate: as the local client CA it signs every host certi
   a member certificate for any host until the CA is replaced. Nothing in the fleet would tell that
   certificate from a real one.
 - Several Server instances on one PostgreSQL database
-  ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)) each need the CA
+  ([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)) each need the CA
   keys. Copying a key file to every instance multiplies the places it can be read from, so an
   instance whose CA key is a file runs alone
-  ([SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §2](SRV-instance-opens-chosen-planes.md)).
 - A key on a token is made there by `opamp-fleetctl pki token-init` on the Server host and never
   leaves it ([OPS-operator-program-fleetctl §8](OPS-operator-program-fleetctl.md),
   [OPS-operator-program-fleetctl §12](OPS-operator-program-fleetctl.md)).
@@ -288,7 +288,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`. A host name is never
       `/api/v1/…`, `/api/v1/openapi.json`, `/api/v1/docs` and the UI at `/`. The browser prompts
       natively and re-sends the header, so the UI needs no login page, session or cookie.
     - On a LOOPBACK `listen` the section stays optional, and the plane's loopback default
-      ([SEC-tls13-two-planes-bounded-input §8](SEC-tls13-two-planes-bounded-input.md)) is what
+      ([SEC-tls13-bounded-input-chosen-planes §8](SEC-tls13-bounded-input-chosen-planes.md)) is what
       protects it.
     - The section leaves the Agent plane, the package download included, untouched.
 14. **A re-sent credential is not a cross-site licence.** The body-less `POST` acts on the Operator
@@ -415,9 +415,9 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`. A host name is never
     - On the filesystem store the one Server holds every session. A revocation reaches them in
       process as it is committed, through the revocation list's subscription.
     - On PostgreSQL a revocation committed on any instance reaches every instance by its
-      notification ([SRV-instances-share-one-postgresql §9](SRV-instances-share-one-postgresql.md)).
+      notification ([SRV-instance-opens-chosen-planes §9](SRV-instance-opens-chosen-planes.md)).
       After a missed notification it arrives by the re-read of
-      [SRV-instances-share-one-postgresql §10](SRV-instances-share-one-postgresql.md).
+      [SRV-instance-opens-chosen-planes §10](SRV-instance-opens-chosen-planes.md).
     - Either way the instance checks it against every open session there at once. A session checks
       itself once more as it starts, so a revocation landing during its admission is not missed.
     - The instance closes a session the revocation concerns with WebSocket close code `1008`
@@ -491,11 +491,11 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`. A host name is never
     keeps its token in files on one host, so it serves the Server instances of that host alone
     (clause 41).
     - The module the `[pkcs11]` section loads is a library the operator has the Server load.
-      [SEC-tls13-two-planes-bounded-input §21](SEC-tls13-two-planes-bounded-input.md) leaves such a
-      library to the ADR that loads it. This clause decides that the module may open a connection
-      of its own to a network HSM. It goes to the address the vendor's client configuration names,
-      over the module's own TLS stack. The Server neither builds that connection nor sees it. That
-      connection and the device's protection of it are the operator's.
+      [SEC-tls13-bounded-input-chosen-planes §21](SEC-tls13-bounded-input-chosen-planes.md) leaves
+      such a library to the ADR that loads it. This clause decides that the module may open a
+      connection of its own to a network HSM. It goes to the address the vendor's client
+      configuration names, over the module's own TLS stack. The Server neither builds that
+      connection nor sees it. That connection and the device's protection of it are the operator's.
     - When the module's `C_GetInfo` names `SoftHSM` as its manufacturer, the Server still starts.
       At every startup it then logs a warning that the keys have no hardware protection, and
       writes the audit entry `pkcs11.software_token`.
@@ -516,7 +516,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`. A host name is never
     - With a hardware or cloud HSM neither file exists; the vendor's client configures how the
       module reaches the device.
     - The Server's image carries no PKCS#11 module
-      ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)). An
+      ([OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md)). An
       operator who runs the image with a token mounts the module into the container, with what it
       loads, and names its path in `[pkcs11] module`. With SoftHSM2 the operator also mounts its
       configuration, named by `SOFTHSM2_CONF`, and its token directory. A module that does not
@@ -535,7 +535,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`. A host name is never
       [OPS-operator-program-fleetctl §12](OPS-operator-program-fleetctl.md) makes it.
 41. **Instances that share the keys reach the same ones.** A key on the token is no file, so an
     instance whose CA keys are named by their labels need not be alone
-    ([SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)). Instances
+    ([SRV-instance-opens-chosen-planes §2](SRV-instance-opens-chosen-planes.md)). Instances
     that sign with shared keys name the same labels on a token every one of them reaches. That
     token is a network HSM all of them reach, or one that the HSM's own replication keeps
     identical on each host.
@@ -718,7 +718,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`. A host name is never
 - **A revocation that reaches the sessions of one Server process alone, and a revocation list
   whose `ETag` is that process's own.** It holds while one Server instance holds every session.
   Where several instances serve one fleet
-  ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)), a session another
+  ([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)), a session another
   instance holds would outlive the revocation, and a Gateway that fetches the list from another
   instance would download it again for an unchanged list. Rejected; clauses 32 and 34 reach every
   instance and give the list one version in the database.
@@ -734,7 +734,7 @@ LOOPBACK below means the IP literals `127.0.0.1` and `::1`. A host name is never
 - **PKCS#11 required with the PostgreSQL store.** One Server on PostgreSQL keeps its key on one
   host as a Server on files does; the database does not make a key file more exposed. What needs
   shared keys is several instances, and
-  [SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md) makes an instance
+  [SRV-instance-opens-chosen-planes §2](SRV-instance-opens-chosen-planes.md) makes an instance
   with a CA key file the only one. Rejected.
 - **Encrypted key files with a passphrase from a file.** It protects a backup, but the passphrase
   sits on the same host as the file, and every instance holds both. Rejected.
@@ -1084,7 +1084,7 @@ Where a test below also covers a clause another ADR carries, that ADR is named b
   `bootstrap_serial` that `GET /api/v1/bootstrap-certificates` lists for it.
   `PendingEnrolment` in the OpenAPI document carries the field (the pending list,
   [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md)).
-- The tests that [SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md) names
+- The tests that [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md) names
   verify clauses 32 and 34 across instances.
 
 Tests that carry `Verifies: SEC-admission-by-client-certificate` verify the CA keys on a token

@@ -15,7 +15,7 @@ what a Gateway forwards in two buckets:
   ([CLT-modes-and-gateway §26](CLT-modes-and-gateway.md)).
 
 A message that finds either bucket empty is answered `Unavailable` with `RetryInfo`
-([SEC-tls13-two-planes-bounded-input §25](SEC-tls13-two-planes-bounded-input.md)).
+([SEC-tls13-bounded-input-chosen-planes §25](SEC-tls13-bounded-input-chosen-planes.md)).
 
 Every host behind the Gateway shares the aggregate, and the Server cannot tell them apart. One host
 may speak for up to `max_carried_agents` `instance_uid`s
@@ -51,7 +51,7 @@ as the Server does, without forwarding it.
      the same bucket.
 
 2. **What is counted.** The Gateway counts each of the following as the Server counts it
-   ([SEC-tls13-two-planes-bounded-input §24](SEC-tls13-two-planes-bounded-input.md)):
+   ([SEC-tls13-bounded-input-chosen-planes §24](SEC-tls13-bounded-input-chosen-planes.md)):
    - every `AgentToServer` message on the downstream `/v1/opamp`, over a WebSocket and over plain
      HTTP;
    - a message there that cannot be decoded;
@@ -67,7 +67,7 @@ as the Server does, without forwarding it.
    - `messages_per_sec` (default `10`) is the number of tokens added per second, continuously.
    - `burst` (default `300`) is the bucket's capacity.
    - These defaults are the values the Server gives a host
-     ([SEC-tls13-two-planes-bounded-input §22](SEC-tls13-two-planes-bounded-input.md)).
+     ([SEC-tls13-bounded-input-chosen-planes §22](SEC-tls13-bounded-input-chosen-planes.md)).
    - A new bucket starts full.
    - The Client refuses `0` for either key at startup, naming the key. No value turns the limit
      off.
@@ -80,14 +80,14 @@ as the Server does, without forwarding it.
      and an `error_response` of type `Unavailable`.
    - The `error_response` carries an `error_message` saying that too many messages arrive, and a
      `RetryInfo` of 30 seconds, the Server's own
-     ([SEC-tls13-two-planes-bounded-input §25 and §27](SEC-tls13-two-planes-bounded-input.md)).
+     ([SEC-tls13-bounded-input-chosen-planes §25 and §27](SEC-tls13-bounded-input-chosen-planes.md)).
    - The Gateway answers a message that cannot be decoded the same way, without an `instance_uid`.
    - The reply names no capabilities, since the Gateway does not speak for the Server. A Client
      reads none from it.
    - The WebSocket stays open.
    - The Gateway answers a download past the limit with `429` and `Retry-After: 30`, and does not
      read the artifact
-     ([SEC-tls13-two-planes-bounded-input §26](SEC-tls13-two-planes-bounded-input.md)).
+     ([SEC-tls13-bounded-input-chosen-planes §26](SEC-tls13-bounded-input-chosen-planes.md)).
    - The Gateway logs what it refuses once per host per minute, with the host and how many it
      refused.
 
@@ -97,7 +97,7 @@ as the Server does, without forwarding it.
      ([CLT-modes-and-gateway §15](CLT-modes-and-gateway.md)).
    - When the table is full, a new key evicts the bucket used least recently. An eviction only
      grants tokens and never withholds them
-     ([SEC-tls13-two-planes-bounded-input §28](SEC-tls13-two-planes-bounded-input.md)).
+     ([SEC-tls13-bounded-input-chosen-planes §28](SEC-tls13-bounded-input-chosen-planes.md)).
 
 **Out of scope:**
 
@@ -125,7 +125,7 @@ as the Server does, without forwarding it.
 ## Sources / Prior art
 
 - This repository:
-  - [SEC-tls13-two-planes-bounded-input §22 and §24–§28](SEC-tls13-two-planes-bounded-input.md):
+  - [SEC-tls13-bounded-input-chosen-planes §22, §24–§28](SEC-tls13-bounded-input-chosen-planes.md):
     the Server's buckets, their answers and their bound;
   - [CLT-modes-and-gateway §26](CLT-modes-and-gateway.md): their keys;
   - [CLT-modes-and-gateway §15](CLT-modes-and-gateway.md): the host a downstream certificate
@@ -135,7 +135,7 @@ as the Server does, without forwarding it.
   - `crates/fleet-server/src/agent_rate.rs` and `docs/HARDENING.md`.
 - The OpAMP specification, *Throttling*: a Server answers `UNAVAILABLE` with `RetryInfo`, and an
   Agent retries no sooner than it says. Recalled, not re-read for this record. The answer the
-  Gateway gives is SEC-tls13-two-planes-bounded-input's, which was read.
+  Gateway gives is SEC-tls13-bounded-input-chosen-planes's, which was read.
 
 ## Consequences
 

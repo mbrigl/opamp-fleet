@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-07
 - **Deciders:** Markus Brigl
-- **Applies to:** the bootstrap-certificate and enrolment routes of the Operator plane in `crates/fleet-server/src/api.rs`, the issuing and recording of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the signing of host certificates in `crates/fleet-server/src/ca.rs`, the approval and renewal paths in `crates/fleet-server/src/fleet/approval.rs`, the pending queue and the rejected keys in `crates/fleet-server/src/enrolment.rs`, their filesystem adapter in `crates/fleet-server/src/fs/enrolment.rs`, their PostgreSQL adapter in `crates/fleet-server/src/postgres/enrolment.rs` and its table in the schema, and the queue's answer in `crates/fleet-server/src/transport.rs`, the `[enrolment]` section of `server.toml` in `crates/fleet-server/src/config.rs`, the password rule in `crates/fleet-core/src/pkcs12.rs`, the Enrolments tab in `crates/fleet-server/static/index.html`, `service install`, its flags and the questionnaire in `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs` and `crates/fleet-agent/src/config_init.rs`, the enrolment in `crates/fleet-agent/src/service/enrol.rs`, the steps `packaging/linux/postinst` prints, the `p12-keystore` crate in `Cargo.toml`, and every document that tells an operator how to issue, hand out, revoke, list or delete a bootstrap certificate, approve an enrolment, or install a Client
+- **Applies to:** the bootstrap-certificate and enrolment routes of the Operator plane in `crates/fleet-server/src/api.rs`, the issuing and recording of bootstrap certificates in `crates/fleet-server/src/bootstrap.rs`, the signing of host certificates in `crates/fleet-server/src/ca.rs`, the approval and renewal paths in `crates/fleet-server/src/fleet/approval.rs`, the pending queue and the rejected keys in `crates/fleet-server/src/enrolment.rs`, their filesystem adapter in `crates/fleet-server/src/fs/enrolment.rs`, their PostgreSQL adapter in `crates/fleet-server/src/postgres/enrolment.rs` and its table in the schema, and the queue's answer in `crates/fleet-server/src/agent_cases.rs`, the `[enrolment]` section of `server.toml` in `crates/fleet-server/src/config.rs`, the password rule in `crates/fleet-core/src/pkcs12.rs`, the Enrolments tab in `crates/fleet-server/static/index.html`, `service install`, its flags and the questionnaire in `crates/fleet-agent/src/cli.rs`, `crates/fleet-agent/src/main.rs` and `crates/fleet-agent/src/config_init.rs`, the enrolment in `crates/fleet-agent/src/service/enrol.rs`, the steps `packaging/linux/postinst` prints, the `p12-keystore` crate in `Cargo.toml`, and every document that tells an operator how to issue, hand out, revoke, list or delete a bootstrap certificate, approve an enrolment, or install a Client
 
 ## Context
 
@@ -30,7 +30,7 @@ The forces:
   password". OpenSSL, Windows, macOS Keychain and Java import it. OpenSSL 3 writes it by default
   with AES-256-CBC under PBKDF2 and an HMAC-SHA-256 MAC. `rustls` and `rcgen` read PEM and DER
   only, and OpenSSL is banned from the build (`deny.toml`,
-  [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)).
+  [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)).
 - **The password protects one thing:** the bootstrap key inside `bootstrap.p12`. That key does not
   admit a host. It lets a host file an enrolment request while a window is open, and every request
   waits for an operator. A leaked file is attacked offline, where no rate limit applies. The
@@ -303,9 +303,9 @@ find the bootstrap identity beside its program and enrol with it.
     - `time` expresses validity.
     - `x509-parser` reads a certificate's validity for the renewal window.
     - The `ring` backend is the provider
-      [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) already installs,
-      so no OpenSSL and no cmake enter the build. `ring` compiles C and assembly in its build
-      script, so a C compiler is needed either way. What this keeps is the absence of system
+      [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) already
+      installs, so no OpenSSL and no cmake enter the build. `ring` compiles C and assembly in its
+      build script, so a C compiler is needed either way. What this keeps is the absence of system
       libraries.
     - `p12-keystore` is pinned exactly, with `default-features = false`, so its `pbes1` feature with
       `rc2` and `des` is not linked. It writes the PKCS#12 file in the Server and reads it in the
@@ -521,7 +521,7 @@ find the bootstrap identity beside its program and enrol with it.
 - **The `p12` crate.** It reads and writes only the legacy schemes (RC2, 3DES, SHA-1 MAC), which
   OpenSSL 3 no longer writes by default.
 - **OpenSSL's PKCS#12 support.** OpenSSL is banned from the build
-  ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md), `deny.toml`).
+  ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md), `deny.toml`).
 - **The Server keeps the PEM key and hands it out again.** It would hold plaintext keys of every
   valid bootstrap certificate. The kept PKCS#12 file is useless without a password the Server
   never stores.
@@ -668,7 +668,7 @@ find the bootstrap identity beside its program and enrol with it.
 - The code: `crates/fleet-server/src/ca.rs` (the host certificate's subject is set, the CSR's
   discarded), `crates/fleet-server/src/bootstrap.rs` (`Subject`), `MAX_PENDING` and `submit` in
   `crates/fleet-server/src/enrolment.rs`, where the bootstrap certificate's `CertId` is part of
-  every request's `Requester`, and `enrol` in `crates/fleet-server/src/transport.rs`.
+  every request's `Requester`, and `enrol` in `crates/fleet-server/src/agent_cases.rs`.
 
 ## Consequences
 

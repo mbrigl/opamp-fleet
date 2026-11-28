@@ -57,12 +57,12 @@ first. Size is the wrong bound for a database. A table has no file to close, and
 how long the record goes back answers in time, not in megabytes.
 
 On PostgreSQL several Server instances write to one database
-([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)). Two writers cannot
+([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)). Two writers cannot
 extend one chain without serialising every security decision of the fleet on one lock across
 processes. A chain that one process takes up from another's tail mixes two processes' orders into
 one sequence that neither wrote. Every Server on PostgreSQL holds a lease, and takes a new one,
 under a new instance id, after it could not renew the old
-([SRV-instances-share-one-postgresql §1 and §3](SRV-instances-share-one-postgresql.md)). A chain
+([SRV-instance-opens-chosen-planes §1 and §3](SRV-instance-opens-chosen-planes.md)). A chain
 drawn with each lease therefore ends where the lease ends. An instance that takes a new lease does
 not chain on from entries it wrote under a lease another instance may already have closed. A chain
 of a lease opens and ends with the lease. An instance that took a lease without its chain open, or
@@ -194,7 +194,7 @@ token.
      - A run closed by an `audit.chain_broken` that names no `last_whole` fails, and so does a run
        nothing closes.
    - On the PostgreSQL store each lease
-     ([SRV-instances-share-one-postgresql §1 and §3](SRV-instances-share-one-postgresql.md)) opens
+     ([SRV-instance-opens-chosen-planes §1 and §3](SRV-instance-opens-chosen-planes.md)) opens
      a chain of its own, which ends with the lease.
      - A Server instance draws a random chain identifier with each lease it takes and opens its
        chain. Opening writes a chain record with the identifier, the host name and the time it was
@@ -264,10 +264,10 @@ token.
      - At an orderly shutdown the instance writes it into its own chain, with `reason` `shutdown`.
      - For a lease that lapsed, the instance that takes it over writes it into the chain the lease
        names. It writes `reason` `lease_lapsed` and `closed_by`, the identifier of its own chain
-       ([SRV-instances-share-one-postgresql §18](SRV-instances-share-one-postgresql.md)).
+       ([SRV-instance-opens-chosen-planes §18](SRV-instance-opens-chosen-planes.md)).
      - An instance that had to be alone and whose process is gone holds a lease the next instance
        takes over before it lapses
-       ([SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)). For that
+       ([SRV-instance-opens-chosen-planes §2](SRV-instance-opens-chosen-planes.md)). For that
        lease the instance taking over writes `reason` `holder_gone` and `closed_by`, the
        identifier of its own chain.
      - No instance writes any other entry into a chain it did not open.
@@ -288,7 +288,7 @@ token.
    - An entry whose decision was taken while the instance held no lease carries `taken_under`
      `none`, in whichever chain it is written into, that of the lease that just lapsed included.
      - The instance holds no lease from the moment its lease is lapsed by the clock it measures it
-       on ([SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md)). It
+       on ([SRV-instance-opens-chosen-planes §3](SRV-instance-opens-chosen-planes.md)). It
        also holds none after it released its lease. Either lasts until it holds a new one.
      - The entries the writer adds of its own carry no `taken_under`. They are the aggregates,
        `audit.resumed`, `audit.chain_broken` and the closing `audit.chain_closed`.
@@ -476,7 +476,7 @@ token.
     - `[audit.export]` names an OTLP/HTTP endpoint. The Server sends every entry to it as an OTLP
       log record.
     - The export is an outbound connection of
-      [SEC-tls13-two-planes-bounded-input §21](SEC-tls13-two-planes-bounded-input.md). The
+      [SEC-tls13-bounded-input-chosen-planes §21](SEC-tls13-bounded-input-chosen-planes.md). The
       configuration names it, and this clause decides its purpose.
     - It runs over TLS 1.3 by the provider of that ADR's clause 5, and in plaintext only to a
       loopback endpoint.
@@ -515,7 +515,7 @@ token.
     - An instance checks the label again whenever it takes a new lease after its own lapsed. One
       that finds a differing label stops as at a failed start, as it does on a schema it does not
       understand
-      ([SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)).
+      ([SRV-instance-opens-chosen-planes §16](SRV-instance-opens-chosen-planes.md)).
     - The audit key has no file form (clause 14).
 
 **Out of scope:**
@@ -526,7 +526,7 @@ token.
 - A REST route to read the record or its checkpoints.
 - Retention by age on the filesystem store.
 - The leases themselves, and how an instance finds one that lapsed
-  ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)).
 - Copying the archived filesystem record into the database, which clause 9 links instead.
 - Where a saved checkpoint is kept and who compares it, which is the operator's.
 - A transparency log or a witness that cosigns checkpoints.

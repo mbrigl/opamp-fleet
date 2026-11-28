@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-10-19
 - **Deciders:** Markus Brigl
-- **Applies to:** the `[connection_offer]` section of `server.toml` and its startup check in `crates/fleet-server/src/config.rs`, the offer composition in `crates/fleet-server/src/fleet/session.rs` and the capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling and its verification of an offered endpoint in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb` and how it is loaded, every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs`, and every document that tells an operator where an offer may move a fleet
+- **Applies to:** the `[connection_offer]` section of `server.toml` and its startup check in `crates/fleet-server/src/config.rs`, the offer composition in `crates/fleet-server/src/fleet.rs` (`compose_settings_offer`) and `crates/fleet-server/src/fleet/session.rs` (`settings_offer`), the capability declaration in `crates/fleet-server/src/fleet.rs`, the Client's offer handling and its verification of an offered endpoint in `crates/fleet-agent/src/connection.rs`, `crates/fleet-agent/src/transport/mod.rs` and `crates/fleet-agent/src/engine.rs`, its persisted `connection-settings.pb` and how it is loaded, every gate on a Server capability in `crates/fleet-agent/src/supervisor/agent.rs`, and every document that tells an operator where an offer may move a fleet
 
 ## Context
 
@@ -172,7 +172,7 @@ message would be an error.
    - The Client refuses `TLSConnectionSettings` on merit. A Server able to command
      `insecure_skip_verify` can switch off the check that proves it is the Server. Trust is an
      operator's file
-     ([SEC-tls13-two-planes-bounded-input §5](SEC-tls13-two-planes-bounded-input.md)).
+     ([SEC-tls13-bounded-input-chosen-planes §5](SEC-tls13-bounded-input-chosen-planes.md)).
    - `ProxyConnectionSettings` has nothing on this Client to configure. Both fields are of
      Development maturity upstream.
    - The Client refuses offered `headers` on the OpAMP connection on merit too. The Agent plane
@@ -259,7 +259,8 @@ message would be an error.
   `Authorization`
   ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)).
 - Plaintext that an operator writes into `supervisor.toml` themselves. It stays allowed on a
-  loopback IP literal ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)).
+  loopback IP literal
+  ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)).
 - The audit entries an offer leaves.
 - `AcceptsOtherConnectionSettings`.
 - What own telemetry is, which destinations an offer sets, and how they and their headers fold
@@ -329,12 +330,13 @@ message would be an error.
 ## Sources / Prior art
 
 - Connection settings in the Baseline:
-  [OpAMP specification — Connection Settings Management](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md#connection-settings-management)
+  [OpAMP specification — Connection Settings
+  Management](https://github.com/open-telemetry/opamp-spec/blob/main/specification.md#connection-settings-management)
   (Baseline `v0.20.0`): the three classes and their sequences, the verification MUST under
   `ConnectionSettingsOffers.opamp` (the Agent verifies offered settings before it uses them), the
-  own-telemetry sequence and its first-reply SHOULD, the hash gate MUST, the heartbeat
-  obligations, and `OpAMPConnectionSettings.headers` as the field *"typically used to set access
-  tokens"*; *Interoperability of Partial Implementations* for the symmetrical capability MUST;
+  own-telemetry sequence and its first-reply SHOULD, the hash gate MUST, the heartbeat obligations,
+  and `OpAMPConnectionSettings.headers` as the field *"typically used to set access tokens"*;
+  *Interoperability of Partial Implementations* for the symmetrical capability MUST;
   `ServerToAgent.capabilities` (*"MAY be omitted in subsequent ServerToAgent messages"*); and the
   `ServerCapabilities` comments that tell `OffersRemoteConfig` from `AcceptsStatus`.
 - The oracle's client:
@@ -342,7 +344,8 @@ message would be an error.
   `OnOpampConnectionSettings` hands the offer to the Agent, which accepts after its own
   verification; the library then reconnects.
 - Persisted settings elsewhere:
-  [OpAMP Supervisor specification](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/cmd/opampsupervisor/specification/README.md):
+  [OpAMP Supervisor
+  specification](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/cmd/opampsupervisor/specification/README.md):
   persists Server-offered connection settings across restarts.
 - A terse peer:
   [`opampextension`](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/opampextension):

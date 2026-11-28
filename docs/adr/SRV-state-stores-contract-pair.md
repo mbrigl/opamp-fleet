@@ -30,8 +30,8 @@ What a port stores is secret-bearing whatever the backend
 bootstrap PKCS#12 files, the certificate register. Q-1 forbids sending a credential or a package
 unencrypted beyond the loopback, which holds for the Server's traffic to its database and its object
 store as much as for an Agent's. Q-3 bounds what a new dependency may bring:
-[SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) keeps the TLS stack on
-rustls with *ring*, without `aws-lc-rs` and without OpenSSL, and TLS 1.3 alone.
+[SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) keeps the TLS
+stack on rustls with *ring*, without `aws-lc-rs` and without OpenSSL, and TLS 1.3 alone.
 
 The artifacts are the largest part of the state: one entry of 1 GiB is allowed
 (`max_package_size_bytes`), and the fleet's software multiplies that. On the Server's host they
@@ -44,7 +44,7 @@ content-addressed and immutable, streamed through the Server in both directions,
 read from a file and the connection verified against the database's certificate and host name.
 Running several Server instances against one database or one bucket has its own questions —
 presence, leases, notifying the other instances — which
-[SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)
+[SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)
 answers.
 
 Existing installations must keep their trust data. Starting empty would lose the revocation list,
@@ -76,7 +76,7 @@ and writes them in batches, and an entry is accepted before the act it records
 
 On PostgreSQL the Server applies its schema itself, and several instances serve one database.
 During a rolling update, instances of a release and of the release after it serve side by side
-([SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)). A column the
+([SRV-instance-opens-chosen-planes §16](SRV-instance-opens-chosen-planes.md)). A column the
 newer release removes fails every statement of the older one that still names it. A column that is
 `NOT NULL` without a default fails every `INSERT` of a release that no longer names it. A default
 changes no stored row: PostgreSQL applies it only to later inserts and updates. The contract pair
@@ -106,7 +106,7 @@ that decides its request, and move an old layout by an offline command.
      reads its configuration, its TLS files and its secret files, all of them read-only, and writes
      to no file. The Server's image names no data directory for that reason, and a Server in it
      that keeps state on its disk is given one by its operator
-     ([OPS-releases-attestations-server-image §16](OPS-releases-attestations-server-image.md)).
+     ([OPS-releases-image-probed-by-plane §16](OPS-releases-image-probed-by-plane.md)).
    - `config_dir` and `packages_dir` do not exist. A `server.toml` that names either fails
      startup, naming the key and `server migrate`.
    - The Server creates every directory under `data_dir` with mode `0700`. It writes every file
@@ -150,7 +150,7 @@ that decides its request, and move an old layout by an offline command.
      [SRV-fleet-record-agents-hosts §4](SRV-fleet-record-agents-hosts.md) states.
    - With `store = "postgres"` an instance holds in memory only the Agents it carries, and the
      Operator plane reads the fleet from the database
-     ([SRV-instances-share-one-postgresql §8 and §13](SRV-instances-share-one-postgresql.md)),
+     ([SRV-instance-opens-chosen-planes §8 and §13](SRV-instance-opens-chosen-planes.md)),
      through the port's `get` and `query`
      ([SRV-fleet-record-agents-hosts §2](SRV-fleet-record-agents-hosts.md)) and its `query_page` and
      `reported_values`
@@ -298,7 +298,7 @@ that decides its request, and move an old layout by an offline command.
     ([SEC-admission-by-client-certificate §34](SEC-admission-by-client-certificate.md))
     and what an
     instance compares at each renewal of its lease
-    ([SRV-instances-share-one-postgresql §10](SRV-instances-share-one-postgresql.md)).
+    ([SRV-instance-opens-chosen-planes §10](SRV-instance-opens-chosen-planes.md)).
     A certificate entry is dropped with its register entry once neither the certificate
     nor any renewal of it is valid. With PostgreSQL a register entry is removed only while the
     database holds no valid certificate renewed from it, whatever the register of the instance that
@@ -414,7 +414,7 @@ that decides its request, and move an old layout by an offline command.
     instance on one database uses the same bucket and prefix. On PostgreSQL every sweep of
     unreferenced blobs (clause 13) runs under an advisory lock, and so does every clearing of
     `<prefix>staging/` (clause 16). So one instance does them at a time
-    ([SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)).
+    ([SRV-instance-opens-chosen-planes §2](SRV-instance-opens-chosen-planes.md)).
     The lock is taken whatever the blob store: with `"fs"` the instance is alone and
     the lock decides nothing, but the PostgreSQL record store does not ask which blob store it
     serves, and one rule for every PostgreSQL Server costs one session per sweep.
@@ -433,7 +433,7 @@ that decides its request, and move an old layout by an offline command.
       time of that blob's mark and finds it still there. Then, before it calls the blob store, it
       finds that no more than 15 seconds have passed since it sent that renewal, on the clock that
       counts a suspend which the lease of
-      [SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md)
+      [SRV-instance-opens-chosen-planes §3](SRV-instance-opens-chosen-planes.md)
       is measured on. Once any of these fails it deletes nothing more and says so in the
       log; a blob whose mark another sweep took away it passes over. An upload
       whose blob is marked is refused, to be uploaded again, in the transaction that checks that the
@@ -459,7 +459,7 @@ that decides its request, and move an old layout by an offline command.
       - Under asynchronous replication, a failover may reach a standby the marks had not reached.
         The new primary then lacks them while the old sweep may still be deleting. So the exclusion
         holds across a failover only with the synchronous replication that
-        [SRV-instances-share-one-postgresql §17](SRV-instances-share-one-postgresql.md)
+        [SRV-instance-opens-chosen-planes §17](SRV-instance-opens-chosen-planes.md)
         requires.
 
       In each case the next start fails on that entry, naming it, and its artifact is uploaded
@@ -487,7 +487,7 @@ that decides its request, and move an old layout by an offline command.
       The Server touches no key outside `<prefix>`. A key under `<prefix>blobs/` that is not a hash,
       or any other key under `<prefix>`, fails startup naming the key.
     - `<lease>` is the identifier of the lease of the instance that writes the upload
-      ([SRV-instances-share-one-postgresql §3](SRV-instances-share-one-postgresql.md)).
+      ([SRV-instance-opens-chosen-planes §3](SRV-instance-opens-chosen-planes.md)).
       With the filesystem record store, which has one Server and no lease, it is `fs`.
     - A staging object is left behind only by an upload that was cut off, or by one whose staging
       object failed to be deleted. The clearing runs with every sweep of clause 13. Such a sweep
@@ -613,7 +613,7 @@ that decides its request, and move an old layout by an offline command.
     - A Configuration's revisions, a Package's entries and a Deployment's members are rows of their
       own, and a package floor one row per Agent type, written under `SELECT … FOR UPDATE` after
       the check that it is not lowered
-      ([SRV-instances-share-one-postgresql §19](SRV-instances-share-one-postgresql.md)).
+      ([SRV-instance-opens-chosen-planes §19](SRV-instance-opens-chosen-planes.md)).
 
 22. **The Server applies its own schema.**
     - The schema is embedded in the binary as numbered migrations. At startup the Server applies,
@@ -631,7 +631,7 @@ that decides its request, and move an old layout by an offline command.
       name that release, 0.8.0. A Server of 0.7.1 holds no lease, keeps its audit record in files
       and leaves the revocation list's version where it was. It therefore refuses the schema once a
       Server of 0.8.0 has applied them, rather than serve beside its instances
-      ([SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)).
+      ([SRV-instance-opens-chosen-planes §16](SRV-instance-opens-chosen-planes.md)).
       A rollback to 0.7.1 after the upgrade restores the database from its backup.
     - Migration 13 adds the table of the sweeps' marks (clause 14) and names 0.8.0, which reads
       and writes none of them.
@@ -650,7 +650,7 @@ that decides its request, and move an old layout by an offline command.
       - Migration 20, of release 0.8.6, drops the three columns and nothing else. It names 0.8.5
         as the oldest Server, so an instance of 0.8.6 refuses to start beside a live lease of 0.8.4
         or older
-        ([SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)).
+        ([SRV-instance-opens-chosen-planes §16](SRV-instance-opens-chosen-planes.md)).
       - Migration 20 is the one migration that removes anything.
     - A Server checks its schema only at its own start. A Server of 0.7.1 holds the exclusive lock
       of clause 23, under the same key, for its whole run. So an instance that shares the database
@@ -672,12 +672,12 @@ that decides its request, and move an old layout by an offline command.
     before it opens either listener and renews the lease while it runs. An instance that cannot
     renew before its lease lapses ends its sessions, closes its listeners and takes a new lease once
     the database answers again
-    ([SRV-instances-share-one-postgresql §1–§3](SRV-instances-share-one-postgresql.md)).
+    ([SRV-instance-opens-chosen-planes §1–§3](SRV-instance-opens-chosen-planes.md)).
     An instance with the filesystem blob store (clause 14) or a CA key in a file
     must be the only instance in the schema: it takes an exclusive lock, fails startup beside
     another live lease, makes a second instance fail startup, and refuses every call once the lock's
     connection ends
-    ([SRV-instances-share-one-postgresql §2](SRV-instances-share-one-postgresql.md)).
+    ([SRV-instance-opens-chosen-planes §2](SRV-instance-opens-chosen-planes.md)).
 
 24. **The database connection is TLS 1.3, verified, and configured in `server.toml` alone.**
     - `[database.postgres]` names `host`, `port` (default 5432), `dbname`, `user` and
@@ -780,7 +780,7 @@ that decides its request, and move an old layout by an offline command.
     - Moving records back from PostgreSQL to files is not provided.
 
 **Out of scope:** presence, leases and notifying other instances
-([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md));
+([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md));
 copying the archived filesystem audit record into the database, which clause 27 links instead;
 paging and filtering in the database, which
 [API-lists-paged-by-cursor](API-lists-paged-by-cursor.md)
@@ -823,7 +823,7 @@ monitors a production store or database.
 - **`rust-s3`.** Small, but it lacks web identity and container credentials, so it misses the
   workload identity this decision asks for. Rejected.
 - **`object_store` with its default `aws` feature.** It pulls `aws-lc-rs`, a C build with cmake,
-  against [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md). The
+  against [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md). The
   `aws-base`, `ring` and `reqwest` features build the same client on *ring*.
 - **Hash every object again at startup.** That downloads the whole store at every start, which
   for a fleet's software costs minutes and egress. The signature and the Client's own hash check
@@ -886,7 +886,7 @@ monitors a production store or database.
   either record store.** A second Server against the same schema would fail startup, and the
   database would be a durable copy of what one Server holds. Several instances serve one fleet
   from one database
-  ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)),
+  ([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)),
   and a copy of the fleet in each instance's memory would be stale as soon as another instance
   writes. Rejected; clause 3 answers from memory on the filesystem store alone.
 - **`data_dir` with either record store, the audit record a file under it.** A Server on
@@ -914,7 +914,7 @@ monitors a production store or database.
   a default changes no stored row.
 - **0.8.1 as the oldest Server of migration 19.** It was the technical lower bound: a Server of
   0.8.0 still read an array for an `instance_uid` that no binding held.
-  [SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md) lets only a
+  [SRV-instance-opens-chosen-planes §16](SRV-instance-opens-chosen-planes.md) lets only a
   release and the one after it serve side by side, so the rule's own reading for 0.8.5 was 0.8.4.
   A rolling update from 0.8.1, 0.8.2 or 0.8.3 straight to 0.8.5 is refused; such a skip scales the
   old instances to zero first, as the manual asks.
@@ -1160,7 +1160,7 @@ Tests that carry `Verifies: SRV-state-stores-contract-pair`:
 - That two writers on the database keep both of what they write, or count both writes against a
   bound, and that the migrations are applied once while instances start together, is decided by
   tests that carry the marker of
-  [SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md):
+  [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md):
   [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
   `two_revocations_committed_at_once_on_two_instances_are_both_kept`,
   `an_instance_with_an_older_floor_in_memory_cannot_lower_the_stored_one`,
@@ -1182,7 +1182,7 @@ Tests that carry `Verifies: SRV-state-stores-contract-pair`:
   `an_instance_takes_its_lease_before_it_opens_a_listener`, which holds the lock its lease is
   taken under elsewhere and observes that neither plane takes a connection until the instance
   holds a lease. Beside them, with the marker of
-  [SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md):
+  [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md):
   [`postgres/lease.rs`](../../crates/fleet-server/src/postgres/lease.rs)
   `instances_that_share_the_database_each_hold_a_lease`, `an_instance_that_must_be_alone_is_alone`;
   [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)

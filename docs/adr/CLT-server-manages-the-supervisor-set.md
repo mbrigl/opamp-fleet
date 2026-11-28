@@ -7,13 +7,10 @@
 
 ## Context
 
-This ADR restates, unchanged in meaning, the clauses of
-[CLT-supervisor-mode-and-kinds](CLT-supervisor-mode-and-kinds.md) that govern the Server-managed
-Supervisor set, the two switches `server_manages_set` and `remote_config_disabled`, and the repeated
-offer of a configuration. [CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md)
-supersedes it, restates and revises the rest, and leaves these clauses to this ADR. The split
-exists because an ADR is superseded whole, and the revision of the port does not touch these
-clauses. A status line names one successor, so this ADR carries no `Supersedes` field.
+This ADR decides the Server-managed Supervisor set, the two switches `server_manages_set` and
+`remote_config_disabled`, and the repeated offer of a configuration.
+[CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md) decides Supervisor
+Mode, its kinds and the port they act through.
 
 What the fleet needs to manage on a Client is which Supervisors it runs. Everything else in
 `supervisor.toml` ([CLT-installed-service-and-state](CLT-installed-service-and-state.md)), the

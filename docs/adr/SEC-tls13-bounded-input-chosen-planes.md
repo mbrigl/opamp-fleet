@@ -3,39 +3,18 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-21
 - **Deciders:** Markus Brigl
-- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, the reconnect delays in `crates/opamp/src/client/backoff.rs` and `crates/opamp/src/client/ws.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the `rustls` features in `Cargo.toml`, the `listen`, `max_connections`, `max_new_connections_per_sec`, `[rest]`, `[tls]` and `[rest.tls]` keys of `server.toml` and their parsing and startup checks in `crates/fleet-server/src/config.rs`, the certificates `server pki status` lists and the running Server watches in `crates/fleet-server/src/pki.rs`, `config/server.toml`, the message limit in `crates/fleet-server/src/agent_rate.rs`, `on_message` and `on_unreadable` of the Server's handler, the enrolment refusals in `Fleet::enrol` and the download guard `admit_download` in `crates/fleet-server/src/transport.rs`, every `Unavailable` reply in `crates/fleet-server/src/fleet/session.rs` and `crates/fleet-server/src/fleet/approval.rs`, the `[agent_rate_limit]` section of `server.toml` and its startup warning, the `agent_rate.throttled` audit event, every outbound connection the Server opens, and every document that tells an operator which certificate the Operator plane serves or how a browser or `opamp-fleetctl` trusts it
-- **Supersedes:** [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)
+- **Applies to:** the OpAMP endpoint and both transports in `crates/fleet-server/src/transport.rs` and `crates/fleet-agent/src/transport/`, TLS in `crates/opamp/src/tls.rs`, `crates/fleet-server/src/tls.rs` and `crates/fleet-agent/src/tls.rs`, the plaintext rule in `crates/opamp/src/client/connection.rs`, the reconnect delays in `crates/opamp/src/client/backoff.rs` and `crates/opamp/src/client/ws.rs`, how every listener binds and serves and how it reads a request body or a WebSocket message in `crates/opamp/src/server/`, the package upload in `crates/fleet-server/src/api.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the `rustls` features in `Cargo.toml`, the `listen`, `max_connections`, `max_new_connections_per_sec`, `[rest]`, `[tls]` and `[rest.tls]` keys of `server.toml` and their parsing and startup checks in `crates/fleet-server/src/config.rs`, the certificates `server pki status` lists and the running Server watches in `crates/fleet-server/src/pki.rs`, `config/server.toml`, the message limit in `crates/fleet-server/src/agent_rate.rs`, `on_message` and `on_unreadable` of the Server's handler, the enrolment refusals in `enrol` of `crates/fleet-server/src/agent_cases.rs`, the download guard `admit_download` in `crates/fleet-server/src/transport.rs` and `crates/fleet-server/src/agent_cases.rs`, every `Unavailable` reply in `crates/fleet-server/src/agent_cases.rs`, `crates/fleet-server/src/fleet/session.rs` and `crates/fleet-server/src/fleet/approval.rs`, the `[agent_rate_limit]` section of `server.toml` and its startup warning, the `agent_rate.throttled` audit event, every outbound connection the Server opens, and every document that tells an operator which certificate the Operator plane serves or how a browser or `opamp-fleetctl` trusts it
 
 ## Context
 
-This ADR carries every clause of
-[SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) and changes those that
-an instance opening one plane makes untrue. A Server instance opens the Agent plane, the Operator
-plane or both, as its `planes` key names
-([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)). The old ADR has every
-Server open both listeners, serve both on `listen::plane`, and drain both planes together. Here
-each of these concerns the planes the instance opens: the listeners (clause 14), the one place
-that builds them (clause 15), and the drain (clause 17). The title of clause 7 and the handshake
-deadline of clause 16 follow them. Every instance still reads and checks the whole configuration,
-`[tls]` and `[rest.tls]` included
-([SRV-instance-opens-chosen-planes §25](SRV-instance-opens-chosen-planes.md)). The clauses on them
-therefore stand unchanged. This ADR adds no clause. A proposed ADR on a branch of its own,
-which signs operators in by OIDC beside Basic on the Operator plane, also supersedes
-SEC-tls13-two-planes-bounded-input. It will be restated against this ADR.
-
-**Clause map.** Every clause keeps its number. On acceptance, a citation of
-SEC-tls13-two-planes-bounded-input §*n* moves to §*n* of this ADR.
-
-| Old clauses | Clauses here | Change |
-|---|---|---|
-| SEC-tls13-two-planes-bounded-input §1–§6 | 1–6 | none |
-| SEC-tls13-two-planes-bounded-input §7 | 7 | the title names two planes, each on a listener of its own, instead of two listeners |
-| SEC-tls13-two-planes-bounded-input §8–§13 | 8–13 | none |
-| SEC-tls13-two-planes-bounded-input §14 | 14 | the listeners are those of the planes the instance opens; colliding addresses and a failed bind fail at startup; every listener it opens is bound before any serves |
-| SEC-tls13-two-planes-bounded-input §15 | 15 | `listen::plane` serves each plane the instance opens |
-| SEC-tls13-two-planes-bounded-input §16 | 16 | the handshake deadline holds on the acceptor of each plane the instance opens |
-| SEC-tls13-two-planes-bounded-input §17 | 17 | one bounded drain and one `Handle` for the planes the instance opens, citing SRV-instance-opens-chosen-planes §3 |
-| SEC-tls13-two-planes-bounded-input §18–§29 | 18–29 | none |
+A Server instance opens the Agent plane, the Operator plane or both, as its `planes` key names
+([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)). The listeners
+(clause 14), the one place that builds them (clause 15), the drain (clause 17), the two planes of
+clause 7 and the handshake deadline of clause 16 therefore concern the planes the instance opens.
+Every instance still reads and checks the whole configuration, `[tls]` and `[rest.tls]` included
+([SRV-instance-opens-chosen-planes §25](SRV-instance-opens-chosen-planes.md)), so the clauses on
+them hold on every instance. A proposed ADR on a branch of its own signs operators in by OIDC
+beside Basic on the Operator plane.
 
 The Baseline defines two transports: *"Server implementations SHOULD accept both plain HTTP
 connections and WebSocket connections. OpAMP Client implementations may choose to support
@@ -178,7 +157,7 @@ Forces that shape the rate limit:
     that *"SHOULD be used only for the client's attempts to reconnect"*.
   - *"The minimum recommended retry interval is 30 seconds."*
   - This Server answers `Unavailable` with a `retry_info` of 30 s (`RETRY_AFTER` in
-    [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs)) in four places besides
+    [`fleet/approval.rs`](../../crates/fleet-server/src/fleet/approval.rs)) in four places besides
     the rate limit: at the Agent-record ceiling, when the enrolment queue is full, when no
     enrolment window is open
     ([SRV-state-stores-contract-pair §8](SRV-state-stores-contract-pair.md)), and
@@ -420,7 +399,7 @@ WebSocket message, and limit what an admitted peer sends on the Agent plane with
     - A fleet larger than the default raises the key together with the process's file-descriptor
       limit.
     - Where several instances serve one fleet
-      ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)), each
+      ([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)), each
       connection cap counts the connections of one instance. `max_agents` counts the Agent records
       stored, for the whole fleet. A fleet with more connections than one instance's cap is spread
       over enough instances, or the cap is raised.
@@ -525,7 +504,7 @@ WebSocket message, and limit what an admitted peer sends on the Agent plane with
     [SEC-append-only-audit-record](SEC-append-only-audit-record.md). Those replies are:
     - the Agent-record ceiling in `fleet/session.rs`;
     - a CSR held back for its audit record;
-    - the full enrolment queue and the closed enrolment window in `Fleet::enrol`.
+    - the full enrolment queue and the closed enrolment window in `enrol` of `agent_cases.rs`.
 
     An undecodable message has no `instance_uid`, so its throttled reply carries none, and no Agent
     receives it.
@@ -739,6 +718,12 @@ None.
 - **`0` to switch the limit off.** A limit that one line disables is not a default an operator can
   rely on (Q-1). A fleet that needs more raises the numbers.
 
+- **Every Server instance opens both planes.** Each instance once bound both listeners, served
+  both on `listen::plane` and drained them together. An instance could then not serve one audience
+  alone, and the Operator plane could not stay usable while the Agents of a lost Agent-plane
+  instance reconnect (G-20). The planes an instance opens are its own
+  ([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)).
+
 ## Sources / Prior art
 
 - The OpAMP transports:
@@ -823,12 +808,15 @@ None.
   `ServerErrorResponseType`, `RetryInfo`.
 - [RFC 6585 section 4](https://datatracker.ietf.org/doc/html/rfc6585#section-4) (`429`).
 - The code the rate limit builds on:
-  - [`transport.rs`](../../crates/fleet-server/src/transport.rs): `admit`, `admit_download`,
-    `Proofs` and `Fleet::enrol`;
+  - [`transport.rs`](../../crates/fleet-server/src/transport.rs): the routes' `admit` and
+    `admit_download`;
+  - [`agent_cases.rs`](../../crates/fleet-server/src/agent_cases.rs): the use cases' `admit`,
+    `admit_download`, `Proofs` and `enrol`;
   - [`throttle.rs`](../../crates/fleet-server/src/throttle.rs): the per-address throttle and its
     bounded table;
-  - [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs): `unavailable`,
-    `RETRY_AFTER` and the `sequence_num` gap;
+  - [`fleet/approval.rs`](../../crates/fleet-server/src/fleet/approval.rs): `unavailable` and
+    `RETRY_AFTER`;
+  - [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs): the `sequence_num` gap;
   - [`audit_log.rs`](../../crates/fleet-server/src/audit_log.rs): the `unrecorded_before` count;
   - [`server.rs`](../../crates/opamp/src/server.rs): the `Handler` dispatch;
   - the Client's handling of `Unavailable` in
@@ -935,9 +923,7 @@ None.
 
 ## Enforcement
 
-The tests named below as carrying `Verifies: SEC-tls13-two-planes-bounded-input` carry it today.
-They decide the clauses carried unchanged. On acceptance their markers move to
-`Verifies: SEC-tls13-bounded-input-chosen-planes`.
+The tests named below carry `Verifies: SEC-tls13-bounded-input-chosen-planes`.
 
 The transports and the message size limit (clauses 1 to 3):
 
@@ -979,7 +965,7 @@ TLS 1.3 alone and plaintext on LOOPBACK alone (clauses 2, 5 and 6):
   [`crates/fleet-server/tests/mutual_tls.rs`](../../crates/fleet-server/tests/mutual_tls.rs)
   exercises the rustls stack on both ends.
 
-These tests carry `Verifies: SEC-tls13-two-planes-bounded-input`:
+These tests carry `Verifies: SEC-tls13-bounded-input-chosen-planes`:
 
 - [`crates/opamp/src/tls.rs`](../../crates/opamp/src/tls.rs):
   `the_provider_offers_tls_1_3_suites_alone` (clause 5);
@@ -1055,7 +1041,7 @@ Connection setup and the pace floor (clauses 15, 17 and 18):
 - Clause 17: `a_spread_drain_closes_the_sessions_over_its_window` in
   [`crates/opamp/tests/server_listen.rs`](../../crates/opamp/tests/server_listen.rs).
 
-Tests of the rate limit, each marked `Verifies: SEC-tls13-two-planes-bounded-input`:
+Tests of the rate limit, each marked `Verifies: SEC-tls13-bounded-input-chosen-planes`:
 
 - `crates/fleet-server/src/agent_rate.rs`:
   - `a_bucket_starts_full_and_refills_at_the_configured_rate` (clause 22);

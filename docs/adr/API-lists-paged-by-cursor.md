@@ -114,7 +114,7 @@ We will let the four lists that grow with the fleet be read a page at a time:
      - `service_name`.
      - On PostgreSQL, `holder`: an instance id, or `none` for the Agents that no instance with a
        live lease holds
-       ([SRV-instances-share-one-postgresql §13](SRV-instances-share-one-postgresql.md)). The
+       ([SRV-instance-opens-chosen-planes §13](SRV-instance-opens-chosen-planes.md)). The
        filesystem store has no holder, and there the Server answers `holder` with `400`.
    - Hosts take `q` over the host id and its subject values, and `gateway`, `true` or `false`.
    - Certificates and revocations take `q` over subject, serial and host.
@@ -151,7 +151,7 @@ We will let the four lists that grow with the fleet be read a page at a time:
      - A row whose digest does not match them was written without its derived columns. It was
        written before those columns existed, or by the release before. That release serves on the
        same schema
-       ([SRV-instances-share-one-postgresql §16](SRV-instances-share-one-postgresql.md)) and does
+       ([SRV-instance-opens-chosen-planes §16](SRV-instance-opens-chosen-planes.md)) and does
        not write them.
      - Before `query_page` reads, the instance derives such rows again from their records, in
        batches, and writes them. So the answer is the same while two releases share the database,
@@ -179,7 +179,7 @@ We will let the four lists that grow with the fleet be read a page at a time:
      ADR's clause 1).
      - Through it an instance reads the Agents behind a Gateway. Among them is the Client Agent
        whose Labels an Agent behind it inherits
-       ([SRV-instances-share-one-postgresql §8](SRV-instances-share-one-postgresql.md)).
+       ([SRV-instance-opens-chosen-planes §8](SRV-instance-opens-chosen-planes.md)).
      - The check of a Gateway's package download reads through it the Agents that arrived over the
        Gateway's Host, not the whole fleet.
    - On PostgreSQL, `query_page` is a read beside `get` and `query`. Those are the reads

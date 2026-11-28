@@ -8,7 +8,7 @@
 ## Context
 
 The Server serves two planes on two listeners
-([SEC-tls13-two-planes-bounded-input §7](SEC-tls13-two-planes-bounded-input.md)):
+([SEC-tls13-bounded-input-chosen-planes §7](SEC-tls13-bounded-input-chosen-planes.md)):
 the Agent plane, `/v1/opamp`, the package download and the Gateways' revocation list in
 `transport.rs`, and the Operator plane, the REST API and the bundled UI in `api.rs`. Behind both
 sits one `AppState` (`crates/fleet-server/src/fleet.rs`), which holds the fleet in memory and every
@@ -20,17 +20,15 @@ services beside it directly: `api.rs` names `AppState` 63 times, `Enrolment`, `R
 what their code may do. A handler of one plane can reach any operation of the other, and a reviewer
 has to read `fleet` and every module of it to know what the Agent plane can change.
 
-On PostgreSQL several instances serve one fleet, and each serves both planes today
-([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)). The proposed
-[SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md) follows this ADR and lets
-each instance open the planes its configuration names. The planes
-already meet only through the database there: an operator's act on one instance reaches the
-sessions on another by a notification
-([SRV-instances-share-one-postgresql §9](SRV-instances-share-one-postgresql.md)) or by the
+On PostgreSQL several instances serve one fleet, and
+[SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md) builds on this ADR to let
+each instance open the planes its configuration names. The planes already meet only through the
+database there: an operator's act on one instance reaches the sessions on another by a notification
+([SRV-instance-opens-chosen-planes §9](SRV-instance-opens-chosen-planes.md)) or by the
 re-read after a missed one
-([SRV-instances-share-one-postgresql §10](SRV-instances-share-one-postgresql.md)), and the
+([SRV-instance-opens-chosen-planes §10](SRV-instance-opens-chosen-planes.md)), and the
 Operator plane reads the Agents from the database rather than from memory
-([SRV-instances-share-one-postgresql §13](SRV-instances-share-one-postgresql.md)). What keeps them
+([SRV-instance-opens-chosen-planes §13](SRV-instance-opens-chosen-planes.md)). What keeps them
 together is the code. For availability, an instance that serves one plane alone would let a
 reconnecting fleet not crowd out the operators who must act on it, and a heavy Operator-plane read
 not slow the sessions; but such an instance is safe only once it is clear what each plane's code
@@ -144,10 +142,7 @@ Instance UID, so that it can be filtered per host.
   even though no behaviour changes.
 - Negative / trade-offs: the list of state-holding types in clause 2 is kept by hand in the test;
   a new such type must be added to it.
-- Follow-ups: a role per instance on PostgreSQL, one program whose instances open the Agent plane,
-  the Operator plane or both, so that each plane is scaled and kept available apart.
-  [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md), proposed, decides it
-  and builds on this split. Splitting `AppState` along the same line; renaming the planes; adding
+- Follow-ups: splitting `AppState` along the same line; renaming the planes; adding
   the use-case layer to the glossary.
 
 ## Enforcement

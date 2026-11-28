@@ -100,7 +100,7 @@ make a REST API under `/api/v1`, described by an OpenAPI document generated code
      behaviour cannot drift.
    - The Server serves the document at `/api/v1/openapi.json`.
    - The API is served on the Operator plane
-     ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)), behind its
+     ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)), behind its
      authentication ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md)),
      beside the rendered docs page ([DEV-six-crates-tokio-axum](DEV-six-crates-tokio-axum.md)).
 

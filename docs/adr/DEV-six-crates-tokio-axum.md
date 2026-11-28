@@ -37,7 +37,7 @@ listener is mechanism, the same for every OpAMP implementation.
 
 **The pace floor needs the frames.** The floor on the pace of every request body and every
 WebSocket message
-([SEC-tls13-two-planes-bounded-input §18](SEC-tls13-two-planes-bounded-input.md)) has to see a
+([SEC-tls13-bounded-input-chosen-planes §18](SEC-tls13-bounded-input-chosen-planes.md)) has to see a
 message's data frames. RFC 6455 lets a peer send a Ping between the fragments of a message. Judged
 by the bytes a connection reads, every Ping looks like progress, and a begun message stays open for
 ever. axum's WebSocket hands over whole messages only.
@@ -123,7 +123,7 @@ Both binaries hold their configuration to a strict parse.
 
 4. **`opamp::tls` is the TLS both sides share.** Either feature compiles it.
    - It installs the ring provider, never a system library
-     ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)).
+     ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)).
    - It reads certificates and a private key from PEM bytes. An empty result is an error.
    - It carries an `Identity`, a certificate chain and its key as PEM.
    - It opens no file.
@@ -148,14 +148,14 @@ Both binaries hold their configuration to a strict parse.
    - `opamp` frames the connection with `tokio-tungstenite` over a reader that follows the frame
      headers as they arrive. So it knows whether a data message has begun and how much of it has
      come, apart from the control frames between its fragments. This serves the pace floor
-     ([SEC-tls13-two-planes-bounded-input §18](SEC-tls13-two-planes-bounded-input.md)).
+     ([SEC-tls13-bounded-input-chosen-planes §18](SEC-tls13-bounded-input-chosen-planes.md)).
 
 6. **The server listener.** `opamp::server::listen` builds the rustls `ServerConfig` from a
    certificate, a key and a client-certificate rule. The rule is none, optional, or required
    against a CA. It sets the ALPN protocols.
    - `serve` runs a router on a bound listener with the bounds of
-     SEC-tls13-two-planes-bounded-input. They are a 30-second header read with the timer it needs,
-     and a 10-second TLS handshake.
+     SEC-tls13-bounded-input-chosen-planes. They are a 30-second header read with the timer it
+     needs, and a 10-second TLS handshake.
    - `serve` puts the verified peer certificate and the peer address into every request, on every
      listener it serves.
    - A handle shuts listeners down. One handle may drain several. The application states how long
@@ -240,8 +240,8 @@ Both binaries hold their configuration to a strict parse.
       hyper (clause 5). So axum's `ws` feature is off.
     - The OpAMP endpoint of the Server, of the Gateway and of the Supervisor Endpoint is
       `opamp::server`'s. So is the listener it is served on (clauses 5 and 6).
-    - [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) decides which
-      listeners exist.
+    - [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) decides
+      which listeners exist.
 
 14. **The bundled UI is static files embedded in the Server binary.** The UI is plain HTML, CSS and
     JS under `crates/fleet-server/static/`, embedded with `include_str!`. It needs no frontend
@@ -310,8 +310,16 @@ Both binaries hold their configuration to a strict parse.
         by, and the proofs a renewal and an enrolment request carry in their CSR. The Server and a
         Gateway read them alike ([CLT-modes-and-gateway](CLT-modes-and-gateway.md));
       - `rate`, the token buckets a sender is counted in on the Server and on a Gateway
-        ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md),
-        [CLT-gateway-rate-limits-hosts](CLT-gateway-rate-limits-hosts.md)).
+        ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md),
+        [CLT-gateway-rate-limits-hosts](CLT-gateway-rate-limits-hosts.md));
+      - `revocation_list`, the path and the body of the list of revoked certificates the Server
+        hands a Gateway and the Gateway reads
+        ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md),
+        [CLT-modes-and-gateway](CLT-modes-and-gateway.md));
+      - `pkcs11`, behind its feature, what the Server's token adapter and the operator tool alike
+        do on a PKCS#11 token
+        ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md),
+        [OPS-operator-program-fleetctl](OPS-operator-program-fleetctl.md)).
     - `fleet-util`:
       - `archive`, the unpackers of a package's artifact and the 7z Unix-mode convention; the
         operator tool packs by them and the Client installs by them
@@ -394,7 +402,7 @@ Both binaries hold their configuration to a strict parse.
 - where an installed service looks for its configuration file on each OS
   ([CLT-installed-service-and-state](CLT-installed-service-and-state.md));
 - the listener layout
-  ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md));
+  ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md));
 - whether a release ships the operator tools, which
   [OPS-operator-program-fleetctl §2](OPS-operator-program-fleetctl.md) decides.
 
@@ -489,8 +497,8 @@ Both binaries hold their configuration to a strict parse.
   `tls_certs_only`, `identity` and `tls_backend_preconfigured`, with the stability warning on the
   last. Read 2026-10-03 in the vendored 0.13.5 source.
 - [`axum-server`](https://docs.rs/axum-server/0.9) `RustlsAcceptor::handshake_timeout` and
-  [`hyper-util`](https://docs.rs/hyper-util/0.1) `TokioTimer`, as SEC-tls13-two-planes-bounded-input
-  cites them.
+  [`hyper-util`](https://docs.rs/hyper-util/0.1) `TokioTimer`, as
+  SEC-tls13-bounded-input-chosen-planes cites them.
 - [`rustls-pki-types`](https://docs.rs/rustls-pki-types) `PemObject`, the PEM reader rustls
   itself uses.
 - hyper and tonic features, the sans-IO pattern, `quinn` over `quinn-proto`, and the Cargo book on
@@ -521,7 +529,8 @@ Both binaries hold their configuration to a strict parse.
   it drives.
 - [TOML v1.0](https://toml.io/), the [`toml` crate](https://crates.io/crates/toml), and the
   [`serde_yaml` deprecation notice](https://github.com/dtolnay/serde-yaml);
-  [`opampsupervisor` configuration](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/cmd/opampsupervisor/specification/README.md):
+  [`opampsupervisor`
+  configuration](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/cmd/opampsupervisor/specification/README.md):
   the YAML prior art not followed for this project's own files.
 
 ## Consequences
