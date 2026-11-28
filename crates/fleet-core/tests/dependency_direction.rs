@@ -875,7 +875,7 @@ fn plugin_breaks(
 
 /// A Plugin names the Plugin port and nothing of the host: no file, process, network or storage
 /// module, no runtime, no system call (CLT-wrappers-act-through-the-core §1).
-/// Verifies: CLT-wrappers-act-through-the-core
+/// Verifies: CLT-wrappers-act-through-the-core, Q-5
 #[test]
 fn a_plugin_names_only_the_port() {
     let locked = locked_crates();
@@ -1132,7 +1132,7 @@ fn overview_gaps(
 
 /// Every module with a role is named in the architecture overview, or exempt from it with a reason
 /// (NUC-documents-are-fixed §4).
-/// Verifies: NUC-documents-are-fixed
+/// Verifies: NUC-documents-are-fixed, DEV-ports-and-adapters
 #[test]
 fn the_overview_names_every_module_with_a_role() {
     let overview = fs::read_to_string(crates_dir().join("../docs/ARCHITECTURE.md")).unwrap();

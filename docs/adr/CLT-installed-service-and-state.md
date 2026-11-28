@@ -81,7 +81,7 @@ second registration missing all of that. Self-update and a package manager must 
 same bytes. If `dpkg`, `rpm` or the MSI held the layout, every fleet update would leave the host in
 a state `dpkg -V` reports as modified, and the next `apt upgrade` would silently revert it. The
 releases that carry these packages are
-[OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)'s.
+[OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md)'s.
 
 One force bears on the name. The Baseline reserves `service.name` for the Agent *type* and
 recommends a reverse FQDN. This project does not enforce that recommendation
@@ -496,7 +496,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
       - `localhost` is a host name, which is never the loopback. Only the IP literals `127.0.0.1`
         and `::1` are, so the Client would refuse the value at startup.
     - The scheme selects the transport
-      ([SEC-tls13-two-planes-bounded-input §2](SEC-tls13-two-planes-bounded-input.md)). The
+      ([SEC-tls13-bounded-input-chosen-planes §2](SEC-tls13-bounded-input-chosen-planes.md)). The
       click-through install therefore runs WebSocket, as an unconfigured Client would.
     - Like every value an installer writes, the prefill passes the rule the Client applies at
       startup
@@ -549,7 +549,7 @@ and is delivered by `.deb`, `.rpm` and `.msi` packages that run its own `service
 - the `[tls]` files an enrolment reads as root;
 - `[logging] dir`, which only the service's own run uses;
 - the releases and the Server's image
-  ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)).
+  ([OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md)).
 
 ## Alternatives considered
 

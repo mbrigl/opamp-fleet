@@ -4,28 +4,15 @@
 - **Date:** 2026-11-21
 - **Deciders:** Markus Brigl
 - **Applies to:** `.github/workflows/release.yml` (the `version`, `build`, `sbom`, `image` and `publish` jobs, their permissions, the release files they attach and the release notes), `packaging/container/Containerfile`, the image `ghcr.io/mbrigl/opamp-fleet-server`, `.github/dependabot.yml`, `crates/fleet-tools/tests/release_workflow.rs`, the names of every release file, the fleet view's reading of an artifact's file name, and every document that tells an operator how to download, check or run a release file or the Server's image (`README.md`, `docs/manual/`, `CHANGELOG.md`)
-- **Supersedes:** [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)
 
 ## Context
 
-This ADR carries every clause of
-[OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md) and changes
-one of them, the documented probe of the Server's image (clause 17), so that it follows the planes
-an instance opens. A Server instance opens the Agent plane, the Operator plane or both
-([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)). The documented probe
-was a TCP connection to `4320`, the Agent plane's port. An instance that opens the Operator plane
-alone never listens on it, so an orchestrator would read it as dead however well it serves.
+A Server instance opens the Agent plane, the Operator plane or both
+([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)). An instance that opens
+the Operator plane alone never listens on `4320`, the Agent plane's port, so an orchestrator that
+probes `4320` would read it as dead however well it serves.
 [SRV-instance-opens-chosen-planes §3](SRV-instance-opens-chosen-planes.md) decides the probe of
-such an instance; this ADR states it for the image. It adds no clause.
-
-**Clause map.** Every clause keeps its number. On acceptance, a citation of
-OPS-releases-attestations-server-image §*n* moves to §*n* of this ADR.
-
-| Old clauses | Clauses here | Change |
-|---|---|---|
-| OPS-releases-attestations-server-image §1–§16 | 1–16 | none |
-| OPS-releases-attestations-server-image §17 | 17 | the documented probe is the Agent plane's port when the instance opens that plane, and the Operator plane's port otherwise |
-| OPS-releases-attestations-server-image §18–§20 | 18–20 | none |
+such an instance; this ADR states it for the image (clause 17).
 
 An operator needs something to install, and a fleet needs something to hand its Server. These are
 two questions:
@@ -74,7 +61,7 @@ The Server runs in a container:
 - It has no health endpoint.
 - Its two planes listen on `127.0.0.1:4320` and `127.0.0.1:4321` by default. Off the loopback both
   require TLS, and the Operator plane requires the operator's credential, configured as
-  `[rest.auth]` ([SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)).
+  `[rest.auth]` ([SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)).
 - The release workflow builds Linux binaries for `x86_64-unknown-linux-gnu` and
   `aarch64-unknown-linux-gnu` on GitHub-hosted runners. It uses the pinned toolchain
   (`rust-toolchain.toml`) and the committed lockfile, without a cache. A binary for a GNU target
@@ -507,6 +494,10 @@ None.
   run it. Rejected; clause 16 names none, and the operator gives one to a Server that keeps state on
   its disk.
 
+- **The documented probe is always a TCP connection to `4320`.** It held while every instance
+  opened both planes. An instance of the Operator plane alone fails it while it serves. Rejected
+  for the probe by plane (clause 17).
+
 ## Sources / Prior art
 
 -
@@ -677,7 +668,7 @@ None.
 - [`scripts/check-build-hardening.sh`](../../scripts/check-build-hardening.sh) check 3 fails on a
   `cargo install` in `release.yml` without an exact version. It covers the tool of clause 8. Its
   check 2 fails on a cache in `release.yml`.
-- A test that carries `Verifies: OPS-releases-attestations-server-image` holds clause 16:
+- A test that carries `Verifies: OPS-releases-image-probed-by-plane` holds clause 16:
   `a_data_dir_the_account_cannot_write_fails_startup_naming_it` in
   [`config.rs`](../../crates/fleet-server/src/config.rs). The test of the Containerfile above
   allows no `FLEET_SERVER__DATA_DIR`.

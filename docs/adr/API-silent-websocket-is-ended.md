@@ -10,7 +10,7 @@
 An Agent learns that its Server is gone when its connection closes.
 
 - A Server killed by its kernel resets its connections, and its Agents reconnect as
-  [SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md) says.
+  [SEC-tls13-bounded-input-chosen-planes §4](SEC-tls13-bounded-input-chosen-planes.md) says.
 - A Server whose host loses power, whose process is frozen, or which a partition cuts off sends
   nothing and closes nothing. The Agent's heartbeats go into its socket's send buffer. The kernel
   retransmits them until it gives up: at Linux's default `tcp_retries2` of 15, after about fifteen
@@ -32,7 +32,7 @@ Every conforming peer answers a WebSocket ping: RFC 6455 says an endpoint that r
 send a Pong. It needs nothing of OpAMP. So it holds against any Server the `opamp` crate talks to,
 with heartbeats or without. It also holds on a Gateway's pool connection, which carries other
 Agents' reports and has no heartbeat of its own. The Server's rate limit counts messages handed to
-its handler (SEC-tls13-two-planes-bounded-input §24), and its pace floor judges data frames (its
+its handler (SEC-tls13-bounded-input-chosen-planes §24), and its pace floor judges data frames (its
 clause 18). A ping is neither.
 
 The heartbeat interval is the operator's measure of how often an Agent is heard from, and G-20 is
@@ -84,7 +84,7 @@ silent once nothing has arrived on it for one heartbeat interval:
 
 4. **An ended connection is a lost one.**
    - The driver logs that nothing arrived, with the bound. It reconnects after the delay that
-     SEC-tls13-two-planes-bounded-input §4 draws over `[0, 30 s)`.
+     SEC-tls13-bounded-input-chosen-planes §4 draws over `[0, 30 s)`.
    - The Gateway's pool marks the connection gone. Its Agents are placed anew at their next report
      (CLT-modes-and-gateway §9).
 
@@ -96,7 +96,7 @@ silent once nothing has arrived on it for one heartbeat interval:
    - `ws::Silence` is public, so that the Gateway's pool derives the same bounds.
    - `ws::run_from` is public. It is `run` with every connection opened from a local address the
      caller names
-     ([SRV-instances-share-one-postgresql §20](SRV-instances-share-one-postgresql.md)).
+     ([SRV-instance-opens-chosen-planes §20](SRV-instance-opens-chosen-planes.md)).
    - Both are additions, not breaks under DEV-six-crates-tokio-axum §2.
    - `Connection::connect_websocket` keeps its signature. It fails once the bounds of clause 3 have
      passed.
@@ -131,8 +131,8 @@ silent once nothing has arrived on it for one heartbeat interval:
   from G-20 when the operator changes the interval. Following the heartbeat gives the same values
   at the defaults and keeps the failover inside G-20 at any interval.
 - **A key of its own in the Client's configuration.** A knob is added when an installation needs a
-  value other than the heartbeat's, not before, as SEC-tls13-two-planes-bounded-input §18 does for
-  its bounds.
+  value other than the heartbeat's, not before, as SEC-tls13-bounded-input-chosen-planes §18 does
+  for its bounds.
 - **TCP keepalive, or `TCP_USER_TIMEOUT`.** Neither notices a frozen process, whose kernel keeps
   acknowledging. Keepalive's interval needs `socket2`, a dependency added for nothing the ping does
   not do. The user timeout is Linux's alone. The connect path of `tokio-tungstenite` does not hand

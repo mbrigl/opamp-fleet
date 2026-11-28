@@ -108,9 +108,9 @@ carries a date once its tag exists.
   them longer fails that start, and a second start succeeds once the rollout is done. The build
   holds the Agents' writes while it lasts, under a second at 100 000 Agents.
 - **Each WebSocket reads into a 4 KiB buffer**
-  ([SEC-tls13-two-planes-bounded-input §3](docs/adr/SEC-tls13-two-planes-bounded-input.md)). The
-  Server's Agent-plane endpoint, the Client's upstream connection and the Gateway's pool held a read
-  buffer of 128 KiB for every WebSocket, `tungstenite`'s default, allocated when the connection
+  ([SEC-tls13-bounded-input-chosen-planes §3](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)).
+  The Server's Agent-plane endpoint, the Client's upstream connection and the Gateway's pool held a
+  read buffer of 128 KiB for every WebSocket, `tungstenite`'s default, allocated when the connection
   opened and kept while nothing arrived. They now hold 4 KiB, enough for an Agent's routine
   messages; a larger message still arrives whole, read 4 KiB at a time. The message size limit is
   unchanged. What this saves an instance's memory was not measured. **What to do:** nothing.
@@ -141,13 +141,13 @@ carries a date once its tag exists.
 ### Fixed
 
 - **A peer that sends no request is hung up on after 30 seconds**
-  ([SEC-tls13-two-planes-bounded-input §15](docs/adr/SEC-tls13-two-planes-bounded-input.md)). On
-  both planes of the Server, a Client's Gateway and a Supervisor Endpoint, a peer that completed the
-  TCP connection, or the TLS handshake, and then sent no request held its place under the connection
-  cap until it closed or the listener stopped; enough such peers filled the cap, and every new
-  connection was refused. The 30 seconds a peer has for its request headers now also bound the
-  time to its first request, counted from the connection, or from the end of the TLS handshake on
-  a TLS listener. **What to do:** nothing.
+  ([SEC-tls13-bounded-input-chosen-planes §15](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)).
+  On both planes of the Server, a Client's Gateway and a Supervisor Endpoint, a peer that completed
+  the TCP connection, or the TLS handshake, and then sent no request held its place under the
+  connection cap until it closed or the listener stopped; enough such peers filled the cap, and
+  every new connection was refused. The 30 seconds a peer has for its request headers now also bound
+  the time to its first request, counted from the connection, or from the end of the TLS handshake
+  on a TLS listener. **What to do:** nothing.
 - **`libz-sys` 1.1.33 (RUSTSEC-2026-0544).** The heap buffer overflow lies in a crate only the
   build script of `fleet-core` links, through `git2`, to stamp the version with git's provenance;
   no shipped binary contains it. `chrono` and `humantime`, flagged as unmaintained on the same day
@@ -183,7 +183,7 @@ carries a date once its tag exists.
   size, rejects an entry that ends short of it and checks the block's CRC where 0.24 skipped it, so
   a malformed `.7z` artifact is refused rather than unpacked short. **What to do:** nothing.
 - **An instance on PostgreSQL takes up the Agents a notice names in one read**
-  ([SRV-instances-share-one-postgresql §8 and §9](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §8 and §9](docs/adr/SRV-instance-opens-chosen-planes.md)).
   When another instance changes the records of Agents this instance holds, it
   read them one database round trip per Agent before it took them up; a rollout over many Agents
   cost as many round trips. It now reads them in one, then reads again under its lock only those
@@ -292,7 +292,7 @@ carries a date once its tag exists.
   menu.
 
 - **An Agent inherits the labels of a Client Agent that another instance binds or takes at once**
-  ([SRV-instances-share-one-postgresql §8 and §9](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §8 and §9](docs/adr/SRV-instance-opens-chosen-planes.md)).
   On PostgreSQL, an instance that placed an Agent before another instance bound
   the Client Agent of its Host, or before the Client Agent first arrived behind the same Gateway on
   another instance, held the Agent without the Client Agent's labels in its memory until the group
@@ -303,23 +303,23 @@ carries a date once its tag exists.
   everything again at each such arrival, as for any notice it does not know.
   **What to do:** nothing.
 - **A Host's bound of 256 Agents holds across instances**
-  ([SRV-instances-share-one-postgresql](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes](docs/adr/SRV-instance-opens-chosen-planes.md)).
   Two instances binding new Agents of one Host at once could pass it; the binding's own
   transaction now counts it.
   **What to do:** nothing.
 - **A restart requested through one instance while another delivers one is sent**
-  ([SRV-instances-share-one-postgresql](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes](docs/adr/SRV-instance-opens-chosen-planes.md)).
   A request that landed between the delivery's clear and its end stayed queued in the database
   until a later take-up; the carrying instance now holds it when its announcement arrives, and
   when it takes up every Agent after a missed notification.
   **What to do:** nothing.
 - **The blob and prune locks are let go when their holder ends**
-  ([SRV-instances-share-one-postgresql](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes](docs/adr/SRV-instance-opens-chosen-planes.md)).
   A dropped blob hold, or a prune round cut off by its bound, kept its lock until its database
   session ended.
   **What to do:** nothing.
 - **A deletion on a shared store is decided by the database, not by an instance's pin cache**
-  ([SRV-instances-share-one-postgresql](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes](docs/adr/SRV-instance-opens-chosen-planes.md)).
   A Configuration, a Deployment or a Package an instance's stale cache held pinned was refused
   although no assignment pinned it any more.
   **What to do:** nothing.
@@ -357,19 +357,18 @@ carries a date once its tag exists.
   side by side**
   ([SEC-admission-by-client-certificate](docs/adr/SEC-admission-by-client-certificate.md),
   [SEC-admission-by-client-certificate §8 and §17](docs/adr/SEC-admission-by-client-certificate.md)).
-  `[pkcs11]` names the token by `module`, `token_label` and `pin_file`, and
-  `[client_ca] key_label`, `[enrolment] bootstrap_ca_key_label` and `[audit] key_label` name its
-  keys in place of the key files; a key is named by a file or a label, never both. The token
-  signs and the Server builds every certificate, so no CA key is on the Server's disk, its
-  backups or its database dumps. Every signature with a key on the token holds its place in the
-  audit record first and writes `pkcs11.signed` with `key_label`, `issuer`, `serial` and
-  `use_case`; the token signs nothing the record cannot take. SoftHSM2 is the token the Server is
-  built and tested against: it serves the instances of one host, and a Server on it warns at
-  every start and writes `pkcs11.software_token`. Instances on several hosts need a network HSM,
-  which is a change of `module` alone. A PIN file others may read or its group may write, a
-  module that does not load, a token no slot carries, a PIN the token refuses, a label it does not
-  hold, and a label without `[pkcs11]` each stop the Server at startup, naming it. The image
-  carries no module.
+  `[pkcs11]` names the token by `module`, `token_label` and `pin_file`, and `[client_ca] key_label`,
+  `[enrolment] bootstrap_ca_key_label` and `[audit] key_label` name its keys in place of the key
+  files; a key is named by a file or a label, never both. The token signs and the Server builds
+  every certificate, so no CA key is on the Server's disk, its backups or its database dumps. Every
+  signature with a key on the token holds its place in the audit record first and writes
+  `pkcs11.signed` with `key_label`, `issuer`, `serial` and `use_case`; the token signs nothing the
+  record cannot take. SoftHSM2 is the token the Server is built and tested against: it serves the
+  instances of one host, and a Server on it warns at every start and writes `pkcs11.software_token`.
+  Instances on several hosts need a network HSM, which is a change of `module` alone. A PIN file
+  others may read or its group may write, a module that does not load, a token no slot carries, a
+  PIN the token refuses, a label it does not hold, and a label without `[pkcs11]` each stop the
+  Server at startup, naming it. The image carries no module.
   - **Side by side.** A key on the token is no file, so an instance whose CA keys are named by
     their labels need not be alone: instances that name the same labels on a token each of them
     reaches serve at once, where a CA key in a file still means a standby
@@ -477,7 +476,7 @@ carries a date once its tag exists.
 ### Added
 
 - **Several Server instances serve the fleet on when one of them is lost**
-  ([SRV-instances-share-one-postgresql](docs/adr/SRV-instances-share-one-postgresql.md),
+  ([SRV-instance-opens-chosen-planes](docs/adr/SRV-instance-opens-chosen-planes.md),
   [API-silent-websocket-is-ended](docs/adr/API-silent-websocket-is-ended.md),
   G-20 in [the specification](docs/SPECIFICATION.md)). Two or more instances on one PostgreSQL
   database and one bucket, with no CA key in a file, serve a fleet of up to about 100 000 Agents:
@@ -558,7 +557,7 @@ carries a date once its tag exists.
   name gets `400` now.
 
 - **Two consecutive releases serve one PostgreSQL database side by side**
-  ([SRV-instances-share-one-postgresql §16](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §16](docs/adr/SRV-instance-opens-chosen-planes.md)).
   The instances of 0.8.0 keep serving beside those of this release, so a rolling
   update may replace them one at a time. Migration 12 records the release of each lease; a lease
   of 0.8.0 counts as 0.8.0. An instance refuses its start, naming both releases and changing
@@ -570,14 +569,14 @@ carries a date once its tag exists.
 
 - **The `opamp` crate's WebSocket driver may connect from a named address, and logs the delay it
   drew after a lost connection**
-  ([SRV-instances-share-one-postgresql §20](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §20](docs/adr/SRV-instance-opens-chosen-planes.md)).
   `ws::run_from` and `ws::connect_from` take a local address; `ws::run` and
   `ws::connect` are unchanged and name none. The line *connection lost; reconnecting* carries
   `delay_ms`, the wait before the first attempt.
   **What to do:** nothing.
 
 - **A presence batch written late is logged**
-  ([SRV-instances-share-one-postgresql §5](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §5](docs/adr/SRV-instance-opens-chosen-planes.md)).
   On PostgreSQL an instance warns, with `late_ms`, when a batch is written later than
   `presence_interval_secs` after it was due.
   **What to do:** nothing; the warning says the database is not keeping up with the fleet.
@@ -587,16 +586,15 @@ carries a date once its tag exists.
 - **A rejected key stays refused beyond its window, and a key may be rejected before its request
   arrives**
   ([SEC-bootstrap-certificates-and-enrolment §10 and §16](docs/adr/SEC-bootstrap-certificates-and-enrolment.md)).
-  A rejection no longer ends with the window: the Server keeps the rejected
-  keys, in `enrolment.json` on files and in a table of their own on PostgreSQL, and a request for
-  one is answered as rejected and not listed in every later window, on every instance. An approval
-  never signs a rejected key. `POST /api/v1/enrolments/{id}/reject` of an `id` the queue does not
-  hold now answers `204` instead of `404`, with the window open or closed, and its request is
-  refused when it arrives; an `id` that is not 64 lowercase hexadecimal digits answers `400`. The
+  A rejection no longer ends with the window: the Server keeps the rejected keys, in
+  `enrolment.json` on files and in a table of their own on PostgreSQL, and a request for one is
+  answered as rejected and not listed in every later window, on every instance. An approval never
+  signs a rejected key. `POST /api/v1/enrolments/{id}/reject` of an `id` the queue does not hold now
+  answers `204` instead of `404`, with the window open or closed, and its request is refused when it
+  arrives; an `id` that is not 64 lowercase hexadecimal digits answers `400`. The
   `enrolment.rejected` audit line carries `queued`, false for such a rejection. No route lifts a
   rejection. The schema gains migration 15, which a Server of 0.8.0 serves on; such a Server reads
-  no rejected key.
-  **What to do:** a host rejected by mistake enrols with a new key: delete
+  no rejected key. **What to do:** a host rejected by mistake enrols with a new key: delete
   `client-key.pending.pem` and `client-csr.pending.pem` from its state directory. A script that
   took `404` from a rejection to mean that the request is gone now gets `204`. While instances of
   0.8.0 still run, approve through instances of this release: one of 0.8.0 reads no rejected key,
@@ -621,7 +619,7 @@ carries a date once its tag exists.
   Agent labelled. `MALLOC_ARENA_MAX` sets another count.
   **What to do:** nothing.
 - **A connecting fleet's new Agents no longer commit one at a time across the database**
-  ([SRV-instances-share-one-postgresql §9 and §10](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §9 and §10](docs/adr/SRV-instance-opens-chosen-planes.md)).
   On PostgreSQL each new Agent's binding to its Host announced itself in its
   commit, and PostgreSQL lets such commits through one at a time, each waiting for the flush of the
   one ahead: a fleet of 10 000 connected at about 120 to 210 new Agents a second, and other calls
@@ -634,7 +632,7 @@ carries a date once its tag exists.
   **What to do:** nothing.
 
 - **A Gateway's mark finds a Host another instance wrote**
-  ([SRV-instances-share-one-postgresql §19](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §19](docs/adr/SRV-instance-opens-chosen-planes.md)).
   On PostgreSQL `PUT /api/v1/hosts/{host}/gateway` decided whether the host is known
   from the instance's copy of the Hosts and the register, so a Host whose first report reached
   another instance was answered `404` until this instance had heard of it, and a Host the database
@@ -654,18 +652,19 @@ carries a date once its tag exists.
   **What to do:** nothing.
 
 - **A Client the Server answered `Unavailable` on a WebSocket comes back after the wait it was
-  told** ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md), its
+  told**
+  ([SEC-tls13-bounded-input-chosen-planes](docs/adr/SEC-tls13-bounded-input-chosen-planes.md), its
   *Context*: the Client closes the connection, waits, and reconnects). It closed the connection,
   waited the wait the Server named and then drew the delay of a lost connection, up to 30 s more, on
   top: an Agent told 30 s stayed away 30 to 60 s. It now waits the named wait, or the next backoff
   step when that is longer, as after a refused upgrade, and nothing on top. `Unavailable`s in a row
   grow along the backoff, up to a minute, until a connection handles a reply, so a named wait of
   zero is no reconnect a second. Agents told `Unavailable` at the same moment now come back at the
-  same moment, no longer spread over 30 s. Plain HTTP waited the named wait already.
-  **What to do:** nothing.
+  same moment, no longer spread over 30 s. Plain HTTP waited the named wait already. **What to do:**
+  nothing.
 
 - **An Agent that comes back on a new connection of its host keeps its identity**
-  ([SRV-instances-share-one-postgresql §8](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §8](docs/adr/SRV-instance-opens-chosen-planes.md)).
   A peer whose reports waited for the database longer than one heartbeat interval
   ended its connection for silence and came back while the Server still handled the old one's
   reports; its Agents were taken for duplicates of themselves and re-keyed, each into a record of
@@ -711,7 +710,7 @@ carries a date once its tag exists.
 
 - **An instance on PostgreSQL takes up its Agents without waiting one database round trip at a
   time**
-  ([SRV-instances-share-one-postgresql §8](docs/adr/SRV-instances-share-one-postgresql.md),
+  ([SRV-instance-opens-chosen-planes §8](docs/adr/SRV-instance-opens-chosen-planes.md),
   [SRV-state-stores-contract-pair §22](docs/adr/SRV-state-stores-contract-pair.md)).
   Each Agent's report held one lock of the whole instance across its calls to the
   database, on a worker of the runtime, so an instance served one round trip at a time: TLS
@@ -784,7 +783,7 @@ carries a date once its tag exists.
   neither names, or one named `unknown`, `GET /api/v1/certificates` answers while the
   certificate is valid.
 - **A presence row ends with its connection**
-  ([SRV-instances-share-one-postgresql §8](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §8](docs/adr/SRV-instance-opens-chosen-planes.md)).
   On PostgreSQL an Agent's row could keep naming an instance as connected after the
   connection ended, until the silence bound, so the fleet list and the holder named an instance
   that no longer carried the Agent. That happened when a connect's take was written but its
@@ -796,7 +795,7 @@ carries a date once its tag exists.
   and no instance took it since.
   **What to do:** nothing.
 - **A shutdown flush keeps what a newer carrier wrote**
-  ([SRV-instances-share-one-postgresql §8](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §8](docs/adr/SRV-instance-opens-chosen-planes.md)).
   On PostgreSQL an instance stopping could write its older record of an Agent over the
   report of the instance that carried the Agent next, when that instance's take was not written:
   the Operator plane then showed the older sequence number, description and health. A shutdown
@@ -808,7 +807,7 @@ carries a date once its tag exists.
   Agent's next report.
   **What to do:** nothing.
 - **A Deployment keeps no deleted member**
-  ([SRV-instances-share-one-postgresql §19](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §19](docs/adr/SRV-instance-opens-chosen-planes.md)).
   On PostgreSQL a Deployment could keep naming a Configuration or a Package that was
   deleted: when an instance that had not yet heard of the deletion added it, when an add met the
   deletion, or when a crash cut the deletion off before it took the member out of the
@@ -837,7 +836,7 @@ carries a date once its tag exists.
   seconds while a sweep's call to the bucket was in flight, or a failover to an asynchronous
   replica the marks had not reached can leave one.
 - **A suspended instance serves nothing on a lease that lapsed meanwhile**
-  ([SRV-instances-share-one-postgresql §3](docs/adr/SRV-instances-share-one-postgresql.md),
+  ([SRV-instance-opens-chosen-planes §3](docs/adr/SRV-instance-opens-chosen-planes.md),
   [SRV-state-stores-contract-pair §14](docs/adr/SRV-state-stores-contract-pair.md)).
   On PostgreSQL an instance measured its lease on a clock that does not count the time
   its host was suspended. After a suspend it served on until its next renewal, up to
@@ -860,7 +859,7 @@ carries a date once its tag exists.
   read. Each of these reads is now one statement, which reads one committed state.
   **What to do:** nothing.
 - **An act whose answer is lost is taken up once it commits**
-  ([SRV-instances-share-one-postgresql §8 and §10](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §8 and §10](docs/adr/SRV-instance-opens-chosen-planes.md)).
   On PostgreSQL an act whose commit landed while its answer was lost, on a
   dropped connection or the bound of a call, was taken as failed, and the instance that made it
   passed its own notification over. Its memory kept what was there before until its listening
@@ -882,7 +881,7 @@ carries a date once its tag exists.
   instance that re-keyed it has stopped and its lease lapsed, and is forgotten by the silence
   bound, or at once through `DELETE /api/v1/agents/{uid}`.
 - **A queued restart survives a failed send**
-  ([SRV-instances-share-one-postgresql §8](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes §8](docs/adr/SRV-instance-opens-chosen-planes.md)).
   The Server cleared an Agent's queued restart before it sent the command, so a send
   that failed lost a restart the Operator plane had accepted, on files and on PostgreSQL alike. A
   command whose WebSocket frame the connection does not take, or whose plain-HTTP answer is past
@@ -930,7 +929,7 @@ carries a date once its tag exists.
 ### Added
 
 - **Several Server instances serve one fleet on one PostgreSQL database and one bucket**
-  ([SRV-instances-share-one-postgresql](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes](docs/adr/SRV-instance-opens-chosen-planes.md)).
   Every Server on PostgreSQL is an instance:
   - **The lease.** Before it opens either listener, an instance takes a lease in the database
     under an instance id of its own. It renews the lease every `[database] lease_renew_secs`
@@ -1029,7 +1028,7 @@ carries a date once its tag exists.
   refused. A rollback to 0.7.1 after the upgrade needs the database restored from that backup.
 - **With PostgreSQL and S3, a `data_dir` fails startup, and the image names no data directory**
   ([SRV-state-stores-contract-pair](docs/adr/SRV-state-stores-contract-pair.md),
-  [OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)).
+  [OPS-releases-image-probed-by-plane](docs/adr/OPS-releases-image-probed-by-plane.md)).
   - A Server on PostgreSQL and S3 keeps nothing on its disk. A `data_dir` named in `server.toml` or
     as `FLEET_SERVER__DATA_DIR` stops the start, naming the key.
   - `server migrate-to-postgres` with S3 takes no `--data-dir` and refuses one. It uploads the
@@ -1090,7 +1089,7 @@ carries a date once its tag exists.
 
 - **With PostgreSQL, a Configuration's revisions, a Package's entries and a Deployment's members are
   written one row at a time**
-  ([SRV-instances-share-one-postgresql](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes](docs/adr/SRV-instance-opens-chosen-planes.md)).
   Every act writes the rows it names and decides from what is stored, so two Server instances on
   one database that edit one Configuration, Package or Deployment at once keep both changes, and a
   revision another instance's rollout pins is never collected. At its first start the Server adds
@@ -1117,7 +1116,7 @@ carries a date once its tag exists.
 
 - **With PostgreSQL the newest connection takes an Agent, and an Agent two instances take in turn
   is logged as a likely duplicate**
-  ([SRV-instances-share-one-postgresql](docs/adr/SRV-instances-share-one-postgresql.md)).
+  ([SRV-instance-opens-chosen-planes](docs/adr/SRV-instance-opens-chosen-planes.md)).
   The instance an Agent connects to names itself as the Agent's holder at once, and the instance
   that held it before stops carrying it; a presence batch of that instance written afterwards no
   longer names it again. Whether a disconnect is written depends no more on the instances' clocks
@@ -1174,7 +1173,7 @@ carries a date once its tag exists.
   alone, its lock's.
 - **A stop spreads the closing of the sessions over `drain_secs`, and the Agent plane takes at most
   `max_new_connections_per_sec` new connections**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)).
+  ([SEC-tls13-bounded-input-chosen-planes](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)).
   - An orderly stop closes both listeners at once. It closes each WebSocket session at an instant
     drawn over `drain_secs` (default 20, from 0 to 300) and cuts what is still open 2 seconds
     later. This replaces the fixed ten-second drain.
@@ -1530,7 +1529,7 @@ carries a date once its tag exists.
 ### Added
 
 - **The Server ships as a container image**
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)).
+  ([OPS-releases-image-probed-by-plane](docs/adr/OPS-releases-image-probed-by-plane.md)).
   Every release pushes `ghcr.io/mbrigl/opamp-fleet-server:<version>` for `linux/amd64` and
   `linux/arm64`: the Server binary the release built and checked for its version, on
   `gcr.io/distroless/cc-debian13:nonroot` pinned by digest, with no shell, running as UID and GID
@@ -1750,7 +1749,7 @@ carries a date once its tag exists.
   release assets are unchanged by this.
 
 - **Every release asset is attested, and every shipped program has an SBOM**
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)).
+  ([OPS-releases-image-probed-by-plane](docs/adr/OPS-releases-image-probed-by-plane.md)).
   Until now `SHA256SUMS` proved only that a download matched the file beside it on the same
   release page. Every asset of a release, `SHA256SUMS` included, is now a subject of one SLSA
   build-provenance attestation, signed through Sigstore by the release workflow and recorded in
@@ -1876,7 +1875,7 @@ carries a date once its tag exists.
   so nothing is loaded from elsewhere and the page's policy is unchanged. Nothing to configure.
 
 - **The UI can present a certificate of its own**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)). An
+  ([SEC-tls13-bounded-input-chosen-planes](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)). An
   optional `[rest.tls]` with `cert_file` and `key_file` gives the Operator plane — the UI, the REST
   API and its docs — a certificate of its own, for example from your organization's PKI, so browsers
   trust it without importing the fleet's server CA. The Agent plane keeps `[tls]`'s, and nothing
@@ -2171,9 +2170,9 @@ carries a date once its tag exists.
 
 - **A revoked bootstrap certificate can be deleted from the list**
   ([SEC-bootstrap-certificates-and-enrolment §7](docs/adr/SEC-bootstrap-certificates-and-enrolment.md)):
-  **Delete** in its row of the Enrolments tab, or
-  `DELETE /api/v1/bootstrap-certificates/{serial}`. The entry and any `bootstrap.p12` go; the
-  revocation stays, so the certificate is still refused. A valid certificate is not deleted.
+  **Delete** in its row of the Enrolments tab, or `DELETE /api/v1/bootstrap-certificates/{serial}`.
+  The entry and any `bootstrap.p12` go; the revocation stays, so the certificate is still refused. A
+  valid certificate is not deleted.
 - **`opamp-fleetctl pki p12-extract <bootstrap.p12> --out <dir>`**
   ([OPS-operator-program-fleetctl](docs/adr/OPS-operator-program-fleetctl.md)) writes
   the file's certificate as `bootstrap.pem` and its key, unencrypted and owner-only, as
@@ -2375,12 +2374,12 @@ carries a date once its tag exists.
   development set made before is replaced by deleting `.dev-pki/` and running the script again.
 
 - **Admitted Agents are rate-limited per host**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)). Every
-  OpAMP message and every package download takes a token from the bucket of the host the certificate
-  names — for a host marked as a Gateway, from the bucket of the Agent the message names and from
-  the Gateway's aggregate. A message past the limit is answered `Unavailable` with `retry_info` of
-  30 seconds and is not processed; a download past it is answered `429` with `Retry-After: 30`.
-  Each refusal is recorded as `agent_rate.throttled`. `[agent_rate_limit]` sets
+  ([SEC-tls13-bounded-input-chosen-planes](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)).
+  Every OpAMP message and every package download takes a token from the bucket of the host the
+  certificate names — for a host marked as a Gateway, from the bucket of the Agent the message names
+  and from the Gateway's aggregate. A message past the limit is answered `Unavailable` with
+  `retry_info` of 30 seconds and is not processed; a download past it is answered `429` with
+  `Retry-After: 30`. Each refusal is recorded as `agent_rate.throttled`. `[agent_rate_limit]` sets
   `messages_per_sec` (10), `burst` (300), `gateway_messages_per_sec` (500) and `gateway_burst`
   (10 000); `0` is refused. **What to do:** nothing at the defaults. A fleet whose offered
   `heartbeat_interval_secs` is short raises `messages_per_sec`; the Server warns at startup when
@@ -2428,8 +2427,8 @@ carries a date once its tag exists.
   waited out, each wait at most 60 seconds and all waits of one download at most 30 minutes, before
   the download is reported failed. **What to do:** nothing.
 - **Every `Unavailable` names the Agent it answers**
-  ([SEC-tls13-two-planes-bounded-input §27](docs/adr/SEC-tls13-two-planes-bounded-input.md)): the
-  Agent-record ceiling, a certificate request held back for its audit record, the full enrolment
+  ([SEC-tls13-bounded-input-chosen-planes §27](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)):
+  the Agent-record ceiling, a certificate request held back for its audit record, the full enrolment
   queue and the closed enrolment window now carry the message's `instance_uid`, so the Client and
   a Gateway route the reply to its Agent and the Agent waits as told.
 - **A refused request for the Gateways' revocation list is recorded**
@@ -2438,15 +2437,13 @@ carries a date once its tag exists.
   whose host is not marked as a Gateway leaves a `gateway_list.refused` line naming its host.
 - **`Unavailable` tells the Agent when to retry**
   ([SEC-bootstrap-certificates-and-enrolment §9](docs/adr/SEC-bootstrap-certificates-and-enrolment.md),
-  [SEC-append-only-audit-record §5](docs/adr/SEC-append-only-audit-record.md)):
-  a full
+  [SEC-append-only-audit-record §5](docs/adr/SEC-append-only-audit-record.md)): a full
   enrolment queue, the Agent-record ceiling and a certificate request held back while the audit
   record cannot be written are answered with `retry_info` of 30 seconds; the last was answered
   `BadRequest`, which told the Agent to give up.
 - **A certificate names its host, and a host speaks only for its own Agents**
   ([SEC-bootstrap-certificates-and-enrolment §11](docs/adr/SEC-bootstrap-certificates-and-enrolment.md),
-  [SEC-admission-by-client-certificate §12](docs/adr/SEC-admission-by-client-certificate.md),
-  and
+  [SEC-admission-by-client-certificate §12](docs/adr/SEC-admission-by-client-certificate.md), and
   [CLT-modes-and-gateway §18](docs/adr/CLT-modes-and-gateway.md)). Every certificate the Server
   signs carries `urn:opamp-fleet:host:<id>`; a connection
   reporting for an Agent another host reported first is re-keyed, and a host holds at most three
@@ -2581,11 +2578,10 @@ carries a date once its tag exists.
   longer than about 20 days; then set `[client_ca] validity_days` higher.
 - **A Client moves to an offered endpoint only when its own `[tls] ca_file` vouches for it**
   ([SEC-connection-settings-never-plaintext §5](docs/adr/SEC-connection-settings-never-plaintext.md)).
-  **What to
-  do:** set `ca_file` on every Client before offering a new endpoint.
+  **What to do:** set `ca_file` on every Client before offering a new endpoint.
 
 - **Every connection off the loopback is TLS 1.3, and plaintext elsewhere is refused at startup**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)).
+  ([SEC-tls13-bounded-input-chosen-planes](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)).
   `ws://` and `http://` are accepted only to `127.0.0.1` or `::1` — not to `localhost`, not to a
   private address. That covers the Client's `endpoint`, a `[connection_offer] endpoint`
   ([SEC-connection-settings-never-plaintext](docs/adr/SEC-connection-settings-never-plaintext.md)),
@@ -2706,7 +2702,7 @@ carries a date once its tag exists.
   replaced exporters are now detached at once and flushed on a thread of their own; only stopping
   the Client waits for them. **What to do:** nothing.
 - **The Server shuts down gracefully on `SIGTERM`**
-  ([SEC-tls13-two-planes-bounded-input §17](docs/adr/SEC-tls13-two-planes-bounded-input.md),
+  ([SEC-tls13-bounded-input-chosen-planes §17](docs/adr/SEC-tls13-bounded-input-chosen-planes.md),
   [SRV-fleet-record-agents-hosts §4](docs/adr/SRV-fleet-record-agents-hosts.md)). It took
   only `SIGINT` (Ctrl-C) as a shutdown,
   so a service manager's stop, which sends `SIGTERM`, ended the process without draining the
@@ -2715,7 +2711,7 @@ carries a date once its tag exists.
   command prints as its result. **What to do:** a log collector that read the Server's stdout reads
   its stderr instead; under systemd both reach the journal unchanged.
 - **A Server that shuts down closes its WebSocket sessions before it saves the fleet**
-  ([SEC-tls13-two-planes-bounded-input §17](docs/adr/SEC-tls13-two-planes-bounded-input.md),
+  ([SEC-tls13-bounded-input-chosen-planes §17](docs/adr/SEC-tls13-bounded-input-chosen-planes.md),
   [SRV-fleet-record-agents-hosts §4](docs/adr/SRV-fleet-record-agents-hosts.md)). The
   shutdown drain counted
   HTTP connections only, so an Agent's WebSocket session kept being served after the drain and
@@ -2725,18 +2721,17 @@ carries a date once its tag exists.
   endpoint closes its sessions the same way. **What to do:** nothing; Agents reconnect as before.
 - **A re-keyed Agent takes its new identity, instead of leaving an empty record every heartbeat**
   ([SEC-bootstrap-certificates-and-enrolment §11](docs/adr/SEC-bootstrap-certificates-and-enrolment.md)).
-  When the Server
-  gave a reporter a new `instance_uid` — an identity bound to another host's certificate, a
-  duplicate on a second connection, or one the Agent asked for — it addressed the reply to the new
-  identity rather than to the one the Agent had sent. The Client routes replies by that field, so
-  it dropped the reply, never adopted the new identity, and reported under the old one again; each
-  report was re-keyed once more. After a certificate was re-issued to a new host, this left a
-  record with no type and no platform every heartbeat. The reply now names the identity the Agent
-  sent. **What to do:** forget the empty records such a host left behind; its Agent is re-keyed
-  once more and keeps the new identity.
+  When the Server gave a reporter a new `instance_uid` — an identity bound to another host's
+  certificate, a duplicate on a second connection, or one the Agent asked for — it addressed the
+  reply to the new identity rather than to the one the Agent had sent. The Client routes replies by
+  that field, so it dropped the reply, never adopted the new identity, and reported under the old
+  one again; each report was re-keyed once more. After a certificate was re-issued to a new host,
+  this left a record with no type and no platform every heartbeat. The reply now names the identity
+  the Agent sent. **What to do:** forget the empty records such a host left behind; its Agent is
+  re-keyed once more and keeps the new identity.
 
 - **A request body or a WebSocket message that stalls is cut off**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)).
+  ([SEC-tls13-bounded-input-chosen-planes](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)).
   Once its headers had arrived, a peer could hold any connection of the Server, a Gateway or a
   Supervisor Endpoint by sending its body, or a WebSocket message, a byte at a time or not at all.
   Every body and message that has begun must now deliver 64 KiB within each minute: a body that
@@ -2966,7 +2961,7 @@ carries a date once its tag exists.
 - **`opamp-package-fetch` can fetch the Client itself** — `--agent supervisor` reads this project's
   own releases, verifies each `.tar.gz` against the `SHA256SUMS` the release publishes, and uploads
   the five platforms into one Set named and typed `supervisor`
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md) is
+  ([OPS-releases-image-probed-by-plane](docs/adr/OPS-releases-image-probed-by-plane.md) is
   what made this possible: the Client's release is now an ordinary fleet package). It replaces the
   download, checksum and `curl` loop from the release notes, and it is the same tool and the same
   questions as for every other agent — with one difference at the end, since nothing supervises a
@@ -3056,7 +3051,7 @@ carries a date once its tag exists.
   name of yours first.
 
 - **Release artifacts are `.tar.gz` and are named `supervisor_…`**
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)).
+  ([OPS-releases-image-probed-by-plane](docs/adr/OPS-releases-image-probed-by-plane.md)).
   A release published `opamp-fleet-client_<version>_<os>_<arch>.7z`; it now publishes
   `supervisor_<version>_<os>_<arch>.tar.gz`, and the `.deb`, `.rpm` and `.msi` beside it take the
   same name. `.tar.gz` is what every other agent's package already ships as — the only container
@@ -3198,9 +3193,9 @@ carries a date once its tag exists.
   nothing; files already on disk are untouched, and the fix only affects newly written ones. If you
   hit this, move the uncommented key above the first `[section]`.
 - **Both of the Server's listeners now hang up on a connection that never finishes its request**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md)). A peer
-  gets 30 seconds for its request line and headers and 10 seconds for the TLS handshake; until now
-  it got forever, because hyper's own 30-second default is silently discarded while no timer is
+  ([SEC-tls13-bounded-input-chosen-planes](docs/adr/SEC-tls13-bounded-input-chosen-planes.md)). A
+  peer gets 30 seconds for its request line and headers and 10 seconds for the TLS handshake; until
+  now it got forever, because hyper's own 30-second default is silently discarded while no timer is
   installed and neither axum nor axum-server installs one. The bound is on connection *setup* only:
   an established WebSocket session, a package download, and a package upload are all unaffected,
   whatever they take.
@@ -3465,10 +3460,10 @@ carries a date once its tag exists.
   `/api/v1/…`, the OpenAPI document, `/api/v1/docs`, and the UI at `/`. A request without a matching
   credential is answered `401` with a `WWW-Authenticate: Basic` challenge, which is what makes a
   browser ask for the password, so the bundled UI needs no login page and no session. Absent, the
-  plane stays open exactly as before — the loopback default of SEC-tls13-two-planes-bounded-input is
-  what protects it then. **What to do:** nothing, unless you publish that plane. If you do, add the
-  section — and pair it with `[tls]` or a TLS-terminating proxy, since Basic sends the password on
-  every request; the Server warns at startup if you have not. Existing tooling needs no new flag:
+  plane stays open exactly as before — the loopback default of SEC-tls13-bounded-input-chosen-planes
+  is what protects it then. **What to do:** nothing, unless you publish that plane. If you do, add
+  the section — and pair it with `[tls]` or a TLS-terminating proxy, since Basic sends the password
+  on every request; the Server warns at startup if you have not. Existing tooling needs no new flag:
   the credential rides the URL (`curl -u user:pass …`, `--server http://user:pass@host:4321`). Two
   limits, stated plainly: everyone listed can do everything (authentication, not authorization), and
   passwords sit in `server.toml` verbatim, as `[auth]`'s already do. The Agent plane is untouched —
@@ -3477,7 +3472,7 @@ carries a date once its tag exists.
 ### Changed
 
 - **The REST API and the UI moved to their own port, on loopback**
-  ([SEC-tls13-two-planes-bounded-input](docs/adr/SEC-tls13-two-planes-bounded-input.md),
+  ([SEC-tls13-bounded-input-chosen-planes](docs/adr/SEC-tls13-bounded-input-chosen-planes.md),
   superseding the single-listener decision of
   [DEV-six-crates-tokio-axum](docs/adr/DEV-six-crates-tokio-axum.md)). The Server now serves two
   planes, split by audience. The **Agent plane** keeps `listen` (`0.0.0.0:4320`): the OpAMP endpoint
@@ -4453,7 +4448,7 @@ carries a date once its tag exists.
   `opamp-fleet-client-<version>-<os>-<arch>.7z` for Linux and macOS on `x86_64` and `aarch64`, and
   Windows
   on `x86_64`, together with `SHA256SUMS`
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)).
+  ([OPS-releases-image-probed-by-plane](docs/adr/OPS-releases-image-probed-by-plane.md)).
   Until now there was nothing to install but a build of your own.
 
   **The version is `[workspace.package] version` in `Cargo.toml`**, and the pipeline creates the
@@ -4800,9 +4795,9 @@ carries a date once its tag exists.
   ([PKG-signed-packages-and-delivery](docs/adr/PKG-signed-packages-and-delivery.md)), and the
   separator between the four
   fields, which used to be `-`
-  ([OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md)) —
+  ([OPS-releases-image-probed-by-plane](docs/adr/OPS-releases-image-probed-by-plane.md)) —
   both as
-  [OPS-releases-attestations-server-image](docs/adr/OPS-releases-attestations-server-image.md) names
+  [OPS-releases-image-probed-by-plane](docs/adr/OPS-releases-image-probed-by-plane.md) names
   them now.
 
   **Anything scripted against the old names breaks**, including a glob like `*-linux-amd64.7z`;

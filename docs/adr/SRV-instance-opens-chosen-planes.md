@@ -3,36 +3,15 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-21
 - **Deciders:** Markus Brigl
-- **Applies to:** the in-memory fleet and its push in `crates/fleet-server/src/fleet.rs`, what one instance holds of it in `crates/fleet-server/src/fleet/held.rs`, the sessions and their guard in `crates/fleet-server/src/transport.rs`, the ports, the PostgreSQL adapters and the change signals of the enrolment window and its queue in `crates/fleet-server/src/enrolment.rs` and of the certificate register, the revocation list and the Hosts in `crates/fleet-server/src/revocation.rs`, the per-instance tables of `crates/fleet-server/src/agent_rate.rs` and `crates/fleet-server/src/throttle.rs`, the package floors in `crates/fleet-server/src/floors.rs` and `crates/fleet-server/src/postgres/floors.rs`, the PostgreSQL adapters of Configurations, Deployments and Packages in `crates/fleet-server/src/postgres/`, the PostgreSQL adapters and their schema, the presence batches in `crates/fleet-server/src/instance.rs`, the WebSocket driver in `crates/opamp/src/client/ws.rs`, the audit port in `crates/fleet-server/src/audit.rs` and its PostgreSQL adapter where an instance closes the chain of a lapsed lease, the `[database]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, `docs/ARCHITECTURE.md`, the operator manual's pages on replication, load balancing and rolling updates, the `planes` key of `server.toml` and its parsing and startup checks in `crates/fleet-server/src/config.rs`, the binding, serving, closing and draining of the planes in `crates/fleet-server/src/instance.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the use-case modules the composition root builds, the lease record in `crates/fleet-server/src/postgres/lease.rs` and its schema, the startup log, `scripts/check-g20.sh` and `crates/fleet-server/tests/g20.rs`, and every document that tells an operator how to run several instances or how to probe one
-- **Supersedes:** [SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)
+- **Applies to:** the in-memory fleet and its push in `crates/fleet-server/src/fleet.rs`, what one instance holds of it in `crates/fleet-server/src/fleet/held.rs`, the sessions in `crates/fleet-server/src/transport.rs` and their guard in `crates/fleet-server/src/agent_cases.rs`, the ports, the PostgreSQL adapters and the change signals of the enrolment window and its queue in `crates/fleet-server/src/enrolment.rs` and of the certificate register, the revocation list and the Hosts in `crates/fleet-server/src/revocation.rs`, the per-instance tables of `crates/fleet-server/src/agent_rate.rs` and `crates/fleet-server/src/throttle.rs`, the package floors in `crates/fleet-server/src/floors.rs` and `crates/fleet-server/src/postgres/floors.rs`, the PostgreSQL adapters of Configurations, Deployments and Packages in `crates/fleet-server/src/postgres/`, the PostgreSQL adapters and their schema, the presence batches in `crates/fleet-server/src/instance.rs`, the WebSocket driver in `crates/opamp/src/client/ws.rs`, the audit port in `crates/fleet-server/src/audit.rs` and its PostgreSQL adapter where an instance closes the chain of a lapsed lease, the `[database]` section of `server.toml` and its parsing in `crates/fleet-server/src/config.rs`, `config/server.toml`, `docs/ARCHITECTURE.md`, the operator manual's pages on replication, load balancing and rolling updates, the `planes` key of `server.toml` and its parsing and startup checks in `crates/fleet-server/src/config.rs`, the binding, serving, closing and draining of the planes in `crates/fleet-server/src/instance.rs`, `crates/fleet-server/src/listen.rs` and `main.rs`, the use-case modules the composition root builds, the lease record in `crates/fleet-server/src/postgres/lease.rs` and its schema, the startup log, `scripts/check-g20.sh` and `crates/fleet-server/tests/g20.rs`, and every document that tells an operator how to run several instances or how to probe one
 
 ## Context
 
-This ADR carries every clause of
-[SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md) and changes two of
-them, so that each instance opens the Agent plane, the Operator plane or both: the lease taken
-before the listeners open (clause 1), and the lease's gate, close, probe and drain (clause 3), now
-concern the listeners and planes the instance opens. It adds five clauses: the `planes` key, both
-planes on an instance that must be alone, the use cases an instance builds, one configuration
-checked whole on every instance, and the warning while a plane goes unserved. Two successors
-change with it, each proposed with this ADR:
-
-- [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) has its
-  clauses 7 and 14 to 17 follow the planes an instance opens;
-- [OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md) states the
-  documented probe of the Server's image by plane (its clause 17).
-
-**Clause map.** Every clause of SRV-instances-share-one-postgresql keeps its number, and the new
-ones follow as 22 to 26. On acceptance, a citation of SRV-instances-share-one-postgresql §*n* moves
-to §*n* of this ADR.
-
-| Old clauses | Clauses here | Change |
-|---|---|---|
-| SRV-instances-share-one-postgresql §1 | 1 | the lease is taken before any listener of the planes the instance opens, and those are the listeners it keeps open |
-| SRV-instances-share-one-postgresql §2 | 2 | none |
-| SRV-instances-share-one-postgresql §3 | 3 | the `503` before each request, the close on a lease it cannot renew and the drain concern the listeners and planes the instance opens; the probe is the port of a plane it opens, citing OPS-releases-image-probed-by-plane §17, and nothing is sent to an instance without a lease |
-| SRV-instances-share-one-postgresql §4–§21 | 4–21 | none |
-| none | 22–26 | new: the `planes` key and when it may be set, both planes on an instance that must be alone, the use cases of the planes an instance opens, one configuration checked whole on every instance, the warning while a plane goes unserved |
+Several Server instances serve one fleet from one PostgreSQL database, and each opens the Agent
+plane, the Operator plane or both. Two ADRs follow the planes an instance opens:
+[SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) in its clauses
+7 and 14 to 17, and [OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md)
+in the documented probe of the Server's image (its clause 17).
 
 A Server process holds its fleet in memory (`AppState` in `crates/fleet-server/src/fleet.rs`). On
 the filesystem store that is the whole fleet, loaded at startup. On PostgreSQL it is the Agents
@@ -50,7 +29,7 @@ On the filesystem, `connected` is what one process knows about its own connectio
 persisted. On PostgreSQL it is persisted with the id of the instance that holds the connection
 ([SRV-fleet-record-agents-hosts §3 and §6](SRV-fleet-record-agents-hosts.md)). The rate limits and
 the admission throttle are tables in memory
-([SEC-tls13-two-planes-bounded-input §28](SEC-tls13-two-planes-bounded-input.md),
+([SEC-tls13-bounded-input-chosen-planes §28](SEC-tls13-bounded-input-chosen-planes.md),
 SEC-admission-by-client-certificate §19). Duplicate detection tells two connections of one
 `instance_uid` apart by a connection id that only this process hands out.
 
@@ -80,10 +59,8 @@ change nothing else.
 A reader would expect two things this ADR decides against: a routing table that says which instance
 carries which Agent, so an event goes only there; and rate limits shared across instances.
 
-On PostgreSQL several Server instances serve one fleet, and under
-[SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md), which this ADR
-supersedes, every instance serves both planes: the Agent plane on `4320` and the Operator plane on
-`4321`
+On PostgreSQL several Server instances serve one fleet. An instance that opens both planes serves
+the Agent plane on `4320` and the Operator plane on `4321`
 ([SEC-tls13-bounded-input-chosen-planes §7](SEC-tls13-bounded-input-chosen-planes.md)). The two
 planes share an instance's CPU, memory and database pool (`[database] pool_size`); only their
 connection caps are apart
@@ -105,8 +82,8 @@ sessions on another by a notification (clause 9) or by the re-read after a misse
 and the Operator plane reads the Agents from the database (clause 13). An instance that opens one
 plane alone therefore needs no new channel between instances. What it needs is code in which each
 plane reaches state through its own module, so that an instance can leave the other module
-unbuilt; [SRV-two-use-case-layers](SRV-two-use-case-layers.md), proposed, decides that split. This
-decision follows it and is implemented only after it.
+unbuilt; [SRV-two-use-case-layers](SRV-two-use-case-layers.md) decides that split, and this
+decision builds on it.
 
 A certificate is signed where its request is decided. A renewal's host certificate is signed on
 the Agent plane, on the connection its CSR came over. The certificate of an approved enrolment
@@ -115,21 +92,15 @@ several instances run, clause 2 lets none of them hold a CA key in a file. Every
 checks `[client_ca]` and `[enrolment]` as an instance that opens both planes does (clause 25). It
 therefore reaches the same CA key, whichever planes it opens. `planes` is set per instance.
 
-Three ADRs in force mean "both planes" in clauses that stop being true for such an instance:
+Where an instance opens one plane alone, "both planes" stops being true in three places, each
+stated here or in the ADR that governs it by the planes the instance opens:
 
-- SRV-instances-share-one-postgresql: the lease's listeners, which open, close and drain together,
-  and the documented probe, a TCP connection to `4320` (clauses 1 and 3). This ADR carries them
-  changed.
-- [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md).
-  [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) carries these
-  clauses changed:
-  - two listeners (clause 7), always, bound before either serves (clause 14);
-  - both planes served by `listen::plane` (clause 15);
-  - the handshake deadline on both planes' acceptors (clause 16);
-  - one drain of both planes on one `Handle` (clause 17).
-- [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md): the image's
-  own statement of the probe (clause 17).
-  [OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md) carries it changed.
+- the lease's listeners, which open, close and drain together, and the documented probe
+  (clauses 1 and 3);
+- the listeners, their serving, their handshake deadline and their drain
+  ([SEC-tls13-bounded-input-chosen-planes §7, §14–§17](SEC-tls13-bounded-input-chosen-planes.md));
+- the image's own statement of the probe
+  ([OPS-releases-image-probed-by-plane §17](OPS-releases-image-probed-by-plane.md)).
 
 ## Decision
 
@@ -178,7 +149,7 @@ Operator plane or both, as the `planes` key of its configuration names.
      its configuration, its TLS files and its secret files, all of them read-only. With no CA key
      on the Server, any instance can take its place.
    - The Server's image names no data directory, so such an instance runs from it as it stands
-     ([OPS-releases-attestations-server-image §16](OPS-releases-attestations-server-image.md)).
+     ([OPS-releases-image-probed-by-plane §16](OPS-releases-image-probed-by-plane.md)).
 
 3. **The lease.**
    - Each instance renews its lease every `[database] lease_renew_secs` (default 10). The lease
@@ -646,10 +617,11 @@ Operator plane or both, as the `planes` key of its configuration names.
         taken out of the Deployment.
 
 20. **A fleet that loses an instance comes back spread out.** The Agents of a lost instance
-    reconnect as [SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md)
-    says, whether its connections were cut, closed as it drains, or ended by a lapsed lease. The
-    first attempt is drawn over `[0, 30 s)`, and each instance is bounded to
-    `max_new_connections_per_sec` new connections a second.
+    reconnect as
+    [SEC-tls13-bounded-input-chosen-planes §4](SEC-tls13-bounded-input-chosen-planes.md) says,
+    whether its connections were cut, closed as it drains, or ended by a lapsed lease. The first
+    attempt is drawn over `[0, 30 s)`, and each instance is bounded to `max_new_connections_per_sec`
+    new connections a second.
     - Thirty seconds is a third of G-20's 90 seconds: a lease time and two heartbeat intervals at
       the defaults, which leaves the rest for a lapsed lease and two heartbeats.
     - Of a fleet of 100 000 on three instances, the 33 000 Agents of a lost instance then arrive at
@@ -680,7 +652,7 @@ Operator plane or both, as the `planes` key of its configuration names.
         interval, as they report.
       - The pool opens a replacement connection when a report needs one. The Gateway's own Client
         connection reconnects as
-        [SEC-tls13-two-planes-bounded-input §4](SEC-tls13-two-planes-bounded-input.md) says.
+        [SEC-tls13-bounded-input-chosen-planes §4](SEC-tls13-bounded-input-chosen-planes.md) says.
     - Meanwhile the Gateway serves on what it holds:
       - its revocation list, refreshed every 30 seconds from whichever instance its fetch reaches
         and trusted for 300 seconds ([CLT-modes-and-gateway §14](CLT-modes-and-gateway.md));
@@ -696,7 +668,7 @@ Operator plane or both, as the `planes` key of its configuration names.
         ([SEC-admission-by-client-certificate §19](SEC-admission-by-client-certificate.md)), and a
         Gateway's own certificate does not fail;
       - the rate limits key on its host and on each `instance_uid`
-        ([SEC-tls13-two-planes-bounded-input §28](SEC-tls13-two-planes-bounded-input.md));
+        ([SEC-tls13-bounded-input-chosen-planes §28](SEC-tls13-bounded-input-chosen-planes.md));
       - the bound on new connections a second counts every connection alike, and a pool of at most
         `upstream_connections` (default 10) is a handful within it.
 
@@ -860,6 +832,12 @@ None.
   the reconnecting fleet and the console together, and a heavy read or a reconnect storm reaches
   both. Rejected.
 
+- **Every instance serves both planes.** Each instance once opened the Agent plane and the
+  Operator plane alike, its lease gating, closing and draining both listeners, and the image was
+  probed on `4320`. The planes then compete for one instance's CPU, memory and pool at the moment
+  G-20 asks the Operator plane to stay usable: when the Agents of a lost instance reconnect.
+  Rejected for the `planes` key (clause 22).
+
 ## Sources / Prior art
 
 - PostgreSQL documentation: [`NOTIFY`](https://www.postgresql.org/docs/current/sql-notify.html)
@@ -870,7 +848,7 @@ None.
 - The code: `AppState` and its `push` channel in `crates/fleet-server/src/fleet.rs`; the duplicate
   detection in `crates/fleet-server/src/fleet/session.rs` and
   `crates/fleet-server/src/fleet/held.rs`; the session guard in
-  `crates/fleet-server/src/transport.rs`; `subscribe` in `crates/fleet-server/src/revocation.rs`
+  `crates/fleet-server/src/agent_cases.rs`; `subscribe` in `crates/fleet-server/src/revocation.rs`
   and `crates/fleet-server/src/enrolment.rs`.
 - The specification's goal G-20 and its success criteria.
 - The code as it stands: `instance::serve` and `Planes` in `crates/fleet-server/src/instance.rs`,
@@ -936,9 +914,8 @@ None.
 
 ## Enforcement
 
-The tests of the carried clauses carry `Verifies: SRV-instances-share-one-postgresql` today. They
-will carry `Verifies: SRV-instance-opens-chosen-planes`, their markers moving on acceptance. They
-run against the PostgreSQL that the `FLEET_TEST_POSTGRES_*` variables name
+The tests of clauses 1 to 21 carry `Verifies: SRV-instance-opens-chosen-planes`. They run
+against the PostgreSQL that the `FLEET_TEST_POSTGRES_*` variables name
 ([SRV-state-stores-contract-pair §25](SRV-state-stores-contract-pair.md)). They run with two
 instances in one test process, or three where a bullet says so. Most stand in
 [`crates/fleet-server/tests/instances.rs`](../../crates/fleet-server/tests/instances.rs),
@@ -1152,7 +1129,7 @@ decide:
   `audit-verify` reports B's chain as closed, and the store refuses an entry B appends to it
   afterwards.
 
-Tests that will carry `Verifies: SRV-instance-opens-chosen-planes` decide clauses 22 to 26, and
+Tests that carry `Verifies: SRV-instance-opens-chosen-planes` decide clauses 22 to 26, and
 what clauses 1 and 3 say of the planes an instance opens:
 
 - The configuration's tests:

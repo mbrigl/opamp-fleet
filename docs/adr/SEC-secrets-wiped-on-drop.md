@@ -72,8 +72,8 @@ until it is dropped. A secret here is any of these:
    ([DEV-six-crates-tokio-axum §11](DEV-six-crates-tokio-axum.md)), with its default `alloc`
    feature and no derive. `fleet-core`, `fleet-util`, `fleet-agent`, `fleet-server` and
    `fleet-tools` name it where they hold a secret. It pulls no TLS or crypto backend, so the rule
-   of [SEC-tls13-two-planes-bounded-input §5](SEC-tls13-two-planes-bounded-input.md) on the TLS and
-   crypto backend holds.
+   of [SEC-tls13-bounded-input-chosen-planes §5](SEC-tls13-bounded-input-chosen-planes.md) on the
+   TLS and crypto backend holds.
 2. **`Zeroizing` is the whole mechanism.** A secret is a `Zeroizing<Vec<u8>>` or a
    `Zeroizing<String>`, or a struct field of that type. No type of this project's own wraps it. A
    function that hands a secret on returns it in that type. A borrow (`&[u8]`, `&str`) passes it to

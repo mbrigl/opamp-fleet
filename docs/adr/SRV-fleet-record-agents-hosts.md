@@ -3,7 +3,7 @@
 - **Status:** 🟢 accepted
 - **Date:** 2026-11-14
 - **Deciders:** Markus Brigl
-- **Applies to:** crates/fleet-server/src/fleet.rs, crates/fleet-server/src/agent_store.rs and its adapters, crates/fleet-server/src/labels.rs, the host register in crates/fleet-server/src/revocation.rs and its adapters, the /api/v1/agents and /api/v1/hosts routes of crates/fleet-server/src/api.rs, stale_after_secs and [database] presence_interval_secs in server.toml, the Hosts and Agents tabs of the bundled UI in crates/fleet-server/static/index.html, and every document that tells an operator what a Host is, when it ends, or how labels and Selectors work
+- **Applies to:** crates/fleet-server/src/fleet.rs, the construction and the stored reads in crates/fleet-server/src/fleet/placement.rs, crates/fleet-server/src/agent_store.rs and its adapters, crates/fleet-server/src/labels.rs, the host register in crates/fleet-server/src/revocation.rs and its adapters, the /api/v1/agents and /api/v1/hosts routes of crates/fleet-server/src/api.rs, stale_after_secs and [database] presence_interval_secs in server.toml, the Hosts and Agents tabs of the bundled UI in crates/fleet-server/static/index.html, and every document that tells an operator what a Host is, when it ends, or how labels and Selectors work
 
 ## Context
 
@@ -27,7 +27,7 @@ is narrow:
 Its report-derived fields are prost-generated protobuf messages without serde. Write frequency is
 the known scale trap: Elastic Fleet persists every check-in and documents the load as a problem.
 Several Server instances may share one PostgreSQL database
-([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)). Each then carries
+([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)). Each then carries
 only some Agents, and an act through one instance must survive the writes of another.
 
 **What the Server knows about liveness.** `connected` is a fact about a connection, and behind a
@@ -109,8 +109,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      of, unless the store holds `max_records` already.
      - The count is taken where the records are stored, in the step that creates the record.
      - So the Agent-record ceiling `max_agents` holds for every instance.
-       [SEC-tls13-two-planes-bounded-input §19](SEC-tls13-two-planes-bounded-input.md) counts it
-       for the whole fleet.
+       [SEC-tls13-bounded-input-chosen-planes §19](SEC-tls13-bounded-input-chosen-planes.md) counts
+       it for the whole fleet.
      - A record stored already is answered as it is stored, and passes no bound.
    - `write_report(uid, &PersistedAgent)`: write the part of a stored record a report decides, as
      `put` does, and create none.
@@ -136,7 +136,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
        count of takes is still the one it comes with. It therefore never undoes a take made since,
        by this instance or another.
    - `take(uid, holder, last_seen_ms)`: the take at a connecting report of
-     [SRV-instances-share-one-postgresql §8](SRV-instances-share-one-postgresql.md).
+     [SRV-instance-opens-chosen-planes §8](SRV-instance-opens-chosen-planes.md).
      - It names `holder`, raises the record's count of takes by one, and answers that count.
      - It answers the holder it replaced, and whether this change of holder is the eleventh within
        a minute, counted on the database's clock.
@@ -191,7 +191,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
      `last_seen_ms` and the holding instance. A heartbeat therefore reaches the database at most
      once per interval and Agent.
    - A change of the holding instance and a disconnect are written in the next batch, except as
-     [SRV-instances-share-one-postgresql §8](SRV-instances-share-one-postgresql.md) says.
+     [SRV-instance-opens-chosen-planes §8](SRV-instance-opens-chosen-planes.md) says.
    - On graceful shutdown every record and every presence is flushed, so an ordinary restart
      restores current values. On PostgreSQL the flush writes:
      - of the Agents this instance heard report, the records whose stored holder is this instance;
@@ -449,7 +449,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
 - **Every record loaded at startup and answered from memory with any store, connectedness never
   persisted, and the port's writes whole records.** It holds while one Server is the store's only
   writer. Where several instances serve one fleet
-  ([SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md)), an instance would
+  ([SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md)), an instance would
   answer from a copy another instance has changed and would not know which instance carries an
   Agent. A whole-record write would undo an act committed through another instance. Clauses 2, 3,
   4, 6 and 8 therefore read and write per call on PostgreSQL and persist an Agent's presence there.
@@ -549,7 +549,8 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
   [Postgres Store](https://docs.bindplane.com/how-to-guides/postgres/postgres-store): one store
   interface, interchangeable backends.
 - [Bindplane agents API](https://docs.bindplane.com/cli-and-api/api/agents) and
-  [progressive rollouts](https://docs.bindplane.com/feature-guides/deployment-and-management/progressive-rollouts):
+  [progressive
+  rollouts](https://docs.bindplane.com/feature-guides/deployment-and-management/progressive-rollouts):
   key/value labels, the opposite collision rule, and stage matching by "every label specified".
 - [Elastic agent tags](https://www.elastic.co/docs/reference/fleet/filter-agent-list-by-tags) and
   the [bulk tag
@@ -662,7 +663,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
   `the_hosts_list_carries_subject_values_and_the_agents_behind_a_gateway`;
   [`packages.rs`](../../crates/fleet-server/tests/packages.rs)
   `a_label_aims_a_set_at_part_of_the_fleet`.
-- The tests [SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md) names
+- The tests [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md) names
   verify `get` and `query` of clause 2, and clauses 3, 4, 6 and 8 as they stand here.
   [`postgres/agents.rs`](../../crates/fleet-server/src/postgres/agents.rs)
   `the_query_reads_the_stored_presence_and_opening_reads_the_assignments_alone` verifies `query` on
@@ -680,7 +681,7 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
   - [`fleet/session.rs`](../../crates/fleet-server/src/fleet/session.rs)
     `a_restart_requested_while_a_delivery_clears_one_stays_queued` decides on the filesystem store
     that a restart requested while another is delivered stays pending. It carries the marker of
-    [SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md).
+    [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md).
   - [`tests/instances.rs`](../../crates/fleet-server/tests/instances.rs)
     `a_restart_requested_through_one_instance_stays_until_the_carrying_instance_sends_it` decides
     across two instances on PostgreSQL that a request stays queued until the carrying instance
@@ -689,4 +690,4 @@ report, its own labels and its Client Agent's labels, in that order of precedenc
     `a_restart_requested_through_one_instance_while_another_delivers_one_stays_until_sent` races a
     request through one instance against a delivery through another. It decides that the request
     is not lost, whether it comes before or after the delivery's clear. It carries the markers of
-    this ADR and of [SRV-instances-share-one-postgresql](SRV-instances-share-one-postgresql.md).
+    this ADR and of [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md).

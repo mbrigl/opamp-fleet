@@ -90,13 +90,17 @@ The structural test
 [`crates/fleet-core/tests/dependency_direction.rs`](../../crates/fleet-core/tests/dependency_direction.rs)
 carries `Verifies:` markers for this ADR.
 
-- Its table gives every module of the workspace's library crates a role: core, adapter, or
-  composition root.
+- Its table gives every module of the workspace's library crates a role: core, adapter,
+  composition root, or Plugin. A Plugin is an adapter held to the Plugin port alone by
+  `a_plugin_names_only_the_port`, as
+  [CLT-wrappers-act-through-the-core](CLT-wrappers-act-through-the-core.md) decides.
 - `the_core_depends_on_no_adapter_and_no_technology` reads the source of every core module
   through its syntax tree. It fails when a core module depends on an adapter or on a technology,
   and when a module has no role (clause 4).
 - `no_adapter_names_the_composition_roots_kept_from_adapters` fails when an adapter names a
   composition root the table keeps from adapters (clause 4).
+- `the_overview_names_every_module_with_a_role` fails when a module that has a role is neither
+  named in [`docs/ARCHITECTURE.md`](../ARCHITECTURE.md) nor exempt from it with a reason.
 
 **Not mechanically decidable:** review
 ([`AGENTS.md` §5](../../AGENTS.md#5-quality-bar--definition-of-done)) and the design revision judge

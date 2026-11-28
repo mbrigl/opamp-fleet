@@ -81,7 +81,7 @@ fn host_resources(names: &[String]) -> Vec<String> {
 
 /// The Plugin port is plain data: no type of it, nor the struct of another crate it embeds, names
 /// a host resource, so a WebAssembly component can implement it.
-/// Verifies: CLT-wrappers-act-through-the-core
+/// Verifies: CLT-wrappers-act-through-the-core, Q-5
 #[test]
 fn the_port_carries_no_host_resource() {
     let read = |path: &str| {

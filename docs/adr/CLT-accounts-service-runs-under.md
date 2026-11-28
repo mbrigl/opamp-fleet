@@ -820,7 +820,7 @@ placed.
     | `program/` and its files | Client : the process account's group | `0750`, files without group or other write |
     | the preflight's staging directory | Client : the process account's group | `0750` |
     | `config/` and its files | Client : the process account's group | `0750` / `0640` |
-    | a kind's data directories | Client : the process account's group | `2770` |
+    | `data/` and a kind's data directories beneath it | Client : the process account's group | `2770` |
 
     The Client creates a file it replaces through the no-follow adapter (clause 15) with the owning
     account, group and mode this table names.
@@ -896,6 +896,8 @@ placed.
       config/                 # the written configuration entries
       program/<file>          # the Managed Process — or program/tree/<program_path> for a tree
       packages/               # this Supervisor's download staging
+      data/                   # what the Managed Process writes, shared with its group (§21)
+      state/                  # the Plugin's own files, the Client's alone
     ```
 
     - **One knob moves state and program together.** Staging beside `program/` makes a raw

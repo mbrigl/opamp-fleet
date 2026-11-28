@@ -55,8 +55,7 @@ two constants of the enrolment's refusals by `fleet/approval.rs`,
 [SRV-instance-opens-chosen-planes](SRV-instance-opens-chosen-planes.md) binds the persist path by
 `fleet/held.rs`, and
 [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md) binds the
-composition of the settings offer by `fleet/session.rs` and names `fleet.rs` only for the
-capability declaration. Nothing holds the
+composition of the settings offer by `fleet.rs` and `fleet/session.rs`. Nothing holds the
 direction: a session that needs a method of another context calls it, and the cycles grow.
 
 The architecture catalogue's *modular monolith* fits when several areas of the domain grow at
@@ -184,16 +183,6 @@ decides; the structure of the other crates.
   context defines and another calls through a field. It does not collect a block written as `impl
   super::AppState` or `impl crate::fleet::AppState`. It resolves `super::` one level off in an
   inline module inside a context.
-- Negative / trade-offs: accepted ADRs cite some moved items by the file they left, until the
-  next normalization moves the citations.
-  [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) cites
-  `unavailable` and `RETRY_AFTER` in `fleet/session.rs`, now in `fleet/approval.rs`.
-  [SRV-fleet-record-agents-hosts](SRV-fleet-record-agents-hosts.md) cites the construction and the
-  stored reads in `fleet.rs`, now in `fleet/placement.rs`.
-  [SEC-connection-settings-never-plaintext](SEC-connection-settings-never-plaintext.md) cites the
-  composition of the offer in `fleet/session.rs`, now in `fleet.rs`. The binding sensor still
-  lists these ADRs for the new files, since it routes every file under `fleet/` to the ADRs of
-  `fleet.rs` as well.
 - Follow-ups: state per context, when a requirement asks for it. The six edges of the Context are
   resolved with this decision's implementation.
 

@@ -10,7 +10,7 @@
 An Agent proves fleet membership with a client certificate in the TLS handshake and nothing else.
 The Server presents a certificate of its own on both planes
 ([SEC-admission-by-client-certificate](SEC-admission-by-client-certificate.md),
-[SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md)).
+[SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md)).
 That takes three certificate authorities, each with one job:
 
 - the **server CA** signs the Server's certificate and a Gateway's downstream certificate;
@@ -94,7 +94,7 @@ The forces:
   installed with `npm install -g fleetctl` and from its GitHub releases. Two `fleetctl` on one
   `PATH` cannot both be found, and a search for either finds the other.
 - **The release is a contract too.** It is one workflow run from one version
-  ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)). Every row
+  ([OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md)). Every row
   of its build matrix already builds the packer for the runner it runs on, Windows included,
   because the packer packs the Client's archives.
 - **Some places want a PEM pair while only a `bootstrap.p12` is at hand:** a host whose install is
@@ -173,7 +173,7 @@ exception is `gpgv`, for an upstream that signs with OpenPGP.
 3. **One archive per target, named like the Client's.**
    - The name is `opamp-fleetctl_<version>_<os>_<arch>.tar.gz`, by the name grammar and the
      platform tokens of
-     [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md).
+     [OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md).
    - `opamp-fleetctl package pack --format tar.gz` packs it, with the one member `opamp-fleetctl`
      and its executable mode.
    - No `.deb`, `.rpm` or `.msi` carries it.
@@ -588,7 +588,7 @@ exception is `gpgv`, for an upstream that signs with OpenPGP.
 - the operator tool on Windows;
 - native packages, Homebrew, `npm` or any other installer;
 - provenance of the release's files
-  ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md));
+  ([OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md));
 - commands that drive the running fleet through the Operator plane, beyond the upload
   `package fetch` makes;
 - writing the extracted key encrypted, extracting files other than the bootstrap form, and making
@@ -821,14 +821,14 @@ exception is `gpgv`, for an upstream that signs with OpenPGP.
   client CA and how the Server signs;
   [SEC-bootstrap-certificates-and-enrolment](SEC-bootstrap-certificates-and-enrolment.md) on the
   bootstrap CA, the crates issuance adds, the `bootstrap.p12` file and its reader;
-  [SEC-tls13-two-planes-bounded-input](SEC-tls13-two-planes-bounded-input.md) on the planes;
+  [SEC-tls13-bounded-input-chosen-planes](SEC-tls13-bounded-input-chosen-planes.md) on the planes;
   [`docs/SPECIFICATION.md`](../SPECIFICATION.md) on how an Agent obtains its certificate and which
   private key the Server may make;
   [PKG-signed-packages-and-delivery](PKG-signed-packages-and-delivery.md) on why a package is
   signed by a key the operator holds and what a tree package may carry;
   [CLT-installed-service-and-state](CLT-installed-service-and-state.md) on the member a package
   artifact carries;
-  [OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md) on the
+  [OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md) on the
   release, its naming and its files.
 
 ## Consequences

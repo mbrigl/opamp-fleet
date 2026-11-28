@@ -172,7 +172,7 @@ We will take the version number from `Cargo.toml`. The build script of the inter
 **Out of scope:**
 
 - what a release builds and releases: targets and artifacts
-  ([OPS-releases-attestations-server-image](OPS-releases-attestations-server-image.md)), and
+  ([OPS-releases-image-probed-by-plane](OPS-releases-image-probed-by-plane.md)), and
   installers ([CLT-installed-service-and-state](CLT-installed-service-and-state.md));
 - whether a Managed Process's package version, free-form and an upstream project's own numbering,
   is parsed beyond what ordering needs;
