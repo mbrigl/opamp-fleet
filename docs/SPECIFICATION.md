@@ -98,7 +98,9 @@ protocol and its agents actually allow.
 - **Hexagonal core, plugins at the edge.** The supervision domain sits at the centre; **Ports**
   abstract the Server-facing side and the managed-process side; **Plugins** are the adapters that
   implement concrete process types. A Collector Supervisor and a Custom Supervisor are two plugins
-  behind the same ports, and a mode is a composition of ports rather than a fork of the core.
+  behind the same ports, and a mode is a composition of ports rather than a fork of the core. A
+  Plugin holds what is specific to its agent and acts on files, processes, the host and the network
+  only through the core, over a port of plain data, so the core's checks hold for every kind alike.
 - **Route by `instance_uid`, not by connection.** The protocol states that multiple Agents may
   be multiplexed onto one connection and distinguished by `instance_uid`. Both ends honour that:
   the Server never assumes one connection means one Agent, and the Client maps *n* Agents onto *m*
@@ -254,10 +256,12 @@ Only a normalization renumbers them
 4. **Q-4** — **A host receives only what is released to it.** The Server, and a Gateway from its
    package cache, shall never serve a host a configuration or an artifact that is not released to an
    Agent that host speaks for.
-5. **Q-5** — **A remote configuration stays inside its Supervisor.** No remote configuration shall
-   write outside a Supervisor's configuration directory, name a program outside its program
-   directory, start a kind the build does not carry, or change any key of the Client's own
-   configuration but its list of Supervisors.
+5. **Q-5** — **A remote configuration and a Plugin stay inside their Supervisor.** No remote
+   configuration shall write outside a Supervisor's configuration directory, name a program outside
+   its program directory, start a kind the build does not carry, or change any key of the Client's
+   own configuration but its list of Supervisors. No Plugin shall reach a file, a process, the host
+   or the network but through the core, nor a file outside the directories the core opens to its
+   Supervisor.
 6. **Q-6** — **No downgrade.** No Client shall install a Package below the highest version it has
    installed for that Agent type, or below the highest floor the operator signed for it.
 
@@ -313,6 +317,9 @@ Only a normalization renumbers them
   - *A Managed Process and its account*: where a process account is registered, below the
     Client's account on its host; it must not gain the Client's key, program, or configuration.
     Without one, it runs as the Client's account.
+  - *A Plugin*: code of the build, run in the Client's process, but bounded by the core. It reaches
+    files, processes, the host and the network only through the core, within the directories the
+    core opens to its Supervisor (Q-5).
   - *The database and the object store*: the operator's, trusted with the Server's state. The
     Server reaches them over TLS beyond the loopback (Q-1), and the fleet never reaches them
     (G-19).
@@ -325,7 +332,7 @@ Only a normalization renumbers them
   - install a package without a valid signature (Q-1), or below what the host has already run
     (Q-6);
   - serve a host what is not released to an Agent it speaks for (Q-4);
-  - let a remote configuration act outside the Supervisor it is for (Q-5);
+  - let a remote configuration or a Plugin act outside the Supervisor it is for (Q-5);
   - hand a host the private key of its client certificate: that key is made on the host, and the
     bootstrap key is the one key the Server makes, good only to ask for enrolment;
   - let the fleet reach the Server's object store or database itself (G-19).

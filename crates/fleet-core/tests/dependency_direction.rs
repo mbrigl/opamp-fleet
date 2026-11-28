@@ -875,7 +875,7 @@ fn plugin_breaks(
 
 /// A Plugin names the Plugin port and nothing of the host: no file, process, network or storage
 /// module, no runtime, no system call (CLT-wrappers-act-through-the-core §1).
-/// Verifies: CLT-wrappers-act-through-the-core
+/// Verifies: CLT-wrappers-act-through-the-core, Q-5
 #[test]
 fn a_plugin_names_only_the_port() {
     let locked = locked_crates();
